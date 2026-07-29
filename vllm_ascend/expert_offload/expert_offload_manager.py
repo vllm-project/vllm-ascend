@@ -88,6 +88,12 @@ class ExpertOffloadManager:
         #   w2 per expert:  [intermediate_size_per_partition, hidden_size]
         self.w13_weights_cpu: list[list[torch.Tensor]] = []
         self.w2_weights_cpu: list[list[torch.Tensor]] = []
+        # Per-layer on-device (NZ) byte size of one expert. PER-LAYER (not a
+        # single global): an MTP draft MoE layer can have a different expert
+        # size than the target, and a global would get clobbered by whichever
+        # layer cast last, corrupting the others' H2D slot slicing.
+        self.w13_expert_size_bytes: list[int] = []
+        self.w2_expert_size_bytes: list[int] = []
 
         # Registered AscendFusedMoE layers, indexed by moe_instance_id order
         self.moe_layers: list = []
@@ -138,6 +144,14 @@ class ExpertOffloadManager:
         self._saved_num_threads: int | None = None
 
         ExpertOffloadManager._instance = self
+
+        # Per-layer NZ-cast tracking. The target model's layers are cast in
+        # bulk in _finalize_offload; an MTP draft MoE layer registered AFTER
+        # finalize (its CPU buffer still raw int8) is cast lazily on first
+        # decode use via _ensure_layer_cast. _cast_quant_kind caches the
+        # (mxfp4, w4a8_dynamic) flags so the draft reuses the target's path.
+        self._cast_done_layers: set[int] = set()
+        self._cast_quant_kind: tuple[bool, bool] | None = None
 
         self.load_stream = torch_npu.npu.Stream()
 
@@ -260,10 +274,14 @@ class ExpertOffloadManager:
             self.w2_weights_cpu.append(w2_list)
 
         # Per-expert storage size (works for both list[0] and big_tensor[0]).
+        # Appended per layer (PER-LAYER list); overwritten with the NZ size in
+        # _cast_one_layer.
         first_w13 = self.w13_weights_cpu[-1][0]
         first_w2 = self.w2_weights_cpu[-1][0]
-        self.w13_expert_size_bytes = first_w13.nelement() * first_w13.element_size()
-        self.w2_expert_size_bytes = first_w2.nelement() * first_w2.element_size()
+        self.w13_expert_size_bytes.append(
+            first_w13.nelement() * first_w13.element_size())
+        self.w2_expert_size_bytes.append(
+            first_w2.nelement() * first_w2.element_size())
 
         # Scale / offset CPU buffers (W8A8)
         self._init_layer_scale_buffers(layer, layer_moe_idx, ntotal)
@@ -487,62 +505,85 @@ class ExpertOffloadManager:
         preserved (4× fewer elements at 4× element size), so the CPU buffer
         can hold the packed bytes without reallocation.
         """
-        num_moe_layers = len(self.w13_weights_cpu)
-        num_experts = len(self.w13_weights_cpu[0])
+        self._cast_quant_kind = (mxfp4, w4a8_dynamic)
+        for layer_id in range(len(self.w13_weights_cpu)):
+            self._cast_one_layer(layer_id)
+
+    def _cast_one_layer(self, layer_id: int) -> None:
+        """NZ-cast + write one layer's CPU weight buffers into device format.
+
+        Idempotent (skips layers already in _cast_done_layers). Extracted from
+        _cast_cpu_weights_to_device_format so it can also run lazily for an MTP
+        draft layer registered after _finalize_offload (its CPU buffer would
+        otherwise stay raw int8 → size/format mismatch on H2D).
+        """
+        if layer_id in self._cast_done_layers:
+            return
+        mxfp4, w4a8_dynamic = self._cast_quant_kind or (False, False)
         use_shard = self.offload_config.shard_per_rank
-        for layer_id in range(num_moe_layers):
-            w13 = torch.stack(self.w13_weights_cpu[layer_id]).to('npu')
-            w2 = torch.stack(self.w2_weights_cpu[layer_id]).to('npu')
-            if mxfp4:
-                w13 = w13.transpose(1, 2).contiguous()
-                w2 = w2.transpose(1, 2).contiguous()
-                w13 = torch_npu.npu_format_cast(
-                    w13.view(torch.uint8), 29,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-                w2 = torch_npu.npu_format_cast(
-                    w2.view(torch.uint8), 29,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-                w13 = w13.transpose(1, 2)
-                w2 = w2.transpose(1, 2)
-            elif w4a8_dynamic:
-                # CPU buffer is already (E, H, dim2) — _copy_w13_shard stored
-                # owned.t(), matching the post-transpose device layout. The
-                # device path (process_weights_after_loading_modelslim) does
-                # transpose(1,2) → NZ cast → pack_to_int32, where transpose
-                # converts (E, dim2, H) → (E, H, dim2). Since the CPU buffer
-                # is already (E, H, dim2), we NZ-cast directly — NO extra
-                # transpose. A double transpose here would apply NZ blocking
-                # to (dim2, H) instead of (H, dim2), producing wrong block
-                # layout and garbled output.
-                w13 = torch_npu.npu_format_cast(w13, ACL_FORMAT_FRACTAL_NZ)
-                w2 = torch_npu.npu_format_cast(w2, ACL_FORMAT_FRACTAL_NZ)
-                w13 = w13.view(torch.int32)
-                w2 = w2.view(torch.int32)
-            else:
-                w13 = torch_npu.npu_format_cast(w13, ACL_FORMAT_FRACTAL_NZ)
-                w2 = torch_npu.npu_format_cast(w2, ACL_FORMAT_FRACTAL_NZ)
-            w13_storage = w13.untyped_storage()
-            w2_storage = w2.untyped_storage()
-            per_w13 = w13_storage.nbytes() // num_experts
-            per_w2 = w2_storage.nbytes() // num_experts
-            self.w13_expert_size_bytes = per_w13
-            self.w2_expert_size_bytes = per_w2
-            for local_i in range(num_experts):
-                # _expert_dst_storage takes a GLOBAL eid (shard-per-rank
-                # remaps it to the local slot); w13/w2_storage are indexed by
-                # the local position in the stacked tensor (== global id when
-                # not sharded).
-                geid = (self._shard_base + local_i) if use_shard else local_i
-                self._expert_dst_storage(layer_id, geid, 'w13').copy_(
-                    w13_storage[local_i * per_w13 : (local_i + 1) * per_w13]
-                )
-                self._expert_dst_storage(layer_id, geid, 'w2').copy_(
-                    w2_storage[local_i * per_w2 : (local_i + 1) * per_w2]
-                )
+        num_experts = len(self.w13_weights_cpu[layer_id])
+        w13 = torch.stack(self.w13_weights_cpu[layer_id]).to('npu')
+        w2 = torch.stack(self.w2_weights_cpu[layer_id]).to('npu')
+        if mxfp4:
+            w13 = w13.transpose(1, 2).contiguous()
+            w2 = w2.transpose(1, 2).contiguous()
+            w13 = torch_npu.npu_format_cast(
+                w13.view(torch.uint8), 29,
+                customize_dtype=torch.float8_e4m3fn,
+                input_dtype=torch_npu.float4_e2m1fn_x2,
+            )
+            w2 = torch_npu.npu_format_cast(
+                w2.view(torch.uint8), 29,
+                customize_dtype=torch.float8_e4m3fn,
+                input_dtype=torch_npu.float4_e2m1fn_x2,
+            )
+            w13 = w13.transpose(1, 2)
+            w2 = w2.transpose(1, 2)
+        elif w4a8_dynamic:
+            # CPU buffer is already (E, H, dim2) — _copy_w13_shard stored
+            # owned.t(), matching the post-transpose device layout. NZ-cast
+            # directly (NO extra transpose); a double transpose would block
+            # (dim2, H) instead of (H, dim2) → wrong layout, garbled output.
+            w13 = torch_npu.npu_format_cast(w13, ACL_FORMAT_FRACTAL_NZ)
+            w2 = torch_npu.npu_format_cast(w2, ACL_FORMAT_FRACTAL_NZ)
+            w13 = w13.view(torch.int32)
+            w2 = w2.view(torch.int32)
+        else:
+            w13 = torch_npu.npu_format_cast(w13, ACL_FORMAT_FRACTAL_NZ)
+            w2 = torch_npu.npu_format_cast(w2, ACL_FORMAT_FRACTAL_NZ)
+        w13_storage = w13.untyped_storage()
+        w2_storage = w2.untyped_storage()
+        per_w13 = w13_storage.nbytes() // num_experts
+        per_w2 = w2_storage.nbytes() // num_experts
+        self.w13_expert_size_bytes[layer_id] = per_w13
+        self.w2_expert_size_bytes[layer_id] = per_w2
+        for local_i in range(num_experts):
+            # _expert_dst_storage takes a GLOBAL eid (shard-per-rank remaps it
+            # to the local slot); w13/w2_storage are indexed by the local
+            # position in the stacked tensor (== global id when not sharded).
+            geid = (self._shard_base + local_i) if use_shard else local_i
+            self._expert_dst_storage(layer_id, geid, 'w13').copy_(
+                w13_storage[local_i * per_w13 : (local_i + 1) * per_w13]
+            )
+            self._expert_dst_storage(layer_id, geid, 'w2').copy_(
+                w2_storage[local_i * per_w2 : (local_i + 1) * per_w2]
+            )
+        self._cast_done_layers.add(layer_id)
+
+    def _ensure_layer_cast(self, layer_idx: int) -> None:
+        """Lazy NZ-cast for a layer registered after _finalize_offload.
+
+        The target model's layers are cast in bulk at finalize; an MTP draft
+        MoE layer loaded later has raw (un-cast) CPU buffers. Cast it on first
+        decode use so the H2D read sees device-format bytes.
+        """
+        if (layer_idx < len(self.w13_weights_cpu)
+                and layer_idx not in self._cast_done_layers):
+            logger.info(
+                "[OFFLOAD] lazy NZ-cast for post-finalize layer %d (e.g. MTP "
+                "draft) — %d experts", layer_idx,
+                len(self.w13_weights_cpu[layer_idx]))
+            self._cast_one_layer(layer_idx)
 
     def _process_scale_bias_cpu_buffers(self):
         """Apply update_bias transformation to scale_bias CPU buffers.
@@ -1009,14 +1050,16 @@ class ExpertOffloadManager:
         has_scale_bias = bool(self._prefill_w13_scale_bias)
 
         for slot in range(ndl):
+            w13_sz0 = self.w13_expert_size_bytes[0]
+            w2_sz0 = self.w2_expert_size_bytes[0]
             for eid in range(min(ntotal, len(self.w13_weights_cpu[0]))):
                 # _expert_src_storage takes a GLOBAL eid (shard-per-rank remaps
                 # it to the local shard slot); the prefill-pool slot stays local.
                 geid = (self._shard_base + eid) if self.offload_config.shard_per_rank else eid
-                self._prefill_w13[slot].untyped_storage()[eid * self.w13_expert_size_bytes : (eid + 1) * self.w13_expert_size_bytes].copy_(
+                self._prefill_w13[slot].untyped_storage()[eid * w13_sz0 : (eid + 1) * w13_sz0].copy_(
                     self._expert_src_storage(0, geid, 'w13')
                 )
-                self._prefill_w2[slot].untyped_storage()[eid * self.w2_expert_size_bytes : (eid + 1) * self.w2_expert_size_bytes].copy_(
+                self._prefill_w2[slot].untyped_storage()[eid * w2_sz0 : (eid + 1) * w2_sz0].copy_(
                     self._expert_src_storage(0, geid, 'w2')
                 )
 
@@ -1084,11 +1127,13 @@ class ExpertOffloadManager:
         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
         with torch_npu.npu.stream(self.load_stream):
+            w13_sz = self.w13_expert_size_bytes[layer_idx]
+            w2_sz = self.w2_expert_size_bytes[layer_idx]
             for eid in range(ntotal):
-                self._prefill_w13[pool_slot].untyped_storage()[eid * self.w13_expert_size_bytes : (eid + 1) * self.w13_expert_size_bytes].copy_(
+                self._prefill_w13[pool_slot].untyped_storage()[eid * w13_sz : (eid + 1) * w13_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w13')
                 )
-                self._prefill_w2[pool_slot].untyped_storage()[eid * self.w2_expert_size_bytes : (eid + 1) * self.w2_expert_size_bytes].copy_(
+                self._prefill_w2[pool_slot].untyped_storage()[eid * w2_sz : (eid + 1) * w2_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w2')
                 )
 
@@ -1186,11 +1231,13 @@ class ExpertOffloadManager:
         base = self.ep_rank * shard
 
         with torch_npu.npu.stream(self.load_stream):
+            w13_sz = self.w13_expert_size_bytes[layer_idx]
+            w2_sz = self.w2_expert_size_bytes[layer_idx]
             for local_i in range(shard):
                 eid = base + local_i
-                self._prefill_w13[pool_slot].untyped_storage()[local_i * self.w13_expert_size_bytes : (local_i + 1) * self.w13_expert_size_bytes].copy_(
+                self._prefill_w13[pool_slot].untyped_storage()[local_i * w13_sz : (local_i + 1) * w13_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w13'))
-                self._prefill_w2[pool_slot].untyped_storage()[local_i * self.w2_expert_size_bytes : (local_i + 1) * self.w2_expert_size_bytes].copy_(
+                self._prefill_w2[pool_slot].untyped_storage()[local_i * w2_sz : (local_i + 1) * w2_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w2'))
             # quant scales / offsets / scale_bias (w4a8) — shard only
             for scale_name, prefill_list in [("w13_weight_scale", self._prefill_w13_scale),
@@ -1260,6 +1307,7 @@ class ExpertOffloadManager:
                     layer_idx = self.moe_layers.index(layer)
                 except ValueError:
                     return 0
+                self._ensure_layer_cast(layer_idx)
                 self._prefill_load_layer(layer_idx, log2phy)
                 return 0
             else:
@@ -1270,6 +1318,7 @@ class ExpertOffloadManager:
             layer_idx = self.moe_layers.index(layer)
         except ValueError:
             return 0
+        self._ensure_layer_cast(layer_idx)
 
         # Wait for prefetch NPU copies to complete before using the weights.
         # Use stream wait (graphable) instead of host synchronize.
@@ -1330,6 +1379,9 @@ class ExpertOffloadManager:
             layer_idx = self.moe_layers.index(layer)
         except ValueError:
             return
+        # MTP draft MoE layers register after _finalize_offload, so their CPU
+        # buffers aren't NZ-cast yet — cast lazily on first decode use.
+        self._ensure_layer_cast(layer_idx)
         # Wait for this layer's prefetch (if any) to finish H2D before reading
         # the device slots — mirror the single-card update_weights stream-join
         # (graphable: stream wait_event, not host sync). Without it the reactive
@@ -1643,16 +1695,16 @@ class ExpertOffloadManager:
     def _h2d_load_mc_misses(self, layer, layer_idx, misses, resident_map):
         """H2D-load missed experts (w13/w2 + quant attrs) into their slots on
         load_stream, then synchronize to gate the compute stream."""
+        w13_sz = self.w13_expert_size_bytes[layer_idx]
+        w2_sz = self.w2_expert_size_bytes[layer_idx]
         with torch_npu.npu.stream(self.load_stream):
             for slot, eid in misses:
                 layer.w13_weight.data.untyped_storage()[
-                    slot * self.w13_expert_size_bytes:
-                    (slot + 1) * self.w13_expert_size_bytes].copy_(
+                    slot * w13_sz:(slot + 1) * w13_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w13'),
                     non_blocking=True)
                 layer.w2_weight.data.untyped_storage()[
-                    slot * self.w2_expert_size_bytes:
-                    (slot + 1) * self.w2_expert_size_bytes].copy_(
+                    slot * w2_sz:(slot + 1) * w2_sz].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w2'),
                     non_blocking=True)
                 self._copy_quant_attrs_into_slot(layer, layer_idx, eid, slot)
@@ -1749,10 +1801,10 @@ class ExpertOffloadManager:
                             sorted(list(need_to_load))[n_copies:][:20])
                     break  # no free slots — should not happen in normal usage
                 
-                layer.w13_weight.data.untyped_storage()[slot * self.w13_expert_size_bytes : (slot + 1) * self.w13_expert_size_bytes].copy_(
+                layer.w13_weight.data.untyped_storage()[slot * self.w13_expert_size_bytes[layer_idx] : (slot + 1) * self.w13_expert_size_bytes[layer_idx]].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w13'), non_blocking=True
                 )
-                layer.w2_weight.data.untyped_storage()[slot * self.w2_expert_size_bytes : (slot + 1) * self.w2_expert_size_bytes].copy_(
+                layer.w2_weight.data.untyped_storage()[slot * self.w2_expert_size_bytes[layer_idx] : (slot + 1) * self.w2_expert_size_bytes[layer_idx]].copy_(
                     self._expert_src_storage(layer_idx, eid, 'w2'), non_blocking=True
                 )
                 # Copy scales/offsets/scale_bias from CPU to NPU
