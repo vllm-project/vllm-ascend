@@ -52,6 +52,10 @@ class NPUInputBatch(InputBatch):
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
+        # Optional plugin-owned projection used by GLM DSA sparse offload.
+        # Keep it on the Ascend batch rather than changing vLLM's InputBatch
+        # ABI; ordinary runners leave it as ``None``.
+        self.dsa_state = None
         # Added for compatibility with InputBatch methods that reference these
         # attributes after PR vllm-project/vllm#34668. NPU does not use
         # thinking budget, so the holder is always None.

@@ -113,6 +113,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     using_paged_attention,
 )
+from vllm_ascend.core.kv_cache_interface import IndexerKVSpec
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -331,6 +332,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
+        self.dsa_worker_mgr = None
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -468,6 +470,33 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         self._dsa_positions_np_buf = self._dsa_positions_cpu_buf.numpy()
+        # DSA keeps dense/indexer positions unchanged while MLA cache writes
+        # use resident-window positions.  These buffers are worker-lifetime so
+        # eager forwards only refresh their active prefixes.
+        self._resident_positions_cpu_buf = torch.zeros(
+            max_buffer_num_tokens,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        self._resident_positions_np_buf = (
+            self._resident_positions_cpu_buf.numpy())
+        self.resident_positions = torch.zeros(
+            max_buffer_num_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.resident_valid_seq_lens_cpu = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            pin_memory=self.pin_memory,
+        )
+        self._resident_valid_seq_lens_np = (
+            self.resident_valid_seq_lens_cpu.numpy())
+        self.resident_valid_seq_lens = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
 
         self.use_eagle = (
             vllm_config.speculative_config.use_eagle()
@@ -740,7 +769,42 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        native_update_states = super()._update_states
+        if self.dsa_worker_mgr is None:
+            return native_update_states(scheduler_output)
+
+        from vllm_ascend.dsa_sparse.dsa_model_runner_adapter import (
+            update_states,
+        )
+
+        return update_states(
+            self,
+            scheduler_output,
+            native_update_states,
+        )
+
+    def set_dsa_mgr(self, dsa_mgr) -> None:
+        """Bind the worker-local sparse offload manager to this runner."""
+        self.dsa_worker_mgr = dsa_mgr
+        dsa_mgr.bind_input_batch_state(self.input_batch)
+
+    def _get_dsa_full_block_table_tensor(self) -> torch.Tensor | None:
+        dsa_mgr = self.dsa_worker_mgr
+        if dsa_mgr is None:
+            return None
+        group_id = int(
+            dsa_mgr.get_full_attention_group_id(self.kv_cache_config))
+        return self.input_batch.block_table[group_id].get_device_tensor()
+
+    def prepare_dsa_forward_metadata(self) -> None:
+        dsa_mgr = self.dsa_worker_mgr
+        if dsa_mgr is None:
+            return
+        if not dsa_mgr.build_dsa_meta(
+                self.input_batch,
+                self._get_dsa_full_block_table_tensor()):
+            raise RuntimeError(
+                "DSA eager forward metadata could not be materialized")
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -846,6 +910,23 @@ class NPUModelRunner(GPUModelRunner):
             self.query_pos.np[: cu_num_tokens[-1]],
             out=positions_np,
         )
+        dsa_input_state = None
+        resident_positions_np = None
+        if self.dsa_worker_mgr is not None:
+            dsa_input_state = self.input_batch.dsa_state
+            if (dsa_input_state is None
+                    or not dsa_input_state.matches_input_batch(
+                        self.input_batch, num_reqs)):
+                raise RuntimeError(
+                    "DSA InputBatch state is stale before input preparation")
+            resident_positions_np = (
+                self._resident_positions_np_buf[
+                    :total_num_scheduled_tokens])
+            np.copyto(resident_positions_np, positions_np)
+            dsa_input_state.bind_query_layout(
+                cumulative_query_lens=cu_num_tokens,
+                resident_positions_cpu=resident_positions_np,
+            )
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP
@@ -1210,6 +1291,28 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
+        if dsa_input_state is not None:
+            assert resident_positions_np is not None
+            self.resident_positions[:total_num_scheduled_tokens].copy_(
+                torch.from_numpy(resident_positions_np),
+                non_blocking=True,
+            )
+            np.copyto(
+                self._resident_valid_seq_lens_np[:num_reqs],
+                self.optimistic_seq_lens_cpu[:num_reqs].numpy(),
+                casting="unsafe",
+            )
+            sparse_rows = dsa_input_state.sparse_row_indices[
+                :dsa_input_state.sparse_row_count]
+            if sparse_rows.size:
+                self._resident_valid_seq_lens_np[sparse_rows] = (
+                    dsa_input_state.scheduler_resident_lens[sparse_rows])
+            self.resident_valid_seq_lens[:num_reqs].copy_(
+                self.resident_valid_seq_lens_cpu[:num_reqs],
+                non_blocking=True,
+            )
+            self.resident_valid_seq_lens[num_reqs:].fill_(0)
+
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
         # on CPU using the valid-sampled-token counts that are already copied
@@ -1232,6 +1335,16 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_start_loc.gpu[: num_reqs + 1],
                 self.positions[:total_num_scheduled_tokens],
             )
+            if dsa_input_state is not None:
+                full_group_id = int(
+                    dsa_input_state.full_attention_group_id)
+                self.input_batch.block_table[
+                    full_group_id].compute_slot_mapping(
+                        num_reqs,
+                        self.query_start_loc.gpu[:num_reqs + 1],
+                        self.resident_positions[
+                            :total_num_scheduled_tokens],
+                    )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -2037,6 +2150,17 @@ class NPUModelRunner(GPUModelRunner):
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+                if self.dsa_worker_mgr is not None:
+                    # Native state update has finalized remove/add, condense
+                    # and backend row ordering. Project DSA semantics exactly
+                    # once in that final InputBatch order.
+                    self.dsa_worker_mgr.prepare_input_batch_state(
+                        scheduler_output,
+                        self.requests,
+                        self.input_batch,
+                        num_scheduled_tokens_np,
+                        self.kv_cache_config,
+                    )
                 (
                     logits_indices,
                     spec_decode_metadata,
@@ -2045,6 +2169,7 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output,
                     num_scheduled_tokens_np,
                 )
+                self.prepare_dsa_forward_metadata()
 
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                 if self.pcp_size > 1:
@@ -3130,6 +3255,26 @@ class NPUModelRunner(GPUModelRunner):
             actual_seq_lengths_q=self.actual_seq_lengths_q,
             positions=self.positions,
             positions_cpu=self._dsa_positions_cpu_buf if self.use_compress else None,
+            indexer_seq_lens=(
+                self.seq_lens[:num_reqs_padded]
+                if self.dsa_worker_mgr is not None else None),
+            indexer_seq_lens_cpu=(
+                self.optimistic_seq_lens_cpu[:num_reqs_padded]
+                if self.dsa_worker_mgr is not None else None),
+            resident_valid_seq_lens=(
+                self.resident_valid_seq_lens[:num_reqs_padded]
+                if self.dsa_worker_mgr is not None else None),
+            resident_valid_seq_lens_cpu=(
+                self.resident_valid_seq_lens_cpu[:num_reqs_padded]
+                if self.dsa_worker_mgr is not None else None),
+            indexer_positions=(
+                self.positions if self.dsa_worker_mgr is not None else None),
+            resident_positions=(
+                self.resident_positions
+                if self.dsa_worker_mgr is not None else None),
+            dsa_row_mode_batch=(
+                self.dsa_worker_mgr.forward_row_mode_decode_batch
+                if self.dsa_worker_mgr is not None else None),
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
@@ -3806,6 +3951,10 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        if self.dsa_worker_mgr is not None:
+            hot_store = self.dsa_worker_mgr.dsa_hot_kv_store
+            hot_store.initialize_hot_cache_from_kv_caches(
+                kv_caches, kv_cache_config)
         # TODO: refactor the logic of attention
         if (
             self.speculative_config
@@ -4075,6 +4224,23 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
+                elif (
+                    isinstance(layer_kv_cache_spec[layer_name],
+                               IndexerKVSpec)
+                    and layer_name not in kv_cache_raw_tensors
+                ):
+                    # The split Indexer plane is K-only. Native Ascend
+                    # attention allocation assumes every sparse AttentionSpec
+                    # is an MLA K/V tuple, so allocate this group explicitly as
+                    # one contiguous raw tensor.
+                    tensor = self._allocate_int8_cache_tensor(
+                        kv_cache_tensor.size,
+                        alignment,
+                    )
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        if isinstance(layer_kv_cache_spec[layer_name_inner],
+                                      IndexerKVSpec):
+                            kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size,
@@ -4376,6 +4542,26 @@ class NPUModelRunner(GPUModelRunner):
                                            )
 
                     kv_caches[layer_name] = kv_cache
+                elif isinstance(current_kv_cache_spec, IndexerKVSpec):
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert torch.is_tensor(raw_tensor)
+                    assert (
+                        raw_tensor.numel()
+                        % current_kv_cache_spec.page_size_bytes == 0
+                    )
+                    num_blocks = (
+                        raw_tensor.numel()
+                        // current_kv_cache_spec.page_size_bytes
+                    )
+                    assert num_blocks >= kv_cache_config.num_blocks
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        num_blocks,
+                        current_kv_cache_spec.block_size,
+                        current_kv_cache_spec.num_kv_heads,
+                        current_kv_cache_spec.head_size,
+                    )
+                    kv_caches[layer_name] = raw_tensor.view(
+                        current_kv_cache_spec.dtype).view(kv_cache_shape)
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
                     # cache_only_layers (extract_hidden_states) are allocated
                     # as a single tensor by the branch at the top of
@@ -4778,11 +4964,21 @@ class NPUModelRunner(GPUModelRunner):
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
-                attn_backend = layers[layer_name].get_attn_backend()
-                full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                if isinstance(layer_kv_cache_spec, IndexerKVSpec):
+                    # DeepseekV32IndexerCache normally reports vLLM's CUDA
+                    # Indexer backend. The split plane is consumed by the
+                    # Ascend SFA implementation, so bind the matching metadata
+                    # builder without globally changing the upstream class.
+                    from vllm_ascend.attention.sfa_v1 import (
+                        AscendSFABackend,
+                    )
+                    attn_backend = AscendSFABackend
+                else:
+                    attn_backend = layers[layer_name].get_attn_backend()
+                full_cls_name = attn_backend.full_cls_name()
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
@@ -4861,6 +5057,14 @@ class NPUModelRunner(GPUModelRunner):
         if has_ec_transfer() and get_ec_transfer().is_producer:
             return {}
 
+        from vllm.model_executor.models.deepseek_v2 import (
+            DeepseekV32IndexerCache,
+        )
+        from vllm_ascend.dsa_sparse.dsa_config import (
+            is_dsa_sparse_config_enabled,
+        )
+
+        dsa_split_cache = is_dsa_sparse_config_enabled(self.vllm_config)
         kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
@@ -4868,6 +5072,18 @@ class NPUModelRunner(GPUModelRunner):
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
         for layer_name, attn_module in attn_layers.items():
+            if (dsa_split_cache
+                    and isinstance(attn_module,
+                                   DeepseekV32IndexerCache)):
+                # DeepseekV32IndexerCache is itself an AttentionLayerBase, so
+                # it must be handled before the generic Attention/MLA chain.
+                # In native Ascend SFA it is deliberately skipped because the
+                # Indexer plane is packed into MLA; sparse offload keeps it as
+                # an independent, fully resident KV group instead.
+                if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    kv_cache_spec[layer_name] = spec
+                    attn_layer_names.add(layer_name)
+                continue
             if (isinstance(attn_module, Attention)
                     and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None):
                 # The layer doesn't need its own KV cache and will use that of
@@ -4895,7 +5111,21 @@ class NPUModelRunner(GPUModelRunner):
                     enable_sparse_sfa_c8_for_layer = bool(getattr(impl, "enable_sparse_sfa_c8", False))
                     enable_sparse_li_c8_for_layer = bool(getattr(impl, "enable_sparse_li_c8", False))
 
-                    if enable_sparse_sfa_c8_for_layer:
+                    if dsa_split_cache:
+                        # Indexer K has its own dense KV group.  The MLA group
+                        # therefore contains only latent/nope and RoPE planes.
+                        if (enable_sparse_sfa_c8_for_layer
+                                or enable_sparse_li_c8_for_layer):
+                            raise ValueError(
+                                "DSA sparse offload currently requires BF16 "
+                                "MLA and Indexer cache planes; disable sparse "
+                                "SFA/LI C8")
+                        sparse_head_dim = (
+                            self.model_config.hf_text_config.kv_lora_rank,
+                            self.model_config.hf_text_config.qk_rope_head_dim,
+                            0,
+                        )
+                    elif enable_sparse_sfa_c8_for_layer:
                         packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
                             self.model_config.hf_text_config.kv_lora_rank,
                             self.model_config.hf_text_config.qk_rope_head_dim,
@@ -4927,6 +5157,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_li_c8=enable_sparse_li_c8_for_layer,
                         sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
                     )
+                    attn_layer_names.add(layer_name)
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim

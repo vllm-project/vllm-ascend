@@ -32,6 +32,14 @@ def _ensure_global_patch():
     from vllm_ascend.utils import adapt_patch
 
     adapt_patch(is_global_patch=True)
+    # EngineCore is spawned with a fresh interpreter. Install the lightweight
+    # DSA bootstrap wrapper at the same v0.23 global-plugin boundary; it is a
+    # no-op unless the serialized config explicitly enables sparse offload.
+    from vllm_ascend.patch.dsa_sparse.patch_engine_process import (
+        ensure_dsa_engine_core_entrypoint,
+    )
+
+    ensure_dsa_engine_core_entrypoint()
     _GLOBAL_PATCH_APPLIED = True
 
 

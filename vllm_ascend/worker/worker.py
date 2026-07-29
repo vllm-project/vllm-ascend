@@ -162,6 +162,9 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
+        # DP ranks and TP workers each own an independent DSA resident/DRAM
+        # manager. It is constructed after the NPU device is selected.
+        self.dsa_mgr_worker = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -374,6 +377,13 @@ class NPUWorker(WorkerBase):
         self._is_checkpoint_format = True
 
     def shutdown(self) -> None:
+        if self.dsa_mgr_worker is not None:
+            from vllm_ascend.dsa_sparse.dsa_runtime import (
+                set_dsa_worker_manager,
+            )
+
+            set_dsa_worker_manager(None)
+
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
 
@@ -518,6 +528,33 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+
+        from vllm_ascend.dsa_sparse.dsa_model_support import (
+            is_dsa_sparse_runtime_enabled,
+        )
+
+        if is_dsa_sparse_runtime_enabled(self.vllm_config):
+            from vllm_ascend.dsa_sparse.dsa_ascend_hot_kv_store import (
+                create_dsa_hot_kv_store,
+            )
+            from vllm_ascend.dsa_sparse.dsa_ascend_ops_backend import (
+                AscendDSAOpsBackend,
+            )
+            from vllm_ascend.dsa_sparse.dsa_runtime import (
+                set_dsa_worker_manager,
+            )
+            from vllm_ascend.dsa_sparse.dsa_sparse import DSASparseV1
+            from vllm_ascend.dsa_sparse.dsa_types import DSASparseRole
+
+            self.dsa_mgr_worker = DSASparseV1(
+                self.vllm_config,
+                DSASparseRole.WORKER,
+                dram_store=create_dsa_hot_kv_store(self.vllm_config),
+                ops_backend=AscendDSAOpsBackend(),
+                resident_device=self.device,
+            )
+            set_dsa_worker_manager(self.dsa_mgr_worker)
+            self.model_runner.set_dsa_mgr(self.dsa_mgr_worker)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -876,7 +913,18 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        if self.dsa_mgr_worker is not None:
+            from vllm_ascend.dsa_sparse.dsa_spec_utils import (
+                is_dsa_indexer_spec,
+            )
+
+            if not any(is_dsa_indexer_spec(spec)
+                       for spec in kv_cache_spec.values()):
+                raise RuntimeError(
+                    "DSA sparse offload is enabled, but v0.23 KV planning "
+                    "did not produce the separate IndexerKVSpec group")
+        return kv_cache_spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.

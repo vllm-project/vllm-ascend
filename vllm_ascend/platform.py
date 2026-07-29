@@ -449,6 +449,11 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
+        from vllm_ascend.dsa_sparse.dsa_config import (
+            attach_dsa_sparse_cache_attrs,
+            is_dsa_sparse_config_enabled,
+            validate_dsa_sparse_runtime_config,
+        )
 
         device_config = getattr(vllm_config, "device_config", None)
         if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
@@ -461,6 +466,12 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        # Materialize plugin-owned cache flags before Ascend compile-mode
+        # selection.  The full validation runs after refresh_block_size().
+        attach_dsa_sparse_cache_attrs(vllm_config)
+        if is_dsa_sparse_config_enabled(vllm_config):
+            vllm_config.model_config.enforce_eager = True
 
         maybe_auto_detect_quantization(vllm_config)
 
@@ -660,6 +671,18 @@ class NPUPlatform(Platform):
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         refresh_block_size(vllm_config)
+
+        if is_dsa_sparse_config_enabled(vllm_config):
+            attach_dsa_sparse_cache_attrs(vllm_config)
+            validate_dsa_sparse_runtime_config(vllm_config)
+            # Install only for explicitly enabled jobs.  This point runs in
+            # EngineCore and worker processes before scheduler/model-runner
+            # construction, while leaving ordinary v0.23 deployments untouched.
+            from vllm_ascend.patch.dsa_sparse.patch_runtime import (
+                install_dsa_runtime_patches,
+            )
+
+            install_dsa_runtime_patches()
 
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:

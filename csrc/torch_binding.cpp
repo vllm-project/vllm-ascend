@@ -52,6 +52,13 @@
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#if !defined(ASCEND_PLATFORM_310P) && \
+    !defined(VLLM_ASCEND_DSA_A5_FALLBACK)
+#include "attention/kv_cache_full_block_dump/kv_cache_full_block_dump_torch_adpt.h"
+#include "attention/kvcache_scatter_copy/kvcache_scatter_copy_torch_adpt.h"
+#include "attention/lightning_indexer_decode_update/lightning_indexer_decode_update_torch_adpt.h"
+#include "attention/sparse_flash_attention_for_offload/sparse_flash_attention_for_offload_torch_adpt.h"
+#endif
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2205,6 +2212,25 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
+#if !defined(ASCEND_PLATFORM_310P) && \
+    !defined(VLLM_ASCEND_DSA_A5_FALLBACK)
+void kv_cache_full_block_dump_torch_op(
+    const at::Tensor& src_cache_0,
+    const at::Tensor& src_cache_1,
+    at::Tensor dst_cache_0,
+    at::Tensor dst_cache_1,
+    const at::Tensor& src_block_ids,
+    const at::Tensor& dst_block_ids)
+{
+    npu_kv_cache_full_block_dump(
+        src_cache_0,
+        src_cache_1,
+        dst_cache_0,
+        dst_cache_1,
+        src_block_ids,
+        dst_block_ids);
+}
+#endif
 
 } // namespace vllm_ascend
 
@@ -2334,6 +2360,52 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // internally submits async memcpy on the current NPU stream.
     ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
+
+#if !defined(ASCEND_PLATFORM_310P) && \
+    !defined(VLLM_ASCEND_DSA_A5_FALLBACK)
+    // Keep the source-branch operator names and tensor ABI unchanged.
+    ops.def(
+        "npu_lightning_indexer_decode_update_out("
+        "Tensor query, Tensor key, Tensor weights, Tensor req_pool_entries, "
+        "Tensor(a!) cache_slots, Tensor row_modes, "
+        "Tensor actual_seq_lengths_key, Tensor block_table, "
+        "Tensor(b!) topk_index_out, Tensor(c!) topk_slots_out, "
+        "Tensor(d!) miss_count_out, Tensor(e!) tail_info_out) -> ()");
+    ops.impl("npu_lightning_indexer_decode_update_out",
+             torch::kPrivateUse1,
+             &vllm_ascend::npu_lightning_indexer_decode_update_out);
+
+    ops.def(
+        "npu_kvcache_scatter_copy(Tensor(a!) hbm_k_rope, "
+        "Tensor(b!) hbm_kv_cache, Tensor dram_k_rope, "
+        "Tensor dram_kv_cache, Tensor hbm_block_table, "
+        "Tensor dram_block_table, Tensor src_token_ids, "
+        "Tensor dst_slots, Tensor copy_counts) -> ()");
+    ops.impl("npu_kvcache_scatter_copy",
+             torch::kPrivateUse1,
+             &vllm_ascend::npu_kvcache_scatter_copy);
+
+    ops.def(
+        "npu_sparse_flash_attention_for_offload("
+        "Tensor query, Tensor key, Tensor value, Tensor sparse_indices, "
+        "Tensor tail_info, float scale_value, int sparse_block_size, "
+        "Tensor block_table, Tensor actual_seq_lengths_query, "
+        "Tensor actual_seq_lengths_kv, Tensor query_rope, Tensor key_rope, "
+        "str layout_query, str layout_kv, int sparse_mode) -> Tensor");
+    ops.impl("npu_sparse_flash_attention_for_offload",
+             torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_flash_attention_for_offload);
+
+    ops.def(
+        "kv_cache_full_block_dump(Tensor src_cache_0, "
+        "Tensor src_cache_1, Tensor(a!) dst_cache_0, "
+        "Tensor(b!) dst_cache_1, Tensor src_block_ids, "
+        "Tensor dst_block_ids) -> ()");
+    ops.impl("kv_cache_full_block_dump",
+             torch::kPrivateUse1,
+             &vllm_ascend::kv_cache_full_block_dump_torch_op);
+#endif
+
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));

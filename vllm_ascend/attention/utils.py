@@ -242,6 +242,17 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     positions: torch.Tensor = None
     positions_cpu: torch.Tensor = None
 
+    # DSA split-cache views.  The Indexer plane keeps dense sequence
+    # positions/lengths; the MLA plane addresses a compact resident window.
+    # They remain optional so every non-DSA backend retains the v0.23 ABI.
+    indexer_seq_lens: torch.Tensor = None
+    indexer_seq_lens_cpu: torch.Tensor = None
+    resident_valid_seq_lens: torch.Tensor = None
+    resident_valid_seq_lens_cpu: torch.Tensor = None
+    indexer_positions: torch.Tensor = None
+    resident_positions: torch.Tensor = None
+    dsa_row_mode_batch: Any = None
+
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
 
@@ -281,6 +292,16 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
             positions_cpu=self.positions_cpu,
+            indexer_seq_lens=_slice_reqs(self.indexer_seq_lens),
+            indexer_seq_lens_cpu=_slice_reqs(
+                self.indexer_seq_lens_cpu),
+            resident_valid_seq_lens=_slice_reqs(
+                self.resident_valid_seq_lens),
+            resident_valid_seq_lens_cpu=_slice_reqs(
+                self.resident_valid_seq_lens_cpu),
+            indexer_positions=self.indexer_positions,
+            resident_positions=self.resident_positions,
+            dsa_row_mode_batch=self.dsa_row_mode_batch,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,

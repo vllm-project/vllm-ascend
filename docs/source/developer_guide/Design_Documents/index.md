@@ -17,4 +17,5 @@ context_parallel
 dynamic_chunked_pipeline_parallel
 quantization
 npugraph_ex
+glm51_dsa_sparse_offload_v023_migration
 :::

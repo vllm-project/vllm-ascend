@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 import torch
 from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
@@ -22,6 +30,58 @@ def _get_c8_k_cache_dtype() -> torch.dtype:
 
 def _get_c8_k_scale_cache_dtype() -> torch.dtype:
     return torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else torch.float16
+
+
+@dataclass(frozen=True, kw_only=True)
+class IndexerKVSpec(AttentionSpec):
+    """Dense GLM/DeepSeek lightning-indexer KV plane.
+
+    Sparse offload keeps this cache fully resident while the MLA cache uses an
+    independently sized resident window.  The type is plugin-owned because
+    vLLM v0.23 has no public Indexer KV spec.
+    """
+
+    @property
+    def page_size_bytes(self) -> int:
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * self.head_size
+            * get_dtype_size(self.dtype)
+        )
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        parallel_config = vllm_config.parallel_config
+        cp_world_size = (
+            parallel_config.decode_context_parallel_size
+            * parallel_config.prefill_context_parallel_size
+        )
+        if cp_world_size > 1:
+            max_model_len = cdiv(max_model_len, cp_world_size)
+        return cdiv(max_model_len,
+                    self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        if not specs or not all(isinstance(spec, cls) for spec in specs):
+            raise TypeError(
+                "All layers in an Indexer KV group must use IndexerKVSpec")
+        merged = cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            dtype=specs[0].dtype,
+            page_size_padded=specs[0].page_size_padded,
+        )
+        for spec in specs:
+            for spec_field in fields(AttentionSpec):
+                if getattr(spec, spec_field.name) != getattr(
+                        merged, spec_field.name):
+                    raise ValueError(
+                        "All Indexer KV specs in one group must have the "
+                        f"same {spec_field.name}")
+        return merged
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -303,6 +363,11 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=IndexerKVSpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=IndexerKVSpec,
+    )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=CompressAttentionManager,

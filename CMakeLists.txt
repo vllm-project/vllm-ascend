@@ -110,6 +110,12 @@ set(
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 
+if(SOC_VERSION MATCHES "ascend950")
+    target_compile_definitions(
+        vllm_ascend_C PRIVATE VLLM_ASCEND_DSA_A5_FALLBACK=1
+    )
+endif()
+
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
 # in vllm_ascend/envs.py, forwarded by setup.py as a CMake variable):

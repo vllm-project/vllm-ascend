@@ -56,6 +56,11 @@ class IndexerWrapper(nn.Module):
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
+        # Keep the static-forward-context name before detaching the upstream
+        # cache module. DSA split-cache mode resolves the independently
+        # allocated dense Indexer plane through this stable layer name.
+        indexer_k_cache = getattr(vllm_indexer, "k_cache", None)
+        self.k_cache_layer_name = getattr(indexer_k_cache, "prefix", None)
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
         vllm_indexer.k_cache = None  # delete k_cache
 
