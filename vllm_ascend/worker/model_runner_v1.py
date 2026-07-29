@@ -772,11 +772,20 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs: int,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
+        uniform_decode_query_len: int | None = None,
     ) -> int:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
+        # These changes fix query-width mismatch during Heterogeneous drafter graph padding
+        # This is required because the target runner may use padded width != drafter padded width
+        # Use the caller-provided query width when available
+        query_width = (
+            int(self.uniform_decode_query_len)
+            if uniform_decode_query_len is None
+            else int(uniform_decode_query_len)
+        )
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL and \
@@ -789,7 +798,7 @@ class NPUModelRunner(GPUModelRunner):
         # e.g. 1 request with 1 token when num_spec > 1 (num_spec = 3 and cudagraph_batch_size = 4 for example)
         # will cause tokens are padded but requests are not
         if (
-            num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len
+            num_tokens_padded == num_reqs_padded * query_width
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
         ):
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
@@ -797,7 +806,7 @@ class NPUModelRunner(GPUModelRunner):
 
             last_loc = query_start_loc.np[num_reqs]
             query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
-                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
+                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * query_width + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
@@ -3369,16 +3378,91 @@ class NPUModelRunner(GPUModelRunner):
             dummy_compute_logits(hidden_states)
 
             if self.drafter and not profile_cpp:
+                
+                # Default behavior: reuse the target model's padded shape and descriptor
+                # This remains unchanged for non-Dspark(heterogeneous) draft proposers
+                # This path maps every target capture shape B*(K+1) to the corresponding draft shape B*K
+                # with handling how B is obtained differentely in FULL and PIECEWISE modes
+                drafter_num_tokens = int(num_tokens_padded)
+                drafter_num_reqs = int(num_reqs_padded)
+                drafter_batch_desc = batch_desc
+                drafter_num_tokens_across_dp = num_tokens_across_dp
+                drafter_context_tokens = None
+                drafter_runtime_mode = cudagraph_runtime_mode
+                
+                # Detect the Dspark proposer (can be generalized to heterogeneous)
+                is_dspark = (
+                    self.speculative_config is not None
+                    and getattr(self.speculative_config, "method", None) == "dspark"
+                )
+                # Heterogeneous drafters (Dspark) needs separate target and draft shapes
+                # Therefore, remap the target capture descriptor before running the drafter dummy forward
+                if (
+                    is_dspark
+                    and batch_desc is not None
+                    and cudagraph_runtime_mode
+                    in (
+                        CUDAGraphMode.FULL,
+                        CUDAGraphMode.PIECEWISE,
+                    )
+                ):
+                    K = int(
+                        self.speculative_config.num_speculative_tokens
+                    )
+                    target_width = K + 1
+                    target_num_tokens = int(num_tokens_padded)
+                    
+                    if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                        assert bool(batch_desc.uniform)
+                        
+                        # FULL descriptors explicitly store the padded request count B
+                        # Reuse that requests count and mark the draft as uniform decode
+                        drafter_num_reqs = int(num_reqs_padded)
+                        drafter_uniform_decode = True
+                    else:
+                        
+                        # PIECEWISE descriptors are token-count based and dont store the logical requests count B
+                        # Recover B from the target capture shape:
+                        # B = target_tokens/ (K+1)
+                        drafter_num_reqs = (
+                            target_num_tokens // target_width
+                        )
+                        draft_uniform_decode = False
+                     
+                    # Convert the target requests into corresponding drafter token count
+                    draft_actual_tokens = drafter_num_reqs * K
+                    
+                    # Dispatch using drafter's own graph dispatcher instead of reusing the target descripor
+                    # This selects the correct captured drafter graph shape
+                    drafter_runtime_mode, drafter_batch_desc = (
+                        self.drafter.cudagraph_dispatcher.dispatch(
+                            num_tokens=draft_actual_tokens,
+                            uniform_decode=draft_uniform_decode,
+                            has_lora=num_active_loras > 0,
+                            num_active_loras=num_active_loras,
+                            valid_modes={cudagraph_runtime_mode},
+                        )
+                    )
+                    assert drafter_runtime_mode == cudagraph_runtime_mode
+                    
+                    drafter_num_tokens = int(
+                        drafter_batch_desc.num_tokens
+                    )
+                    # Dspark still precomputes KV from target hidde states whose shape is B(K+1)
+                    drafter_context_tokens = target_num_tokens
+                    drafter_num_tokens_across_dp = None
+ 
                 self.drafter.dummy_run(
-                    num_tokens=num_tokens_padded,
+                    num_tokens=drafter_num_tokens,
                     with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_desc,
+                    num_reqs=drafter_num_reqs,
+                    num_tokens_across_dp=drafter_num_tokens_across_dp,
+                    aclgraph_runtime_mode=drafter_runtime_mode,
+                    batch_descriptor=drafter_batch_desc,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
+                    dspark_num_context_tokens=drafter_context_tokens,
                 )
             if is_profile and self.dynamic_eplb:
                 self.eplb_updator.adaptor.clear_all_moe_loads()
@@ -4684,34 +4768,84 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )
-
-        if (
-            self.speculative_config
+        
+        has_drafter = (
+            self.speculative_config is not None
             and self.drafter is not None
-            and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_extract_hidden_states()
-            )
-        ):
-            assert isinstance(
+        )
+        
+        is_dspark = (
+            has_drafter
+            and self.speculative_config.use_dspark()
+        )
+        
+        # Initialize a drafter-owned dispatcher whenever the proposer exposes
+        # initialize_cudagraph_keys()
+        drafter_initialize_cudagraph_keys = (
+            getattr(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                "initialize_cudagraph_keys",
+                None,
             )
-            self.drafter.initialize_cudagraph_keys(cudagraph_mode)
-
-        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
-        capture_sizes = sorted({
-            desc.num_tokens
-            for _, descs in capture_descs
+            if has_drafter
+            else None
+        )
+        
+        if callable(drafter_initialize_cudagraph_keys):
+            drafter_initialize_cudagraph_keys(cudagraph_mode)
+        
+        # Read target capture sizes from the target dispatcher
+        target_capture_descs = (
+            self.cudagraph_dispatcher.get_capture_descs()
+        )
+        
+        target_capture_sizes = sorted({
+            int(desc.num_tokens)
+            for _, descs in target_capture_descs
             for desc in descs
         })
+        
+        # Default behavior:
+        # speculative drafter graph pools reuse the target graph shapes
+        draft_capture_descs = []
+        draft_capture_sizes = target_capture_sizes
+        
+        if has_drafter:
+            # Check whether current drafter actually owns a dispatcher and whether
+            # thet dispatcher produces independent graph descriptors
+            draft_dispatcher = getattr(
+                self.drafter,
+                "cudagraph_dispatcher",
+                None,
+            )
+            
+            if draft_dispatcher is not None:
+                get_capture_descs = getattr(
+                    draft_dispatcher,
+                    "get_capture_descs",
+                    None,
+                )
+                
+                if callable(get_capture_descs):
+                    draft_capture_descs = get_capture_descs()
+                    
+                    independent_draft_capture_sizes = sorted({
+                        int(desc.num_tokens)
+                        for _, descs in draft_capture_descs
+                        for desc in descs
+                    })
+                    
+                    if independent_draft_capture_sizes:
+                        draft_capture_sizes = (
+                            independent_draft_capture_sizes
+                        )
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
-            set_graph_params(capture_sizes)
+            set_graph_params(target_capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
