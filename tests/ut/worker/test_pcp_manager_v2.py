@@ -37,7 +37,21 @@ if not vllm_version_is("0.25.1"):
     )
 
 
-def _make_local_pcp_batch() -> AscendInputBatch:
+def _mock_async_copy_to_cpu(value, out=None, device=None):
+    """Copy PCP metadata without requiring device hooks in CPU-only UTs."""
+    if isinstance(value, np.ndarray):
+        value = torch.from_numpy(value)
+    elif not isinstance(value, torch.Tensor):
+        value = torch.as_tensor(value)
+
+    if out is not None:
+        out.copy_(value)
+        return out
+
+    return value.to(device="cpu")
+
+
+def _make_local_pcp_batch():
     """Build a local batch in the shape returned by the community PCP manager."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -76,7 +90,7 @@ def _make_local_pcp_batch() -> AscendInputBatch:
     )
 
 
-def _make_global_pcp_batch() -> AscendInputBatch:
+def _make_global_pcp_batch():
     """Build the global batch that is passed into PCPManager.partition_batch."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -144,6 +158,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         patch(
             "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
             return_value=torch.zeros(2, dtype=torch.int64),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
         ),
         patch.object(pcp_manager_module, "build_attn_state", return_value=attn_state) as build_attn_state,
     ):
