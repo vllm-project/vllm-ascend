@@ -36,6 +36,7 @@ if not hasattr(Request, "num_in_flight_tokens"):
         # and AsyncScheduler forwards via `super().__init__(*args, **kwargs)`)
         # or positionally; handle both. If neither, args[0] fast-fails.
         vllm_config = kwargs.get("vllm_config")
+        assert vllm_config is not None
         _inflight_token_budget = (
             vllm_config.max_concurrent_batches * vllm_config.scheduler_config.max_num_batched_tokens
         )
