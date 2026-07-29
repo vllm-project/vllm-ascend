@@ -2587,15 +2587,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         indexer_kv_state_metadata,
         indexer_kv_scale_metadata,
         swa_decode_metadata: AscendDSADecodeMetadata,
-        common_decode_metadata: AscendDSADecodeMetadata,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
     ):
         enable_limit_core = self._enable_csa_limit_core(is_prefill=False)
         compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
         compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
+        actual_seq_lengths_query = compressor_decode_metadata.query_start_loc
+        actual_seq_lengths_key = compressor_decode_metadata.seq_lens
         compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
             compressor_decode_metadata,
         )
@@ -2622,7 +2621,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 state_cache,
                 compressor_state_decode_metadata.block_table,
                 actual_seq_lengths_query,
-                common_decode_metadata.start_pos,
+                compressor_decode_metadata.start_pos,
                 compress_sin,
                 compress_cos,
                 compress_slot_mapping,
@@ -2777,11 +2776,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 indexer_kv_state_metadata,
                 indexer_kv_scale_metadata,
                 swa_decode_metadata,
-                common_decode_metadata,
                 cos,
                 sin,
-                actual_seq_lengths_query,
-                actual_seq_lengths_key,
             )
 
         if self.multistream_dsv4_dsa_overlap:
