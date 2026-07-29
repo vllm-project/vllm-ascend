@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+BISECT_SOC="${1:-}"
+MAX_GOOD_AGE_DAYS="${2:-3}"
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
@@ -347,9 +350,13 @@ aop_pipeline() {
         return 1
     fi
 
-    # Only consider success rows
+    # Match the name and, for new-schema rows, the current SoC. Legacy
+    # seven-column rows have no SoC and remain eligible during migration.
     local success_rows
-    success_rows=$(grep "^${case_name}," "$table" | grep -F ',success,' || true)
+    success_rows=$(awk -F',' -v name="$case_name" -v soc="$BISECT_SOC" '
+        NR > 1 && $1 == name && tolower($4) == "success" &&
+        (soc == "" || NF < 9 || $7 == soc) { print }
+    ' "$table")
     if [ -z "$success_rows" ]; then
         echo "  No success row found for '${case_name}'"
         echo "  Decision: no success entry → SKIP"
@@ -386,10 +393,16 @@ aop_pipeline() {
     fi
     now_ts=$(date +%s)
     age_days=$(( (now_ts - last_ts) / 86400 ))
-    echo "  Last success: ${best_date} (${age_days} days ago, threshold: 3 days)"
+    local max_age_days="$MAX_GOOD_AGE_DAYS"
+    if ! [[ "$max_age_days" =~ ^[0-9]+$ ]]; then
+        echo "  Invalid max good age: ${max_age_days}"
+        echo "  Decision: invalid age threshold → SKIP"
+        return 1
+    fi
+    echo "  Last success: ${best_date} (${age_days} days ago, threshold: ${max_age_days} days)"
 
-    if [ "$age_days" -gt 3 ]; then
-        echo "  Decision: old commit (> 3 days) → SKIP"
+    if [ "$age_days" -gt "$max_age_days" ]; then
+        echo "  Decision: old commit (> ${max_age_days} days) → SKIP"
         echo "=== AOP Pipeline (Pod) - END (age skip) ==="
         return 1
     fi
@@ -424,6 +437,7 @@ aop_pipeline() {
         --bad-commit HEAD \
         --good-table "${table}" \
         --name "${case_name}" \
+        --soc "$BISECT_SOC" \
         --coord-dir "${coord}" || bisect_rc=$?
     echo "  bisect completed (exit code: ${bisect_rc})"
     echo "=== AOP Pipeline (Pod) - END ==="

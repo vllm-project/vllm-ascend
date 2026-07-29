@@ -84,8 +84,6 @@ env:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
-    if: >-
-      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.parse.outputs.run }}
@@ -98,7 +96,9 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ inputs.test_cases }}'.trim();
+            const testCases = context.eventName === 'schedule'
+              ? 'all'
+              : '${{ inputs.test_cases }}'.trim();
 
             core.setOutput('ref', context.sha || 'unknown');
 
@@ -128,7 +128,7 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
+            input_branch="${{ github.event_name == 'schedule' && 'main' || inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
@@ -193,6 +193,8 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: 310p
+      test_frequency: weekly
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -208,6 +210,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ github.event_name == 'schedule' || inputs.aop_enabled }}
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip

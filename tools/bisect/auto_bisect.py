@@ -262,7 +262,10 @@ class Bisector:
         if self.inp.good_commit:
             return self.inp.good_commit
         entry = GoodTable(self.opt.good_table_path).lookup_last_good(
-            name=self.inp.name, config_yaml=self.inp.config_yaml
+            name=self.inp.name,
+            config_yaml=self.inp.config_yaml,
+            soc=self.inp.soc,
+            scene=self.inp.scene,
         )
         if entry is None:
             raise SystemExit(
@@ -294,8 +297,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--name",
         default=None,
-        help="nightly case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
+        help="case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
     )
+    p.add_argument("--soc", default=None, help="hardware generation used to select the matching good-table row")
     p.add_argument("--bad-commit", default=os.getenv("VLLM_ASCEND_REF", "HEAD"))
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
     p.add_argument("--config-base-path", default=os.getenv("CONFIG_BASE_PATH"))
@@ -391,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         scene=args.scene,
         config_yaml=args.config_yaml,
         name=args.name,
+        soc=args.soc,
         bad_commit=args.bad_commit,
         config_base_path=args.config_base_path,
         good_commit=args.good_commit,

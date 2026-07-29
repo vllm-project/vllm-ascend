@@ -12,19 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Read the nightly status table to find a case's last-known-good commit.
+"""Read a scheduled-test status table to find a case's last-known-good commit.
 
-The table is produced by the nightly pipeline (one row per case per run) with
-these columns::
+The table is maintained as one latest-success row per
+``soc + scene + yaml/path`` key with these columns::
 
-    name, yaml/path, link, status, vLLM Git information, vLLM-Ascend Git information, time
+    name, yaml/path, link, status, vLLM Git information,
+    vLLM-Ascend Git information, soc, scene, time
 
 Example rows (columns abbreviated)::
 
     qwen3-30b-acc, .../test_qwen3_30b_acc.py, <link>, success, <vllm>, <vllm_ascend>, <time>
     Qwen3.5-397B-A17B-w4a8-mtp, .../Qwen3.5-...-A2.yaml, <link>, failure, <vllm>, <vllm_ascend>, <time>
 
-For a given case (matched by ``name`` or by ``yaml/path``) the last-known-good
+For a given case (matched by the supplied identity dimensions) the last-known-good
 vllm-ascend commit is the ``vLLM-Ascend Git information`` of the most recent row
 whose ``status`` is ``success``. That row also records the paired vLLM commit,
 which lets us keep vLLM in sync while bisecting vllm-ascend.
@@ -45,6 +46,8 @@ COL_LINK = "link"
 COL_STATUS = "status"
 COL_VLLM = "vLLM Git information"
 COL_VLLM_ASCEND = "vLLM-Ascend Git information"
+COL_SOC = "soc"
+COL_SCENE = "scene"
 COL_TIME = "time"
 
 _TIME_FORMATS = ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S")
@@ -58,6 +61,8 @@ class GoodEntry:
     status: str
     vllm_commit: str
     vllm_ascend_commit: str
+    soc: str
+    scene: str
     time: str
 
     @property
@@ -139,33 +144,61 @@ class GoodTable:
                         status=row.get(COL_STATUS.lower(), ""),
                         vllm_commit=row.get(COL_VLLM.lower(), ""),
                         vllm_ascend_commit=row.get(COL_VLLM_ASCEND.lower(), ""),
+                        soc=row.get(COL_SOC.lower(), ""),
+                        scene=row.get(COL_SCENE.lower(), ""),
                         time=row.get(COL_TIME.lower(), ""),
                     )
                 )
         return entries
 
     @staticmethod
-    def _matches(entry: GoodEntry, name: str | None, config_yaml: str | None) -> bool:
-        if name:
-            return entry.name == name
+    def _matches(
+        entry: GoodEntry,
+        name: str | None,
+        config_yaml: str | None,
+        soc: str | None,
+        scene: str | None,
+    ) -> bool:
+        if soc and entry.soc and entry.soc != soc:
+            return False
+        if scene and entry.scene and entry.scene != scene:
+            return False
+        if name and entry.name != name:
+            return False
         if config_yaml:
             p = entry.path.rstrip("/")
             q = config_yaml.rstrip("/")
-            return p.endswith(q) or Path(p).name == Path(q).name
-        return False
+            if not (p.endswith(q) or Path(p).name == Path(q).name):
+                return False
+        return bool(name or config_yaml)
 
-    def lookup_last_good(self, *, name: str | None = None, config_yaml: str | None = None) -> GoodEntry | None:
+    def lookup_last_good(
+        self,
+        *,
+        name: str | None = None,
+        config_yaml: str | None = None,
+        soc: str | None = None,
+        scene: str | None = None,
+    ) -> GoodEntry | None:
         """Latest ``success`` row for the case, or None.
 
-        Match by ``name`` when given, otherwise by ``yaml/path`` ending with
-        ``config_yaml`` (or its basename). The newest success row by ``time``
-        wins; its ``vllm_ascend_commit`` is the good bisect endpoint.
+        Every supplied identity dimension is required to match. Legacy rows
+        without ``soc``/``scene`` remain eligible. The newest success row by
+        ``time`` wins; its ``vllm_ascend_commit`` is the good bisect endpoint.
         """
         rows = [
-            e for e in self._read_all() if self._matches(e, name, config_yaml) and e.is_success and e.vllm_ascend_commit
+            e
+            for e in self._read_all()
+            if self._matches(e, name, config_yaml, soc, scene) and e.is_success and e.vllm_ascend_commit
         ]
         if not rows:
-            logger.warning("No successful good-table row for name=%r config_yaml=%r", name, config_yaml)
+            logger.warning(
+                "No successful good-table row for name=%r config_yaml=%r soc=%r scene=%r",
+                name,
+                config_yaml,
+                soc,
+                scene,
+            )
             return None
         best = max(rows, key=lambda e: _parse_time(e.time))
         logger.info(

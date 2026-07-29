@@ -42,6 +42,45 @@ def test_lookup_last_good_by_yaml_basename(tmp_path: Path):
     assert entry.vllm_ascend_commit == "asc-new"
 
 
+def test_lookup_uses_all_supplied_case_dimensions(tmp_path: Path):
+    table_path = tmp_path / "good_table.csv"
+    table_path.write_text(
+        dedent(
+            """
+            name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time
+            shared,cases/a2.yaml,a2,success,vllm-a2,asc-a2,a2,single_node,2026-01-01 01:00:00 +0800
+            shared,cases/a3.yaml,a3,success,vllm-a3,asc-a3,a3,single_node,2026-01-02 01:00:00 +0800
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    entry = GoodTable(str(table_path)).lookup_last_good(
+        name="shared",
+        config_yaml="a2.yaml",
+        soc="a2",
+        scene="single_node",
+    )
+
+    assert entry is not None
+    assert entry.vllm_ascend_commit == "asc-a2"
+
+
+def test_lookup_legacy_row_without_dimensions_remains_compatible(tmp_path: Path):
+    table_path = tmp_path / "good_table.csv"
+    _write_table(table_path)
+
+    entry = GoodTable(str(table_path)).lookup_last_good(
+        name="llama",
+        config_yaml="llama.yaml",
+        soc="a2",
+        scene="single_node",
+    )
+
+    assert entry is not None
+    assert entry.vllm_ascend_commit == "asc-new"
+
+
 def test_lookup_last_good_returns_none_for_missing_or_failed_case(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)

@@ -148,6 +148,7 @@ class BisectInput:
     config_yaml: str  # CONFIG_YAML_PATH value: the whole failing case file
     bad_commit: str  # current failing commit (resolved to full sha later)
     name: str | None = None  # nightly case name, to match the good-table 'name'
+    soc: str | None = None  # hardware generation, to disambiguate good-table rows
     config_base_path: str | None = None  # CONFIG_BASE_PATH override (multi/ext dp)
     good_commit: str | None = None  # explicit good; else looked up in the table
     good_vllm_commit: str | None = None  # paired vLLM commit of the good row
