@@ -67,8 +67,6 @@ from vllm_ascend.utils import is_950, weak_ref_tensors
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
-# Cached: on the per-decode-step graph-replay path.
-_TARGET_NUM_LAYERS: int | None = None
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
