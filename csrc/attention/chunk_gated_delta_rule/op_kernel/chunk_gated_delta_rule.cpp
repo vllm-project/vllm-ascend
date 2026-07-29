@@ -30,7 +30,7 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule(
     TPipe pipe;
 
     __gm__ uint8_t *user = GetUserWorkspace(workspaceGM);
-    
+
     CGDR<bfloat16_t, float> op(&pipe, &tilingData);
     CGDRInitParams initParams{
         query, key, value, beta, initialState, seqlens, gOptional,

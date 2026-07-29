@@ -17,4 +17,3 @@ if (BUILD_OPEN_PROJECT)
 endif()
 
 add_modules_sources(OPTYPE chunk_gated_delta_rule ACLNNTYPE aclnn_exclude)
-

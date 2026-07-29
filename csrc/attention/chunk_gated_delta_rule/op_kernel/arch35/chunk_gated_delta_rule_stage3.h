@@ -129,7 +129,7 @@ public:
             }
         }
     }
-    
+
     __aicore__ inline void CalMaskedQKT(GlobalTensor<bfloat16_t> outGM, int nvId, int chunkPos)
     {
         // chunkSize 大小进行自动补齐
@@ -154,7 +154,7 @@ public:
             Duplicate(tmpBuffer1_, static_cast<float>(1.0f), curChunkSize_ * chunkSize_);
             PipeBarrier<PIPE_V>();
         }
- 
+
         // qkt
         AlignedCopyIn(sTP_->qkt[nvId * Sp_ * chunkSize_ + chunkPos * chunkSize_], curChunkSize_, curChunkSize_);
         auto qkt = inQueue_.DeQue<bfloat16_t>();
