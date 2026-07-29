@@ -313,6 +313,44 @@ def test_eplb_state_step_preserves_upstream_defaults():
     assert calls == [(state, False, True, True, None)]
 
 
+def test_eplb_state_step_clears_uncollected_v2_load():
+    sentinel = object()
+    expert_load_pass = torch.ones(2, dtype=torch.int32)
+    state = SimpleNamespace(
+        _ascend_scope_matched=True,
+        _should_record_current_step=MagicMock(return_value=False),
+        model_states={"model": SimpleNamespace(expert_load_pass=expert_load_pass)},
+    )
+
+    def original_step(self, is_dummy=False, is_profile=False, log_stats=False):
+        assert torch.count_nonzero(expert_load_pass) == 0
+        return sentinel
+
+    result = patch_eplb._wrap_eplb_state_step(original_step)(state)
+
+    assert result is sentinel
+    state._should_record_current_step.assert_called_once_with(log_stats=False)
+
+
+def test_eplb_state_step_keeps_collected_v2_load():
+    sentinel = object()
+    expert_load_pass = torch.ones(2, dtype=torch.int32)
+    state = SimpleNamespace(
+        _ascend_scope_matched=True,
+        _should_record_current_step=MagicMock(return_value=True),
+        model_states={"model": SimpleNamespace(expert_load_pass=expert_load_pass)},
+    )
+
+    def original_step(self, is_dummy=False, is_profile=False, log_stats=False):
+        torch.testing.assert_close(expert_load_pass, torch.ones_like(expert_load_pass))
+        return sentinel
+
+    result = patch_eplb._wrap_eplb_state_step(original_step)(state)
+
+    assert result is sentinel
+    state._should_record_current_step.assert_called_once_with(log_stats=False)
+
+
 def test_non_matching_scope_discards_pass_without_advancing_load_window(monkeypatch):
     model_state = SimpleNamespace(expert_load_pass=torch.ones(2, dtype=torch.int64))
     eplb_state = patch_eplb._eplb_state.EplbState.__new__(patch_eplb._eplb_state.EplbState)

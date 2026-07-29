@@ -5,7 +5,6 @@ import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
 EPLB_LOOKUP_NUM_ROWS = 1024
-_EPLB_LOOKUP_ROW_MASK = EPLB_LOOKUP_NUM_ROWS - 1
 
 
 def build_physical_id_lookup(
@@ -38,22 +37,45 @@ def map_to_physical(
     """Map logical expert IDs to global physical IDs through a periodic table."""
     if topk_ids.numel() == 0:
         return topk_ids
+    if topk_ids.ndim != 2:
+        raise ValueError("topk_ids must be a 2D tensor.")
 
-    logical_ids = topk_ids.to(torch.int64)
-    valid_logical = (logical_ids >= 0) & (logical_ids < physical_id_lookup.shape[1])
-    safe_logical_ids = torch.where(valid_logical, logical_ids, 0)
+    logical_ids = topk_ids.to(torch.int64) if topk_ids.device.type == "cpu" else topk_ids
+    num_rows, topk = topk_ids.shape
+    num_full_blocks, tail_rows = divmod(num_rows, EPLB_LOOKUP_NUM_ROWS)
+    mapped_blocks = []
 
-    token_indices = torch.arange(topk_ids.shape[0], dtype=torch.int64, device=topk_ids.device)
-    lookup_rows = torch.bitwise_and(token_indices, _EPLB_LOOKUP_ROW_MASK)
-    physical_ids = physical_id_lookup[lookup_rows[:, None], safe_logical_ids]
-    return torch.where(valid_logical, physical_ids, -1).to(topk_ids.dtype)
+    if num_full_blocks:
+        full_rows = num_full_blocks * EPLB_LOOKUP_NUM_ROWS
+        lookup_blocks = physical_id_lookup.view(
+            1,
+            EPLB_LOOKUP_NUM_ROWS,
+            physical_id_lookup.shape[1],
+        ).expand(num_full_blocks, -1, -1)
+        logical_id_blocks = logical_ids[:full_rows].view(
+            num_full_blocks,
+            EPLB_LOOKUP_NUM_ROWS,
+            topk,
+        )
+        mapped_blocks.append(torch.gather(lookup_blocks, 2, logical_id_blocks).reshape(full_rows, topk))
+
+    if tail_rows:
+        mapped_blocks.append(
+            torch.gather(
+                physical_id_lookup[:tail_rows],
+                1,
+                logical_ids[num_full_blocks * EPLB_LOOKUP_NUM_ROWS :],
+            )
+        )
+
+    physical_ids = mapped_blocks[0] if len(mapped_blocks) == 1 else torch.cat(mapped_blocks)
+    return physical_ids if physical_ids.dtype == topk_ids.dtype else physical_ids.to(topk_ids.dtype)
 
 
 def record_local_expert_load(
     expert_tokens: torch.Tensor,
     group_list_type: int,
     expert_load_view: torch.Tensor,
-    record_enabled: torch.Tensor,
     ep_rank: int,
     ep_size: int,
 ) -> None:
@@ -74,9 +96,7 @@ def record_local_expert_load(
         ep_rank * num_local_physical_experts,
         num_local_physical_experts,
     )
-    local_load_view.add_(
-        local_load.to(expert_load_view.dtype, non_blocking=True) * record_enabled.to(expert_load_view.dtype)
-    )
+    local_load_view.add_(local_load)
 
 
 def _map_to_physical_fake(

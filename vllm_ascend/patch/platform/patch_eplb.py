@@ -229,14 +229,25 @@ def _wrap_eplb_state_step(original_step):
 
     @wraps(original_step)
     def _step(self, *args, **kwargs):
-        if getattr(self, "_ascend_scope_matched", True):
-            return original_step(self, *args, **kwargs)
-
         bound = step_signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
-        if not bound.arguments["is_dummy"] and not bound.arguments["is_profile"]:
+        if (
+            not getattr(self, "_ascend_scope_matched", True)
+            and not bound.arguments["is_dummy"]
+            and not bound.arguments["is_profile"]
+        ):
             bound.arguments["is_dummy"] = True
             bound.arguments["log_stats"] = False
+        elif (
+            not bound.arguments["is_dummy"]
+            and not bound.arguments["is_profile"]
+            and not self._should_record_current_step(log_stats=bound.arguments["log_stats"])
+        ):
+            # V2 records local GMM counts with one add per layer. Clear the
+            # whole pass here when the upstream collection window is closed,
+            # avoiding a device-side record predicate in every MoE layer.
+            for model_state in self.model_states.values():
+                model_state.expert_load_pass.zero_()
         return original_step(*bound.args, **bound.kwargs)
 
     setattr(_step, _PATCH_MARKER, True)
