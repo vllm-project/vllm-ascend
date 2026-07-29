@@ -735,7 +735,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         ascend_config = get_ascend_config()
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_kv_nz = ascend_config.enable_kv_nz
 
         self.ring_mla_mask_size = 512

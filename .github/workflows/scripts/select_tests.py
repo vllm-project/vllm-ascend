@@ -87,6 +87,7 @@ class RunnerInfo:
     npu_type: NpuType
     label: str
     image_tag: str = ""
+    csrc_cache_target: str = ""
 
 
 RunnerKey = tuple[int, NpuType]
@@ -190,6 +191,7 @@ def _load_runners() -> list[RunnerInfo]:
             npu_type=NpuType(info["chip"]),
             label=label,
             image_tag=info.get("image_tag", ""),
+            csrc_cache_target=info.get("csrc_cache_target", ""),
         )
         for label, info in raw.items()
     ]
@@ -592,6 +594,8 @@ def _build_test_group(
     }
     if runner.image_tag:
         group["image_tag"] = runner.image_tag
+    if runner.csrc_cache_target:
+        group["csrc_cache_target"] = runner.csrc_cache_target
     return group
 
 
@@ -654,10 +658,12 @@ def _write_output(
 ) -> None:
     has_tests = len(test_groups) > 0
     groups_json = json.dumps(test_groups, separators=(",", ":"))
+    cache_target_ids = sorted({group["csrc_cache_target"] for group in test_groups if group.get("csrc_cache_target")})
 
     outputs = {
         "test_groups": groups_json,
         "has_tests": str(has_tests).lower(),
+        "csrc_cache_target_ids": json.dumps(cache_target_ids, separators=(",", ":")),
         "matched_modules": ",".join(matched_modules),
     }
 
