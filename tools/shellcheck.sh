@@ -19,6 +19,7 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 
+# test: skip pre-commit hooks
 set -euo pipefail
 
 scversion="stable"
