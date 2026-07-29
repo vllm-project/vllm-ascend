@@ -624,10 +624,10 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
 
     - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
-2. Run server for each node:
+1. Run server for each node:
 
     ```shell
     # p0
@@ -640,7 +640,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 8 --dp-rank-start 8 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-3. Run the `proxy.sh` script on the prefill master node
+2. Run the `proxy.sh` script on the prefill master node
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
