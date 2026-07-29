@@ -126,6 +126,43 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
     _sin_cache = sin_cache.squeeze(1)
 
 
+def reload_cos_and_sin_after_restore(model: torch.nn.Module) -> bool:
+    """[snapshot] Rebind module-level RoPE caches to restored model buffers.
+
+    MLA/SFA metadata reads cos/sin through module globals. Those globals are
+    outside ``state_dict`` and may retain stale NPU storage after restore even
+    though the owning rotary module's persistent buffers have been refreshed.
+    """
+    global _cos_cache
+    global _sin_cache
+    global _cos_sin_cache
+    global _cos_slice
+    global _sin_slice
+
+    for module in model.modules():
+        cos_cached = getattr(module, "cos_cached", None)
+        sin_cached = getattr(module, "sin_cached", None)
+        cos_sin_cache = getattr(module, "cos_sin_cache", None)
+        if isinstance(cos_cached, torch.Tensor) and isinstance(sin_cached, torch.Tensor):
+            _cos_cache = cos_cached
+            _sin_cache = sin_cached
+            if isinstance(cos_sin_cache, torch.Tensor):
+                _cos_sin_cache = cos_sin_cache
+            _cos_slice = None
+            _sin_slice = None
+            return True
+        if isinstance(cos_sin_cache, torch.Tensor):
+            _cos_sin_cache = cos_sin_cache
+            hidden_dim = cos_sin_cache.shape[-1] // 2
+            cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
+            _cos_cache = cos_cache.squeeze(1)
+            _sin_cache = sin_cache.squeeze(1)
+            _cos_slice = None
+            _sin_slice = None
+            return True
+    return False
+
+
 def update_cos_sin(positions):
     global _cos
     global _sin

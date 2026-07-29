@@ -74,6 +74,42 @@ class TestAscendSFABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
 
+class TestAscendSFASnapshotRestore(TestBase):
+    def test_absorbed_weights_are_persistent_and_rebound(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.q_proj = torch.nn.Linear(2, 2, bias=False)
+        impl.W_UV = torch.randn(2, 3)
+        impl.W_UK_T = torch.randn(2, 4)
+        original_w_uv = impl.W_UV
+        original_w_uk_t = impl.W_UK_T
+        expected_w_uv = impl.W_UV.clone()
+        expected_w_uk_t = impl.W_UK_T.clone()
+
+        impl._persist_absorbed_weights()
+        state_dict = {name: tensor.clone() for name, tensor in impl.q_proj.state_dict().items()}
+
+        # Registering snapshot buffers must not copy or replace forward tensors.
+        self.assertIs(impl.W_UV, original_w_uv)
+        self.assertIs(impl.W_UK_T, original_w_uk_t)
+        self.assertIn("sfa_w_uv", state_dict)
+        self.assertIn("sfa_w_uk_t", state_dict)
+
+        impl.q_proj._buffers["sfa_w_uv"].zero_()
+        impl.q_proj._buffers["sfa_w_uk_t"].zero_()
+        impl.q_proj.load_state_dict(state_dict)
+        self.assertTrue(impl._rebind_absorbed_weight_buffers())
+        self.assertTrue(torch.equal(impl.W_UV, expected_w_uv))
+        self.assertTrue(torch.equal(impl.W_UK_T, expected_w_uk_t))
+
+    def test_missing_absorbed_weights_fail_restore(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.q_proj = torch.nn.Linear(2, 2, bias=False)
+        impl.layer_name = "model.layers.0.self_attn"
+
+        with self.assertRaisesRegex(RuntimeError, "absorbed weight buffers are missing"):
+            impl.reload_derived_weights_after_restore(torch.bfloat16)
+
+
 class TestAscendSFAKVQuantSparseAttention(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant")
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope")
