@@ -16,12 +16,14 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.spec_decode.dflash_proposer_310 import (
     _compute_slots_for_block_size_310,
     _copy_and_expand_inputs_ascendc,
+    _validate_num_spec_tokens_310,
 )
 
 
@@ -35,6 +37,16 @@ def test_compute_slots_supports_mixed_physical_block_sizes():
 
     assert slots_64.tolist() == [703, 704, 767, 768]
     assert slots_128.tolist() == [1343, 1344, 1407, 1408]
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [6, 8, 15])
+def test_num_spec_validation_supports_k_above_five(num_speculative_tokens):
+    _validate_num_spec_tokens_310(num_speculative_tokens)
+
+
+def test_num_spec_validation_rejects_query_beyond_kernel_capacity():
+    with pytest.raises(ValueError, match="supports at most 15"):
+        _validate_num_spec_tokens_310(16)
 
 
 class TestCopyAndExpandInputsAscendC(TestBase):

@@ -304,6 +304,18 @@ class cmake_build_ext(build_ext):
             pybind11_cmake_path = (
                 subprocess.check_output([python_executable, "-m", "pybind11", "--cmakedir"]).decode().strip()
             )
+            torch_cmake_path = (
+                subprocess.check_output(
+                    [
+                        python_executable,
+                        "-c",
+                        "import torch; print(torch.utils.cmake_prefix_path)",
+                    ]
+                )
+                .decode()
+                .strip()
+                .splitlines()[0]
+            )
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
@@ -314,7 +326,7 @@ class cmake_build_ext(build_ext):
         # add CMAKE_INSTALL_PATH
         cmake_args += [f"-DCMAKE_INSTALL_PREFIX={install_path}"]
 
-        cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
+        cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path};{torch_cmake_path}"]
 
         soc_version_map = {
             "910b": "ascend910b1",

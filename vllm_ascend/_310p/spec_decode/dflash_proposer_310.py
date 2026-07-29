@@ -38,15 +38,25 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
 
-# On 310P the target spec-verify forward miscomputes for a verify query length
-# >= 9 (i.e. num_speculative_tokens >= 8): the per-token pre-attention pipeline
-# gets corrupted by the batch token count, collapsing draft acceptance to ~0
-# (verified: qlen<=8 healthy, qlen==9 collapses). The attention op, KV slots,
-# RoPE positions and verify input ids were all proven correct, so the ceiling is
-# a hardware/library limit of the 310P verify path, not this code. Keep
-# num_speculative_tokens within the healthy regime; small values are also best
-# for acceptance in practice (num_spec=3 gives the highest observed rate).
-MAX_RELIABLE_NUM_SPEC_TOKENS_310P = 7
+# The 310P recurrent GDN kernel reserves buffers for a maximum recurrent query
+# length of 16. DFlash verification prepends one target bonus token, leaving
+# room for up to 15 draft tokens. Real-weight Qwen3.5-9B runs and isolated
+# CausalConv1d/GDN comparisons cover K=6, K=8 and K=15.
+MAX_SUPPORTED_NUM_SPEC_TOKENS_310P = 15
+
+
+def _validate_num_spec_tokens_310(num_speculative_tokens: int | None) -> None:
+    """Reject only query lengths that exceed the compiled recurrent buffers."""
+    if (
+        num_speculative_tokens is not None
+        and num_speculative_tokens > MAX_SUPPORTED_NUM_SPEC_TOKENS_310P
+    ):
+        raise ValueError(
+            "dflash/dspark on 310P supports at most "
+            f"{MAX_SUPPORTED_NUM_SPEC_TOKENS_310P} speculative tokens, but got "
+            f"{num_speculative_tokens}. The target verify query also contains "
+            "one bonus token and the recurrent GDN kernel supports 16 tokens."
+        )
 
 
 def _draft_cache_block_sizes_310(proposer: Any) -> dict[str, int]:
@@ -192,20 +202,7 @@ def _ensure_kernel_block_size_matches_cache_310(proposer: Any) -> None:
         return
     proposer._kernel_block_size_fixed_310 = True
 
-    num_spec = getattr(proposer, "num_speculative_tokens", None)
-    if num_spec is not None and num_spec > MAX_RELIABLE_NUM_SPEC_TOKENS_310P:
-        logger.warning(
-            "dflash/dspark on 310P: num_speculative_tokens=%s exceeds the reliable "
-            "limit %s. The 310P target spec-verify forward corrupts draft "
-            "acceptance (drops to ~0) once the verify query length reaches %s "
-            "(num_speculative_tokens>=%s); set num_speculative_tokens<=%s "
-            "(num_speculative_tokens=3 gives the best observed acceptance).",
-            num_spec,
-            MAX_RELIABLE_NUM_SPEC_TOKENS_310P,
-            MAX_RELIABLE_NUM_SPEC_TOKENS_310P + 2,
-            MAX_RELIABLE_NUM_SPEC_TOKENS_310P + 1,
-            MAX_RELIABLE_NUM_SPEC_TOKENS_310P,
-        )
+    _validate_num_spec_tokens_310(getattr(proposer, "num_speculative_tokens", None))
 
     current = getattr(proposer, "kernel_block_size", None)
     try:

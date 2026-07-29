@@ -15,7 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import logging
+
 _GLOBAL_PATCH_APPLIED = False
+_logger = logging.getLogger(__name__)
 
 
 def _ensure_global_patch():
@@ -70,11 +73,19 @@ def register_service_profiling():
 
 
 def register_model():
-    from vllm_ascend.patch.hunyuan_vl_processor_compat import (
-        install_hunyuan_vl_processor_compat,
-    )
+    import transformers
 
-    install_hunyuan_vl_processor_compat()
+    if hasattr(transformers, "HunYuanVLProcessor"):
+        from vllm_ascend.patch.hunyuan_vl_processor_compat import (
+            install_hunyuan_vl_processor_compat,
+        )
+
+        install_hunyuan_vl_processor_compat()
+    else:
+        _logger.info(
+            "Skipping optional HunyuanVL processor compatibility patch: "
+            "transformers.HunYuanVLProcessor is unavailable."
+        )
     from .models import register_model
 
     register_model()
