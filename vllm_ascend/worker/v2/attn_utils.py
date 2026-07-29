@@ -166,14 +166,16 @@ def build_attn_metadata(
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
+    is_prefilling: torch.Tensor | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
-    # ModelRunner V2 callers can omit this legacy Ascend field. The scheduled
-    # token count is the valid positions and rotary-embedding extent.
+    # MRV2 callers currently omit this legacy Ascend field. In eager mode the
+    # scheduled token count is also the valid positions/cos-sin extent; PCP
+    # builders can still replace it with their fixed local padded extent.
     if num_input_tokens <= 0:
         num_input_tokens = num_tokens
 
@@ -214,6 +216,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,

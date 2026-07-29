@@ -8,10 +8,11 @@ import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -325,6 +326,32 @@ class AscendDSADecodeMetadata:
     dspark_swa_indices: torch.Tensor | None = None
 
 
+@dataclass(frozen=True)
+class AscendDSAPCPSegment:
+    """One canonical PCP token run in rank-major gathered hidden states."""
+
+    rank: int
+    row: int
+    token_start: int
+    num_tokens: int
+    start_pos: int
+
+
+@dataclass
+class AscendDSAPCPMetadata:
+    """Internal metadata used to replay DSA cache updates under PCP."""
+
+    local_num_input_tokens: int
+    local_num_actual_tokens: int
+    num_decode_reqs: int
+    canonical_segments: tuple[AscendDSAPCPSegment, ...]
+    gathered_block_tables: torch.Tensor
+    raw_slot_mapping: torch.Tensor
+    block_size: int
+    full_compress_sin: torch.Tensor | None = None
+    full_compress_cos: torch.Tensor | None = None
+
+
 @dataclass
 class AscendDSAMetadata:
     """Metadata for MLACommon.
@@ -363,6 +390,8 @@ class AscendDSAMetadata:
     hadamard: torch.Tensor | None = None
 
     start_pos: torch.Tensor | None = None
+
+    pcp: AscendDSAPCPMetadata | None = None
 
     def __post_init__(self):
         pass
@@ -675,7 +704,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if self.common_ratio_to_sas_metadata.get("num_decodes", None) is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
-                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=self.decode_threshold,
+                    treat_short_extends_as_decodes=kwargs.get(
+                        "treat_short_extends_as_decodes",
+                        True,
+                    ),
+                )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
             self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
@@ -1488,6 +1524,328 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         assert attn_metadata is not None
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+
+class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
+    """DSA metadata builder for MRV2 prefill context parallelism."""
+
+    aclgraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+
+    def __init__(
+        self,
+        kv_cache_spec: AscendMLAAttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendDSAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        parallel_config = vllm_config.parallel_config
+        if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+            raise NotImplementedError("DSA PCP currently supports ModelRunner V2 only.")
+        if parallel_config.prefill_context_parallel_size <= 1:
+            raise ValueError("AscendDSAPCPMetadataBuilder requires PCP size greater than one.")
+        if parallel_config.decode_context_parallel_size != 1:
+            raise NotImplementedError("DSA PCP currently requires DCP size to be one.")
+        if vllm_config.cache_config.enable_prefix_caching:
+            raise NotImplementedError("DSA PCP does not support prefix caching yet.")
+
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls,
+            supports_dcp_with_varlen,
+        )
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group
+        self.segment_capacity = 2 * vllm_config.scheduler_config.max_num_seqs
+        self.start_pos_prefill = torch.zeros(
+            self.segment_capacity,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.start_pos_decode = torch.zeros(
+            self.segment_capacity,
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendDSAPCPMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        return AttentionCGSupport.NEVER
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendDSAMetadata:
+        raise NotImplementedError("DSA PCP supports eager execution only.")
+
+    def _build_pcp_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendDSAPCPMetadata:
+        """Gather rank-local segments and plan the canonical PCP token order.
+
+        The resulting metadata separates the rank-local attention layout from
+        the global cache replay layout used by every PCP rank.
+        """
+        raw_slot_mapping = common_attn_metadata.slot_mapping
+        if raw_slot_mapping.ndim != 1:
+            raise ValueError(
+                f"DSA PCP expects a one-dimensional raw slot mapping, got shape {tuple(raw_slot_mapping.shape)}."
+            )
+        if raw_slot_mapping.shape[0] % self.pcp_world_size != 0:
+            raise ValueError(
+                "Expanded PCP slot mapping must be divisible by PCP size, "
+                f"got {raw_slot_mapping.shape[0]} and {self.pcp_world_size}."
+            )
+        local_num_input_tokens = raw_slot_mapping.shape[0] // self.pcp_world_size
+        num_reqs = common_attn_metadata.num_reqs
+        if num_reqs > self.segment_capacity:
+            raise ValueError(
+                f"DSA PCP local request segments exceed metadata capacity, got {num_reqs} and {self.segment_capacity}."
+            )
+
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to(
+            device="cpu",
+            dtype=torch.int32,
+        )
+        local_descriptors_cpu = torch.zeros(
+            (self.segment_capacity, 4),
+            dtype=torch.int32,
+        )
+        for row in range(num_reqs):
+            token_start = int(query_start_loc_cpu[row])
+            num_tokens = int(query_lens_cpu[row])
+            start_pos = int(seq_lens_cpu[row]) - num_tokens
+            if start_pos < 0:
+                raise ValueError(
+                    "DSA PCP segment has a negative start position, "
+                    f"row={row}, seq_len={int(seq_lens_cpu[row])}, "
+                    f"num_tokens={num_tokens}."
+                )
+            local_descriptors_cpu[row] = torch.tensor(
+                (token_start, num_tokens, start_pos, 1),
+                dtype=torch.int32,
+            )
+        local_descriptors = local_descriptors_cpu.to(self.device)
+        gathered_descriptors = (
+            get_pcp_group()
+            .all_gather(
+                local_descriptors,
+                dim=0,
+            )
+            .view(self.pcp_world_size, self.segment_capacity, 4)
+        )
+
+        block_table = common_attn_metadata.block_table_tensor
+        block_table_width = block_table.shape[1]
+        local_block_tables = block_table.new_zeros(
+            (self.segment_capacity, block_table_width),
+        )
+        local_block_tables[:num_reqs].copy_(block_table[:num_reqs])
+        gathered_block_tables = (
+            get_pcp_group()
+            .all_gather(
+                local_block_tables,
+                dim=0,
+            )
+            .view(
+                self.pcp_world_size,
+                self.segment_capacity,
+                block_table_width,
+            )
+        )
+
+        descriptors_cpu = gathered_descriptors.to("cpu")
+        slot_mapping_cpu = raw_slot_mapping.view(
+            self.pcp_world_size,
+            local_num_input_tokens,
+        ).to("cpu")
+
+        decode_counts: list[int] = []
+        for rank in range(1, self.pcp_world_size):
+            decode_count = 0
+            saw_prefill = False
+            for row in range(self.segment_capacity):
+                token_start, num_tokens, _, valid = (int(value) for value in descriptors_cpu[rank, row])
+                if not valid or num_tokens == 0:
+                    continue
+                token_end = token_start + num_tokens
+                segment_has_write = bool(torch.any(slot_mapping_cpu[rank, token_start:token_end] != PAD_SLOT_ID))
+                if segment_has_write:
+                    saw_prefill = True
+                else:
+                    if saw_prefill:
+                        raise ValueError("DSA PCP requires decode segments to precede prefill segments on every rank.")
+                    decode_count += 1
+            decode_counts.append(decode_count)
+        if not decode_counts or any(count != decode_counts[0] for count in decode_counts):
+            raise ValueError(f"DSA PCP could not derive a consistent replicated decode prefix, counts={decode_counts}.")
+        num_decode_reqs = decode_counts[0]
+
+        canonical_segments: list[AscendDSAPCPSegment] = []
+        for rank in range(self.pcp_world_size):
+            for row in range(self.segment_capacity):
+                token_start, num_tokens, start_pos, valid = (int(value) for value in descriptors_cpu[rank, row])
+                if not valid or num_tokens == 0:
+                    continue
+                valid_mask = (
+                    slot_mapping_cpu[
+                        rank,
+                        token_start : token_start + num_tokens,
+                    ]
+                    != PAD_SLOT_ID
+                )
+                run_start = 0
+                while run_start < num_tokens:
+                    while run_start < num_tokens and not bool(valid_mask[run_start]):
+                        run_start += 1
+                    if run_start == num_tokens:
+                        break
+                    run_end = run_start + 1
+                    while run_end < num_tokens and bool(valid_mask[run_end]):
+                        run_end += 1
+                    canonical_segments.append(
+                        AscendDSAPCPSegment(
+                            rank=rank,
+                            row=row,
+                            token_start=token_start + run_start,
+                            num_tokens=run_end - run_start,
+                            start_pos=start_pos + run_start,
+                        )
+                    )
+                    run_start = run_end
+        canonical_segments.sort(
+            key=lambda segment: (
+                segment.start_pos,
+                segment.rank,
+                segment.row,
+                segment.token_start,
+            )
+        )
+
+        full_compress_cos = None
+        full_compress_sin = None
+        if self.compressor_ratio > 1:
+            full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(f"c{self.compressor_ratio}")
+
+        return AscendDSAPCPMetadata(
+            local_num_input_tokens=local_num_input_tokens,
+            local_num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            num_decode_reqs=num_decode_reqs,
+            canonical_segments=tuple(canonical_segments),
+            gathered_block_tables=gathered_block_tables,
+            raw_slot_mapping=raw_slot_mapping,
+            block_size=self.kv_cache_spec.block_size,
+            full_compress_sin=full_compress_sin,
+            full_compress_cos=full_compress_cos,
+        )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendDSAMetadata:
+        pcp_metadata = self._build_pcp_metadata(common_attn_metadata)
+        local_num_input_tokens = pcp_metadata.local_num_input_tokens
+        local_num_actual_tokens = pcp_metadata.local_num_actual_tokens
+        num_reqs = common_attn_metadata.num_reqs
+
+        raw_slot_mapping = common_attn_metadata.slot_mapping
+        local_slot_mapping = raw_slot_mapping.view(
+            self.pcp_world_size,
+            local_num_input_tokens,
+        )[self.pcp_rank]
+        common_attn_metadata.slot_mapping = local_slot_mapping
+        common_attn_metadata.num_input_tokens = local_num_input_tokens
+
+        local_seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to(
+            device="cpu",
+            dtype=torch.int32,
+        )
+        common_attn_metadata.seq_lens_cpu = local_seq_lens_cpu
+        common_attn_metadata._seq_lens_cpu = local_seq_lens_cpu
+        common_attn_metadata.seq_lens_cpu_upper_bound = local_seq_lens_cpu
+        query_lens_cpu = (
+            common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+            - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+        )
+        common_attn_metadata.max_query_len = int(query_lens_cpu.max()) if query_lens_cpu.numel() else 0
+        if common_attn_metadata.is_prefilling is None:
+            is_prefilling = torch.ones(num_reqs, dtype=torch.bool)
+            is_prefilling[: pcp_metadata.num_decode_reqs] = False
+        else:
+            is_prefilling = common_attn_metadata.is_prefilling[:num_reqs].to(
+                device="cpu",
+                dtype=torch.bool,
+            )
+            if is_prefilling.shape[0] != num_reqs:
+                raise ValueError(
+                    "DSA PCP is_prefilling metadata does not cover every "
+                    f"local segment, got {is_prefilling.shape[0]} and {num_reqs}."
+                )
+            expected_is_prefilling = torch.ones(num_reqs, dtype=torch.bool)
+            expected_is_prefilling[: pcp_metadata.num_decode_reqs] = False
+            if not torch.equal(is_prefilling, expected_is_prefilling):
+                raise ValueError(
+                    "DSA PCP scheduler prefill flags disagree with the "
+                    "replicated decode prefix reconstructed from PAD slots."
+                )
+        common_attn_metadata.is_prefilling = is_prefilling
+
+        if local_num_actual_tokens == 0:
+            input_positions = common_attn_metadata.positions[:local_num_input_tokens].long()
+            cos, sin = get_cos_and_sin_dsa(input_positions)
+            metadata = self.metadata_cls(  # type: ignore[call-arg]
+                num_input_tokens=local_num_input_tokens,
+                num_actual_tokens=0,
+                query_lens=query_lens_cpu,
+                slot_mapping=None,
+                head_dim=self.model_config.get_head_size(),
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_prefills=0,
+                attn_mask=None,
+                attn_state=common_attn_metadata.attn_state,
+                prefill=None,
+                decode=None,
+                query_start_loc=common_attn_metadata.query_start_loc,
+                block_tables=None,
+                seq_lens=common_attn_metadata.seq_lens[:num_reqs],
+                cos=cos,
+                sin=sin,
+                hadamard=AscendDSAMetadataBuilder.hadamard,
+                pcp=pcp_metadata,
+            )
+            common_attn_metadata.slot_mapping = raw_slot_mapping
+            return metadata
+
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+            prefill_ratio_to_sas_metadata={},
+            decode_ratio_to_sas_metadata={},
+            common_ratio_to_sas_metadata={},
+            block_size=self.kv_cache_spec.block_size,
+            treat_short_extends_as_decodes=False,
+            **kwargs,
+        )
+        metadata.pcp = pcp_metadata
+        common_attn_metadata.slot_mapping = raw_slot_mapping
+        return metadata
 
 
 class AscendDSAImpl(DSAAttentionImpl):
