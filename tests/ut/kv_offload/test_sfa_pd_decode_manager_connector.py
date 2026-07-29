@@ -37,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.protocol import (  #
 from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.read_thread import (  # noqa: E402
     ConsumerReadState,
     MembPullReadThread,
+    TransferDescriptors,
 )
 from vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.scheduler import (  # noqa: E402
     SFAPDCpuOffloadScheduler,
@@ -202,7 +203,7 @@ def _make_layer(
 def test_read_descriptors_use_independent_main_and_indexer_block_ids():
     thread = _make_read_thread()
 
-    local, peer, lengths, info = thread._build_req_descriptors(
+    cpu, npu, info = thread._build_req_descriptors(
         _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000),
         "req-0",
         p_main_block_ids=[1, 2],
@@ -210,9 +211,12 @@ def test_read_descriptors_use_independent_main_and_indexer_block_ids():
         want_info=True,
     )
 
-    assert local == [3030, 4060, 8040]
-    assert peer == [1010, 2020, 7035]
-    assert lengths == [20, 40, 5]
+    assert cpu.local_ptrs == [3030, 4060]
+    assert cpu.peer_ptrs == [1010, 2020]
+    assert cpu.lengths == [20, 40]
+    assert npu.local_ptrs == [8040]
+    assert npu.peer_ptrs == [7035]
+    assert npu.lengths == [5]
     assert info is not None
     assert info["n_main"] == 2
     assert info["n_indexer"] == 1
@@ -221,7 +225,7 @@ def test_read_descriptors_use_independent_main_and_indexer_block_ids():
 def test_non_tp0_read_descriptors_still_transfer_indexer():
     thread = _make_read_thread()
 
-    local, peer, lengths, info = thread._build_req_descriptors(
+    cpu, npu, info = thread._build_req_descriptors(
         _make_layer(k_cpu_ptr=None, v_cpu_ptr=None),
         "req-0",
         p_main_block_ids=[1, 2],
@@ -229,9 +233,10 @@ def test_non_tp0_read_descriptors_still_transfer_indexer():
         want_info=True,
     )
 
-    assert local == [8040]
-    assert peer == [7035]
-    assert lengths == [5]
+    assert cpu == TransferDescriptors([], [], [])
+    assert npu.local_ptrs == [8040]
+    assert npu.peer_ptrs == [7035]
+    assert npu.lengths == [5]
     assert info is not None
     assert info["n_main"] == 0
     assert info["n_indexer"] == 1
@@ -270,15 +275,26 @@ def test_non_tp0_resolves_broadcast_main_gva_without_cpu_tensor():
         "k_cpu_ptr",
         "v_cpu_ptr",
         "has_indexer",
-        "expected_local",
-        "expected_peer",
-        "expected_lengths",
+        "expected_cpu",
+        "expected_npu",
     ),
     [
-        (None, None, True, [8040], [7035], [5]),
-        (None, None, False, [], [], []),
-        (3000, 4000, False, [3030, 4060], [1010, 2020], [20, 40]),
-        (3000, 4000, True, [3030, 4060, 8040], [1010, 2020, 7035], [20, 40, 5]),
+        (None, None, True, ([], [], []), ([8040], [7035], [5])),
+        (None, None, False, ([], [], []), ([], [], [])),
+        (
+            3000,
+            4000,
+            False,
+            ([3030, 4060], [1010, 2020], [20, 40]),
+            ([], [], []),
+        ),
+        (
+            3000,
+            4000,
+            True,
+            ([3030, 4060], [1010, 2020], [20, 40]),
+            ([8040], [7035], [5]),
+        ),
     ],
     ids=[
         "non-tp0-indexer",
@@ -291,13 +307,12 @@ def test_read_descriptors_cover_tp_ownership_and_optional_indexer(
     k_cpu_ptr,
     v_cpu_ptr,
     has_indexer,
-    expected_local,
-    expected_peer,
-    expected_lengths,
+    expected_cpu,
+    expected_npu,
 ):
     thread = _make_read_thread()
 
-    local, peer, lengths, _ = thread._build_req_descriptors(
+    cpu, npu, _ = thread._build_req_descriptors(
         _make_layer(
             k_cpu_ptr=k_cpu_ptr,
             v_cpu_ptr=v_cpu_ptr,
@@ -309,9 +324,51 @@ def test_read_descriptors_cover_tp_ownership_and_optional_indexer(
         want_info=True,
     )
 
-    assert local == expected_local
-    assert peer == expected_peer
-    assert lengths == expected_lengths
+    assert (cpu.local_ptrs, cpu.peer_ptrs, cpu.lengths) == expected_cpu
+    assert (npu.local_ptrs, npu.peer_ptrs, npu.lengths) == expected_npu
+
+
+def test_read_batch_submits_cpu_and_npu_descriptors_separately():
+    thread = _make_read_thread()
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = 0
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+    thread._resolve_read_layer = MagicMock(return_value=layer)
+
+    thread._do_read_batch(
+        layer["layer_name"],
+        [("req-0", [1, 2], [7], 0, 0)],
+        p_session="p-session",
+        p_layer_meta={},
+    )
+
+    calls = thread.engine.batch_transfer_sync_read.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args == (
+        "p-session",
+        [3030, 4060],
+        [1010, 2020],
+        [20, 40],
+    )
+    assert calls[1].args == ("p-session", [8040], [7035], [5])
+
+
+def test_read_batch_reports_npu_failure_after_cpu_read():
+    thread = _make_read_thread()
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.side_effect = [0, -1]
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+    thread._resolve_read_layer = MagicMock(return_value=layer)
+
+    with pytest.raises(RuntimeError, match="NPU batch read failed"):
+        thread._do_read_batch(
+            layer["layer_name"],
+            [("req-0", [1, 2], [7], 0, 0)],
+            p_session="p-session",
+            p_layer_meta={},
+        )
+
+    assert thread.engine.batch_transfer_sync_read.call_count == 2
 
 
 def test_non_tp0_main_only_layer_acknowledges_without_memfabric_read():
@@ -343,7 +400,7 @@ def test_tp_ranks_split_main_blocks_into_disjoint_contiguous_ranges():
         thread._state.tp_size = 2
         thread._state.dest_blocks_by_req["req-0"] = ([0, 1, 2, 3], [])
 
-        local, peer, lengths, info = thread._build_req_descriptors(
+        cpu, npu, info = thread._build_req_descriptors(
             layer,
             "req-0",
             p_main_block_ids=[0, 1, 2, 3],
@@ -351,9 +408,10 @@ def test_tp_ranks_split_main_blocks_into_disjoint_contiguous_ranges():
             want_info=True,
         )
 
-        assert local == expected_local
-        assert peer == expected_peer
-        assert lengths == expected_lengths
+        assert cpu.local_ptrs == expected_local
+        assert cpu.peer_ptrs == expected_peer
+        assert cpu.lengths == expected_lengths
+        assert npu == TransferDescriptors([], [], [])
         assert info is not None
         assert info["n_main"] == 2
 
@@ -386,7 +444,7 @@ def test_small_chunks_rotate_across_tp_ranks():
             thread._state.tp_size = 4
             thread._state.dest_blocks_by_req["req-0"] = ([0, 1, 2, 3], [])
 
-            local, _, _, _ = thread._build_req_descriptors(
+            cpu, _, _ = thread._build_req_descriptors(
                 layer,
                 "req-0",
                 p_main_block_ids=[chunk_start],
@@ -395,7 +453,7 @@ def test_small_chunks_rotate_across_tp_ranks():
                 main_start_block=chunk_start,
             )
 
-            assert bool(local) is (tp_rank == chunk_start)
+            assert bool(cpu.local_ptrs) is (tp_rank == chunk_start)
 
 
 def test_non_tp0_verify_log_marks_shared_main_as_unavailable():
@@ -417,9 +475,7 @@ def test_non_tp0_verify_log_marks_shared_main_as_unavailable():
     with (
         patch.object(envs, "VLLM_ASCEND_MF_VERIFY", True),
         patch.object(envs, "VLLM_ASCEND_SFA_DEBUG", False),
-        patch(
-            "vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.read_thread.logger.info"
-        ) as log_info,
+        patch("vllm_ascend.distributed.kv_transfer.sfa_pd_cpu_offload.read_thread.logger.info") as log_info,
     ):
         thread._log_read_result(read_info)
 
@@ -461,9 +517,7 @@ def test_consumer_load_errors_are_unioned_across_tp():
     worker = _make_consumer_worker_for_completion_test()
     worker._mf_read_thread.get_and_clear_done.return_value = set()
     worker._mf_read_thread.get_and_clear_failed.return_value = set()
-    worker._gather_tp_read_status = MagicMock(
-        return_value=[({"req-0"}, set()), ({"req-0"}, {"req-0"})]
-    )
+    worker._gather_tp_read_status = MagicMock(return_value=[({"req-0"}, set()), ({"req-0"}, {"req-0"})])
 
     assert worker.get_finished() == (set(), {"req-0-internal"})
 
@@ -492,7 +546,13 @@ def test_owned_component_without_descriptors_still_fails():
     thread.engine = MagicMock()
     layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
     thread._resolve_read_layer = MagicMock(return_value=layer)
-    thread._build_req_descriptors = MagicMock(return_value=([], [], [], None))
+    thread._build_req_descriptors = MagicMock(
+        return_value=(
+            TransferDescriptors([], [], []),
+            TransferDescriptors([], [], []),
+            None,
+        )
+    )
 
     with pytest.raises(RuntimeError, match="built no transfer descriptors"):
         thread._do_read_batch(
@@ -535,7 +595,7 @@ def test_read_descriptor_rejects_incomplete_indexer_transfer():
 def test_main_only_layer_uses_chunk_destination_slice():
     thread = _make_read_thread()
 
-    local, peer, lengths, info = thread._build_req_descriptors(
+    cpu, npu, info = thread._build_req_descriptors(
         _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
         "req-0",
         p_main_block_ids=[2],
@@ -544,9 +604,10 @@ def test_main_only_layer_uses_chunk_destination_slice():
         main_start_block=1,
     )
 
-    assert local == [3040, 4080]
-    assert peer == [1020, 2040]
-    assert lengths == [10, 20]
+    assert cpu.local_ptrs == [3040, 4080]
+    assert cpu.peer_ptrs == [1020, 2040]
+    assert cpu.lengths == [10, 20]
+    assert npu == TransferDescriptors([], [], [])
     assert info is not None
     assert info["d_main_ids"] == [4]
     assert info["n_indexer"] == 0

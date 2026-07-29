@@ -42,6 +42,28 @@ class ConsumerReadState:
     get_offload_layer_id: Callable[[str], int]
 
 
+@dataclass
+class TransferDescriptors:
+    local_ptrs: list[int]
+    peer_ptrs: list[int]
+    lengths: list[int]
+
+    def extend_arrays(
+        self,
+        peer_ptrs: np.ndarray,
+        local_ptrs: np.ndarray,
+        lengths: np.ndarray,
+    ) -> None:
+        self.peer_ptrs.extend(peer_ptrs.tolist())
+        self.local_ptrs.extend(local_ptrs.tolist())
+        self.lengths.extend(lengths.tolist())
+
+    def extend(self, other: TransferDescriptors) -> None:
+        self.local_ptrs.extend(other.local_ptrs)
+        self.peer_ptrs.extend(other.peer_ptrs)
+        self.lengths.extend(other.lengths)
+
+
 def _coalesce_desc(
     peer: np.ndarray,
     local: np.ndarray,
@@ -207,8 +229,7 @@ class MembPullReadThread(threading.Thread):
                             p_layer_meta = self._p_layer_metas.get(identity)
                             if p_session is None or p_layer_meta is None:
                                 raise RuntimeError(
-                                    "MF_META was not received from this P connection "
-                                    "before READ_READY_BATCH"
+                                    "MF_META was not received from this P connection before READ_READY_BATCH"
                                 )
                             if read_reqs:
                                 self._do_read_batch(
@@ -303,37 +324,30 @@ class MembPullReadThread(threading.Thread):
                 f"tensors, got main_tensor_count={main_tensor_count}, "
                 f"total={len(p_base_addrs)}"
             )
-        p_has_indexer = bool(
-            p_meta.get("has_indexer", len(p_base_addrs) > main_tensor_count)
-        )
+        p_has_indexer = bool(p_meta.get("has_indexer", len(p_base_addrs) > main_tensor_count))
 
         try:
             k_cpu_ptr, v_cpu_ptr = state.main_gva_bases[offload_id]
             d_k_len, d_v_len = state.main_block_lens[offload_id]
         except IndexError as error:
-            raise RuntimeError(
-                f"MembPull shared CPU pool metadata is missing for {layer_name}"
-            ) from error
+            raise RuntimeError(f"MembPull shared CPU pool metadata is missing for {layer_name}") from error
         p_k_len = p_block_len[0] * p_block_size_scale[0]
         p_v_len = p_block_len[1] * p_block_size_scale[1]
         if (p_k_len, p_v_len) != (d_k_len, d_v_len):
             raise RuntimeError(
-                f"MembPull main KV layout mismatch for {layer_name}: "
-                f"P=({p_k_len}, {p_v_len}), D=({d_k_len}, {d_v_len})"
+                f"MembPull main KV layout mismatch for {layer_name}: P=({p_k_len}, {p_v_len}), D=({d_k_len}, {d_v_len})"
             )
         d_indexer = state.indexer_tensors[pool_idx]
         if p_has_indexer != (d_indexer is not None):
             raise RuntimeError(
-                f"MembPull indexer presence mismatch for {layer_name}: "
-                f"P={p_has_indexer}, D={d_indexer is not None}"
+                f"MembPull indexer presence mismatch for {layer_name}: P={p_has_indexer}, D={d_indexer is not None}"
             )
         indexer = None
         if p_has_indexer:
             indexer_pos = main_tensor_count
             if len(p_base_addrs) <= indexer_pos:
                 raise RuntimeError(
-                    f"MembPull P metadata for {layer_name} marks an indexer but "
-                    "does not expose its tensor"
+                    f"MembPull P metadata for {layer_name} marks an indexer but does not expose its tensor"
                 )
             p_dsa_len = p_block_len[indexer_pos] * p_block_size_scale[indexer_pos]
             d_dsa_row_len = d_indexer.element_size() * math.prod(d_indexer.shape[1:])
@@ -397,16 +411,13 @@ class MembPullReadThread(threading.Thread):
         want_info: bool,
         main_start_block: int = 0,
         indexer_start_block: int = 0,
-    ) -> tuple[list[int], list[int], list[int], dict[str, Any] | None]:
+    ) -> tuple[TransferDescriptors, TransferDescriptors, dict[str, Any] | None]:
         state = self._state
         layer_name = layer["layer_name"]
 
         dest = state.dest_blocks_by_req.get(ext_req_id)
         if dest is None:
-            raise RuntimeError(
-                f"MembPull has no destination blocks on D for req {ext_req_id} "
-                f"(layer {layer_name})"
-            )
+            raise RuntimeError(f"MembPull has no destination blocks on D for req {ext_req_id} (layer {layer_name})")
         all_d_main_ids, all_d_indexer_ids = dest
         main_end_block = main_start_block + len(p_main_block_ids)
         if main_end_block > len(all_d_main_ids):
@@ -436,16 +447,13 @@ class MembPullReadThread(threading.Thread):
                 d_indexer_ids,
             )
         if not p_main_block_ids and not p_indexer_block_ids:
-            raise RuntimeError(
-                f"MembPull source block ids are empty for {layer_name}"
-            )
+            raise RuntimeError(f"MembPull source block ids are empty for {layer_name}")
 
         p_k_base, p_v_base = layer["p_k_base"], layer["p_v_base"]
         p_k_len, p_v_len = layer["p_k_len"], layer["p_v_len"]
 
-        peer_chunks: list[np.ndarray] = []
-        local_chunks: list[np.ndarray] = []
-        length_chunks: list[np.ndarray] = []
+        cpu_descriptors = TransferDescriptors([], [], [])
+        npu_descriptors = TransferDescriptors([], [], [])
         n_main = 0
         n_indexer = 0
 
@@ -470,14 +478,18 @@ class MembPullReadThread(threading.Thread):
             d_main = np.array(d_main_ids, dtype=np.int64)
             len_k = np.full(n_main, p_k_len, dtype=np.int64)
             len_v = np.full(n_main, p_v_len, dtype=np.int64)
-            cp, cl, clen = _coalesce_desc(p_k_base + p_main * p_k_len, layer["k_cpu_ptr"] + d_main * p_k_len, len_k)
-            peer_chunks.append(cp)
-            local_chunks.append(cl)
-            length_chunks.append(clen)
-            cp, cl, clen = _coalesce_desc(p_v_base + p_main * p_v_len, layer["v_cpu_ptr"] + d_main * p_v_len, len_v)
-            peer_chunks.append(cp)
-            local_chunks.append(cl)
-            length_chunks.append(clen)
+            peer_desc, local_desc, length_desc = _coalesce_desc(
+                p_k_base + p_main * p_k_len,
+                layer["k_cpu_ptr"] + d_main * p_k_len,
+                len_k,
+            )
+            cpu_descriptors.extend_arrays(peer_desc, local_desc, length_desc)
+            peer_desc, local_desc, length_desc = _coalesce_desc(
+                p_v_base + p_main * p_v_len,
+                layer["v_cpu_ptr"] + d_main * p_v_len,
+                len_v,
+            )
+            cpu_descriptors.extend_arrays(peer_desc, local_desc, length_desc)
 
         idx = layer["indexer"]
         if idx is not None and len(p_indexer_block_ids) != len(d_indexer_ids):
@@ -497,14 +509,12 @@ class MembPullReadThread(threading.Thread):
                 idx["shape"],
                 len(p_indexer_block_ids),
             )
-            cp, cl, clen = _coalesce_desc(
+            peer_desc, local_desc, length_desc = _coalesce_desc(
                 p_dsa_base + p_idx * block_len,
                 d_base + d_idx_arr * block_len,
                 np.full(len(p_idx), block_len, dtype=np.int64),
             )
-            peer_chunks.append(cp)
-            local_chunks.append(cl)
-            length_chunks.append(clen)
+            npu_descriptors.extend_arrays(peer_desc, local_desc, length_desc)
             n_indexer = len(p_idx)
 
         scale = layer.get("scale")
@@ -528,28 +538,21 @@ class MembPullReadThread(threading.Thread):
             if d_indexer_ids:
                 p_scale_arr = np.array(p_indexer_block_ids, dtype=np.int64)
                 d_scale_arr = np.array(d_indexer_ids, dtype=np.int64)
-                cp, cl, clen = _coalesce_desc(
+                peer_desc, local_desc, length_desc = _coalesce_desc(
                     p_scale_base + p_scale_arr * block_len,
                     d_scale_base + d_scale_arr * block_len,
                     np.full(len(p_scale_arr), block_len, dtype=np.int64),
                 )
-                peer_chunks.append(cp)
-                local_chunks.append(cl)
-                length_chunks.append(clen)
+                npu_descriptors.extend_arrays(peer_desc, local_desc, length_desc)
 
-        if not peer_chunks:
+        if not cpu_descriptors.local_ptrs and not npu_descriptors.local_ptrs:
             logger.debug(
-                "MembPull _do_read: this rank owns no requested transfer for %s "
-                "(main=%d, indexer=%d)",
+                "MembPull _do_read: this rank owns no requested transfer for %s (main=%d, indexer=%d)",
                 layer_name,
                 n_main,
                 n_indexer,
             )
-            return [], [], [], None
-
-        peer_ptrs = np.concatenate(peer_chunks).tolist()
-        local_ptrs = np.concatenate(local_chunks).tolist()
-        lengths = np.concatenate(length_chunks).tolist()
+            return cpu_descriptors, npu_descriptors, None
 
         info = None
         if want_info:
@@ -562,10 +565,12 @@ class MembPullReadThread(threading.Thread):
                 "d_indexer_ids": d_indexer_ids,
                 "n_main": n_main,
                 "n_indexer": n_indexer,
-                "num_transfers": len(local_ptrs),
+                "num_transfers": len(cpu_descriptors.local_ptrs) + len(npu_descriptors.local_ptrs),
+                "cpu_transfers": len(cpu_descriptors.local_ptrs),
+                "npu_transfers": len(npu_descriptors.local_ptrs),
                 "atomic_transfers": 2 * n_main + n_indexer,
             }
-        return local_ptrs, peer_ptrs, lengths, info
+        return cpu_descriptors, npu_descriptors, info
 
     def _log_read_result(self, read_info: dict[str, Any]) -> None:
         state = self._state
@@ -582,12 +587,8 @@ class MembPullReadThread(threading.Thread):
                     mk = mv = "n/a"
                 else:
                     k_cpu, v_cpu = cpu_pool
-                    mk = "%.6f" % (
-                        k_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0
-                    )
-                    mv = "%.6f" % (
-                        v_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0
-                    )
+                    mk = "%.6f" % (k_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0)
+                    mv = "%.6f" % (v_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0)
                 mi = state.indexer_tensors[pool_idx][d_indexer_ids].float().sum().item() if d_indexer_ids else 0.0
                 logger.info(
                     "MFV D layer %s req %s main_k=%s main_v=%s idx_post=%.6f",
@@ -630,9 +631,8 @@ class MembPullReadThread(threading.Thread):
             raise RuntimeError(f"MembPull cannot resolve P/D layout for {layer_name}")
 
         want_info = bool(envs.VLLM_ASCEND_MF_VERIFY or envs.VLLM_ASCEND_SFA_DEBUG)
-        all_local_ptrs: list[int] = []
-        all_peer_ptrs: list[int] = []
-        all_lengths: list[int] = []
+        cpu_descriptors = TransferDescriptors([], [], [])
+        npu_descriptors = TransferDescriptors([], [], [])
         read_infos: list[dict[str, Any]] = []
         for (
             ext_req_id,
@@ -641,7 +641,7 @@ class MembPullReadThread(threading.Thread):
             main_start_block,
             indexer_start_block,
         ) in read_reqs:
-            local_ptrs, peer_ptrs, lengths, read_info = self._build_req_descriptors(
+            req_cpu_descriptors, req_npu_descriptors, read_info = self._build_req_descriptors(
                 layer,
                 ext_req_id,
                 p_main_block_ids,
@@ -650,7 +650,7 @@ class MembPullReadThread(threading.Thread):
                 main_start_block,
                 indexer_start_block,
             )
-            if not local_ptrs:
+            if not req_cpu_descriptors.local_ptrs and not req_npu_descriptors.local_ptrs:
                 owned_main_start, owned_main_end = _tp_block_range(
                     len(p_main_block_ids),
                     self.tp_rank,
@@ -662,49 +662,53 @@ class MembPullReadThread(threading.Thread):
                     and layer["v_cpu_ptr"] is not None
                     and owned_main_end > owned_main_start
                 )
-                owns_requested_indexer = layer["indexer"] is not None and bool(
-                    p_indexer_block_ids
-                )
+                owns_requested_indexer = layer["indexer"] is not None and bool(p_indexer_block_ids)
                 if owns_requested_main or owns_requested_indexer:
                     raise RuntimeError(
-                        f"MembPull built no transfer descriptors for layer "
-                        f"{layer_name}, req {ext_req_id}"
+                        f"MembPull built no transfer descriptors for layer {layer_name}, req {ext_req_id}"
                     )
                 if envs.VLLM_ASCEND_SFA_DEBUG:
                     logger.info(
-                        "MembPull D skips local no-op: layer=%s, req=%s, "
-                        "P main blocks=%d, P indexer blocks=%d",
+                        "MembPull D skips local no-op: layer=%s, req=%s, P main blocks=%d, P indexer blocks=%d",
                         layer_name,
                         ext_req_id,
                         len(p_main_block_ids),
                         len(p_indexer_block_ids),
                     )
                 continue
-            all_local_ptrs.extend(local_ptrs)
-            all_peer_ptrs.extend(peer_ptrs)
-            all_lengths.extend(lengths)
+            cpu_descriptors.extend(req_cpu_descriptors)
+            npu_descriptors.extend(req_npu_descriptors)
             if want_info:
                 read_infos.append(read_info)
 
-        if not all_local_ptrs:
+        if not cpu_descriptors.local_ptrs and not npu_descriptors.local_ptrs:
             # This rank may own no main block in a small chunk and the layer may
             # have no rank-local indexer transfer. It still acknowledges
             # READ_DONE so its corresponding P rank can reuse the source.
             return
 
-        if envs.VLLM_ASCEND_SFA_DEBUG:
-            atomic_total = sum(r.get("atomic_transfers", 0) for r in read_infos)
-            logger.info(
-                "MembPull D start batched memfabric read: layer=%s, reqs=%d, "
-                "p_session=%s, transfers=%d (coalesced from %d)",
-                layer_name,
-                len(read_infos),
+        for destination, descriptors in (
+            ("CPU", cpu_descriptors),
+            ("NPU", npu_descriptors),
+        ):
+            if not descriptors.local_ptrs:
+                continue
+            if envs.VLLM_ASCEND_SFA_DEBUG:
+                logger.info(
+                    "MembPull D start %s memfabric read: layer=%s, reqs=%d, p_session=%s, transfers=%d",
+                    destination,
+                    layer_name,
+                    len(read_infos),
+                    p_session,
+                    len(descriptors.local_ptrs),
+                )
+            ret = self.engine.batch_transfer_sync_read(
                 p_session,
-                len(all_local_ptrs),
-                atomic_total,
+                descriptors.local_ptrs,
+                descriptors.peer_ptrs,
+                descriptors.lengths,
             )
-        ret = self.engine.batch_transfer_sync_read(p_session, all_local_ptrs, all_peer_ptrs, all_lengths)
-        if ret != 0:
-            raise RuntimeError(f"memfabric batch read failed for layer {layer_name}, ret={ret}")
+            if ret != 0:
+                raise RuntimeError(f"memfabric {destination} batch read failed for layer {layer_name}, ret={ret}")
         for read_info in read_infos:
             self._log_read_result(read_info)
