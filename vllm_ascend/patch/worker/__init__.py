@@ -17,7 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -25,7 +25,6 @@ if HAS_TRITON:
 
 
 import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
-import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
@@ -54,7 +53,6 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
-import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
 # vLLM's use_v2_model_runner may enable the v2 runner without the
 # VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).
@@ -69,8 +67,12 @@ import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
+
+# MRV2 speculative decoding currently tracks only the verified vLLM main
+# commit. Keep its main-only imports unreachable on the v0.25.1 release lane.
+if not vllm_version_is("0.25.1"):
+    import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

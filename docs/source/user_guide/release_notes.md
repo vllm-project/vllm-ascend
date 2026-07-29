@@ -82,13 +82,13 @@ The following features and optimizations are planned for deprecation in a future
 - Qwen3-30B-A3B floating-point serving can show a 1-2 ms TPOT regression at batch size 1 in the reported TP4 full-graph configuration. [#12337](https://github.com/vllm-project/vllm-ascend/issues/12337)
 - In the reported DeepSeek V4 Flash W8A8 MTP P/D-disaggregated deployment, the second aisbench round can cause a worker process from another card to appear on an NPU device. [#12338](https://github.com/vllm-project/vllm-ascend/issues/12338)
 - On Ascend 950, Qwen3.5-397B-W8A8-MXFP8-FULL_QUANT in a P/D-disaggregated deployment without MTP can alternate between correct and incorrect outputs. [#12339](https://github.com/vllm-project/vllm-ascend/issues/12339)
-- DeepSeek V4 Pro on A3 and A5 can show continuously increasing memory usage in both P/D-disaggregated and co-located deployments, eventually causing OOM or service instability. [#12345](https://github.com/vllm-project/vllm-ascend/issues/12345)
+- DeepSeek V4 Pro on A3 and Ascend 950 Products can show continuously increasing memory usage in both P/D-disaggregated and co-located deployments, eventually causing OOM or service instability. [#12345](https://github.com/vllm-project/vllm-ascend/issues/12345)
 - DeepSeek-V3.1-Terminus can show about a 15% output-throughput regression against the reported v0.18.0 baseline in high-throughput P/D-disaggregated deployments; the regression was reported on an A3 four-node 2P1D setup and an A2 large-EP setup. [#12349](https://github.com/vllm-project/vllm-ascend/issues/12349)
 - KV-cache transfer can produce precision issues and TP-shard inconsistencies when reformatting occurs before all pull tasks for a request have completed. [#12359](https://github.com/vllm-project/vllm-ascend/pull/12359)
 
 ## v0.22.1rc1 - 2026.06.30
 
-We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the first release candidate for the v0.22.1 release line, building on v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/releases-v0.22.1rc) to get started.
+We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the first release candidate for the v0.22.1 release line, building on v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.22.1rc) to get started.
 
 ### Highlights
 
@@ -282,7 +282,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Features
 
 - Added Flash Attention 3 support for training-inference consistency. The backend is ready in vLLM Ascend and will become directly usable once the FA3 package is publicly available. [#9060](https://github.com/vllm-project/vllm-ascend/pull/9060)
-- Added DeepSeek PCP/DCP adaptation to improve support for disaggregated deployments. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
+- Added DeepSeek-V3.1 PCP/DCP adaptation to improve support for disaggregated deployments on Ascend 950 Products. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
 - Added a dedicated `additional_config.enable_dsa_cp` switch to decouple DSA-CP from FC1. DSA-CP now requires both FC1 and DSA-CP to be explicitly enabled, allowing FC1 to stay enabled while DSA-CP is disabled when needed. [#9878](https://github.com/vllm-project/vllm-ascend/pull/9878)
 - Added merged graph support for DFlash workloads. [#9074](https://github.com/vllm-project/vllm-ascend/pull/9074)
 - Added LoRA support for Qwen3.5 dense models. [#9023](https://github.com/vllm-project/vllm-ascend/pull/9023)

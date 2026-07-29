@@ -93,17 +93,19 @@ class AscendInputBatch(InputBatch):
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens_np[num_reqs:] = 0
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
-        input_batch.seq_lens_np = seq_lens_np
         # A dummy run for dp or memory profiling.
         # When dummy run for dp, num_tokens is set to 1,
         # so attn_state is set to DecodeOnly.
         # when dummy run for memory profiling,
         # attention metadata isn't needed,
         # we can also set attn_state to AscendAttentionState.DecodeOnly.
-        input_batch.attn_state = AscendAttentionState.DecodeOnly
-        # For mla/sfa, update cos/sin. Here is for _dummy_run.
+        # For mla, update cos/sin. Here is for _dummy_run.
         update_cos_sin(input_batch.positions)
-        return cls(**asdict(input_batch), seq_lens_np=seq_lens_np)
+        return cls(
+            **asdict(input_batch),
+            seq_lens_np=seq_lens_np,
+            attn_state=AscendAttentionState.DecodeOnly,
+        )
 
 
 @triton.jit

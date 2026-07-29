@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from typing import Any
 
 import torch
@@ -162,6 +163,35 @@ class BaseDeviceAdaptor:
             bias_opt=bias_opt,
         )
         return topk_weights, topk_ids.to(torch.int32), out
+
+    @staticmethod
+    def npu_mm_reduce_scatter_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "aiv",
+    ):
+        return torch_npu.npu_mm_reduce_scatter_base(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            comm_turn=comm_turn,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
 
     @staticmethod
     def npu_dynamic_quant(
@@ -436,7 +466,7 @@ class BaseDeviceAdaptor:
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        use_sparse_c8_indexer: bool,
+        enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
@@ -445,8 +475,8 @@ class BaseDeviceAdaptor:
         indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
         indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
 
-        if use_sparse_c8_indexer:
-            assert len(kv_cache) == (3 if sfa_impl.use_sparse_c8_sfa else 4)
+        if enable_sparse_li_c8:
+            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
@@ -1079,6 +1109,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
+    def npu_mm_reduce_scatter_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "ai_cpu",
+    ):
+        expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
+        if expansion_mode == "CCU_SCHED":
+            comm_mode = "ccu"
+
+        return torch_npu.npu_mm_reduce_scatter_base(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            comm_turn=comm_turn,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -1598,14 +1661,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-        use_sparse_c8_indexer: bool,
+        enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
         indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
 
-        if use_sparse_c8_indexer:
-            assert len(kv_cache) == (3 if sfa_impl.use_sparse_c8_sfa else 4)
+        if enable_sparse_li_c8:
+            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
             assert q_li_shape_ori is not None
 
             if q_li_scale is not None:
