@@ -4,26 +4,27 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
+#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
-"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/features/index.md:1
 #: ../../source/tutorials/features/index.md:5
 msgid "Feature Tutorials"
-msgstr "特性教程"
+msgstr "功能教程"
 
 #: ../../source/tutorials/features/index.md:3
 msgid "This section provides tutorials for different features of vLLM Ascend."
-msgstr "本节提供 vLLM Ascend 各项特性的使用教程。"
+msgstr "本节提供 vLLM Ascend 不同功能的教程。"

@@ -4,19 +4,20 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
+#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
-"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
@@ -31,37 +32,32 @@ msgstr "什么是序列并行"
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:5
 msgid ""
 "Sequence Parallelism (SP) was first introduced in "
-"[Megatron](https://arxiv.org/pdf/2205.05198), with the original intention"
-" of reducing training activation memory. The core modification was "
-"changing `Allreduce->LayerNorm` to `ReduceScatter->LayerNorm->Allgather`."
-" This technique was later applied to inference by vllm. It should be "
-"noted that splitting Allreduce into ReduceScatter and Allgather does not "
-"inherently bring performance benefits; it reduces the computation load of"
-" LayerNorm, but this gain is minimal. The real benefits of SP come from:"
+"[Megatron](https://arxiv.org/pdf/2205.05198), with the original intention of"
+" reducing training activation memory. The core modification was changing "
+"`Allreduce->LayerNorm` to `ReduceScatter->LayerNorm->Allgather`. This "
+"technique was later applied to inference by vllm. It should be noted that "
+"splitting Allreduce into ReduceScatter and Allgather does not inherently "
+"bring performance benefits; it reduces the computation load of LayerNorm, "
+"but this gain is minimal. The real benefits of SP come from:"
 msgstr ""
-"序列并行最初由 [Megatron](https://arxiv.org/pdf/2205.05198) 提出，其初衷是减少训练时的激活内存。"
-"核心修改是将 `Allreduce->LayerNorm` 改为 `ReduceScatter->LayerNorm->Allgather`。"
-"该技术后来被 vLLM 应用于推理。需要注意的是，将 Allreduce 拆分为 ReduceScatter 和 Allgather 本身并不会带来性能提升；"
-"它减少了 LayerNorm 的计算负载，但收益微乎其微。SP 的真正收益来自："
+"序列并行（Sequence "
+"Parallelism，SP）最早在[Megatron](https://arxiv.org/pdf/2205.05198)中提出，初衷是减少训练激活内存。其核心改动是将`Allreduce->LayerNorm`改为`ReduceScatter->LayerNorm->Allgather`。该技术后来被vllm应用于推理。需要注意的是，将Allreduce拆分为ReduceScatter和Allgather本身并不会带来性能提升；它减少了LayerNorm的计算量，但收益微乎其微。SP的真正收益来自于："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:7
 msgid ""
-"LLM inference deployment often uses quantization. Taking INT8 "
-"quantization commonly used on NPUs as an example, after LayerNorm, a "
-"Quant operator quantizes the hidden states from BF16 to INT8. The "
-"communication volume of Allgather is halved, and the time consumption is "
-"almost halved."
+"LLM inference deployment often uses quantization. Taking INT8 quantization "
+"commonly used on NPUs as an example, after LayerNorm, a Quant operator "
+"quantizes the hidden states from BF16 to INT8. The communication volume of "
+"Allgather is halved, and the time consumption is almost halved."
 msgstr ""
-"LLM 推理部署常使用量化技术。以 NPU 上常用的 INT8 量化为例，在 LayerNorm 之后，"
-"Quant 算子会将隐藏状态从 BF16 量化为 INT8。Allgather 的通信量减半，耗时也几乎减半。"
+"LLM推理部署常使用量化。以NPU上常用的INT8量化为准，在LayerNorm之后，Quant算子将隐藏状态从BF16量化到INT8。Allgather的通信量减半，耗时也几乎减半。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:8
 msgid ""
-"ReduceScatter and Allgather can be fused with the preceding and following"
-" Matmul operations respectively into communication-computation parallel "
+"ReduceScatter and Allgather can be fused with the preceding and following "
+"Matmul operations respectively into communication-computation parallel "
 "operators, reducing latency."
-msgstr ""
-"ReduceScatter 和 Allgather 可以分别与前后的 Matmul 操作融合为通信-计算并行算子，从而减少延迟。"
+msgstr "ReduceScatter和Allgather可以分别与前后Matmul操作融合为通信-计算并行算子，降低延迟。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:10
 msgid "How to Use"
@@ -70,47 +66,45 @@ msgstr "使用方法"
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:12
 msgid ""
 "Currently, vllm-ascend has implemented Sequence Parallelism for VL-class "
-"models based on the Inductor pass. It can be enabled in the following "
-"way:"
-msgstr "目前，vllm-ascend 已基于 Inductor pass 为 VL 类模型实现了序列并行。可通过以下方式启用："
+"models based on the Inductor pass. It can be enabled in the following way:"
+msgstr "目前，vllm-ascend已基于Inductor pass为VL类模型实现了序列并行。可通过以下方式启用："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:20
 msgid ""
-"`\"enable_sp\"`: This is the switch for SP. Since SP relies on graph "
-"mode, it is not supported in eager mode."
-msgstr "`\"enable_sp\"`：SP 的开关。由于 SP 依赖图模式，因此在 eager 模式下不支持。"
+"`\"enable_sp\"`: This is the switch for SP. Since SP relies on graph mode, "
+"it is not supported in eager mode."
+msgstr "`\"enable_sp\"`：SP的开关。由于SP依赖图模式，在eager模式下不支持。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:21
 #, python-brace-format
 msgid ""
 "`sp_min_token_num` (from upstream vllm's `pass_config`): Based on our "
 "experiments, when the number of tokens is small (empirical value is less "
-"than 1000), SP can actually bring negative impact. This is because when "
-"the communication volume is small, the fixed overhead of the "
-"communication operator becomes the dominant factor. SP will only take "
-"effect when `num_tokens >= sp_min_token_num`. **The default value is 1000"
-" on Ascend, which generally does not need to be modified.** To customize,"
-" use `--compilation-config '{\"pass_config\": {\"enable_sp\": true, "
+"than 1000), SP can actually bring negative impact. This is because when the "
+"communication volume is small, the fixed overhead of the communication "
+"operator becomes the dominant factor. SP will only take effect when "
+"`num_tokens >= sp_min_token_num`. **The default value is 1000 on Ascend, "
+"which generally does not need to be modified.** To customize, use "
+"`--compilation-config '{\"pass_config\": {\"enable_sp\": true, "
 "\"sp_min_token_num\": 512}}'`. The value will be appended into "
-"`compile_ranges_split_points`, which splits the graph compilation range "
-"and checks whether the pass is applicable per range."
+"`compile_ranges_split_points`, which splits the graph compilation range and "
+"checks whether the pass is applicable per range."
 msgstr ""
-"`sp_min_token_num`（来自上游 vLLM 的 `pass_config`）：根据我们的实验，当 token 数量较小时（经验值小于 1000），"
-"SP 实际上会带来负面影响。这是因为当通信量较小时，通信算子的固定开销成为主导因素。"
-"SP 仅在 `num_tokens >= sp_min_token_num` 时生效。**在 Ascend 上默认值为 1000，通常无需修改。**"
-"如需自定义，请使用 `--compilation-config '{\"pass_config\": {\"enable_sp\": true, "
-"\"sp_min_token_num\": 512}}'`。该值将被附加到 `compile_ranges_split_points` 中，"
-"用于划分图编译范围并检查每个范围是否适用该 pass。"
+"`sp_min_token_num`（来自上游vllm的`pass_config`）：根据我们的实验，当token数量较少时（经验值小于1000），SP实际上可能带来负面影响。这是因为通信量较小时，通信算子的固定开销成为主导因素。只有当`num_tokens"
+" >= "
+"sp_min_token_num`时，SP才会生效。**在Ascend上默认值为1000，一般无需修改。**如需自定义，使用`--compilation-"
+"config '{\"pass_config\": {\"enable_sp\": true, \"sp_min_token_num\": "
+"512}}'`。该值会被追加到`compile_ranges_split_points`中，用于拆分图编译范围并逐段检查pass是否适用。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:23
 msgid ""
-"Without modifying `sp_min_token_num`, the simplest way and recommended "
-"way to enable SP is:"
-msgstr "不修改 `sp_min_token_num` 的情况下，启用 SP 的最简单且推荐的方式是："
+"Without modifying `sp_min_token_num`, the simplest way and recommended way "
+"to enable SP is:"
+msgstr "在不修改`sp_min_token_num`的情况下，启用SP最简单且推荐的方式是："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:31
 msgid "Difference Between SP and Flash Comm V1"
-msgstr "SP 与 Flash Comm V1 的区别"
+msgstr "SP与Flash Comm V1的区别"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:33
 msgid ""
@@ -120,31 +114,32 @@ msgid ""
 "enhancements include:"
 msgstr ""
 "[Flash Comm V1 (FC1)](https://gitcode.com/ascend-tribe/ascend-inference-"
-"cluster/blob/main/FlashComm/ascend-inference-cluster-flashcomm.md) 是基于 NPU 开发的序列并行增强版本。增强内容包括："
+"cluster/blob/main/FlashComm/ascend-inference-cluster-"
+"flashcomm.md)是基于NPU开发的序列并行增强版本。增强点包括："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:35
 msgid ""
-"For models using the MLA structure, Allgather is postponed until after "
-"QKV projection, further reducing communication volume."
-msgstr "对于使用 MLA 结构的模型，Allgather 被推迟到 QKV 投影之后，进一步减少了通信量。"
+"For models using the MLA structure, Allgather is postponed until after QKV "
+"projection, further reducing communication volume."
+msgstr "对于使用MLA结构的模型，Allgather被推迟到QKV投影之后，进一步减少通信量。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:36
 msgid ""
-"For MoE models, Allgather is postponed until after Gating+DynamicQuant, "
-"also aiming to reduce communication volume."
-msgstr "对于 MoE 模型，Allgather 被推迟到 Gating+DynamicQuant 之后，同样旨在减少通信量。"
+"For MoE models, Allgather is postponed until after Gating+DynamicQuant, also"
+" aiming to reduce communication volume."
+msgstr "对于MoE模型，Allgather被推迟到Gating+DynamicQuant之后，同样旨在减少通信量。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:38
 msgid ""
-"FC1 is a unique optimization in vllm-ascend, currently implemented based "
-"on Custom OP, but it is difficult to support VL-class models (reasons "
-"detailed in [[RFC]: support sequence parallelism by "
-"pass](https://github.com/vllm-project/vllm-ascend/issues/5712) ). "
-"Therefore, currently FC1 and SP are complementary."
+"FC1 is a unique optimization in vllm-ascend, currently implemented based on "
+"Custom OP, but it is difficult to support VL-class models (reasons detailed "
+"in [[RFC]: support sequence parallelism by pass](https://github.com/vllm-"
+"project/vllm-ascend/issues/5712) ). Therefore, currently FC1 and SP are "
+"complementary."
 msgstr ""
-"FC1 是 vllm-ascend 中的特有优化，目前基于 Custom OP 实现，但难以支持 VL 类模型（原因详见 "
-"[[RFC]: support sequence parallelism by pass](https://github.com/vllm-project/vllm-ascend/issues/5712)）。"
-因此，目前 FC1 和 SP 是互补的关系。"
+"FC1是vllm-ascend中的独特优化，目前基于Custom OP实现，但难以支持VL类模型（原因详见[[RFC]: support "
+"sequence parallelism by pass](https://github.com/vllm-project/vllm-"
+"ascend/issues/5712)）。因此，目前FC1和SP是互补关系。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:40
 msgid "Support Matrix"
@@ -156,7 +151,7 @@ msgstr "无量化"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "VL + Dense"
-msgstr "VL + 稠密模型"
+msgstr "VL + Dense"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "VL + MoE"
@@ -164,15 +159,11 @@ msgstr "VL + MoE"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "non-VL + Dense"
-msgstr "非 VL + 稠密模型"
+msgstr "非VL + Dense"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "non-VL + MoE"
-msgstr "非 VL + MoE"
-
-#: ../../source/user_guide/feature_guide/sequence_parallelism.md
-msgid "graph"
-msgstr "图模式"
+msgstr "非VL + MoE"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "x"
@@ -184,7 +175,7 @@ msgstr "Flash Comm V1"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "eager/graph"
-msgstr "eager/图模式"
+msgstr "eager/graph"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:49
 msgid "With Quantization"
@@ -192,17 +183,18 @@ msgstr "有量化"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:51
 msgid "SP currently does not support quantization and is under adaptation."
-msgstr "SP 目前不支持量化，正在适配中。"
+msgstr "SP目前不支持量化，正在适配中。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:58
 msgid "Pass Design"
-msgstr "Pass 设计"
+msgstr "Pass设计"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:60
 msgid ""
 "When SP is enabled, the following passes run in order: "
 "`SequenceParallelismPass` then `SequenceParallelismMoePass`."
-msgstr "启用 SP 后，将按顺序运行以下 pass：`SequenceParallelismPass`，然后是 `SequenceParallelismMoePass`。"
+msgstr ""
+"启用SP后，以下pass按顺序运行：`SequenceParallelismPass`，然后是`SequenceParallelismMoePass`。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:62
 msgid "SequenceParallelismPass"
@@ -212,7 +204,7 @@ msgstr "SequenceParallelismPass"
 msgid ""
 "Runs `NoOpEliminationPass` first to eliminate redundant view-like "
 "operations, then applies AllReduce-based patterns:"
-msgstr "首先运行 `NoOpEliminationPass` 以消除冗余的 view-like 操作，然后应用基于 AllReduce 的模式："
+msgstr "首先运行`NoOpEliminationPass`消除冗余的类view操作，然后应用基于AllReduce的模式："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "Pattern"
@@ -262,34 +254,37 @@ msgstr "`all_reduce` + add + `layernorm`"
 msgid ""
 "`reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + "
 "`all_gather`"
-msgstr "`reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + `all_gather`"
+msgstr ""
+"`reduce_scatter` + chunk(`deepstack_input_embeds`) + add + `layernorm` + "
+"`all_gather`"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:72
 msgid ""
 "**Why Qwen3 VL needs special handling by "
 "Qwen3VLMiddleAllReduceRMSNormPattern**"
-msgstr "**为什么 Qwen3 VL 需要 Qwen3VLMiddleAllReduceRMSNormPattern 的特殊处理**"
+msgstr "**为什么Qwen3 VL需要Qwen3VLMiddleAllReduceRMSNormPattern特殊处理**"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:74
 msgid ""
 "Qwen3-VL middle layers insert an extra add between `all_reduce` and "
-"`layernorm`: `hidden_states=hidden_states + deepstack_input_embeds`. "
-"Under SP, `hidden_states` (i.e., `input`) is reduced-scattered to shape "
-"`[seq_len/tp, hidden]` per rank, while `deepstack_input_embeds` comes "
-"from the vision/deepstack path and stays full-sequence `[seq_len, "
-"hidden]` (typically replicated across TP ranks). Simply doing "
-"`reduce_scatter(input) + deepstack_input_embeds` would cause a shape "
-"mismatch. The fix is to chunk `deepstack_input_embeds` by `tp_size` so "
-"each rank uses `add(reduce_scatter, "
-"chunk(deepstack_input_embeds)[tp_rank])`, keeping shapes consistent "
-"before `layernorm` and `all_gather`."
+"`layernorm`: `hidden_states=hidden_states + deepstack_input_embeds`. Under "
+"SP, `hidden_states` (i.e., `input`) is reduced-scattered to shape "
+"`[seq_len/tp, hidden]` per rank, while `deepstack_input_embeds` comes from "
+"the vision/deepstack path and stays full-sequence `[seq_len, hidden]` "
+"(typically replicated across TP ranks). Simply doing `reduce_scatter(input) "
+"+ deepstack_input_embeds` would cause a shape mismatch. The fix is to chunk "
+"`deepstack_input_embeds` by `tp_size` so each rank uses `add(reduce_scatter,"
+" chunk(deepstack_input_embeds)[tp_rank])`, keeping shapes consistent before "
+"`layernorm` and `all_gather`."
 msgstr ""
-"Qwen3-VL 的中间层在 `all_reduce` 和 `layernorm` 之间插入了一个额外的加法：`hidden_states=hidden_states + deepstack_input_embeds`。"
-"在 SP 下，`hidden_states`（即 `input`）被 reduce-scatter 为每个 rank 的形状 `[seq_len/tp, hidden]`，"
-"而 `deepstack_input_embeds` 来自视觉/deepstack 路径，保持完整序列形状 `[seq_len, hidden]`（通常在 TP rank 间复制）。"
-"直接执行 `reduce_scatter(input) + deepstack_input_embeds` 会导致形状不匹配。"
-"解决方案是按 `tp_size` 对 `deepstack_input_embeds` 进行分块，使每个 rank 使用 "
-"`add(reduce_scatter, chunk(deepstack_input_embeds)[tp_rank])`，从而在 `layernorm` 和 `all_gather` 之前保持形状一致。"
+"Qwen3-VL中间层在`all_reduce`和`layernorm`之间插入了一个额外的add：`hidden_states=hidden_states"
+" + deepstack_input_embeds`。在SP下，`hidden_states`（即`input`）被reduce-"
+"scatter为每个rank上的形状`[seq_len/tp, "
+"hidden]`，而`deepstack_input_embeds`来自视觉/deepstack路径，保持全序列形状`[seq_len, "
+"hidden]`（通常在TP rank间复制）。简单地执行`reduce_scatter(input) + "
+"deepstack_input_embeds`会导致形状不匹配。解决方法是将`deepstack_input_embeds`按`tp_size`分块，使每个rank使用`add(reduce_scatter,"
+" "
+"chunk(deepstack_input_embeds)[tp_rank])`，从而在`layernorm`和`all_gather`之前保持形状一致。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:77
 msgid "SequenceParallelismMoePass"
@@ -299,15 +294,15 @@ msgstr "SequenceParallelismMoePass"
 msgid ""
 "After `SequenceParallelismPass` applies, the MoE model computation graph "
 "looks like:"
-msgstr "应用 `SequenceParallelismPass` 后，MoE 模型的计算图如下所示："
+msgstr "应用`SequenceParallelismPass`后，MoE模型的计算图如下所示："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:81
 msgid "![AllGather EP computation graph](../../assets/sp_moe.png)"
-msgstr "![AllGather EP 计算图](../../assets/sp_moe.png)"
+msgstr "![AllGather EP计算图](../../assets/sp_moe.png)"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:81
 msgid "AllGather EP computation graph"
-msgstr "AllGather EP 计算图"
+msgstr "AllGather EP计算图"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:83
 msgid "**Overview**"
@@ -316,34 +311,34 @@ msgstr "**概述**"
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:85
 msgid ""
 "**Postponing allgather**: Under SP, `residual` is chunked by tensor "
-"parallelism. This causes a shape mismatch between hidden states and "
-"residual in the next layer's layernorm: hidden states are gathered (full "
-"sequence) while residual remains chunked. The fix is to move `all_gather`"
-" to after layernorm so that layernorm operates on consistent shapes per"
-" rank. `MiddleLayerAllgatherAddRMSNormPattern`, "
-"`LastLayerAllgatherRMSNormPattern`, and "
-"`Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` are designed for this "
-"purpose, each handling different layer and structure variants (see the "
-"table below)."
+"parallelism. This causes a shape mismatch between hidden states and residual"
+" in the next layer's layernorm: hidden states are gathered (full sequence) "
+"while residual remains chunked. The fix is to move `all_gather` to after "
+"layernorm so that layernorm operates on consistent shapes per rank. "
+"`MiddleLayerAllgatherAddRMSNormPattern`, `LastLayerAllgatherRMSNormPattern`,"
+" and `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` are designed for this "
+"purpose, each handling different layer and structure variants (see the table"
+" below)."
 msgstr ""
-"**推迟 allgather**：在 SP 下，`residual` 按张量并行进行分块。这导致下一层的 layernorm 中隐藏状态与残差之间出现形状不匹配："
-"隐藏状态被 gather（完整序列），而残差仍保持分块状态。解决方法是将 `all_gather` 移动到 layernorm 之后，"
-"以便 layernorm 在每个 rank 上对一致形状进行操作。"
-"`MiddleLayerAllgatherAddRMSNormPattern`、`LastLayerAllgatherRMSNormPattern` 和 "
-"`Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` 正是为此目的而设计的，每个模式处理不同的层和结构变体（见下表）。"
+"**推迟allgather**：在SP下，`residual` "
+"被张量并行分块。这导致下一层layernorm中隐藏状态与残差之间的形状不匹配：隐藏状态被收集（完整序列），而残差仍保持分块状态。解决方法是将 "
+"`all_gather` "
+"移到layernorm之后，使layernorm在每个rank上对一致的形状进行操作。`MiddleLayerAllgatherAddRMSNormPattern`、`LastLayerAllgatherRMSNormPattern`"
+" 和 `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` 专为此设计，分别处理不同的层和结构变体（见下表）。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:87
 msgid ""
-"**AllGatherChunkNoOp cleanup**: When MoE SP is enabled, vllm introduces a"
-" `sequence_parallel_chunk` op (corresponding to `sp_chunk` in the "
-"diagram). Together with the preceding `all_gather`, the pair forms a "
-"redundant no-op (all_gather gathers, then chunk re-splits). "
-"`AllGatherChunkNoOpPattern` replaces this pair with identity to eliminate"
-" the redundant communication and computation."
+"**AllGatherChunkNoOp cleanup**: When MoE SP is enabled, vllm introduces a "
+"`sequence_parallel_chunk` op (corresponding to `sp_chunk` in the diagram). "
+"Together with the preceding `all_gather`, the pair forms a redundant no-op "
+"(all_gather gathers, then chunk re-splits). `AllGatherChunkNoOpPattern` "
+"replaces this pair with identity to eliminate the redundant communication "
+"and computation."
 msgstr ""
-"**AllGatherChunkNoOp 清理**：当 MoE SP 启用时，vLLM 会引入一个 `sequence_parallel_chunk` 操作（对应图中的 `sp_chunk`）。"
-"该操作与前面的 `all_gather` 一起形成了一个冗余的无操作对（all_gather 收集，然后 chunk 重新分割）。"
-"`AllGatherChunkNoOpPattern` 将此对替换为 identity，以消除冗余的通信和计算。"
+"**AllGatherChunkNoOp清理**：当启用MoE SP时，vllm会引入一个 `sequence_parallel_chunk` "
+"操作（对应图中的 `sp_chunk`）。与前面的 `all_gather` "
+"一起，这对操作形成了一个冗余的空操作（all_gather收集，然后chunk重新拆分）。`AllGatherChunkNoOpPattern` "
+"将此对替换为恒等操作，以消除冗余的通信和计算。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:89
 msgid "**Pattern details:**"
@@ -387,7 +382,7 @@ msgstr "`all_gather` + `sequence_parallel_chunk_impl`"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md
 msgid "identity (no-op)"
-msgstr "identity（无操作）"
+msgstr "恒等操作（空操作）"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:98
 msgid "FAQ"
@@ -395,13 +390,13 @@ msgstr "常见问题"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:100
 msgid "Q1: Is SP enabled by default?"
-msgstr "问1：SP 默认启用吗？"
+msgstr "Q1：SP默认启用吗？"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:102
 msgid ""
-"No, SP is not enabled by default. SP is currently in the experimental "
-"stage and will be enabled by default in the future."
-msgstr "不，SP 默认不启用。SP 目前处于实验阶段，未来将默认启用。"
+"No, SP is not enabled by default. SP is currently in the experimental stage "
+"and will be enabled by default in the future."
+msgstr "不，SP默认不启用。SP目前处于实验阶段，未来将默认启用。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:104
 msgid "The processing flow of `enable_sp` in the code is:"
@@ -413,20 +408,25 @@ msgstr "在 `pass_config` 中，`enable_sp` 和 `sp_min_token_num` 默认为 `No
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:107
 msgid ""
-"`NPUPlatform.apply_config_platform_defaults`: If `enable_sp` is `True` "
-"and `sp_min_token_num` is None, set default `sp_min_token_num` (1000 for "
-"Dense models, 1 for MoE models)"
-msgstr "`NPUPlatform.apply_config_platform_defaults`：如果 `enable_sp` 为 `True` 且 `sp_min_token_num` 为 None，"
-则设置默认的 `sp_min_token_num`（稠密模型为 1000，MoE 模型为 1）"
+"`NPUPlatform.apply_config_platform_defaults`: If `enable_sp` is `True` and "
+"`sp_min_token_num` is None, set default `sp_min_token_num` (1000 for Dense "
+"models, 1 for MoE models)"
+msgstr ""
+"`NPUPlatform.apply_config_platform_defaults`：如果 `enable_sp` 为 `True` 且 "
+"`sp_min_token_num` 为 None，则设置默认的 `sp_min_token_num`（Dense模型为1000，MoE模型为1）"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:108
 msgid ""
 "`VllmConfig._apply_optimization_level_defaults`: `enable_sp` is set to "
 "`True` for dense models."
-msgstr "`VllmConfig._apply_optimization_level_defaults`：对于稠密模型，`enable_sp` 被设置为 `True`。"
+msgstr ""
+"`VllmConfig._apply_optimization_level_defaults`：对于dense模型，`enable_sp` 设置为 "
+"`True`。"
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:109
 msgid ""
 "`VllmConfig.__post_init__`: If `sp_min_token_num` is still `None`, then "
 "`enable_sp` is set to `False`"
-msgstr "`VllmConfig.__post_init__`：如果 `sp_min_token_num` 仍然为 `None`，则将 `enable_sp` 设置为 `False`"
+msgstr ""
+"`VllmConfig.__post_init__`：如果 `sp_min_token_num` 仍为 `None`，则将 `enable_sp` "
+"设置为 `False`"
