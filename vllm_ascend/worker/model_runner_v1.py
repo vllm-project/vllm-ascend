@@ -3817,16 +3817,12 @@ class NPUModelRunner(GPUModelRunner):
             time.time() - start,
         )
 
-        # [snapshot] Re-derive decode-path weights that are NOT part of
-        # ``state_dict`` (e.g. the MLA absorbed weights ``W_UV`` / ``W_UK_T``,
-        # rope cos/sin). These are computed once from persistent parameters
-        # inside ``process_weights_after_loading`` and are plain attributes (not
-        # parameters/buffers), so they are never serialized. After suspend/resume
-        # the device memory backing them is stale, which collapses the MLA
-        # *decode* attention output to zero (prefill still works because it uses
-        # ``kv_b_proj`` directly). Recomputing them from the freshly restored
-        # weights repairs the decode path. The ACL graph is re-captured after
-        # restore, so reallocating these tensors is safe.
+        # [snapshot] Restore/re-derive decode-path state produced by
+        # ``process_weights_after_loading``. MLA can rebuild absorbed weights
+        # from persistent parameters; SFA rebinds absorbed/MLAPO buffers because
+        # its source ``kv_b_proj`` is disposed. Remaining cheap derived tensors
+        # are rebuilt from restored sources. Graph mode recaptures after this
+        # step; enforce-eager has no captured tensor addresses to preserve.
         self._reload_non_persistent_derived_weights(model=model, label=label)
 
     def restore_model(self, path="/mnt") -> None:
@@ -4094,10 +4090,9 @@ class NPUModelRunner(GPUModelRunner):
     def _reload_global_non_persistent_state(self) -> None:
         """[snapshot] Rebuild process/class-level device tensors that are not part
         of any ``nn.Module`` state and are therefore neither serialized nor
-        repaired by the per-model reload path. Currently the DSA lightning-indexer
-        ``hadamard`` rotation matrix (a class attribute holding a device tensor):
-        after suspend/resume its device memory is zeroed, which zeroes the indexer
-        q/k rotate and collapses the per-layer quant scales to zero. Each rebuild
+        repaired by the per-model reload path. Currently the DSA/SFA lightning-indexer
+        ``hadamard`` rotation matrices and MLA RoPE global cos/sin aliases:
+        after suspend/resume their device memory is zeroed / stale. Each rebuild
         is best-effort so an unused backend never breaks restore."""
         hf_config = self.model_config.hf_config
         device = self.device
@@ -4115,6 +4110,18 @@ class NPUModelRunner(GPUModelRunner):
                 rebuilt.append("dsa_cp.hadamard")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[restore model] DSA-CP hadamard rebuild skipped: %s", exc)
+        try:
+            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+            if AscendSFAImpl.reload_hadamard_after_restore(device):
+                rebuilt.append("sfa.hadamard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] SFA hadamard rebuild skipped: %s", exc)
+        try:
+            from vllm_ascend.ops.rotary_embedding import reload_cos_and_sin_after_restore
+            if reload_cos_and_sin_after_restore(self.get_model()):
+                rebuilt.append("mla_rope.cos_sin")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] MLA RoPE global rebind skipped: %s", exc)
         logger.info(
             "[restore model] rebuilt global non-persistent state: %s",
             rebuilt if rebuilt else "none",
@@ -4126,10 +4133,9 @@ class NPUModelRunner(GPUModelRunner):
         act_dtype = self.model_config.dtype
         reloaded = 0
         failed: list[str] = []
-        # Minimal regression guard: the resume bug manifested as the MLA decode
-        # absorbed weights (W_UV / W_UK_T) collapsing to zero. After recompute
-        # they must be non-zero; track the worst (smallest) norm and the layers
-        # that still look degenerate so a regression is loud and obvious.
+        # Minimal regression guard: the resume bug manifested as MLA/SFA decode
+        # weights and scales collapsing to zero. After restore/recompute they
+        # must be non-zero; track the worst norm and any degenerate tensors.
         min_norm = float("inf")
         min_norm_where = ""
         zero_norm_modules: list[str] = []
@@ -4160,11 +4166,17 @@ class NPUModelRunner(GPUModelRunner):
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"{name}:{type(exc).__name__}:{exc}")
                 continue
-            # W_UV / W_UK_T are rebuilt from kv_b_proj; deq_scale_qkv / qb_deq_scl
-            # are the fused-MLAPO w8a8 dequant scales that (on KV consumers) are
-            # restored from the snapshot buffers -- a zero here means the decode
-            # MLA query collapses to 0 and output diverges, so guard both.
-            for attr in ("W_UV", "W_UK_T", "deq_scale_qkv", "qb_deq_scl"):
+            # A zero in any of these tensors collapses the decode query/output.
+            for attr in (
+                "W_UV",
+                "W_UK_T",
+                "wd_qkv",
+                "deq_scale_qkv",
+                "wu_q",
+                "qb_deq_scl",
+                "ctkv_scale",
+                "q_nope_scale",
+            ):
                 tensor = getattr(target, attr, None)
                 if tensor is None:
                     continue
