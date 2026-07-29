@@ -745,3 +745,4 @@ class XliteWrapper:
             if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
                 self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
         return h[:num_actual_tokens]
+        
