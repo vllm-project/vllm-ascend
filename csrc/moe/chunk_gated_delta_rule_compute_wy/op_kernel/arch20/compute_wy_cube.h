@@ -66,8 +66,10 @@ class WyCubeGemm {
   }
 
   // C[64,64] = A[64,K] @ B[64,K]^T
+  // K is split into <=64 slices and accumulated in UB: on 310P a gram matmul whose inner
+  // K exceeds 64 (i.e. needs more than one K iteration) hangs the AI core (aicore timeout).
   __aicore__ inline void GemmATransB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
-                                     uint32_t kDim, uint32_t aLda, uint32_t bLda)
+                                     LocalTensor<float> accScratch, uint32_t kDim, uint32_t aLda, uint32_t bLda)
   {
     WaitVToMte3();
     CopyHalfRowsToGm(aGm_, aUb, WY_CUBE_CHUNK, kDim, aLda);
@@ -75,17 +77,26 @@ class WyCubeGemm {
     WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
-    mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kDim));
-    mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kDim));
-    mmAttn_.SetLocalWorkspace(localWs_);
-    mmAttn_.SetTensorA(aGm_, false);
-    mmAttn_.SetTensorB(bGm_, true);
-    mmAttn_.IterateAll(cGm_);
-    WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
-
-    CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    WaitMte2ToV();
+    for (uint32_t k0 = 0; k0 < kDim; k0 += WY_CUBE_CHUNK) {
+      const uint32_t kCur = (kDim - k0) < WY_CUBE_CHUNK ? (kDim - k0) : WY_CUBE_CHUNK;
+      mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kDim));
+      mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
+      mmAttn_.SetLocalWorkspace(localWs_);
+      mmAttn_.SetTensorA(aGm_[k0], false);
+      mmAttn_.SetTensorB(bGm_[k0], true);
+      mmAttn_.IterateAll(cGm_);
+      WaitMte3ToMte2();
+      PipeBarrier<PIPE_ALL>();
+      if (k0 == 0) {
+        CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+        WaitMte2ToV();
+      } else {
+        CopyFloatRowsFromGm(accScratch, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+        WaitMte2ToV();
+        Add(cUb, cUb, accScratch, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
+        PipeBarrier<PIPE_V>();
+      }
+    }
   }
 
   // P = P @ P (64x64). halfScratch >= 64*64 halves.
