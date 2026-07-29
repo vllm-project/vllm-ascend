@@ -326,6 +326,25 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_dsa_cp = enable_dsa_cp()
 
+    def reset_runtime_cache(self) -> None:
+        """[snapshot] Restore cold-start contents of reusable SFA metadata.
+
+        These tensors are plain builder attributes rather than module buffers,
+        so ``state_dict`` restore does not refresh them.  In particular, DSA-CP
+        and speculative decoding reuse the same length storage across steps.
+        Clear the complete allocations (not just the previous active prefix) so
+        the first post-resume request cannot observe snapshot-time tail values.
+        """
+        self.actual_seq_lengths_query.zero_()
+        self.actual_seq_lengths_key.zero_()
+        for buffers in (
+            self.spec_actual_seq_lengths_query,
+            self.spec_actual_seq_lengths_key,
+        ):
+            if buffers is not None:
+                for buffer in buffers:
+                    buffer.zero_()
+
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)

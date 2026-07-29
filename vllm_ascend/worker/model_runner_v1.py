@@ -3860,6 +3860,9 @@ class NPUModelRunner(GPUModelRunner):
         # Clear per-builder runtime metadata cache (MLA/DSA/etc.) so the first
         # post-resume forward cannot read stale host/device tensors.
         self._reset_resume_attention_builder_runtime_states()
+        # SFA keeps sparse-index and reshape metadata outside ``state_dict``.
+        # Restore their cold-start sentinels before the first post-resume build.
+        self._reset_resume_sfa_runtime_buffers()
         # Re-zero block-table device rows that are never re-copied from CPU
         # (row >= num_reqs). After restore they hold garbage which the MTP
         # drafter's look-ahead slot computation can read, producing an
@@ -4026,6 +4029,84 @@ class NPUModelRunner(GPUModelRunner):
             "[restore model] attention builder runtime reset: total=%d reset=%d%s",
             total,
             reset,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+
+    def _reset_resume_sfa_runtime_buffers(self) -> None:
+        """[snapshot] Clear reusable SFA index/reshape metadata after restore.
+
+        ``topk_indices_buffer`` is allocated with ``torch.empty`` on the model
+        and shared by indexer-bearing and ``skip_topk`` layers (and, for MTP, by
+        the target and draft models). It is intentionally not a persistent
+        model buffer. Filling it with the invalid-index sentinel prevents a
+        skip layer from consuming snapshot-time indices before the preceding
+        indexer layer refreshes the active rows.
+
+        The C8 reshape metadata buffers are runner-owned staged buffers. Clear
+        both CPU and device storage so ``store_kv_block_metadata`` starts from
+        the same state as a cold process. Main/indexer KV caches are deliberately
+        not cleared here: they are paged state owned by the cache manager and
+        may contain valid restored prefix data.
+        """
+        reset_topk = 0
+        reset_group_tensors = 0
+        failed: list[str] = []
+        seen_tensors: set[int] = set()
+
+        def reset_tensor(tensor: object, value: int, where: str) -> bool:
+            if not isinstance(tensor, torch.Tensor):
+                return False
+            tensor_id = id(tensor)
+            if tensor_id in seen_tensors:
+                return False
+            seen_tensors.add(tensor_id)
+            try:
+                tensor.fill_(value)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{where}:{type(exc).__name__}:{exc}")
+                return False
+
+        for attr_name in (
+            "group_len",
+            "group_key_idx",
+            "group_key_cache_idx",
+        ):
+            staged = getattr(self, attr_name, None)
+            for storage_name in ("gpu", "cpu"):
+                if reset_tensor(
+                    getattr(staged, storage_name, None),
+                    0,
+                    f"{attr_name}.{storage_name}",
+                ):
+                    reset_group_tensors += 1
+
+        roots = [self.get_model(), self._get_drafter_model()]
+        seen_objects: set[int] = set()
+        for root in roots:
+            if root is None:
+                continue
+            objects: list[tuple[str, object]] = [("", root)]
+            objects.extend(root.named_modules())
+            for name, obj in objects:
+                for suffix, candidate in (
+                    ("", obj),
+                    (".impl", getattr(obj, "impl", None)),
+                ):
+                    if candidate is None or id(candidate) in seen_objects:
+                        continue
+                    seen_objects.add(id(candidate))
+                    if reset_tensor(
+                        getattr(candidate, "topk_indices_buffer", None),
+                        -1,
+                        f"{name or '<root>'}{suffix}.topk_indices_buffer",
+                    ):
+                        reset_topk += 1
+
+        logger.info(
+            "[restore model] reset SFA runtime buffers: topk=%d group_tensors=%d%s",
+            reset_topk,
+            reset_group_tensors,
             "" if not failed else f", failed={failed[: min(8, len(failed))]}",
         )
 

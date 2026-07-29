@@ -261,6 +261,29 @@ class TestAscendSFASnapshotRestore(TestBase):
         with self.assertRaisesRegex(RuntimeError, "absorbed weight buffers are missing"):
             impl.reload_derived_weights_after_restore(torch.bfloat16)
 
+    def test_metadata_builder_reset_clears_reusable_length_buffers(self):
+        builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+        builder.actual_seq_lengths_query = torch.full((4,), 7, dtype=torch.int32)
+        builder.actual_seq_lengths_key = torch.full((4,), 11, dtype=torch.int32)
+        builder.spec_actual_seq_lengths_query = [
+            torch.full((4,), 13, dtype=torch.int32),
+            torch.full((4,), 17, dtype=torch.int32),
+        ]
+        builder.spec_actual_seq_lengths_key = [
+            torch.full((4,), 19, dtype=torch.int32),
+            torch.full((4,), 23, dtype=torch.int32),
+        ]
+
+        builder.reset_runtime_cache()
+
+        buffers = [
+            builder.actual_seq_lengths_query,
+            builder.actual_seq_lengths_key,
+            *builder.spec_actual_seq_lengths_query,
+            *builder.spec_actual_seq_lengths_key,
+        ]
+        self.assertTrue(all(torch.count_nonzero(buffer) == 0 for buffer in buffers))
+
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant")
