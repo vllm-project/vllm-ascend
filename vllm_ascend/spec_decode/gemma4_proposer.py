@@ -65,10 +65,10 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         #    causing a double-init of the Ascend base.
         self.constant_draft_positions = True
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
-        # Kept empty: upstream _greedy_sample reads this; on NPU we never
-        # populate it (CUDA-graph centroids are GPU-only), so the upstream
-        # fast-path is skipped and our override below handles masked vocab.
         self._centroids_sizes: list[int] = []
+        self._centroids_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._centroids_inputs: dict[int, torch.Tensor] = {}
+        self._centroids_outputs: dict[int, torch.Tensor] = {}
 
     # ---- _create_draft_vllm_config -------------------------------------------
     # Override to also replace model_config with the draft model's config.
@@ -96,6 +96,67 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         if getattr(model, "masked_embedding", None) is not None:
             return model.get_top_tokens(hidden_states)
         return super()._greedy_sample(hidden_states)
+
+    # ---- constant_draft_positions hooks -------------------------------------
+    # Gemma4 MTP predicts all draft tokens from the same position.  Override
+    # the base-class hooks so positions stay fixed and step-0 attention
+    # metadata is reused for every draft step.
+
+    def _reuse_step0_metadata(self) -> bool:
+        return self.constant_draft_positions
+
+    def _next_draft_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        if self.constant_draft_positions:
+            return positions
+        return super()._next_draft_positions(positions)
+
+    # ---- model_returns_tuple -----------------------------------------------
+    # Ascend base returns False for "mtp", but Gemma4 MTP forward()
+    # returns (draft_hidden_states, backbone_hidden_states).
+    # Gemma4Proposer already overrides this to return True; the MRO
+    # picks that up.  Explicit override here for clarity.
+
+    def model_returns_tuple(self) -> bool:
+        return True
+
+    # ---- build_per_group_and_layer_attn_metadata ----------------------------
+    # Override to add diagnostics for multi-group block table assignment.
+
+    def build_per_group_and_layer_attn_metadata(
+        self,
+        common_attn_metadata,
+        draft_index: int = 0,
+    ):
+        from copy import copy
+
+        per_group_attn_metadata: list[object] = []
+        per_layer_attn_metadata: dict[str, object] = {}
+        # Slice to the actual batch size to match the upstream Gemma4Proposer
+        # behavior: stored block tables may be padded (num_reqs_padded) from
+        # the target forward pass, while the drafter runs on the unpadded
+        # batch. Without this slice, padded rows leak into draft metadata.
+        batch_size = common_attn_metadata.batch_size()
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            if gid in self._per_group_block_tables:
+                cm = copy(common_attn_metadata)
+                cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
+            else:
+                cm = common_attn_metadata
+            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                common_attn_metadata=cm, draft_index=draft_index
+            )
+            per_group_attn_metadata.append(attn_metadata)
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return per_group_attn_metadata, per_layer_attn_metadata
+
+    # ---- set_per_group_block_table -------------------------------------------
+    # Override to log block table updates — tracks when new blocks are assigned
+    # to each KV cache group. Critical for the "append" degradation theory.
+
+    def set_per_group_block_table(self, gid: int, block_table: torch.Tensor) -> None:
+        self._per_group_block_tables[gid] = block_table
 
     # ---- _maybe_share_lm_head ----------------------------------------------
     # Gemma4 MTP's lm_head operates in draft hidden_size (e.g. 1024),
@@ -130,15 +191,24 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     def _fix_draft_kv_head_counts(self, target_model) -> None:
         from vllm.logger import logger
 
+        # Build a lookup from target layer name → (num_heads, num_kv_heads)
+        # using the already-computed target_attn_layer_names.
         target_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,
         )
 
         draft_model = self.get_model()
+        if not (hasattr(draft_model, "model") and hasattr(draft_model.model, "layers")):
+            return
+
         for draft_idx, layer in enumerate(draft_model.model.layers):
-            attn = layer.self_attn.attn
-            tgt_name = attn.kv_sharing_target_layer_name
+            if not hasattr(layer, "self_attn"):
+                continue
+            attn = getattr(layer.self_attn, "attn", None)
+            if attn is None:
+                continue
+            tgt_name = getattr(attn, "kv_sharing_target_layer_name", None)
             if tgt_name is None:
                 continue
             target_module = target_attn_layers.get(tgt_name)
@@ -155,12 +225,14 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             draft_nh = attn.num_heads
             tgt_nh = target_module.num_heads
 
-            # Sync kv_sharing_target_layer_name to the backend impl.
-            # _setup_gemma4_kv_sharing sets it on the Attention wrapper
-            # but the AscendAttention backend was already initialised with None.
-            impl = attn.impl
-            if impl is not None:
-                object.__setattr__(impl, "kv_sharing_target_layer_name", tgt_name)
+            # Always sync kv_sharing_target_layer_name to the backend
+            # (impl). _setup_gemma4_kv_sharing sets it on the Attention
+            # wrapper but the AscendAttention backend was already
+            # initialised with None.
+            kv_share_tgt = getattr(attn, "kv_sharing_target_layer_name", None)
+            impl = getattr(attn, "impl", None)
+            if impl is not None and kv_share_tgt is not None:
+                object.__setattr__(impl, "kv_sharing_target_layer_name", kv_share_tgt)
 
             if draft_nkv != tgt_nkv or draft_nh != tgt_nh:
                 logger.info(
@@ -176,6 +248,9 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                 )
                 object.__setattr__(attn, "num_kv_heads", tgt_nkv)
                 object.__setattr__(attn, "num_heads", tgt_nh)
+                # Also fix the AscendAttention backend (impl) — it has
+                # its own copies that were initialised from Attention
+                # before _setup_gemma4_kv_sharing ran.
                 if impl is not None:
                     object.__setattr__(impl, "num_kv_heads", tgt_nkv)
                     object.__setattr__(impl, "num_heads", tgt_nh)
@@ -191,10 +266,40 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
                 # LARGE-HEAD FALLBACK PA path, missing the prefill-only
                 # KV gathering from the shared target cache.
                 mtp_attn = layer.self_attn
-                if mtp_attn.num_kv_heads != tgt_nkv:
+                if getattr(mtp_attn, "num_kv_heads", None) != tgt_nkv:
                     object.__setattr__(mtp_attn, "num_kv_heads", tgt_nkv)
-                if mtp_attn.num_heads != tgt_nh:
+                if getattr(mtp_attn, "num_heads", None) != tgt_nh:
                     object.__setattr__(mtp_attn, "num_heads", tgt_nh)
+
+    # ---- target->draft KV sync --------------------------------------------
+    # Gemma4 MTP reads K/V from the target model's KV cache, so the draft must
+    # wait for the target's (async, FDO-graph) KV writes to land before it
+    # reads.  This is Gemma4-specific: other draft proposers own their KV
+    # cache and need no such sync, so the runner calls the no-op base hooks
+    # and only this class actually records/waits on the event.
+
+    def notify_target_forward_done(self) -> None:
+        """Record an NPU event now that the target forward has finished.
+
+        The draft reads the target's KV cache, whose FDO-graph replay writes
+        land asynchronously on the NPU stream; ``_sync_wait_target_events``
+        waits on this event before the draft reads the cache.  A single event
+        is reused across steps to avoid NPU event resource pressure.
+        """
+        if not hasattr(self, "_target_done_event"):
+            self._target_done_event = torch.npu.Event()
+        self._target_done_event.record()
+
+    def _sync_wait_target_events(self) -> None:
+        """Wait for the NPU event recorded after target forward completes.
+
+        In draft_eager/both_fdo mode, the target model's FDO graph replay
+        writes KV cache asynchronously on the NPU stream.  We must wait for
+        those writes to complete before the draft model reads the KV cache.
+        """
+        _ev = getattr(self, "_target_done_event", None)
+        if _ev is not None:
+            _ev.wait()
 
     # ---- load_model --------------------------------------------------------
     # We need BOTH:

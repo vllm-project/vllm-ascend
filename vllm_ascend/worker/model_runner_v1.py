@@ -139,6 +139,7 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -566,7 +567,6 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDflashProposer
             | AscendGemma4Proposer
             | AscendDSparkProposer
-            | AscendGemma4Proposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -3041,7 +3041,8 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(
                     self.drafter,
                     AscendEagleProposer | AscendGemma4Proposer
-                    | AscendDraftModelProposer | AscendDflashProposer | AscendDSparkProposer,
+                    | AscendDraftModelProposer | AscendDflashProposer
+                    | AscendDSparkProposer,
                 ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -3055,6 +3056,9 @@ class NPUModelRunner(GPUModelRunner):
                 and isinstance(self.drafter, AscendGemma4Proposer)
             ):
                 self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
+            if self.enable_hamming_sparse is True:
+                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
+                build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(
                     kv_cache_gid,
@@ -3615,23 +3619,16 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer
-                | AscendGemma4Proposer
-                | AscendDflashProposer
-                | AscendDSparkProposer
-                | AscendDraftModelProposer,
+                AscendEagleProposer | AscendGemma4Proposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
             )
             if isinstance(self.drafter, AscendGemma4Proposer):
                 # Gemma4 MTP needs per-group kernel_block_sizes (list of ints),
-                # not a single block_size.  vllm-ascend stores
-                # self.kernel_block_sizes as list[list[int]] (one inner list
-                # per kv_cache_group, e.g. [[128], [128]]), but upstream
-                # vLLM's initialize_attn_backend expects a flat list[int]
-                # indexed by kv_cache_group_id.  Flatten the inner lists.
-                kernel_block_sizes = [
-                    sz if isinstance(sz, int) else sz[0]
-                    for sz in self.kernel_block_sizes
-                ]
+                # not a single block_size.  Pass the list directly.
+                kernel_block_sizes = (
+                    self.kernel_block_sizes
+                    if isinstance(self.kernel_block_sizes, list)
+                    else [self.kernel_block_sizes]
+                )
                 self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
             else:
                 block_size = (self.kernel_block_sizes[0] if isinstance(
