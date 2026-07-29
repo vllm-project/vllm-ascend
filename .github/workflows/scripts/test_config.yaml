@@ -288,6 +288,7 @@
     - vllm_ascend/models
     - vllm_ascend/transformers_utils
   tests:
+    - tests/ut/models
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: models_minimax_m3

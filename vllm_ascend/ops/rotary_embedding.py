@@ -102,6 +102,20 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
 
 
+def get_identity_cos_and_sin_mla(positions, use_cache=False):
+    """Return the preallocated identity rotation used by no-RoPE MLA.
+
+    A no-RoPE model can still carry a q/k positional slice, so the fused MLA
+    kernels retain their normal shapes. Supplying cos=1 and sin=0 makes both
+    transforms position independent without consulting a rotary cache.
+    """
+    del use_cache  # The identity buffers are already laid out for both paths.
+    if _cos_mla is None or _sin_mla is None:
+        raise RuntimeError("MLA identity rotary buffers have not been initialized")
+    num_tokens = positions.size(0)
+    return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
+
+
 def _record_cos_sin_cache(cos_sin_cache):
     global _cos_sin_cache
     if _cos_sin_cache is not None:

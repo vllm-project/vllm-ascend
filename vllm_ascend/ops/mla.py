@@ -122,6 +122,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            g_proj=getattr(mla_modules, "g_proj", None),
+            use_output_gate=getattr(mla_modules, "use_output_gate", False),
+            use_mla_rope=getattr(mla_modules, "use_mla_rope", True),
             layer_name=f"{prefix}.attn",
         )
 

@@ -32,7 +32,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     cache_sparse_sfa_c8: bool = False
 
     @property
-    def page_size_bytes(self) -> int:
+    def real_page_size_bytes(self) -> int:
         return (
             self.block_size
             * self.num_kv_heads
@@ -41,8 +41,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
+        assert all(isinstance(spec, cls) for spec in specs), (
+            "All attention layers in the same KV cache group must use AscendMLAAttentionSpec."
         )
         layout_set = {
             (
@@ -66,15 +66,22 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(cache_sparse_sfa_c8_set) == 1, (
             "All attention layers in the same KV cache group must use the same sparse SFA C8 setting."
         )
+        first_spec = specs[0]
         return cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            scale_dim=specs[0].scale_dim,
-            scale_dtype=specs[0].scale_dtype,
-            dtype=specs[0].dtype,
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
+            block_size=first_spec.block_size,
+            num_kv_heads=first_spec.num_kv_heads,
+            head_size=first_spec.head_size,
+            scale_dim=first_spec.scale_dim,
+            scale_dtype=first_spec.scale_dtype,
+            dtype=first_spec.dtype,
+            kv_quant_mode=first_spec.kv_quant_mode,
+            page_size_padded=first_spec.page_size_padded,
+            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            cache_dtype_str=first_spec.cache_dtype_str,
+            alignment=first_spec.alignment,
+            compress_ratio=first_spec.compress_ratio,
+            model_version=first_spec.model_version,
+            cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

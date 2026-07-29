@@ -2,6 +2,14 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    ModelRegistry.register_model(
+        "KimiK3ForCausalLM",
+        "vllm_ascend.models.kimi_k3:AscendKimiK3ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "KimiK3ForConditionalGeneration",
+        "vllm_ascend.models.kimi_k3:AscendKimiK3ForConditionalGeneration",
+    )
     ModelRegistry.register_model("DeepseekV4ForCausalLM", "vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM")
     ModelRegistry.register_model(
         "MiniMaxM3SparseForCausalLM",

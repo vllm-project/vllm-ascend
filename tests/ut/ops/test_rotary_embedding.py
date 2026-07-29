@@ -21,7 +21,11 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import (
+    AscendRotaryEmbedding,
+    AscendYaRNRotaryEmbedding,
+    get_identity_cos_and_sin_mla,
+)
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -30,6 +34,23 @@ BASE = 10000.0
 DTYPE = torch.bfloat16
 SEQ_LEN = 4
 NUM_HEADS = 2
+
+
+def test_kimi_k3_identity_mla_rope_does_not_index_position_cache(monkeypatch):
+    identity_cos = torch.ones(8, 1, 1, ROTARY_DIM)
+    identity_sin = torch.zeros_like(identity_cos)
+    monkeypatch.setattr("vllm_ascend.ops.rotary_embedding._cos_mla", identity_cos)
+    monkeypatch.setattr("vllm_ascend.ops.rotary_embedding._sin_mla", identity_sin)
+    monkeypatch.setattr("vllm_ascend.ops.rotary_embedding._cos_cache", None)
+    monkeypatch.setattr("vllm_ascend.ops.rotary_embedding._sin_cache", None)
+
+    # Large absolute positions prove that K3 slices by token count rather
+    # than indexing a position-dependent RoPE cache.
+    positions = torch.tensor([100_000, 900_000])
+    cos, sin = get_identity_cos_and_sin_mla(positions, use_cache=True)
+    torch.testing.assert_close(cos, torch.ones_like(cos))
+    torch.testing.assert_close(sin, torch.zeros_like(sin))
+    assert cos.shape[0] == positions.numel()
 
 
 def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
