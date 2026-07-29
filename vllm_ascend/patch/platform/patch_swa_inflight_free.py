@@ -3,6 +3,7 @@
 """Runtime backport of vLLM PR #47728 for v0.25.1: free sliding-window blocks
 on the processed-token basis under async scheduling. No-op on vLLM revisions
 that already ship `Request.num_in_flight_tokens`."""
+
 from functools import wraps
 
 import vllm.v1.core.kv_cache_coordinator as _kvcc
@@ -24,8 +25,7 @@ if not hasattr(Request, "num_in_flight_tokens"):
     _orig_update_from_output = _sched.Scheduler.update_from_output
 
     @wraps(_orig_remove_skipped_blocks)
-    def _remove_skipped_blocks(self, request_id, total_computed_tokens,
-                               num_prompt_tokens=None):
+    def _remove_skipped_blocks(self, request_id, total_computed_tokens, num_prompt_tokens=None):
         processed = max(0, total_computed_tokens - _inflight.get(request_id, 0))
         _orig_remove_skipped_blocks(self, request_id, processed, num_prompt_tokens)
 
@@ -37,8 +37,8 @@ if not hasattr(Request, "num_in_flight_tokens"):
         # or positionally; handle both. If neither, args[0] fast-fails.
         vllm_config = kwargs.get("vllm_config")
         _inflight_token_budget = (
-            vllm_config.max_concurrent_batches
-            * vllm_config.scheduler_config.max_num_batched_tokens)
+            vllm_config.max_concurrent_batches * vllm_config.scheduler_config.max_num_batched_tokens
+        )
         return _orig_scheduler_init(self, *args, **kwargs)
 
     @wraps(_orig_update_after_schedule)
