@@ -226,8 +226,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         --no-enable-prefix-caching \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+        --additional-config '{"enable_cpu_binding":true}'
         ```
 
     === "Qwen3.6-27B-w8a8"
@@ -268,8 +267,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         --no-enable-prefix-caching \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}' \
-        --async-scheduling
+        --additional-config '{"enable_cpu_binding":true}'
         ```
 
     Key Parameter Descriptions:
@@ -393,7 +391,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently:
 
 - **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
-- **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling async-scheduling and full-decode aclgraph).
+- **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling full-decode aclgraph).
 
 For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
@@ -531,7 +529,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
       --gpu-memory-utilization 0.91 \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{"recompute_scheduler_enable":true,"enable_cpu_binding":true}' \
-      --async-scheduling \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
@@ -555,7 +552,6 @@ Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
-- `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
 
 4. Run server for each node:
