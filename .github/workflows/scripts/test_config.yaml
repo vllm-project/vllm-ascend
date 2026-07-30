@@ -894,7 +894,11 @@ runner_mapping:
 
 # === Partition Configuration ===
 # Controls how tests are split across parallel runners of the same type.
-# Key format: <npu_type>_x<num_npus>
+# Key formats (used in order of priority):
+#   <soc_label>_x<num_npus>                — SOC-specific (e.g. ascend910_9392_x4)
+#   <npu_type>_x<num_npus>               — generic (e.g. a3_x4)
+# SOC-specific entries take priority; if absent, the generic entry is used
+# for both SOC and non-SOC tests of that chip type.
 # Only runner types that can appear in test routing need entries.
 # Unlisted types default to 1 (no partition).
 partition:
@@ -905,3 +909,5 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
+  # SOC-specific examples (uncomment and adjust as needed):
+  # ascend910_9392_x4: 1
