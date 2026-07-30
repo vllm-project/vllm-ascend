@@ -73,30 +73,67 @@ def custom_fused_infer_attention_v310(
     block_table: torch.Tensor | None = None,
     num_heads: int = 1,
     scale_value: float = 1.0,
-    input_layout: str = "BSH",
+    input_layout: str = "BSND",
     num_key_value_heads: int = 0,
     block_size: int = 0,
-    inner_precise: int = 1,
 ) -> torch.Tensor:
-    """Ascend 310P custom fused infer attention.
+    """Ascend 310P custom fused infer attention (PagedAttention / incre-flash).
+
+    Wraps ``CustomFusedInferAttentionV310`` which is a 310P-specific attention
+    kernel supporting paged KV-cache with block-table addressing. ONLY head-dim
+    256 or 128 supported.
 
     Args:
-        query: query tensor.
-        key / value: key/value (single) cache tensors; passed as single-element
-            lists to the dynamic-list inputs of the custom op.
-        attn_mask: optional attention mask.
-        actual_seq_lengths_q / actual_seq_lengths_kv: optional per-batch actual
-            sequence lengths.
-        block_table: optional paged-attention block table.
-        num_heads: number of query heads.
-        scale_value: attention scale.
-        input_layout: input layout, e.g. ``"BSH"``/``"BSND"``/``"TND"``.
-        num_key_value_heads: number of key/value heads (GQA).
-        block_size: paged-attention block size.
-        inner_precise: inner-precise flag.
+        query: Query tensor.
+            - dtype: float16
+            - format: ND
+            - TND layout: shape ``(T_q, num_heads, head_dim)``
+            - BSND layout: shape ``(B, max_q_len, num_heads, head_dim)``
+        key: Key cache tensor (single layer).
+            - dtype: float16
+            - format: ND or FRACTAL_NZ
+            - ND shape: ``(num_blocks, C//16, block_size, 16)``
+              where ``C = num_key_value_heads * head_dim``
+            - NZ shape: same shape, format tag FRACTAL_NZ
+            - Internally wrapped as ``[key]`` for the TensorList input.
+        value: Value cache tensor (single layer). Same dtype/format/shape
+            constraints as ``key``.
+        attn_mask: Optional attention mask.
+            - dtype: float16
+            - format: ND
+            - ``None`` means no mask (causal or full attention depending on
+              the kernel path).
+        actual_seq_lengths_q: Per-batch actual query sequence lengths.
+            - List of ``B`` integers.
+            - Default ``None`` treated as all ones (decode).
+        actual_seq_lengths_kv: Per-batch actual KV sequence lengths.
+            - List of ``B`` integers.
+            - Default ``None`` treated as all ones.
+        block_table: Paged-attention block table.
+            - dtype: int32
+            - format: ND
+            - shape: ``(B, max_num_blocks_per_seq)``
+            - ``-1`` marks unused (padding) entries.
+        num_heads: Number of query heads. Must be >= num_key_value_heads and
+            ``num_heads % num_key_value_heads == 0``.
+        scale_value: Attention scale factor, typically ``head_dim ** -0.5``.
+        input_layout: Input tensor layout string. Must be ``"BSND"`` or
+            ``"TND"``.
+        num_key_value_heads: Number of key/value heads (GQA). Defaults to 0
+            (will be set to ``num_heads`` internally if not provided).
+        block_size: KV-cache block size in tokens. Must be a multiple of 16.
+            head_dim * block_size <= 128 * 128.
 
     Returns:
         Attention output tensor.
+            - dtype: float16, format: ND
+            - TND layout: shape ``(T_q, num_heads, head_dim)``
+            - BSND layout: shape ``(B, max_q_len, num_heads, head_dim)``
+
+    Note:
+        ``inner_precise`` is fixed to 2 (high-precision softmax accumulate)
+        and not exposed in this API.  It should not be changed without
+        verifying numerical correctness on 310P.
     """
     return torch.ops._C_ascend.npu_custom_fused_infer_attention_v310(
         query,
@@ -111,5 +148,5 @@ def custom_fused_infer_attention_v310(
         input_layout=input_layout,
         num_key_value_heads=num_key_value_heads,
         block_size=block_size,
-        inner_precise=inner_precise,
+        inner_precise=2,
     )

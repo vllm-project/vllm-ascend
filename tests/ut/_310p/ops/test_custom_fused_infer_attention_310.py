@@ -124,7 +124,8 @@ def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
     )
 
     total_needed_blocks = sum(
-        (l.item() + block_size - 1) // block_size for l in kv_seq_lens_cpu
+        (seq_len.item() + block_size - 1) // block_size
+        for seq_len in kv_seq_lens_cpu
     )
     block_num = total_needed_blocks + 20
     block_table_cpu = _generate_random_block_table(kv_seq_lens_cpu, block_size, block_num)
