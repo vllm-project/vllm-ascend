@@ -114,7 +114,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # This flag is graph-static. Per-token indices below preserve base rows
         # when the single adapter shares a compiled batch with base requests.
         self._single_lora_slot = (
-            ascend_device_type == AscendDeviceType.A3
+            ascend_device_type in {AscendDeviceType.A2, AscendDeviceType.A3}
             and self.lora_config is not None
             and self.lora_config.max_loras == 1
             and not self.lora_config.fully_sharded_loras

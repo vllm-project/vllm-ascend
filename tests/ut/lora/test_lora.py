@@ -18,6 +18,7 @@ from vllm_ascend.patch.worker.patch_lora_vlm_prefix import (
     _detect_prefix,
     _enable_wrapped_language_model_expand_slice,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 def test_detects_vlm_wrapper_prefix() -> None:
@@ -70,6 +71,26 @@ def test_wrapped_language_model_selects_compatible_expand_slice(language_prefix:
         punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_called_once_with()
     else:
         punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_not_called()
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_single_lora_slot_enabled_on_a2_and_a3(device_type: AscendDeviceType) -> None:
+    lora_config = SimpleNamespace(
+        max_lora_rank=8,
+        max_loras=1,
+        fully_sharded_loras=False,
+        lora_dtype=torch.bfloat16,
+    )
+
+    with (
+        patch.object(PunicaWrapperBase, "__init__", return_value=None),
+        patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes"),
+        patch("vllm_ascend.lora.punica_npu.get_ascend_device_type", return_value=device_type),
+    ):
+        wrapper = PunicaWrapperNPU(16, 4, "cpu", lora_config=lora_config)
+
+    assert wrapper._single_lora_slot
+    assert wrapper._single_lora_mask.shape == (16, 1)
 
 
 @pytest.mark.parametrize(
