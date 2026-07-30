@@ -147,7 +147,6 @@ class GlobalMemfabricTE:
         self._unique_id = f"{hostname}:{advertised_rpc_port}"
         return MemfabricBackend(raw_engine, advertised_rpc_port)
 
-
     def register_buffer(self, ptrs: list[int], sizes: list[int]) -> None:
         if len(ptrs) != len(sizes):
             raise ValueError(f"MemFabric registration pointer/size counts differ: {len(ptrs)} != {len(sizes)}")

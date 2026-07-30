@@ -66,10 +66,13 @@ class MembPullSendingThread(threading.Thread):
         self._stopped = False
         self.startup_error: BaseException | None = None
         self._pending_reads_by_layer: dict[int, int] = {}
-        num_storage_slots = max(
-            (slot for slots in state.layer_storage_slots.values() for slot in slots),
-            default=-1,
-        ) + 1
+        num_storage_slots = (
+            max(
+                (slot for slots in state.layer_storage_slots.values() for slot in slots),
+                default=-1,
+            )
+            + 1
+        )
         self.storage_send_done_events: list[threading.Event] = []
         for _ in range(num_storage_slots):
             event = threading.Event()
@@ -192,11 +195,7 @@ class MembPullSendingThread(threading.Thread):
         layer_has_indexer = layer_meta.has_indexer
 
         def _blocks_for_chunk(rm, group_idx: int) -> tuple[list[int], int]:
-            all_block_ids = (
-                rm.local_block_ids[group_idx]
-                if len(rm.local_block_ids) > group_idx
-                else []
-            )
+            all_block_ids = rm.local_block_ids[group_idx] if len(rm.local_block_ids) > group_idx else []
             block_size = self._state.block_sizes[group_idx]
             transferred_tokens = max(
                 int(getattr(rm, "remote_cache_tokens", 0) or 0),
@@ -218,13 +217,9 @@ class MembPullSendingThread(threading.Thread):
             return list(all_block_ids[start_block:end_block]), start_block
 
         for req_id, rm in send_task.send_request.items():
-            p_main_block_ids, main_start_block = _blocks_for_chunk(
-                rm, self._state.main_group_idx
-            )
+            p_main_block_ids, main_start_block = _blocks_for_chunk(rm, self._state.main_group_idx)
             if layer_has_indexer:
-                p_indexer_block_ids, indexer_start_block = _blocks_for_chunk(
-                    rm, self._state.indexer_group_idx
-                )
+                p_indexer_block_ids, indexer_start_block = _blocks_for_chunk(rm, self._state.indexer_group_idx)
             else:
                 p_indexer_block_ids, indexer_start_block = [], 0
             ext_id = get_external_request_id(req_id)
@@ -265,15 +260,10 @@ class MembPullSendingThread(threading.Thread):
                 dealer = self._ensure_dealer(path)
                 if path not in self._mf_meta_sent_paths:
                     self._send_mf_meta(path, dealer, encoder)
-                dealer.send(
-                    encoder.encode(
-                        (READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_ext_ids)
-                    )
-                )
+                dealer.send(encoder.encode((READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_ext_ids)))
                 if envs.VLLM_ASCEND_SFA_DEBUG:
                     logger.info(
-                        "MembPull P send READ_READY_BATCH: layer=%d (%s), "
-                        "endpoint=%s:%d, reqs=%d, done_reqs=%d",
+                        "MembPull P send READ_READY_BATCH: layer=%d (%s), endpoint=%s:%d, reqs=%d, done_reqs=%d",
                         layer_idx,
                         layer_name,
                         remote_host,
