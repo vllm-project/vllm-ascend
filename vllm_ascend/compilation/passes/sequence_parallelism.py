@@ -15,13 +15,6 @@ from vllm_ascend.utils import is_moe_model
 SP_MIN_TOKEN_NUM_DEFAULT = 1000
 
 
-# def get_sp_min_token_num(config: VllmConfig) -> int:
-#     if is_moe_model(config):
-#         return 1
-
-#     return SP_MIN_TOKEN_NUM_DEFAULT
-
-
 def get_sp_min_token_num(config: VllmConfig) -> int:
     configured = config.compilation_config.pass_config.sp_min_token_num
     if configured is not None:
@@ -110,8 +103,6 @@ class _SequenceParallelPatternHelper:
         weight: torch.Tensor,
     ):
         """Call the norm op with the same arity Dynamo emits for its defaults."""
-        if self.eps == 1e-6:
-            return torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight)
         return torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight, None, self.eps)
 
     def empty(self, *args, **kws):
