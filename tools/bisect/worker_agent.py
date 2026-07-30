@@ -34,6 +34,8 @@ from tools.bisect import git_ops, runner
 from tools.bisect.build_manager import BuildError, BuildManager
 from tools.bisect.config import BisectInput, BisectOptions
 from tools.bisect.coordinator import Coordinator
+from tools.bisect.env_manager import EnvironmentManager, EnvSwitchError
+from tools.bisect.env_table import RuntimeEnv
 
 logger = logging.getLogger("bisect.worker")
 
@@ -54,7 +56,7 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
         if "external_dp/config" in base or "external_dp/config" in inp.config_yaml
         else runner._INTERNAL_DP_TEST
     )
-    sources = " ; ".join(f"source {f} 2>/dev/null || true" for f in runner._ENV_SOURCE_FILES)
+    sources = runner.ascend_source_cmd(env)
     bash_cmd = f"set -e ; {sources} ; exec python -m pytest -sv --show-capture=no {test_path}"
     with open(log_path, "a", encoding="utf-8") as out:
         out.write(f"\n$ {bash_cmd}\n")
@@ -77,6 +79,7 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
 def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
     builder = BuildManager(opt)
+    env_manager = EnvironmentManager()
     log_dir = Path(opt.work_dir) / "worker_logs" / f"node{opt.node_index}"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -93,8 +96,8 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
             return 0
 
         commit = cmd["commit"]
-        # A SKIP command (e.g. vLLM mismatch decided by the leader) is consumed
-        # to keep rounds in lockstep, but the worker neither deploys nor runs.
+        # A SKIP command is consumed to keep rounds in lockstep, but the worker
+        # neither switches env, deploys, nor runs.
         if cmd.get("action") == "SKIP":
             logger.info("[worker] round %d: SKIP %s (no deploy/run)", rnd, commit[:12])
             continue
@@ -102,12 +105,15 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
         log_path = log_dir / f"round{rnd}_{commit[:12]}.log"
         logger.info("[worker] round %d: deploying %s", rnd, commit[:12])
         try:
+            changed = env_manager.ensure(RuntimeEnv.from_dict(cmd.get("env")), log_path)
+            if changed:
+                builder.invalidate_build_baseline("runtime env changed for bisect candidate")
             builder.prepare(commit, log_path)
-        except BuildError as exc:
+        except (BuildError, EnvSwitchError) as exc:
             # Don't block the barrier; report our (built) HEAD so the master can
             # detect inconsistency. The master will likely hit the same build
             # failure and record SKIP.
-            logger.error("[worker] build failed for %s: %s", commit[:12], exc)
+            logger.error("[worker] deploy/env failed for %s: %s", commit[:12], exc)
 
         coord.signal_ready(rnd, git_ops.current_commit(opt.repo_dir))
         # Launch the worker test; it returns when the master's trial completes.

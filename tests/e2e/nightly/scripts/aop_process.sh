@@ -74,6 +74,24 @@ if [ -z "$NAME" ] && [ "$SCENE" = "single_node" ]; then
 fi
 
 GOOD_TABLE="${GOOD_TABLE:-}"
+if [ -n "$GOOD_TABLE" ]; then
+  ENV_TABLE="${ENV_TABLE:-$(dirname "$GOOD_TABLE")/env_table.csv}"
+else
+  ENV_TABLE="${ENV_TABLE:-}"
+fi
+RUN_LINK="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-vllm-project/vllm-ascend}/actions/runs/${GITHUB_RUN_ID:-unknown}"
+
+if [ -n "$GOOD_TABLE" ] && [ -n "$NAME" ]; then
+  echo "Recording current failure runtime environment: ${ENV_TABLE}"
+  python tests/e2e/nightly/scripts/update_good_table.py \
+    --cache-csv "$GOOD_TABLE" \
+    --env-table "$ENV_TABLE" \
+    --status failure \
+    --test-name "$NAME" \
+    --test-path "${CONFIG:-$TESTS}" \
+    --scene "$SCENE" \
+    --run-link "$RUN_LINK" || true
+fi
 
 BISECT_CMD=(
   python -m tools.bisect.auto_bisect
@@ -84,6 +102,7 @@ BISECT_CMD=(
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")
 [ -n "$NAME" ] && BISECT_CMD+=(--name "$NAME")
+[ -n "$ENV_TABLE" ] && BISECT_CMD+=(--env-table "$ENV_TABLE")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
 [ -n "$COORD_DIR" ] && BISECT_CMD+=(--coord-dir "$COORD_DIR")
 

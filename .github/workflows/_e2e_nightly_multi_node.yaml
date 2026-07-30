@@ -319,13 +319,19 @@ jobs:
           eval "$(awk '
             /^vLLM Git information$/        { sec="vllm"; next }
             /^vLLM-Ascend Git information$/ { sec="vllm_ascend"; next }
+            /^CANN Version: /                { print "CANN_VERSION="$3; next }
+            /^torch-npu Version: /           { print "TORCH_NPU_VERSION="$3; next }
             sec && /^Commit hash: / {
               print "HASH_" sec "=" $NF
               sec=""
             }
           ' "$LEADER_TMP")"
-          echo "vllm_hash=${HASH_vllm:-N/A}" >> "$GITHUB_OUTPUT"
-          echo "vllm_ascend_hash=${HASH_vllm_ascend:-N/A}" >> "$GITHUB_OUTPUT"
+          {
+            echo "vllm_hash=${HASH_vllm:-N/A}"
+            echo "vllm_ascend_hash=${HASH_vllm_ascend:-N/A}"
+            echo "cann_version=${CANN_VERSION:-unknown}"
+            echo "torch_npu_version=${TORCH_NPU_VERSION:-unknown}"
+          } >> "$GITHUB_OUTPUT"
           rm -f "$LEADER_TMP"
 
       - name: Update good_table.csv on success
@@ -345,7 +351,9 @@ jobs:
             --run-link  "$RUN_LINK" \
             --vllm-ascend-dir "." \
             --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \
-            --vllm-version "${{ steps.stream_logs.outputs.vllm_hash }}"
+            --vllm-version "${{ steps.stream_logs.outputs.vllm_hash }}" \
+            --cann-version "${{ steps.stream_logs.outputs.cann_version }}" \
+            --torch-npu-version "${{ steps.stream_logs.outputs.torch_npu_version }}"
 
       - name: Fetch benchmark results from PVC
         if: always()
