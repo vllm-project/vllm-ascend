@@ -4,30 +4,31 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
+#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:1
 msgid "Dynamic Chunked Pipeline Parallel (CPP)"
-msgstr "动态分块流水线并行 (CPP)"
+msgstr "动态分块流水线并行（CPP）"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:3
 msgid ""
 "TL;DR CPP uses profiling-based dynamic chunking to equalize per-chunk "
 "latency and eliminate pipeline bubbles in PP scenarios."
-msgstr "摘要：CPP 使用基于性能分析的动态分块技术，均衡每块延迟，消除 PP 场景中的流水线气泡。"
+msgstr "摘要：CPP 利用基于性能分析的动态分块，均衡每块延迟，消除 PP 场景中的流水线气泡。"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:5
 msgid "Background"
@@ -35,23 +36,24 @@ msgstr "背景"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:7
 msgid "Problem Statement"
-msgstr "问题陈述"
+msgstr "问题描述"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:9
 msgid ""
-"In Pipeline Parallelism (PP) + Chunked Prefill scenarios, long sequences "
-"are split into fixed-size chunks that pass through the pipeline "
-"sequentially. Due to the O(n²) computational complexity of Self-"
-"Attention, **chunks of the same size take increasingly longer to process "
-"as the prefix sequence grows**:"
-msgstr "在流水线并行 (PP) + 分块预填充场景中，长序列被分割成固定大小的块，依次通过流水线。由于自注意力的 O(n²) 计算复杂度，**随着前缀序列增长，相同大小的块处理时间会越来越长**："
+"In Pipeline Parallelism (PP) + Chunked Prefill scenarios, long sequences are"
+" split into fixed-size chunks that pass through the pipeline sequentially. "
+"Due to the O(n²) computational complexity of Self-Attention, **chunks of the"
+" same size take increasingly longer to process as the prefix sequence "
+"grows**:"
+msgstr ""
+"在流水线并行（PP）+ 分块预填充场景中，长序列被切分为固定大小的块，依次通过流水线。由于自注意力机制具有 O(n²) "
+"的计算复杂度，**随着前缀序列增长，相同大小的块处理时间会越来越长**："
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:18
 msgid ""
-"This time variance propagates across pipeline stages, causing increased "
-"idle waiting (Pipeline Bubble) and significantly reducing GPU "
-"utilization."
-msgstr "这种时间差异会在流水线阶段间传播，导致空闲等待（流水线气泡）增加，并显著降低 GPU 利用率。"
+"This time variance propagates across pipeline stages, causing increased idle"
+" waiting (Pipeline Bubble) and significantly reducing GPU utilization."
+msgstr "这种时间差异会跨流水线阶段传播，导致空闲等待（流水线气泡）增加，并显著降低 GPU 利用率。"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:20
 msgid "Solution Overview"
@@ -61,14 +63,16 @@ msgstr "解决方案概述"
 msgid ""
 "Dynamic Chunked Pipeline Parallel uses a **profile-first, then predict** "
 "strategy:"
-msgstr "动态分块流水线并行采用**先性能分析，再预测**的策略："
+msgstr "动态分块流水线并行采用**先性能分析，后预测**的策略："
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:38
 msgid ""
 "The core idea is borrowed from [SGLang's dynamic chunking "
 "mechanism](https://lmsys.org/blog/2026-01-15-chunked-pipeline/), with "
 "additional enhancements such as online calibration."
-msgstr "核心思想借鉴自 [SGLang 的动态分块机制](https://lmsys.org/blog/2026-01-15-chunked-pipeline/)，并增加了在线校准等增强功能。"
+msgstr ""
+"核心思想借鉴自 [SGLang 的动态分块机制](https://lmsys.org/blog/2026-01-15-chunked-"
+"pipeline/)，并增加了在线校准等增强功能。"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:40
 msgid "Design"
@@ -80,8 +84,8 @@ msgstr "二次延迟模型"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:44
 msgid ""
-"Transformer prefill latency grows quadratically with sequence length due "
-"to the O(n²) Self-Attention mechanism:"
+"Transformer prefill latency grows quadratically with sequence length due to "
+"the O(n²) Self-Attention mechanism:"
 msgstr "由于 O(n²) 的自注意力机制，Transformer 预填充延迟随序列长度呈二次增长："
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:46
@@ -98,7 +102,7 @@ msgstr "$a \\cdot l^2$：注意力开销（二次）"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:51
 msgid "$b \\cdot l$: Linear operations (FFN, projection)"
-msgstr "$b \\cdot l$：线性操作（FFN，投影）"
+msgstr "$b \\cdot l$：线性运算（FFN、投影）"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:52
 msgid "$c$: Fixed overhead (kernel launch)"
@@ -110,15 +114,14 @@ msgstr "启动阶段：性能分析"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:56
 msgid ""
-"During engine initialization, the system profiles actual model "
-"performance:"
+"During engine initialization, the system profiles actual model performance:"
 msgstr "在引擎初始化期间，系统对实际模型性能进行分析："
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:58
 msgid ""
 "**Sampling**: Uniformly sample 64 different chunk sizes from "
 "`base_chunk_size` down to near 0"
-msgstr "**采样**：从 `base_chunk_size` 到接近 0 均匀采样 64 种不同的块大小"
+msgstr "**采样**：从 `base_chunk_size` 向下到接近 0，均匀采样 64 种不同的块大小"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:59
 msgid ""
@@ -134,13 +137,12 @@ msgstr "**拟合**：使用最小二乘法拟合二次模型"
 msgid ""
 "**Target Setting**: Calculate target per-chunk latency based on "
 "`base_chunk_size`"
-msgstr "**目标设定**：基于 `base_chunk_size` 计算每块目标延迟"
+msgstr "**目标设定**：基于 `base_chunk_size` 计算每块的目标延迟"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:63
 msgid ""
 "In PP mode, all workers execute forward passes to stay synchronized, but "
-"only the first PP rank's timing results are used for scheduling "
-"decisions."
+"only the first PP rank's timing results are used for scheduling decisions."
 msgstr "在 PP 模式下，所有工作节点执行前向传播以保持同步，但仅使用第一个 PP 等级的计时结果进行调度决策。"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:65
@@ -151,9 +153,11 @@ msgstr "运行时阶段：动态预测"
 #, python-brace-format
 msgid ""
 "Given current prefix length $L$ and target latency $T = "
-"f(\\text{base\\_chunk\\_size}) - f(0)$, the system solves for the next "
-"chunk size $x$:"
-msgstr "给定当前前缀长度 $L$ 和目标延迟 $T = f(\\text{base\\_chunk\\_size}) - f(0)$，系统求解下一个块大小 $x$："
+"f(\\text{base\\_chunk\\_size}) - f(0)$, the system solves for the next chunk"
+" size $x$:"
+msgstr ""
+"给定当前前缀长度 $L$ 和目标延迟 $T = f(\\text{base\\_chunk\\_size}) - f(0)$，系统求解下一个块大小 "
+"$x$："
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:69
 msgid "f(L + x) - f(L) = T"
@@ -183,11 +187,11 @@ msgstr "结果经过后处理："
 msgid ""
 "**Smoothing**: Blend predicted chunk size with `base_chunk_size` using "
 "`smooth_factor`"
-msgstr "**平滑**：使用 `smooth_factor` 将预测块大小与 `base_chunk_size` 混合"
+msgstr "**平滑**：使用 `smooth_factor` 将预测的块大小与 `base_chunk_size` 混合"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:82
 msgid "**Alignment**: Round down to multiple of `page_size` (minimum 64)"
-msgstr "**对齐**：向下取整到 `page_size` 的倍数（最小 64）"
+msgstr "**对齐**：向下取整为 `page_size` 的倍数（最小 64）"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:83
 msgid ""
@@ -202,8 +206,8 @@ msgstr "在线校准"
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:87
 msgid ""
 "Since profiling only covers sequences up to `max_num_batched_tokens` "
-"(typically shorter than real workloads), the system continuously refines "
-"the model at runtime."
+"(typically shorter than real workloads), the system continuously refines the"
+" model at runtime."
 msgstr "由于性能分析仅覆盖到 `max_num_batched_tokens` 的序列（通常比实际工作负载短），系统在运行时持续优化模型。"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:89
@@ -223,7 +227,9 @@ msgid ""
 "After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual "
 "execution time are recorded. Once enough data points accumulate (5-30), "
 "model parameters are updated using least squares."
-msgstr "每批次后，记录特征向量 `[Σ(C+H)·C, Σ(C+H), N]` 和实际执行时间。一旦累积足够的数据点（5-30），使用最小二乘法更新模型参数。"
+msgstr ""
+"每批处理后，记录特征向量 `[Σ(C+H)·C, Σ(C+H), N]` 和实际执行时间。一旦累积足够的数据点（5-30 "
+"个），使用最小二乘法更新模型参数。"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:97
 msgid "Architecture"
@@ -375,11 +381,11 @@ msgstr "准确性"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
 msgid "May deviate on different hardware"
-msgstr "在不同硬件上可能产生偏差"
+msgstr "在不同硬件上可能有偏差"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
 msgid "Adapts to actual hardware performance"
-msgstr "适配实际硬件性能"
+msgstr "自适应实际硬件性能"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
 msgid "Startup cost"
@@ -394,46 +400,40 @@ msgid "Constraints"
 msgstr "约束条件"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:148
-msgid "**Pipeline Parallelism Required**: Must set `--pipeline-parallel-size > 1`"
-msgstr "**需要流水线并行**：必须设置`--pipeline-parallel-size > 1`"
+msgid ""
+"**Pipeline Parallelism Required**: Must set `--pipeline-parallel-size > 1`"
+msgstr "**需要流水线并行**：必须设置 `--pipeline-parallel-size > 1`"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:149
 msgid "**Chunked Prefill Required**: Must enable `--enable-chunked-prefill`"
-msgstr "**需要分块预填充**：必须启用`--enable-chunked-prefill`"
+msgstr "**需要分块预填充**：必须启用 `--enable-chunked-prefill`"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:150
 msgid ""
 "**Incompatible with Balance Scheduling**: Cannot enable "
 "`VLLM_ASCEND_BALANCE_SCHEDULING`"
-msgstr ""
-"**与均衡调度不兼容**：不能启用"
-"`VLLM_ASCEND_BALANCE_SCHEDULING`"
+msgstr "**与均衡调度不兼容**：不能启用 `VLLM_ASCEND_BALANCE_SCHEDULING`"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:151
 msgid ""
-"**Startup Overhead**: Profiling phase adds tens of seconds to "
-"initialization"
-msgstr ""
-"**启动开销**：性能分析阶段会增加数十秒的初始化时间"
+"**Startup Overhead**: Profiling phase adds tens of seconds to initialization"
+msgstr "**启动开销**：性能分析阶段会增加数十秒的初始化时间"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:152
 msgid ""
-"**Memory**: No additional runtime memory overhead; profiling reuses "
-"existing dummy_run mechanism"
-msgstr ""
-"**内存**：无额外运行时内存开销；性能分析复用现有的dummy_run机制"
+"**Memory**: No additional runtime memory overhead; profiling reuses existing"
+" dummy_run mechanism"
+msgstr "**内存**：无额外运行时内存开销；性能分析复用已有的 dummy_run 机制"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:154
 msgid "References"
-msgstr "参考资料"
+msgstr "参考文档"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:156
 msgid ""
 "[SGLang Dynamic Chunking Blog](https://lmsys.org/blog/2026-01-15-chunked-"
 "pipeline/)"
-msgstr ""
-"[SGLang动态分块博客](https://lmsys.org/blog/2026-01-15-chunked-"
-"pipeline/)"
+msgstr "[SGLang 动态分块博客](https://lmsys.org/blog/2026-01-15-chunked-pipeline/)"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:157
 msgid ""
@@ -443,5 +443,6 @@ msgstr ""
 "[用户指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)"
 
 #: ../../source/developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md:158
-msgid "[Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)"
+msgid ""
+"[Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)"
 msgstr "[教程](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)"
