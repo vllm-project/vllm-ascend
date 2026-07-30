@@ -18,7 +18,17 @@ def test_publish_command_and_wait_command_round_trip(tmp_path: Path):
         "commit": "abcdef1234567890",
         "rebuild": True,
         "action": "RUN",
+        "env": None,
     }
+
+
+def test_publish_command_can_include_runtime_env(tmp_path: Path):
+    coord = Coordinator(str(tmp_path), num_nodes=2, node_index=1)
+    env = {"vllm_ref": "vllm-sha", "cann_version": "9.0.1", "torch_npu_version": "2.6.0"}
+
+    coord.publish_command(1, "abcdef1234567890", rebuild=True, env=env)
+
+    assert coord.wait_command(1, timeout_s=0.1)["env"] == env
 
 
 def test_wait_command_ignores_stale_done_when_since_ts_is_newer(tmp_path: Path):

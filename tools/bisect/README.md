@@ -31,9 +31,14 @@ trigger (case FAIL)
 * **Compile only on C++ changes**: by default (`--native-check per-commit`) a
   rebuild happens only when that commit's own diff touches
   `*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`, `csrc/**`, `CMakeLists.txt`, or `setup.py`.
-  Pure `.py`/yaml changes are picked up live by the editable install (vLLM is
-  never touched). `--native-check since-build` widens the check to all changes
-  since the last build (safer across bisect jumps).
+  Pure `.py`/yaml changes are picked up live by the editable install.
+  `--native-check since-build` widens the check to all changes since the last
+  build (safer across bisect jumps).
+* **Runtime env follows the status table**: the paired vLLM, CANN and torch-npu
+  versions are read from `env_table.csv`. If the current container env differs,
+  auto-bisect switches it at runtime before building/testing the candidate. vLLM
+  is always installed from source (`/vllm-workspace/vllm` by default) so rc/dev
+  refs can be tested.
 * **SKIP semantics**: a flaky/unconfirmed FAIL, a build failure, or a collection
   error (pytest rc 2/3/4/5, e.g. a conftest ImportError) becomes `SKIP` instead
   of a misleading FAIL — like `git bisect skip`.
@@ -87,6 +92,19 @@ single/multi-node workflows that support bisect. The A2 accuracy-model workflow
 uses a different runner and is not yet bisect-capable. Nightly workflows
 currently expose `workflow_dispatch` and are started by the existing
 external/manual dispatch path.
+
+## Runtime environment table
+
+The environment table is a separate CSV, defaulting to `env_table.csv` beside
+the good table (override with `--env-table` / `$BISECT_ENV_TABLE`):
+
+```csv
+name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,CANN Version,torch-npu Version,time
+```
+
+For each candidate commit, auto-bisect first looks for an exact yaml status row.
+If none exists, it uses the closest preceding status row for the same yaml/name
+in first-parent history. See `env_table.sample.csv`.
 
 ## Usage
 

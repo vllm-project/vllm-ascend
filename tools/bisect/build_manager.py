@@ -116,6 +116,11 @@ class BuildManager:
             reason=f"no native/cpp changes ({scope}) -> editable install, no compile",
         )
 
+    def invalidate_build_baseline(self, reason: str) -> None:
+        """Force the next prepare() to rebuild against a changed runtime env."""
+        logger.info("[build] invalidating build baseline: %s", reason)
+        self.last_built_commit = None
+
     # ------------------------------------------------------------- prepare
     def prepare(self, target_commit: str, log_file: Path | None = None) -> BuildDecision:
         """Checkout ``target_commit`` and rebuild/reinstall as needed.

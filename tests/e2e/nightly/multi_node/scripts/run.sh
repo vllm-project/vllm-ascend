@@ -70,6 +70,7 @@ show_vllm_info() {
     cd "$WORKSPACE"
     echo "Installed vLLM-related Python packages:"
     pip list | grep vllm || echo "No vllm packages found."
+    echo "torch-npu Version: $(pip show torch_npu 2>/dev/null | awk '/^Version:/{print $2}' || true)"
 
     echo ""
     echo "============================"
@@ -113,7 +114,11 @@ show_vllm_info() {
 check_npu_info() {
     echo "====> Check NPU info"
     npu-smi info
-    cat "/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
+    local info_file="/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
+    if [ -f "$info_file" ]; then
+        cat "$info_file"
+        echo "CANN Version: $(grep '^version=' "$info_file" | head -n1 | cut -d= -f2 | tr -d '\"')"
+    fi
 }
 
 check_and_config() {
@@ -271,6 +276,10 @@ run_tests_with_log() {
 aop_pipeline() {
     local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
     local table="${GOOD_TABLE:-}"
+    local env_table=""
+    if [ -n "$table" ]; then
+        env_table="${ENV_TABLE:-$(dirname "$table")/env_table.csv}"
+    fi
     # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
     local case_name="${BENCHMARK_JOB_NAME#*-}"
     if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then
@@ -283,6 +292,7 @@ aop_pipeline() {
     echo "  Case name   : ${case_name}"
     echo "  Rules file  : ${rules}"
     echo "  Table file  : ${table}"
+    echo "  Env table   : ${env_table:-N/A}"
     echo "  Log prefix  : ${LOG_PREFIX}"
     echo "  BENCHMARK_JOB_NAME: ${BENCHMARK_JOB_NAME:-}"
     echo "============================================"
@@ -417,6 +427,19 @@ aop_pipeline() {
     local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
     echo "  Coord dir   : ${coord}"
 
+    if [ -n "$env_table" ]; then
+        local run_link="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-vllm-project/vllm-ascend}/actions/runs/${GITHUB_RUN_ID:-unknown}"
+        echo "  Recording current failure runtime environment: ${env_table}"
+        python tests/e2e/nightly/scripts/update_good_table.py \
+            --cache-csv "$table" \
+            --env-table "$env_table" \
+            --status failure \
+            --test-name "$case_name" \
+            --test-path "${CONFIG_YAML_PATH}" \
+            --scene multi_node \
+            --run-link "$run_link" || true
+    fi
+
     # Wait for all workers to signal ready
     echo "  Waiting for workers..."
     for i in $(seq 1 30); do
@@ -431,6 +454,8 @@ aop_pipeline() {
 
     cd "$WORKSPACE/vllm-ascend"
     local bisect_rc=0
+    local env_table_args=()
+    [ -n "$env_table" ] && env_table_args=(--env-table "$env_table")
     python -m tools.bisect.auto_bisect \
         --scene multi_node \
         --config-yaml "${CONFIG_YAML_PATH}" \
@@ -438,7 +463,8 @@ aop_pipeline() {
         --good-table "${table}" \
         --name "${case_name}" \
         --soc "$BISECT_SOC" \
-        --coord-dir "${coord}" || bisect_rc=$?
+        --coord-dir "${coord}" \
+        "${env_table_args[@]}" || bisect_rc=$?
     echo "  bisect completed (exit code: ${bisect_rc})"
     echo "=== AOP Pipeline (Pod) - END ==="
     return 1

@@ -15,12 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Update a frequency-specific good_table.csv with a successful test entry.
+"""Update frequency-specific nightly status helper tables.
 
-Creates the file (with a header) if it does not exist. Existing rows are
-replaced by the stable ``soc + scene + yaml/path`` key, so cases with the same
-display name do not overwrite each other. Updates are protected by a file lock
-and committed with an atomic rename because matrix jobs share the same table.
+On success, updates good_table.csv using the stable
+``soc + scene + yaml/path`` key. For every status (success/failure), updates
+env_table.csv so auto-bisect can replay the matching vLLM/CANN/torch-npu
+environment. Updates use file locks and atomic renames because matrix jobs
+share the same frequency-specific tables.
 
 CSV columns:
     name, yaml/path, link, status,
@@ -30,6 +31,7 @@ CSV columns:
 import argparse
 import csv
 import os
+import platform
 import subprocess
 import tempfile
 from collections.abc import Iterator
@@ -45,6 +47,18 @@ HEADER = [
     "vLLM-Ascend Git information",
     "soc",
     "scene",
+    "time",
+]
+
+ENV_HEADER = [
+    "name",
+    "yaml/path",
+    "link",
+    "status",
+    "vLLM Git information",
+    "vLLM-Ascend Git information",
+    "CANN Version",
+    "torch-npu Version",
     "time",
 ]
 
@@ -123,6 +137,36 @@ def table_lock(csv_path: str) -> Iterator[None]:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def load_env_rows(csv_path: str) -> list[list[str]]:
+    if not os.path.isfile(csv_path):
+        return []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        rows = list(reader)
+    # Drop the header row if present
+    if rows and rows[0] == ENV_HEADER:
+        rows = rows[1:]
+    return rows
+
+
+def save_env_rows(csv_path: str, rows: list[list[str]]) -> None:
+    table_dir = os.path.dirname(os.path.abspath(csv_path))
+    os.makedirs(table_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".env_table.", suffix=".tmp", dir=table_dir)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(ENV_HEADER)
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, csv_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
 _DEFAULT_SINGLE_NODE_CONFIG_BASE = "tests/e2e/nightly/single_node/models/configs"
 _DEFAULT_MULTI_NODE_CONFIG_BASES = (
     "tests/e2e/nightly/multi_node/internal_dp/config",
@@ -193,31 +237,108 @@ def update_table(csv_path: str, new_row: dict[str, str]) -> bool:
         return is_new
 
 
+def _installed_package_version(package: str) -> str:
+    try:
+        out = subprocess.check_output(
+            ["python3", "-m", "pip", "show", package],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return ""
+    for line in out.splitlines():
+        if line.startswith("Version:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def current_torch_npu_version() -> str:
+    return _installed_package_version("torch_npu") or _installed_package_version("torch-npu") or "unknown"
+
+
+def current_cann_version() -> str:
+    env = os.getenv("CANN_VERSION")
+    if env:
+        return env.strip()
+    ascend_home = os.getenv("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
+    machine = platform.machine()
+    candidates = [
+        os.path.join(ascend_home, f"{machine}-linux", "ascend_toolkit_install.info"),
+        os.path.join(ascend_home, "ascend_toolkit_install.info"),
+    ]
+    for info_file in candidates:
+        if not os.path.isfile(info_file):
+            continue
+        with open(info_file, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("version="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    return "unknown"
+
+
+def update_env_table(env_csv: str, row: list[str]) -> None:
+    with table_lock(env_csv):
+        rows = load_env_rows(env_csv)
+        test_name = row[0]
+        vllm_ascend_hash = row[5]
+        rows = [r for r in rows if not (len(r) > 5 and r[0] == test_name and r[5] == vllm_ascend_hash)]
+        rows.append(row)
+        save_env_rows(env_csv, rows)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Update good_table.csv on test success")
+    parser = argparse.ArgumentParser(description="Update nightly good/env tables")
     parser.add_argument("--cache-csv", required=True)
+    parser.add_argument("--env-table", default="")
+    parser.add_argument("--status", default="success")
     parser.add_argument("--test-name", required=True)
     parser.add_argument("--test-path", required=True)
     parser.add_argument("--config-base-path", default="")
     parser.add_argument("--scene", default="single_node", choices=["single_node", "multi_node"])
-    parser.add_argument("--soc", required=True)
+    parser.add_argument("--soc", default="")
     parser.add_argument("--run-link", required=True)
     parser.add_argument("--vllm-dir", default="/vllm-workspace/vllm")
     parser.add_argument("--vllm-ascend-dir", default="/vllm-workspace/vllm-ascend")
     parser.add_argument("--vllm-ascend-version", default="")
     parser.add_argument("--vllm-version", default="")
+    parser.add_argument("--cann-version", default="")
+    parser.add_argument("--torch-npu-version", default="")
     args = parser.parse_args()
 
     vllm_hash = args.vllm_version.strip() or git_head(args.vllm_dir)
     vllm_ascend_hash = args.vllm_ascend_version.strip() or git_head(args.vllm_ascend_dir)
+    cann_version = args.cann_version.strip() or current_cann_version()
+    torch_npu_version = args.torch_npu_version.strip() or current_torch_npu_version()
     timestamp = current_timestamp()
     test_path = resolve_test_path(args.test_path, args.config_base_path, args.scene, args.vllm_ascend_dir)
+
+    status = args.status.strip() or "success"
+    env_table = args.env_table.strip() or os.path.join(os.path.dirname(args.cache_csv), "env_table.csv")
+    env_row = [
+        args.test_name,
+        test_path,
+        args.run_link,
+        status,
+        vllm_hash,
+        vllm_ascend_hash,
+        cann_version,
+        torch_npu_version,
+        timestamp,
+    ]
+    update_env_table(env_table, env_row)
+    print(
+        f">>> Updated {env_table}: name={args.test_name} status={status} "
+        f"vllm={vllm_hash} cann={cann_version} torch-npu={torch_npu_version}"
+    )
+
+    if status.lower() != "success":
+        return
 
     new_row = {
         "name": args.test_name,
         "yaml/path": test_path,
         "link": args.run_link,
-        "status": "success",
+        "status": status,
         "vLLM Git information": vllm_hash,
         "vLLM-Ascend Git information": vllm_ascend_hash,
         "soc": args.soc.strip(),
