@@ -101,6 +101,19 @@
 # This will return a JSON object with the adding or removing info
 # and the current prefiller and decoder instances.
 #
+# Step 6: Dump Requests (Optional)
+# --------------------------------
+# Start writing incoming completion requests to the configured JSONL file:
+#
+#   curl -X POST http://localhost:9000/start_dump_req
+#
+# Stop writing requests:
+#
+#   curl -X POST http://localhost:9000/stop_dump_req
+#
+# Use --request-dump-file to choose the output file. Existing content is
+# preserved when request dumping is restarted.
+#
 # When adding instances, if the instances are not started,
 # the proxy will wait and try until the instances to be started
 # or exceeding the number of attempts
@@ -245,6 +258,10 @@ class SharedProxyScheduler:
     def __init__(self, prefiller_instances, decoder_instances):
         self._lock = threading.RLock()
         self.request_num = 0
+        self._request_dump_enabled = False
+        self._request_dump_file: str | None = None
+        self._request_dump_handle = None
+        self._dumped_request_num = 0
         self.waiting_nodes: dict[str, tuple[str, tuple[str, int], int]] = {}
         self._pools: dict[ServerRole, RolePools] = {
             ServerRole.PREFILL: RolePools(),
@@ -347,7 +364,64 @@ class SharedProxyScheduler:
                 "prefill_instances": len(self.prefillers),
                 "decode_instances": len(self.decoders),
                 "request_num": self.request_num,
+                "request_dump_enabled": self._request_dump_enabled,
             }
+
+    def start_request_dump(self, output_file: str) -> dict[str, Any]:
+        with self._lock:
+            if self._request_dump_enabled:
+                return {
+                    "status": "already_started",
+                    "output_file": self._request_dump_file,
+                    "dumped_request_num": self._dumped_request_num,
+                }
+
+            dump_path = Path(output_file).expanduser().resolve()
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._request_dump_handle is not None:
+                self._request_dump_handle.close()
+            self._request_dump_handle = dump_path.open("a", encoding="utf-8")
+            self._request_dump_file = str(dump_path)
+            self._dumped_request_num = 0
+            self._request_dump_enabled = True
+            logger.info("Started dumping requests to %s.", dump_path)
+            return {
+                "status": "started",
+                "output_file": self._request_dump_file,
+                "dumped_request_num": self._dumped_request_num,
+            }
+
+    def stop_request_dump(self) -> dict[str, Any]:
+        with self._lock:
+            status = "stopped" if self._request_dump_enabled else "already_stopped"
+            self._request_dump_enabled = False
+            if self._request_dump_handle is not None:
+                self._request_dump_handle.close()
+                self._request_dump_handle = None
+            logger.info("Stopped dumping requests to %s.", self._request_dump_file)
+            return {
+                "status": status,
+                "output_file": self._request_dump_file,
+                "dumped_request_num": self._dumped_request_num,
+            }
+
+    def dump_request(self, endpoint: str, request_data: Any) -> bool:
+        with self._lock:
+            if not self._request_dump_enabled or self._request_dump_handle is None:
+                return False
+            record = {
+                "timestamp": time.time(),
+                "endpoint": endpoint,
+                "request": request_data,
+            }
+            try:
+                self._request_dump_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                self._request_dump_handle.flush()
+                self._dumped_request_num += 1
+            except Exception as e:
+                logger.error("Failed to write request dump: %s", e)
+                return False
+            return True
 
     def _pick_server(
         self,
@@ -582,12 +656,10 @@ class NodeListener:
             for key, (instance_type, server, retries) in list(self.scheduler.get_waiting_nodes().items()):
                 host, port = server
                 is_valid = asyncio.run(self.check_instance_status(host, port))
-                print(f"Checking instance {key}...")
                 retries += 1
                 if is_valid:
                     self.scheduler.activate_waiting_instance(ServerRole(instance_type), host, port)
                 elif retries >= args.max_waiting_retries:
-                    print(f"Instance {key} was not added to the proxy.")
                     self.scheduler.drop_waiting_instance(key)
                 else:
                     self.scheduler.mark_waiting_retry(key, retries)
@@ -672,6 +744,12 @@ def parse_args() -> argparse.Namespace:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Log level for the proxy server.",
+    )
+    parser.add_argument(
+        "--request-dump-file",
+        type=str,
+        default="request_dump.jsonl",
+        help="JSONL file used by the /start_dump_req endpoint.",
     )
     args = parser.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
@@ -965,6 +1043,7 @@ async def handle_completions_impl(api: str, request: Request):
     try:
         req_data = await request.json()
         req_body = await request.body()
+        await runtime.schedule("dump_request", api, req_data)
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
         stream_flag = bool(req_data.get("stream", False))
@@ -1182,6 +1261,17 @@ async def reset_prefix_cache(request: Request):
 @app.get("/healthcheck")
 async def healthcheck():
     return get_runtime().scheduler.healthcheck()
+
+
+@app.api_route("/start_dump_req", methods=["GET", "POST"])
+async def start_dump_req():
+    args = get_global_args()
+    return await get_runtime().schedule("start_request_dump", args.request_dump_file)
+
+
+@app.api_route("/stop_dump_req", methods=["GET", "POST"])
+async def stop_dump_req():
+    return await get_runtime().schedule("stop_request_dump")
 
 
 @app.post("/instances/add")

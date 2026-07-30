@@ -168,6 +168,12 @@ class MooncakeBackend(Backend):
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, lengths)
 
+    def register_additional_buffer(self, ptrs: list[int], lengths: list[int]):
+        if not self._use_fabric_mem:
+            local_hostname = get_ip()
+            global_te.get_transfer_engine(local_hostname, device_name=None)
+            global_te.register_additional_buffer(ptrs, lengths)
+
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:
             logger.debug(

@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     get_cache_family_granularity,
     infer_group_cache_families,
     normalize_block_ids_by_group,
+    resolve_hybrid_cache_c128_config,
 )
 
 
@@ -102,14 +103,27 @@ class KVPoolScheduler:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
-        self.cache_transfer_granularity = self._infer_cache_transfer_granularity()
-        # request_id -> full_token_ids
-        self._request_trackers: dict[str, RequestTracker] = {}
-        self._preempted_req_ids: set[str] = set()
-        # Whether to discard partial chunks
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
             "discard_partial_chunks", True
         )
+        self.hybrid_cache_c128_config = resolve_hybrid_cache_c128_config(
+            vllm_config,
+            use_layerwise=self.use_layerwise,
+            group_block_sizes=self.grouped_block_size,
+            group_cache_families=self.kv_cache_group_families,
+            hash_block_size=self.hash_block_size,
+            discard_partial_chunks=self._discard_partial_chunks,
+        )
+        self.cache_transfer_granularity = (
+            self.hybrid_cache_c128_config.chunk_tokens
+            if self.hybrid_cache_c128_config.enabled
+            else self._infer_cache_transfer_granularity()
+        )
+        assert self.cache_transfer_granularity is not None
+
+        # request_id -> full_token_ids
+        self._request_trackers: dict[str, RequestTracker] = {}
+        self._preempted_req_ids: set[str] = set()
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._block_pool: BlockPool | None = None

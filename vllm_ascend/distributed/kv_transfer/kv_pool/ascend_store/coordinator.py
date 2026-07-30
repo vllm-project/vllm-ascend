@@ -63,6 +63,7 @@ class AscendStoreCoordinator:
         hash_block_size: int,
         group_block_sizes: list[int],
         group_cache_families: list[str],
+        transfer_chunk_tokens: int | None = None,
         use_eagle: bool = False,
         retention_interval: int | None = None,
     ) -> None:
@@ -83,11 +84,26 @@ class AscendStoreCoordinator:
             _cache_family_granularity(block_size, family)
             for block_size, family in zip(group_block_sizes, group_cache_families, strict=True)
         ]
-        for effective_block_size in self.group_effective_block_sizes:
+        self.group_transfer_chunk_sizes = (
+            [transfer_chunk_tokens] * len(group_block_sizes)
+            if transfer_chunk_tokens is not None
+            else self.group_effective_block_sizes.copy()
+        )
+        for effective_block_size, transfer_size, family in zip(
+            self.group_effective_block_sizes,
+            self.group_transfer_chunk_sizes,
+            group_cache_families,
+            strict=True,
+        ):
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-            assert scheduler_block_size % effective_block_size == 0, (
-                "scheduler_block_size must be a multiple of each group's effective block_size"
+            assert transfer_size % hash_block_size == 0, "transfer chunk size must be divisible by hash_block_size"
+            assert scheduler_block_size % transfer_size == 0, (
+                "scheduler_block_size must be a multiple of each group's transfer chunk size"
             )
+            if _uses_reachable_mask(family):
+                assert scheduler_block_size % effective_block_size == 0, (
+                    "scheduler_block_size must be a multiple of each reachable group's effective block size"
+                )
 
         self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
         if use_eagle and not self.eagle_group_ids:
@@ -101,25 +117,26 @@ class AscendStoreCoordinator:
 
         for group_id, group in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(group.kv_cache_spec)
+            transfer_spec = _copy_spec_with_block_size(spec, self.group_transfer_chunk_sizes[group_id])
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             if (
                 not _uses_reachable_mask(self.group_cache_families[group_id])
-                and getattr(effective_spec, "compress_ratio", 1) > 1
+                and getattr(transfer_spec, "compress_ratio", 1) > 1
             ):
                 # The cache family already folds the compression ratio into
                 # the external key granularity. Avoid applying it again inside
                 # CompressAttentionManager.find_longest_cache_hit().
-                effective_spec = replace(effective_spec, compress_ratio=1)
+                transfer_spec = replace(transfer_spec, compress_ratio=1)
             self.group_effective_specs.append(effective_spec)
             manager_cls = _get_manager_class(spec)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
-                if existing_spec == effective_spec:
+                if existing_spec == transfer_spec:
                     assert manager_cls is existing_cls, "Expected same manager class for identical KV cache specs."
                     group_ids.append(group_id)
                     break
             else:
-                attention_groups.append((effective_spec, [group_id], manager_cls))
+                attention_groups.append((transfer_spec, [group_id], manager_cls))
 
         self.attention_groups = sorted(
             attention_groups,
@@ -165,7 +182,7 @@ class AscendStoreCoordinator:
             apply_eagle=False,
         )
         return tuple(
-            [True] * _num_chunks(token_len, self.group_effective_block_sizes[group_id])
+            [True] * _num_chunks(token_len, self.group_transfer_chunk_sizes[group_id])
             if not _uses_reachable_mask(self.group_cache_families[group_id])
             else mask
             for group_id, mask in enumerate(masks)
@@ -181,9 +198,12 @@ class AscendStoreCoordinator:
         )
         masks: list[list[bool]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
-            num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
+            transfer_size = self.group_transfer_chunk_sizes[group_id]
+            effective_block_size = self.group_effective_block_sizes[group_id]
+            num_chunks = aligned_token_len // effective_block_size
+            transfer_num_chunks = aligned_token_len // transfer_size
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
-                masks.append([True] * num_chunks)
+                masks.append([True] * transfer_num_chunks)
                 continue
             manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
             mask = _reachable_block_mask(
@@ -196,8 +216,35 @@ class AscendStoreCoordinator:
                 retention_interval=self.retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )
-            masks.append([True] * num_chunks if mask is None else mask)
+            if mask is None:
+                masks.append([True] * transfer_num_chunks)
+                continue
+            transfer_mask: list[bool] = []
+            for chunk_id in range(transfer_num_chunks):
+                raw_start = chunk_id * transfer_size
+                raw_end = min(raw_start + transfer_size, aligned_token_len)
+                block_start, block_end = self.transfer_value_block_range(group_id, raw_start, raw_end)
+                block_mask = mask[block_start:block_end]
+                transfer_mask.append(len(block_mask) == block_end - block_start and all(block_mask))
+            masks.append(transfer_mask)
         return tuple(masks)
+
+    def transfer_value_block_range(self, group_id: int, raw_start: int, raw_end: int) -> tuple[int, int]:
+        """Map one external chunk to the complete native blocks it needs."""
+        effective_block_size = self.group_effective_block_sizes[group_id]
+        block_end = _num_chunks(raw_end, effective_block_size)
+        if not _uses_reachable_mask(self.group_cache_families[group_id]):
+            block_start = raw_start // effective_block_size
+            return block_start, block_end
+
+        spec = self.group_effective_specs[group_id]
+        sliding_window = getattr(spec, "sliding_window", None)
+        if sliding_window is None:
+            block_start = raw_start // effective_block_size
+        else:
+            window_blocks = _num_chunks(sliding_window, effective_block_size)
+            block_start = max(raw_start // effective_block_size, block_end - window_blocks)
+        return block_start, block_end
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         if spec.block_size == self.hash_block_size:

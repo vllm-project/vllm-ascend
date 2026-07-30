@@ -16,6 +16,10 @@ class Backend(ABC):
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         pass
 
+    def register_additional_buffer(self, ptrs: list[int], lengths: list[int]):
+        """Register buffers allocated after the backend's initial registration."""
+        self.register_buffer(ptrs, lengths)
+
     @abstractmethod
     def exists(self, keys: list[str]) -> list[int]:
         pass
