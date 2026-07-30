@@ -242,11 +242,7 @@ class SFAPDRD2HConsumerWorker:
             self._terminal_ext_ids,
             local_failed,
         )
-        finished_on_all = (
-            set.intersection(*(terminal for terminal, _ in tp_status))
-            if tp_status
-            else set()
-        )
+        finished_on_all = set.intersection(*(terminal for terminal, _ in tp_status)) if tp_status else set()
         failed_on_any = set().union(*(failed for _, failed in tp_status))
         self._terminal_ext_ids.difference_update(finished_on_all)
 
@@ -415,8 +411,7 @@ class SFAPDRD2HConsumerWorker:
             self._mf_read_thread.stop()
             raise RuntimeError("SFAPD D-side read thread failed during startup") from error
         logger.info(
-            "SFAPDRD2H D-side registered (memfabric pull): "
-            "%d indexer + %d TP-shared main layers",
+            "SFAPDRD2H D-side registered (memfabric pull): %d indexer + %d TP-shared main layers",
             sum(t is not None for t in self._indexer_tensors),
             len(main_names),
         )
@@ -745,8 +740,7 @@ class SFAPDRD2HProducerWorker:
         send_thread = self.kv_send_layer_thread
         if send_thread is None:
             raise RuntimeError(
-                "SFAPD P-side send thread is unavailable; "
-                "register_kv_caches() must complete before save_kv_layer()"
+                "SFAPD P-side send thread is unavailable; register_kv_caches() must complete before save_kv_layer()"
             )
         resolved_layer_name = layer_name or self.index_to_name.get(self.current_layer)
         if resolved_layer_name is None:
