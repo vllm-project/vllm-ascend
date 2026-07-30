@@ -559,6 +559,26 @@ class TestKVCacheGroupingContract(unittest.TestCase):
 
 
 class TestV023LifecycleContract(unittest.TestCase):
+    def test_worker_installs_indexer_spec_patch_before_model_init(self):
+        source = _read("vllm_ascend/worker/worker.py")
+        worker_start = source.index("class NPUWorker(")
+        init_start = source.index("    def __init__(", worker_start)
+        init_end = source.index("\n    def ", init_start + 1)
+        worker_init = source[init_start:init_end]
+
+        adapt_patch = worker_init.index("adapt_patch()")
+        enabled_guard = worker_init.index(
+            "if is_dsa_sparse_runtime_enabled(vllm_config):"
+        )
+        indexer_patch = worker_init.index(
+            "patch_deepseek_v2_indexer_cache_spec()"
+        )
+        worker_base_init = worker_init.index("super().__init__(")
+
+        self.assertLess(adapt_patch, enabled_guard)
+        self.assertLess(enabled_guard, indexer_patch)
+        self.assertLess(indexer_patch, worker_base_init)
+
     def test_engine_child_composes_dsa_outside_late_platform_patch(self):
         for balance_enabled in (False, True):
             with self.subTest(balance_enabled=balance_enabled):
@@ -773,7 +793,7 @@ class TestV023LifecycleContract(unittest.TestCase):
             source,
         )
 
-    def test_mtp_boundary_budget(self):
+    def test_draft_boundary_helper_is_conservative(self):
         module = _load_lightweight_types_module()
         safe = module.max_safe_mtp_drafts_before_block_boundary
         self.assertEqual(safe(0, 1, 128), 126)
@@ -783,7 +803,7 @@ class TestV023LifecycleContract(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             safe(127, 2, 128)
 
-    def test_mtp_executes_selection_before_next_round(self):
+    def test_multi_token_rounds_select_before_attention(self):
         source = _read("vllm_ascend/attention/sfa_v1.py")
         start = source.index("def _execute_dsa_offload_rounds(")
         end = source.index(
@@ -808,10 +828,39 @@ class TestV023LifecycleContract(unittest.TestCase):
             "cannot use sparse C8 cache modes",
             "source FP16/BF16 ABI",
             "requires non-chunked prefill",
-            "supports MTP speculative decoding only",
+            "does not support speculative/MTP decoding",
             "enforce_eager = True",
         ):
             self.assertIn(required_contract, source)
+
+    def test_speculative_decode_is_rejected_and_example_disables_it(self):
+        source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
+        start = source.index(
+            'speculative_config = getattr(vllm_config, "speculative_config"'
+        )
+        end = source.index("raw_dsa_config =", start)
+        speculative_guard = source[start:end]
+
+        self.assertIn(
+            "if speculative_config is not None:",
+            speculative_guard,
+        )
+        self.assertIn(
+            "does not support speculative/MTP decoding",
+            speculative_guard,
+        )
+        self.assertIn("--speculative-config", speculative_guard)
+        self.assertNotIn("_is_mtp_config", source)
+        self.assertNotIn("num_speculative_tokens", speculative_guard)
+
+        example = _read("examples/glm51_dsa_sparse_mtp.sh")
+        self.assertNotIn("--speculative-config", example)
+        self.assertNotIn("NUM_SPECULATIVE_TOKENS", example)
+        self.assertIn(
+            'QUANTIZATION="${QUANTIZATION-ascend}"',
+            example,
+        )
+        self.assertIn('--quantization "${QUANTIZATION}"', example)
 
     def test_only_mla_specs_are_resident_cache_planes(self):
         source = _read(

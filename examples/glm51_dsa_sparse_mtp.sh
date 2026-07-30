@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# GLM-5.1 decode-only sparse KV offload, eager DP+TP, optional MTP.
+# GLM-5.1 decode-only sparse KV offload with eager DP+TP.
+# The legacy filename is retained for compatibility. Speculative/MTP decoding
+# is intentionally disabled until the DSA path passes device token-accuracy
+# validation.
 # Override these values for the target server topology before launching.
 set -euo pipefail
 
@@ -13,7 +16,13 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 # Chunked prefill is intentionally disabled. This value must cover the
 # longest prompt admitted by the service.
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-${MAX_MODEL_LEN}}"
-NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-3}"
+# Quantized GLM-5/5.1 weights require the Ascend loader. Set QUANTIZATION to
+# an empty string explicitly when serving a BF16 checkpoint.
+QUANTIZATION="${QUANTIZATION-ascend}"
+QUANTIZATION_ARGS=()
+if [[ -n "${QUANTIZATION}" ]]; then
+  QUANTIZATION_ARGS=(--quantization "${QUANTIZATION}")
+fi
 PORT="${PORT:-8000}"
 
 export HCCL_OP_EXPANSION_MODE="${HCCL_OP_EXPANSION_MODE:-AIV}"
@@ -26,6 +35,7 @@ vllm serve "${MODEL_PATH}" \
   --port "${PORT}" \
   --data-parallel-size "${DP_SIZE}" \
   --tensor-parallel-size "${TP_SIZE}" \
+  "${QUANTIZATION_ARGS[@]}" \
   --block-size 128 \
   --max-num-seqs "${MAX_NUM_SEQS}" \
   --max-model-len "${MAX_MODEL_LEN}" \
@@ -35,7 +45,5 @@ vllm serve "${MODEL_PATH}" \
   --enforce-eager \
   --no-enable-chunked-prefill \
   --no-enable-prefix-caching \
-  --speculative-config \
-  "{\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"method\":\"deepseek_mtp\",\"enforce_eager\":true}" \
   --additional-config \
   '{"dsa_sparse_config":{"enabled":true,"split_indexer_cache":true,"indexer_mla_block_ratio":3},"ascend_compilation_config":{"enable_npugraph_ex":false}}'

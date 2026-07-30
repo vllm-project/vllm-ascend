@@ -108,6 +108,20 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch()
+        from vllm_ascend.dsa_sparse.dsa_model_support import (
+            is_dsa_sparse_runtime_enabled,
+        )
+
+        if is_dsa_sparse_runtime_enabled(vllm_config):
+            # Multiprocessing workers start in a fresh interpreter. The
+            # EngineCore bootstrap installs the DSA KV-planning patches only
+            # in the EngineCore process, so install the model-side Indexer
+            # spec patch explicitly before this worker constructs its model.
+            from vllm_ascend.patch.dsa_sparse.patch_deepseek_v2 import (
+                patch_deepseek_v2_indexer_cache_spec,
+            )
+
+            patch_deepseek_v2_indexer_cache_spec()
 
         # Register ops when worker init.
         from vllm_ascend import ops

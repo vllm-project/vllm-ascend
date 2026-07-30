@@ -320,21 +320,15 @@ def is_dsa_sparse_config_enabled(vllm_config: Any) -> bool:
     return isinstance(dsa_config, dict) and bool(dsa_config.get("enabled"))
 
 
-def _is_mtp_config(speculative_config: Any | None) -> bool:
-    if speculative_config is None:
-        return False
-    method = str(getattr(speculative_config, "method", "") or "").lower()
-    return "mtp" in method
-
-
 def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
     """Validate and normalize the supported v0.23 sparse-offload envelope.
 
     The implementation intentionally has a narrow first-class envelope:
-    GLM-5/5.1, decoder-only eager execution, DP+TP, and optional MTP.  Options
-    which change cache ownership (prefix cache, KV connectors) or shard the
-    token domain (DCP/PCP/PP) are rejected instead of silently producing an
-    invalid resident map.
+    GLM-5/5.1, decoder-only eager execution, and DP+TP without speculative
+    decoding. Options which change cache ownership (prefix cache, KV
+    connectors), add speculative tokens, or shard the token domain
+    (DCP/PCP/PP) are rejected instead of silently producing an invalid
+    resident map.
     """
     attach_dsa_sparse_cache_attrs(vllm_config)
     if not is_dsa_sparse_config_enabled(vllm_config):
@@ -452,19 +446,17 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
             "DSA sparse offload is eager-only; set "
             "ascend_compilation_config.enable_npugraph_ex=false")
 
-    # Keep v0.23's native MTP lifecycle and accept only MTP-family proposers.
+    # The source DSA implementation does not integrate speculative/MTP cache
+    # ownership. Letting a multi-token step enter this migrated sparse path can
+    # return numerically corrupted tokens without raising a device exception,
+    # so keep the unsupported combination fail-closed until it passes
+    # device-side token-accuracy validation.
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None:
-        if not _is_mtp_config(speculative_config):
-            raise ValueError(
-                "DSA sparse offload supports MTP speculative decoding only, "
-                f"got method={getattr(speculative_config, 'method', None)!r}")
-        num_speculative_tokens = int(
-            getattr(speculative_config, "num_speculative_tokens", 0) or 0)
-        if not 1 <= num_speculative_tokens <= 3:
-            raise ValueError(
-                "DSA sparse offload currently validates 1-3 MTP draft "
-                f"tokens, got {num_speculative_tokens}")
+        raise ValueError(
+            "DSA sparse offload does not support speculative/MTP decoding "
+            "until device-side token accuracy is validated; remove "
+            "--speculative-config")
 
     raw_dsa_config = additional_config.get(
         DSA_SPARSE_ADDITIONAL_CONFIG_KEY, {})

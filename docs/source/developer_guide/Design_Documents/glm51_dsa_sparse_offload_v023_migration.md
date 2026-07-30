@@ -8,7 +8,7 @@
 | 目标基线提交 | `98c40c6602fa2005f50676451f05f535b7ad142e` |
 | 迁移来源 | `long1016033679/vLLM-ascend-DSA:vllm-ascend-v0.19.1rc1-gs-glm` |
 | 目标模型 | GLM-5/GLM-5.1，架构名 `GlmMoeDsaForCausalLM` |
-| 推理范围 | decode-only sparse KV offload、eager、DP+TP、可选 MTP |
+| 推理范围 | decode-only sparse KV offload、eager、DP+TP；不含 speculative/MTP |
 | 目标设备 | 昇腾 A2、A3、A5（Ascend 950） |
 | 文档日期 | 2026-07-29 |
 
@@ -25,7 +25,7 @@
 5. 将 Indexer 和 MLA KV cache 拆分为独立 cache group 和独立 block pool。
 6. 保留 Indexer 全量 HBM cache；MLA 使用 HBM resident window 和 DRAM full-block arena。
 7. 将调度状态机、KV cache planning、`NPUInputBatch` sidecar、模型输入整理和 attention 接入点适配到 v0.23.0。
-8. 在 v0.23.0 原生 speculative token 生命周期上增加 MTP 安全边界，并按轮执行稀疏选择与注意力。
+8. 对 speculative/MTP 配置在启动阶段 fail-closed，避免未验收的多 token cache 路径产生错误输出。
 9. DP rank 和 TP worker 各自持有请求状态、resident pool、DRAM arena 和算子 backend，不共享可变 KV ownership。
 10. 对不在本次支持范围内的组合在启动阶段失败，不进行静默降级。
 
@@ -39,7 +39,7 @@
 | Decode-only sparse offload | 支持 | Prefill 使用原生 dense 路径；完整 MLA block 在层内写入后 dump |
 | Eager | 支持且强制 | 自动设置 `model_config.enforce_eager=True` |
 | DP+TP | 支持 | DP/TP 大小可以按服务器拓扑配置 |
-| MTP | 支持 | 仅接受 MTP 类 method，当前校验 1–3 个 draft token |
+| Speculative/MTP | 不支持 | 来源 DSA 分支未集成该 cache 语义；配置后启动失败 |
 | A2/A3 | 支持 | LIDU、KSC、SFA-Offload、full-block dump 使用融合自定义算子 |
 | A5 | 功能适配 | LIDU/KSC 保持同名同参；使用 eager tensor 组合实现，尚需真机性能优化 |
 | BF16/FP16 cache | 支持 | 保持来源分支算子 ABI |
@@ -186,29 +186,17 @@ A5 路径保持功能接口，但不是 A2/A3 融合 kernel 的性能等价实�
 
 补丁安装是幂等的。未启用 `dsa_sparse_config.enabled` 时，不安装 DSA scheduler/KV planning 数据面补丁，普通 v0.23.0 请求继续使用原生路径。
 
-## 7. MTP 支持
+## 7. 推测解码边界
 
-本次不替换 v0.23.0 的 MTP proposer、accept/reject 和输出处理。改造只约束 sparse-offload 数据面。
+迁移来源分支明确未集成 speculative/MTP decode。该模式会让一个 scheduler
+step 写入多个候选 token，而 DSA 的 split Indexer/MLA cache、resident window 和
+DRAM full-block dump 尚未完成 accepted/rejected token 的设备侧精度验收。它可能
+不触发设备异常，却返回错误 token。
 
-### 7.1 执行方式
-
-对于每个 scheduler step：
-
-1. v0.23.0 生成主模型保证 token 和最多 1–3 个 MTP draft token。
-2. DSA 按 request-major 的 query round 逐轮执行 LIDU → KSC → SFA-Offload。
-3. 第 `n` 轮仅增加到第 `n` 个 token 的有效 KV 长度，不能提前看见后续 draft。
-4. 后续由 v0.23.0 原生 MTP 逻辑决定 accepted/rejected token。
-
-### 7.2 MLA block 边界约束
-
-DRAM full-block dump 一旦发布，不能按 draft rejection 回滚。因此 scheduler 在 speculative step 进入完整 MLA block 边界前裁剪 draft：
-
-- 主模型保证 token可以恰好完成一个 block。
-- 当保证 token 恰好完成 block 时，本 step 的 draft 数为 0。
-- draft token 不允许完成或跨越一个将被发布到 DRAM 的 block。
-- 如果一个 step 的多个保证 token自身跨越 block 边界，启动路径会显式报错。
-
-被拒绝的 draft 可能在未发布的 HBM tail 中留下无效内容，但逻辑长度会回退，后续 accepted token 在重用 slot 时覆盖这些内容。
+因此本分支在 `validate_dsa_sparse_runtime_config()` 中拒绝所有非空
+`speculative_config`，并提示删除 `--speculative-config`。只有在 A2/A3/A5 上完成
+dense 与 sparse 的逐 token 对比、draft 接受/拒绝和 block 边界回滚验收后，才应
+重新开放该组合。
 
 ## 8. DP+TP 资源与一致性
 
@@ -297,11 +285,11 @@ DP_SIZE=2 \
 TP_SIZE=8 \
 MAX_NUM_SEQS=8 \
 MAX_MODEL_LEN=65536 \
-NUM_SPECULATIVE_TOKENS=3 \
 bash examples/glm51_dsa_sparse_mtp.sh
 ```
 
-不使用 MTP 时，删除脚本中的 `--speculative-config` 参数，或以同等参数单独启动服务。
+该文件保留旧文件名以兼容现有部署，但不再传入 `--speculative-config`。量化模型
+默认使用 `QUANTIZATION=ascend`；BF16 权重应显式传入 `QUANTIZATION=`。
 
 如果完整 prompt 可能达到 `MAX_MODEL_LEN`，`MAX_NUM_BATCHED_TOKENS` 必须至少覆盖该 prompt；否则因关闭 chunked prefill，请求会被调度配置拒绝。
 
@@ -323,7 +311,8 @@ bash -n csrc/build_aclnn.sh examples/glm51_dsa_sparse_mtp.sh
 - v0.23.0 `KVCacheManager.allocate_slots` 签名。
 - Indexer logical BF16/FP16 cache spec。
 - 最后 prefill 的完整 block 全量 dump。
-- MTP block-boundary 数学约束和逐轮顺序。
+- speculative/MTP 启动期 fail-closed 和示例禁用约束。
+- 多进程 Worker 在模型初始化前安装 Indexer spec patch。
 - scheduler decode barrier 不丢失临时 preempt 请求。
 - 非 DSA EngineCore child 不安装 DSA 数据面补丁。
 - DRAM/resident ownership 只接受 MLA spec。
@@ -341,20 +330,20 @@ bash -n csrc/build_aclnn.sh examples/glm51_dsa_sparse_mtp.sh
 | Dense 基线 | 关闭 DSA，固定 prompts/seeds | 与未改 v0.23.0 token 输出一致 |
 | Sparse 精度 | 开启 DSA，6K/10K/12K 或 A5 6K/8K budgets | 逐 token 对比 dense 基线，误差符合 BF16/FP16门限 |
 | 长上下文 | prompt 覆盖 6K、32K、64K 及服务上限 | 无错误 block、越界、提前释放或 DRAM OOM |
-| MTP | draft 1/2/3；命中与拒绝；block 边界前后 | accepted tokens 与 dense MTP 基线一致；无 rollback dump |
+| Speculative guard | 启用 DSA 并传入任意 `--speculative-config` | 启动期明确拒绝，不进入推理数据面 |
 | Continuous batching | 请求加入、完成、preempt、recompute、condense | 无串请求、resident row 泄漏或 block refcount 泄漏 |
 | DP+TP | 多 DP rank并发不同长度请求 | rank资源隔离；TP rank logical mapping 一致 |
 | A5 稳定性 | 长时间压测和高 miss-rate | 无 Host 同步、OOM、NaN 或地址错误 |
 | 性能 | TTFT、TPOT、吞吐、HBM/DRAM 带宽 | 达到项目验收门限；A5 特别记录组合实现开销 |
 
-建议在 debug 验收中记录每个 DP/TP rank 的设备号、resident rows、HBM/DRAM block 使用率、LIDU miss rate、full-block dump 数量和 MTP boundary trim 次数。
+建议在 debug 验收中记录每个 DP/TP rank 的设备号、resident rows、HBM/DRAM block 使用率、LIDU miss rate 和 full-block dump 数量。
 
 ## 13. 已知限制与风险
 
 1. A5 当前是接口兼容的 eager 组合实现，不是融合 kernel；功能和性能必须真机确认。
 2. DRAM arena 按 layer、cache type、worker 固定预分配。`hot_cpu_block_multiple`、`max_active_reqs`、模型层数和上下文上限会显著影响内存。
 3. `indexer_mla_block_ratio=3` 是容量规划权重，不代表所有部署都应使用同一值；修改后需要重新测量 HBM/DRAM 和并发上限。
-4. Prefix cache、chunked prefill、graph、DCP、PCP、PP 和通用 KV offload 不在本次正确性闭包中。
+4. Speculative/MTP、prefix cache、chunked prefill、graph、DCP、PCP、PP 和通用 KV offload 不在本次正确性闭包中。
 5. 当前契约测试是源码级和轻量逻辑测试，不能替代自定义 kernel 编译、设备数值和多机通信验收。
 
 ## 14. 回滚方式
@@ -386,7 +375,7 @@ bash -n csrc/build_aclnn.sh examples/glm51_dsa_sparse_mtp.sh
 
 1. `KVCacheManager.allocate_slots` 的完整签名和返回语义。
 2. `SchedulerOutput`、`NewRequestData`、`CachedRequestData` 字段。
-3. scheduler 的 preempt、free、recompute、MTP proposal 清理顺序。
+3. scheduler 的 preempt、free 和 recompute 清理顺序。
 4. `NPUInputBatch` add/remove/condense/reorder 后的最终行顺序。
 5. KV group planning 是否仍允许 Indexer/MLA 独立 page size、block count 和 pool。
 6. `AscendSFAImpl` decode metadata、Indexer cache layout 和 A5原生 lightning indexer schema。
