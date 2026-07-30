@@ -17,10 +17,10 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+from vllm.config.reasoning import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -34,7 +34,6 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
-from vllm.config.reasoning import ReasoningConfig
 
 
 class NPUInputBatch(InputBatch):
