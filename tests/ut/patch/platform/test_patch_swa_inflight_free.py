@@ -29,8 +29,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from vllm.v1.request import Request
+
 import vllm_ascend.patch.platform.patch_swa_inflight_free as swa
 
 # The whole backport is inert once vLLM ships `Request.num_in_flight_tokens`
@@ -116,8 +116,7 @@ class TestInFlightAccounting(_SWABackportTestBase):
     def test_increment_after_schedule(self, monkeypatch):
         self._reset_inflight()
         monkeypatch.setattr(swa, "_orig_update_after_schedule", lambda *a, **k: None)
-        swa._update_after_schedule(
-            object(), self._scheduler_output({"req-0": 6, "req-1": 1}))
+        swa._update_after_schedule(object(), self._scheduler_output({"req-0": 6, "req-1": 1}))
         assert swa._inflight == {"req-0": 6, "req-1": 1}
 
     def test_accumulates_across_steps(self, monkeypatch):
@@ -131,8 +130,7 @@ class TestInFlightAccounting(_SWABackportTestBase):
         self._reset_inflight()
         swa._inflight["req-0"] = 6
         monkeypatch.setattr(swa, "_orig_update_from_output", lambda *a, **k: None)
-        swa._update_from_output(
-            object(), self._scheduler_output({"req-0": 6}), None)
+        swa._update_from_output(object(), self._scheduler_output({"req-0": 6}), None)
         assert "req-0" not in swa._inflight
 
     def test_decrement_keeps_positive_remainder(self, monkeypatch):
@@ -140,8 +138,7 @@ class TestInFlightAccounting(_SWABackportTestBase):
         self._reset_inflight()
         swa._inflight["req-0"] = 12
         monkeypatch.setattr(swa, "_orig_update_from_output", lambda *a, **k: None)
-        swa._update_from_output(
-            object(), self._scheduler_output({"req-0": 6}), None)
+        swa._update_from_output(object(), self._scheduler_output({"req-0": 6}), None)
         assert swa._inflight == {"req-0": 6}
 
 
@@ -160,8 +157,7 @@ class TestSchedulerInitPublishesBudget(_SWABackportTestBase):
             swa._scheduler_init(object(), vllm_config=vllm_config)
         else:
             swa._scheduler_init(object(), vllm_config)
-        assert swa._inflight_token_budget == (
-            _MAX_CONCURRENT_BATCHES * _MAX_NUM_BATCHED_TOKENS)
+        assert swa._inflight_token_budget == (_MAX_CONCURRENT_BATCHES * _MAX_NUM_BATCHED_TOKENS)
 
 
 class TestSpecDecodeArithmetic(_SWABackportTestBase):
