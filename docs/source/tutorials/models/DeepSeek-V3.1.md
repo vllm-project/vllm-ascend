@@ -74,7 +74,7 @@ docker run --rm \
     --device /dev/ummu \
     --device /dev/uburma \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hixlep/:/etc/hixlep/ \
     -v /root/.cache:/root/.cache \
     -v /usr/local/sbin:/usr/local/sbin \
