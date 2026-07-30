@@ -122,7 +122,6 @@ private:
                                             const gert::StorageShape *keyShape,
                                             const gert::StorageShape *valueShape);
 
-    bool IsSupportFormat(const ge::Format format);
 
     ge::graphStatus GenTilingKey();
 

@@ -69,32 +69,11 @@ ge::graphStatus CustomFIATiling::CheckBaseInputsNull()
     return ge::GRAPH_SUCCESS;
 }
 
-bool CustomFIATiling::IsSupportFormat(const ge::Format format)
-{
-    return format == ge::FORMAT_ND || format == ge::FORMAT_NCHW;
-}
-
 ge::graphStatus CustomFIATiling::CheckInputParameterFormat()
 {
-    auto qFormat = context_->query.desc->GetOriginFormat();
-    auto kFormat = context_->key.desc->GetOriginFormat();
-    auto vFormat = context_->value.desc->GetOriginFormat();
-
-    OPS_ERR_IF(
-        (!IsSupportFormat(qFormat)), OPS_LOG_E(
-            context_->opName, "Query format %d should be ND", qFormat), return ge::GRAPH_FAILED);
-    OPS_ERR_IF(
-        (!IsSupportFormat(kFormat)), OPS_LOG_E(
-            context_->opName, "Key format %d should be ND", kFormat), return ge::GRAPH_FAILED);
-    OPS_ERR_IF(
-        (!IsSupportFormat(vFormat)), OPS_LOG_E(
-            context_->opName, "Value format %d should be ND", vFormat), return ge::GRAPH_FAILED);
-    if (context_->attnMask.desc != nullptr) {
-        auto mFormat = context_->attnMask.desc->GetOriginFormat();
-        OPS_ERR_IF((!IsSupportFormat(mFormat)),
-                OPS_LOG_E(context_->opName, "attn_mask format should be ND"),
-                return ge::GRAPH_FAILED);
-    }
+    // No format whitelist: the kernel only cares about storage shape dimensions,
+    // not the origin format tag.  Accepting all formats allows callers to pass
+    // NZ-layout tensors (with either ND or NZ metadata) without being rejected.
     return ge::GRAPH_SUCCESS;
 }
 
