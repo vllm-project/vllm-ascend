@@ -125,8 +125,6 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
-    update_output_bin_counts: tl.constexpr,
-    has_query_start_loc: tl.constexpr,
 ):
     pid = tl.program_id(0)
     n_programs = tl.num_programs(0)
@@ -149,7 +147,7 @@ def _post_update_kernel(
             for i in range(num_sampled):
                 token_id = tl.load(sampled_tokens_ptr + row_idx * sampled_tokens_stride + i)
 
-                if update_output_bin_counts:
+                if output_bin_counts_ptr is not None:
                     token_ptr = output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
                     count = tl.load(token_ptr)
                     count += 1
@@ -160,16 +158,17 @@ def _post_update_kernel(
                     token_id,
                 )
 
-            query_len = 0
-            if has_query_start_loc:
+            if query_start_loc_ptr is None:
+                query_len = 0
+            else:
                 query_start = tl.load(query_start_loc_ptr + row_idx)
                 query_end = tl.load(query_start_loc_ptr + row_idx + 1)
                 query_len = query_end - query_start
             num_rejected = tl.load(num_rejected_ptr + row_idx)
 
-            num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
             computed_delta = query_len - num_rejected
             if computed_delta != 0:
+                num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
                 tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + computed_delta)
 
 
@@ -198,17 +197,6 @@ def post_update(
     num_rows = idx_mapping.shape[0]
 
     core_num = get_vectorcore_num()
-    update_output_bin_counts = output_bin_counts is not None
-    output_bin_counts_tensor = output_bin_counts
-    output_bin_counts_stride = 0
-    if output_bin_counts_tensor is None:
-        output_bin_counts_tensor = last_sampled_tokens
-    else:
-        output_bin_counts_stride = output_bin_counts_tensor.stride(0)
-    has_query_start_loc = query_start_loc is not None
-    query_start_loc_tensor = query_start_loc
-    if query_start_loc_tensor is None:
-        query_start_loc_tensor = idx_mapping
 
     grid = (min(num_rows, core_num),)
     _post_update_kernel[grid](
@@ -216,17 +204,15 @@ def post_update(
         idx_mapping.stride(0),
         num_computed_tokens,
         last_sampled_tokens,
-        output_bin_counts_tensor,
-        output_bin_counts_stride,
+        output_bin_counts,
+        output_bin_counts.stride(0) if output_bin_counts is not None else 0,
         sampled_tokens,
         sampled_tokens.stride(0),
         num_rows,
         num_sampled,
         num_rejected,
-        query_start_loc_tensor,
+        query_start_loc,
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
-        update_output_bin_counts,
-        has_query_start_loc,
     )
