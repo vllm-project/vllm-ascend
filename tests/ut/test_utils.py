@@ -208,19 +208,6 @@ class TestUtils(TestBase):
         hits = utils.vllm_version_is.cache_info().hits
         self.assertEqual(hits, 1)
 
-    def test_vllm_fla_uses_model_executor_path(self):
-        utils.vllm_fla_uses_model_executor_path.cache_clear()
-        with mock.patch("vllm_ascend.utils.find_spec", return_value=object()):
-            self.assertTrue(utils.vllm_fla_uses_model_executor_path())
-
-        utils.vllm_fla_uses_model_executor_path.cache_clear()
-        with mock.patch("vllm_ascend.utils.find_spec", return_value=None):
-            self.assertFalse(utils.vllm_fla_uses_model_executor_path())
-
-        utils.vllm_fla_uses_model_executor_path.cache_clear()
-        with mock.patch("vllm_ascend.utils.find_spec", side_effect=ModuleNotFoundError):
-            self.assertFalse(utils.vllm_fla_uses_model_executor_path())
-
     def test_get_max_hidden_layers(self):
         from transformers import PretrainedConfig
 

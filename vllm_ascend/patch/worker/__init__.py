@@ -70,17 +70,8 @@ import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 
-# MRV2 speculative decoding depends on the vLLM main speculator graph manager.
-try:
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-        SpeculatorCudaGraphManager as _SpeculatorCudaGraphManager,
-    )
-except ImportError:
-    _SpeculatorCudaGraphManager = None
-
-if _SpeculatorCudaGraphManager is not None:
-    import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

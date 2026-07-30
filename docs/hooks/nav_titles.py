@@ -85,14 +85,6 @@ TITLES = {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
     },
-    "tutorials/features/long_sequence_context_parallel_multi_node.md": {
-        "en": "Long Sequence Context Parallel (Multi Node)",
-        "zh": "长序列上下文并行（多节点）",
-    },
-    "tutorials/features/long_sequence_context_parallel_single_node.md": {
-        "en": "Long Sequence Context Parallel (Single Node)",
-        "zh": "长序列上下文并行（单节点）",
-    },
     "tutorials/features/pd_colocated_mooncake_multi_instance.md": {
         "en": "PD Colocated (Mooncake, Multi-Instance)",
         "zh": "PD 共置（Mooncake，多实例）",

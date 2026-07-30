@@ -280,14 +280,18 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             )
         return layer
 
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu", new=lambda self: self)
-    def test_process_weights_after_loading(self, mock_npu_quantize, mock_npu_format_cast, mock_maybe_trans_nz):
+    def test_process_weights_after_loading(
+        self, mock_npu_quantize, mock_npu_format_cast, mock_maybe_trans_nz, mock_get_ascend_config
+    ):
         mock_npu_quantize.return_value = torch.Tensor()
         mock_npu_format_cast.side_effect = identity
         mock_maybe_trans_nz.side_effect = identity
+        mock_get_ascend_config.return_value.enable_fused_mc2 = 0
         # old quant version weight
         layer = self.build_layer(is_new_quant_version=False)
         self.quant_method.process_weights_after_loading(layer)
@@ -334,16 +338,18 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
 
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu", new=lambda self: self)
     def test_process_weights_after_loading_compressed_tensors(
-        self, mock_npu_quantize, mock_npu_format_cast, mock_maybe_trans_nz
+        self, mock_npu_quantize, mock_npu_format_cast, mock_maybe_trans_nz, mock_get_ascend_config
     ):
         mock_npu_quantize.return_value = torch.Tensor()
         mock_npu_format_cast.side_effect = identity
         mock_maybe_trans_nz.side_effect = identity
+        mock_get_ascend_config.return_value.enable_fused_mc2 = 0
 
         layer = self.build_layer(is_new_quant_version=False)
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
