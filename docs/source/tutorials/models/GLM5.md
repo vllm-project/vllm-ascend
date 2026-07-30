@@ -1420,6 +1420,11 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 |High Throughput (A3)|1P1D deployment|32|P:8 D:4|P:4 D:8|P:64 D:128|P:4096 D:32|P:133120 D:150000|3|
 |Low Latency (A3)|1P1D deployment|32|4|8|P:64 D:128|P:4096 D:32|P:133120 D:150000|3|
 
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+
 ## 10 FAQ
 
 - Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
