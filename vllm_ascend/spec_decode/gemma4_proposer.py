@@ -118,25 +118,30 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         # full-graph mode.  Call it for that side-effect.
         AscendSpecDecodeBaseProposer._maybe_share_lm_head(self, target_language_model)
 
-    # ---- _fix_draft_kv_head_counts -------------------------------------------
-    # When the draft model's attention layer is configured with a different
-    # number of KV heads than the target layer it shares with (e.g. draft
-    # reports 16 KV heads from HuggingFace config but the target's
-    # full_attention uses num_global_kv_heads=4), reading that cache under the
-    # draft's head counts would misinterpret the layout.  Align the draft's
-    # num_kv_heads (and num_heads) to the target layer's values so the shared
-    # KV cache is decoded correctly on both the FIA (A5) and PA (A2/A3) paths.
+    # ---- _sync_kv_sharing_target_to_impl ------------------------------------
+    # _setup_gemma4_kv_sharing (upstream) wires each draft attention layer to
+    # share KV with a target layer by setting `kv_sharing_target_layer_name`
+    # on the vLLM Attention *wrapper*.  At runtime, though, the Ascend path
+    # reads that name off the backend *impl* (AscendAttention), which was
+    # constructed with None.  Propagate the name wrapper -> impl here so KV
+    # sharing actually resolves the target cache; without it the draft reads
+    # its own (wrong) cache and acceptance collapses (~5%).
+    #
+    # (An earlier version of this method also rewrote num_kv_heads per layer
+    # to match the heterogeneous GQA groups.  That is unnecessary now: in
+    # 0.25.1 the Attention wrapper is constructed with the correct per-layer
+    # count already -- full_attention layers carry num_global_key_value_heads
+    # (4), not num_key_value_heads (16) -- so there is no head-count mismatch
+    # to fix.  KV-head alignment is left to the backend.)
 
-    def _fix_draft_kv_head_counts(self, target_model) -> None:
+    def _sync_kv_sharing_target_to_impl(self) -> None:
         from vllm.logger import logger
 
-        target_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,
-        )
-
         draft_model = self.get_model()
-        for draft_idx, layer in enumerate(draft_model.model.layers):
+        num_layers = 0
+        synced = 0
+        for idx, layer in enumerate(draft_model.model.layers):
+            num_layers += 1
             self_attn = getattr(layer, "self_attn", None)
             if self_attn is None:
                 continue
@@ -144,62 +149,29 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
             if attn is None:
                 continue
             tgt_name = getattr(attn, "kv_sharing_target_layer_name", None)
-            if tgt_name is None:
-                continue
-            target_module = target_attn_layers.get(tgt_name)
-            if target_module is None:
-                logger.warning(
-                    "Draft layer %d shares KV with '%s' but target module not found — skipping head-count fix.",
-                    draft_idx,
-                    tgt_name,
-                )
-                continue
-
-            draft_nkv = attn.num_kv_heads
-            tgt_nkv = target_module.num_kv_heads
-            draft_nh = attn.num_heads
-            tgt_nh = target_module.num_heads
-
-            # Sync kv_sharing_target_layer_name to the backend impl.
-            # _setup_gemma4_kv_sharing sets it on the Attention wrapper
-            # but the AscendAttention backend was already initialised with None.
             impl = attn.impl
-            if impl is not None:
-                object.__setattr__(impl, "kv_sharing_target_layer_name", tgt_name)
-
-            if draft_nkv != tgt_nkv or draft_nh != tgt_nh:
+            if impl is None or tgt_name is None:
                 logger.info(
-                    "MTP KV-sharing head fix: draft layer %d "
-                    "(heads=%d, kv_heads=%d) -> target '%s' "
-                    "(heads=%d, kv_heads=%d)",
-                    draft_idx,
-                    draft_nh,
-                    draft_nkv,
+                    "MTP KV-sharing sync: draft layer %d skipped (impl=%s, target=%s).",
+                    idx,
+                    "present" if impl is not None else "None",
                     tgt_name,
-                    tgt_nh,
-                    tgt_nkv,
                 )
-                object.__setattr__(attn, "num_kv_heads", tgt_nkv)
-                object.__setattr__(attn, "num_heads", tgt_nh)
-                if impl is not None:
-                    object.__setattr__(impl, "num_kv_heads", tgt_nkv)
-                    object.__setattr__(impl, "num_heads", tgt_nh)
-                # CRITICAL: Also fix Gemma4MTPAttention's own attributes.
-                # Gemma4MTPAttention.forward() creates kv_dummy using
-                # self.num_kv_heads. If this doesn't match
-                # Attention.num_kv_heads, the vLLM Attention.forward
-                # reshape (view(-1, num_kv_heads, head_size)) produces
-                # a different batch dimension for key vs query, causing
-                # the KV-sharing prefill condition
-                #   query.shape[0] == key.shape[0]
-                # to fail. Layer 59 then falls through to the
-                # LARGE-HEAD FALLBACK PA path, missing the prefill-only
-                # KV gathering from the shared target cache.
-                mtp_attn = layer.self_attn
-                if mtp_attn.num_kv_heads != tgt_nkv:
-                    object.__setattr__(mtp_attn, "num_kv_heads", tgt_nkv)
-                if mtp_attn.num_heads != tgt_nh:
-                    object.__setattr__(mtp_attn, "num_heads", tgt_nh)
+                continue
+            # AscendAttention.kv_sharing_target_layer_name is a @property
+            # descriptor, so a plain assignment is a silent no-op; bypass it.
+            object.__setattr__(impl, "kv_sharing_target_layer_name", tgt_name)
+            synced += 1
+            logger.info(
+                "MTP KV-sharing sync: draft layer %d -> impl.target=%s.",
+                idx,
+                tgt_name,
+            )
+        logger.info(
+            "MTP KV-sharing sync: propagated to %d/%d draft layers.",
+            synced,
+            num_layers,
+        )
 
     # ---- load_model --------------------------------------------------------
     # We need BOTH:
@@ -230,14 +202,10 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         # reads K/V from the corresponding target layer's cache.
         _VllmGemma4Proposer._setup_gemma4_kv_sharing(self, target_attn_layer_names)
 
-        # Fix num_kv_heads mismatch: the draft model's attention layers
-        # may have a different GQA configuration than the target layers
-        # they share KV caches with (e.g., the draft reads 16 KV heads
-        # from its config but the target's full_attention layer only has
-        # 4 global KV heads).  If they don't match, reading the shared cache
-        # under the draft's head counts misinterprets the layout, leading to
-        # garbage attention outputs and downstream crashes.
-        self._fix_draft_kv_head_counts(target_model)
+        # Propagate each draft layer's kv_sharing_target_layer_name from the
+        # Attention wrapper onto the AscendAttention impl, which is what the
+        # runtime KV-sharing path reads.  See the method doc above.
+        self._sync_kv_sharing_target_to_impl()
 
         # Centroids CUDA graphs are CUDA-only; skip on Ascend.
         # The upstream check calls _setup_centroids_cuda_graphs()
