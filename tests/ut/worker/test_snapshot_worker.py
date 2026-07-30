@@ -171,11 +171,19 @@ def test_rebuild_kv_transfer_engine_after_resume_delegates_to_connector(worker):
     rebuild.assert_called_once_with("10.0.0.8")
 
 
-def test_rebuild_kv_transfer_engine_after_resume_skips_hybrid_connector(worker):
+def test_rebuild_kv_transfer_engine_after_resume_delegates_to_hybrid_connector(worker):
     worker.vllm_config.kv_transfer_config.kv_connector = "MooncakeHybridConnector"
+    rebuild = MagicMock()
+    connector_worker = SimpleNamespace(rebuild_kv_transfer_endpoint=rebuild)
+    kv_group = SimpleNamespace(connector_worker=connector_worker)
 
-    with patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True):
+    with (
+        patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
+        patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=kv_group),
+    ):
         worker.rebuild_kv_transfer_engine_after_resume("10.0.0.8")
+
+    rebuild.assert_called_once_with("10.0.0.8")
 
 
 def test_recapture_graph_clears_and_recaptures(worker):
