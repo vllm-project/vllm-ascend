@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
 - `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node. It can also run on 1 Atlas 800 A2 (64G × 8) node with a reduced context length, see [Single-node Deployment](#single-node-deployment).[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -110,46 +110,94 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+=== "A3 series"
 
-Run the following script to execute online inference.
+    - Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
-```shell
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
---host 0.0.0.0 \
---port 8077 \
---api-server-count 1 \
---data-parallel-size 2 \
---enable-expert-parallel \
---tensor-parallel-size 8 \
---seed 1024 \
---served-model-name glm-5 \
---tool-call-parser glm47 \
---reasoning-parser glm45 \
---enable-auto-tool-choice \
---max-num-seqs 12 \
---max-model-len 135000 \
---max-num-batched-tokens 8192 \
---trust-remote-code \
---gpu-memory-utilization 0.92 \
---quantization ascend \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+    Run the following script to execute online inference.
 
-```
+    ```shell
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --api-server-count 1 \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --seed 1024 \
+    --served-model-name glm-5 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --max-num-seqs 12 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 8192 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.92 \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
-**Notice:**
-The parameters are explained as follows:
+    ```
 
-- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+    **Notice:**
+    The parameters are explained as follows:
+
+    - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+
+=== "A2 series"
+
+    - Quantized model `GLM-5.2-w4a8c8` can also be deployed on 1 Atlas 800 A2 (64G × 8) node with a reduced context length. This configuration is verified on 8 × Ascend 910B2 (64G HBM each).
+
+    Run the following script to execute online inference.
+
+    ```shell
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export HCCL_BUFFSIZE=200
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=0
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+    --host 0.0.0.0 \
+    --port 8077 \
+    --api-server-count 1 \
+    --data-parallel-size 1 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --seed 1024 \
+    --served-model-name glm-52 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --enable-auto-tool-choice \
+    --max-num-seqs 4 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 2048 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.96 \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+
+    ```
+
+    **Notice:**
+    The parameters are explained as follows:
+
+    - `--data-parallel-size 1` with `--tensor-parallel-size 8` and `--enable-expert-parallel` makes all 8 NPUs of the single A2 node form one TP8/EP8 group, so the quantized weights are sharded across the node.
+    - Compared with the A3 single-node configuration, `--max-model-len 16384`, `--max-num-seqs 4` and `--max-num-batched-tokens 2048` are reduced so that the KV cache fits into the HBM left on 8 × 64G devices. Increase them only if your workload leaves enough free HBM, otherwise the profile run fails with out-of-memory errors.
+    - `--gpu-memory-utilization 0.96` enlarges the memory available for the KV cache. Lower it if you observe OOM during actual inference.
+    - `GLM-5.2-w4a8c8` uses the DSA shared indexer architecture, which requires vllm-ascend v0.23.0rc1 or later. Earlier versions fail during weight loading with `KeyError: 'model.layers.x.self_attn.indexer.wq_b.weight'`.
 
 ### Multi-node Deployment
 
@@ -1416,7 +1464,20 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-Not tested yet.
+The following GSM8K result is measured with [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) against the OpenAI-compatible API of the [single-node Atlas 800 A2 (64G × 8) deployment](#single-node-deployment) described above (vllm-ascend v0.23.0rc1, 8 × Ascend 910B2):
+
+```shell
+lm_eval --model local-completions \
+  --model_args model=glm-52,base_url=http://127.0.0.1:8077/v1/completions,tokenizer=<local model path>,num_concurrent=4,max_retries=3,timeout=600,tokenized_requests=False \
+  --tasks gsm8k --num_fewshot 5 --limit 200 --seed 1024
+```
+
+| Tasks | n-shot | Filter | Metric | Value | Stderr |
+|---|---|---|---|---|---|
+| gsm8k | 5 | flexible-extract | exact_match | 0.96 | ±0.0139 |
+| gsm8k | 5 | strict-match | exact_match | 0.96 | ±0.0139 |
+
+The result is measured on 200 samples and is for reference only; it may vary with your environment and sampling settings.
 
 ## Performance
 
@@ -1427,6 +1488,39 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 ### Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+
+Here is a reference result measured with `vllm bench serve` (random dataset, `--ignore-eos`) on the [single-node Atlas 800 A2 (64G × 8) deployment](#single-node-deployment) described above (vllm-ascend v0.23.0rc1, 8 × Ascend 910B2):
+
+```shell
+vllm bench serve \
+  --backend openai --base-url http://127.0.0.1:8077 --endpoint /v1/completions \
+  --model glm-52 --tokenizer <local model path> --trust-remote-code \
+  --dataset-name random \
+  --random-input-len <input_len> --random-output-len 128 \
+  --num-prompts <num_prompts> --max-concurrency <concurrency> \
+  --ignore-eos --seed 1024
+```
+
+Different input lengths (concurrency = 4, output length = 128, 8 prompts):
+
+| Input len | Output token throughput (tok/s) | Total token throughput (tok/s) | Median TTFT (ms) | Mean TPOT (ms) |
+|---|---|---|---|---|
+| 512 | 18.41 | 92.05 | 5498.76 | 97.21 |
+| 2048 | 41.89 | 712.09 | 995.04 | 83.19 |
+| 4096 | 38.29 | 1263.63 | 2142.94 | 81.21 |
+| 8192 | 23.55 | 1530.53 | 5007.09 | 98.89 |
+| 12288 | 16.55 | 1605.26 | 18257.74 | 92.41 |
+
+Different concurrency (input length = 1024, output length = 128):
+
+| Concurrency | Output token throughput (tok/s) | Total token throughput (tok/s) | Median TTFT (ms) | Mean TPOT (ms) |
+|---|---|---|---|---|
+| 1 | 14.98 | 134.79 | 613.96 | 62.47 |
+| 2 | 27.52 | 247.65 | 720.99 | 65.39 |
+| 4 | 44.48 | 400.28 | 739.52 | 78.69 |
+| 8 | 45.27 | 407.46 | 11758.78 | 80.01 |
+
+Since the single-node A2 configuration uses `--max-num-seqs 4`, requests beyond 4 concurrent are queued, which is why TTFT rises sharply at concurrency 8 while throughput stays flat. The results are for reference only and may vary with your environment.
 
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
