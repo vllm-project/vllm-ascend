@@ -543,6 +543,7 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         cache_family: str | None = None,
+        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys."""
         for start, end, hash_val, _ in self._iter_token_chunks(
@@ -552,6 +553,7 @@ class ChunkedTokenDatabase:
             kv_cache_group_id,
             cache_role,
             cache_family,
+            grouped_hash_cache=grouped_hash_cache,
         ):
             yield (
                 start,
@@ -571,6 +573,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         chunk_filter: Callable[[int], bool] | None = None,
+        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -580,6 +583,7 @@ class ChunkedTokenDatabase:
             mask_num,
             kv_cache_group_id,
             chunk_filter=chunk_filter,
+            grouped_hash_cache=grouped_hash_cache,
         ):
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val
 
