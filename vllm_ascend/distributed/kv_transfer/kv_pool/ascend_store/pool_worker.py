@@ -300,19 +300,15 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        if self.backend.lower() == "memcache":
-            self.m_store = real_backend(  # type: ignore[misc]
-                parallel_config,
-                lazy_init=True,
-            )
-        else:
-            backend_kwargs = {}
-            if self.backend.lower() == "mooncake":
-                backend_kwargs["lazy_init"] = self.use_compress
-            self.m_store = real_backend(  # type: ignore[misc]
-                parallel_config,
-                **backend_kwargs,
-            )
+        backend_kwargs = {}
+        # lazy_init is enabled only for DSV4 compress models. The backend further
+        # gates this based on hardware: Mooncake requires ASCEND_ENABLE_FABRIC_MEM=1
+        # (A3 fabric memory), and Memcache requires device_sdma protocol.
+        backend_kwargs["lazy_init"] = self.use_compress
+        self.m_store = real_backend(  # type: ignore[misc]
+            parallel_config,
+            **backend_kwargs,
+        )
 
     def _init_kv_events(self, vllm_config) -> None:
         kv_event_config = vllm_config.kv_events_config
