@@ -267,6 +267,39 @@ row、cache slots 或 DRAM logical block table。多 DP rank 可能在不报设�
 - `prefill_context_parallel_size=1`
 - `additional_config.enable_dsa_cp=false`
 
+### 9.3 首次采样 trace
+
+`first_sample` 在 Worker 的 `NPUModelRunner.sample_tokens()` 中发射，位置位于
+模型 forward 之后、sampler 之前；日志在 `_bookkeeping_sync()` 完成后输出，
+不会把 Host 同步插入模型 forward。配置示例：
+
+```json
+{
+  "dsa_sparse_config": {
+    "enabled": true,
+    "trace_points": {
+      "enabled": true,
+      "points": ["first_sample"],
+      "ranks": [0]
+    }
+  }
+}
+```
+
+`ranks` 按 TP rank 过滤；省略时所有 TP rank 都输出。启动和首次实际采样时
+应分别看到以下 WARNING：
+
+```text
+Configured DSA trace points: DSATraceConfig(...)
+[DSA first-sample boundary] point=first_sample ... rows=[...]
+```
+
+每个 `req_id` 只打印一次，`rows` 包含 `prompt_tokens`、
+`computed_tokens`、`scheduled_tokens`、`dsa_stage`、
+`top1_before_processors` 和 `sampled`。`dsa_sparse_config.enabled=false`
+是总开关，即使残留 `trace_points.enabled=true` 也不会发射 trace。
+trace 会增加一次 argmax 和调试用 D2H，性能测试时应关闭。
+
 ## 10. 构建与部署
 
 v0.23.0 依赖基线为 `torch==2.10.0`、`torch-npu==2.10.0.post2`、`transformers==5.5.4` 和 `triton-ascend==3.2.1`。CANN、驱动和固件版本应与该依赖组合及目标服务器发布矩阵一致。
@@ -290,7 +323,7 @@ pip install --no-build-isolation -e .
 
 ```bash
 MODEL_PATH=/models/GLM-5.1 \
-DP_SIZE=2 \
+DP_SIZE=1 \
 TP_SIZE=8 \
 MAX_NUM_SEQS=8 \
 MAX_MODEL_LEN=65536 \

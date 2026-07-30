@@ -123,6 +123,14 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.dsa_sparse.dsa_config import (
+    is_dsa_sparse_config_enabled,
+)
+from vllm_ascend.dsa_sparse.dsa_trace import (
+    DSA_TRACE_POINT_FIRST_SAMPLE,
+    configure_dsa_trace_from_additional_config,
+    dsa_trace_enabled,
+)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -333,6 +341,13 @@ class NPUModelRunner(GPUModelRunner):
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
         self.dsa_worker_mgr = None
+        self._dsa_first_sample_traced_req_ids: set[str] = set()
+        additional_config = vllm_config.additional_config or {}
+        configure_dsa_trace_from_additional_config(
+            additional_config
+            if is_dsa_sparse_config_enabled(vllm_config)
+            else None
+        )
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -755,6 +770,10 @@ class NPUModelRunner(GPUModelRunner):
         return self.model
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        self._dsa_first_sample_traced_req_ids.difference_update(
+            scheduler_output.finished_req_ids
+        )
+
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -2528,6 +2547,20 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
+        # This probe lives after model forward and before the sampler. It
+        # observes first-token logits without adding work to model forward or
+        # a captured graph. The D2H read happens after _bookkeeping_sync below.
+        trace_first_sample = (
+            dsa_trace_enabled(DSA_TRACE_POINT_FIRST_SAMPLE)
+            and any(
+                req_id not in self._dsa_first_sample_traced_req_ids
+                for req_id in self.input_batch.req_ids
+            )
+        )
+        pre_sample_top1 = None
+        if trace_first_sample and logits is not None:
+            pre_sample_top1 = logits.detach().argmax(dim=-1)
+
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
@@ -2572,6 +2605,15 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
         )
+
+        if trace_first_sample:
+            self._trace_dsa_first_sample_boundary(
+                scheduler_output=scheduler_output,
+                batch_desc=batch_desc,
+                req_ids=req_ids_output_copy,
+                sampled_token_ids=valid_sampled_token_ids,
+                pre_sample_top1=pre_sample_top1,
+            )
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
@@ -2685,6 +2727,93 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
+
+    def _trace_dsa_first_sample_boundary(
+        self,
+        *,
+        scheduler_output: "SchedulerOutput",
+        batch_desc: BatchDescriptor,
+        req_ids: list[str],
+        sampled_token_ids: list[list[int]],
+        pre_sample_top1: torch.Tensor | None,
+    ) -> None:
+        """Log each request's first sampling boundary outside model forward.
+
+        ``top1_before_processors`` is captured before min-token/EOS and other
+        logit processors, so it can legitimately differ from ``sampled``.
+        Trace-only D2H work occurs after ``_bookkeeping_sync`` and therefore
+        adds no synchronization inside model forward.
+        """
+        traced_req_ids = self._dsa_first_sample_traced_req_ids
+        first_rows = [
+            row
+            for row, req_id in enumerate(req_ids)
+            if req_id not in traced_req_ids
+        ]
+        if not first_rows:
+            return
+
+        raw_top1 = []
+        if pre_sample_top1 is not None:
+            raw_top1 = (
+                pre_sample_top1.detach()
+                .reshape(-1)
+                .to(device="cpu")
+                .tolist()
+            )
+
+        req_stages = getattr(scheduler_output, "req_dsa_stage", None) or {}
+        trace_rows = []
+        for row in first_rows:
+            req_id = req_ids[row]
+            input_row = self.input_batch.req_id_to_index.get(req_id, row)
+            prompt_tokens = int(
+                self.input_batch.num_prompt_tokens[input_row]
+            )
+            computed_tokens = int(
+                self.input_batch.num_computed_tokens_cpu[input_row]
+            )
+            sampled = (
+                sampled_token_ids[row]
+                if row < len(sampled_token_ids)
+                else None
+            )
+            trace_rows.append(
+                {
+                    "row": row,
+                    "input_row": int(input_row),
+                    "req_id": req_id,
+                    "is_prefill": computed_tokens < prompt_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "computed_tokens": computed_tokens,
+                    "scheduled_tokens": int(
+                        scheduler_output.num_scheduled_tokens.get(
+                            req_id, 0
+                        )
+                    ),
+                    "dsa_stage": str(
+                        req_stages.get(req_id, "missing")
+                    ),
+                    "top1_before_processors": (
+                        int(raw_top1[row])
+                        if row < len(raw_top1)
+                        else None
+                    ),
+                    "sampled": sampled,
+                }
+            )
+            traced_req_ids.add(req_id)
+
+        # Trace is an explicit debugging mode. Use WARNING so the worker log
+        # level cannot silently hide the configured trace point.
+        logger.warning(
+            "[DSA first-sample boundary] point=%s "
+            "batch_num_tokens=%s batch_num_reqs=%s rows=%s",
+            DSA_TRACE_POINT_FIRST_SAMPLE,
+            getattr(batch_desc, "num_tokens", None),
+            getattr(batch_desc, "num_reqs", None),
+            trace_rows,
+        )
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):

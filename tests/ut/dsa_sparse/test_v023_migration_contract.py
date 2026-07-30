@@ -1111,6 +1111,244 @@ class TestV023LifecycleContract(unittest.TestCase):
         self.assertIn("self.freeze_capacity()", source)
 
 
+class TestDSATraceContract(unittest.TestCase):
+    def _model_runner_method(self, method_name: str) -> ast.FunctionDef:
+        module = ast.parse(
+            _read("vllm_ascend/worker/model_runner_v1.py")
+        )
+        runner = next(
+            node
+            for node in module.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "NPUModelRunner"
+            )
+        )
+        return next(
+            node
+            for node in runner.body
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == method_name
+            )
+        )
+
+    def test_model_runner_configures_and_emits_first_sample_trace(self):
+        init_source = ast.unparse(self._model_runner_method("__init__"))
+        sample_source = ast.unparse(
+            self._model_runner_method("sample_tokens")
+        )
+        update_source = ast.unparse(
+            self._model_runner_method("_update_states")
+        )
+        trace_source = ast.unparse(
+            self._model_runner_method(
+                "_trace_dsa_first_sample_boundary"
+            )
+        )
+
+        self.assertIn(
+            "self._dsa_first_sample_traced_req_ids: set[str] = set()",
+            init_source,
+        )
+        self.assertIn(
+            "configure_dsa_trace_from_additional_config("
+            "additional_config if "
+            "is_dsa_sparse_config_enabled(vllm_config) else None)",
+            init_source,
+        )
+        self.assertIn(
+            "trace_first_sample = dsa_trace_enabled("
+            "DSA_TRACE_POINT_FIRST_SAMPLE)",
+            sample_source,
+        )
+        self.assertIn(
+            "pre_sample_top1 = logits.detach().argmax(dim=-1)",
+            sample_source,
+        )
+        self.assertIn(
+            "self._dsa_first_sample_traced_req_ids.difference_update("
+            "scheduler_output.finished_req_ids)",
+            update_source,
+        )
+        self.assertLess(
+            sample_source.index("dsa_trace_enabled("),
+            sample_source.index(
+                "sampler_output = self._sample("
+            ),
+        )
+        self.assertLess(
+            sample_source.index("self._bookkeeping_sync("),
+            sample_source.index(
+                "self._trace_dsa_first_sample_boundary("
+            ),
+        )
+        self.assertIn("logger.warning(", trace_source)
+        self.assertNotIn("logger.info(", trace_source)
+        self.assertIn(
+            "[DSA first-sample boundary] point=%s",
+            trace_source,
+        )
+
+    def test_first_sample_trace_logs_each_request_once(self):
+        method = self._model_runner_method(
+            "_trace_dsa_first_sample_boundary"
+        )
+        method.decorator_list = []
+        contract_module = ast.Module(body=[method], type_ignores=[])
+        ast.fix_missing_locations(contract_module)
+
+        warning_calls = []
+
+        class FakeLogger:
+            def warning(self, *args):
+                warning_calls.append(args)
+
+        class FakeTensor:
+            def __init__(self, values):
+                self.values = values
+
+            def detach(self):
+                return self
+
+            def reshape(self, *shape):
+                return self
+
+            def to(self, **kwargs):
+                return self
+
+            def tolist(self):
+                return self.values
+
+        namespace = {
+            "BatchDescriptor": object,
+            "DSA_TRACE_POINT_FIRST_SAMPLE": "first_sample",
+            "logger": FakeLogger(),
+            "torch": types.SimpleNamespace(Tensor=object),
+        }
+        exec(
+            compile(
+                contract_module,
+                "vllm_ascend/worker/model_runner_v1.py",
+                "exec",
+            ),
+            namespace,
+        )
+        trace = namespace["_trace_dsa_first_sample_boundary"]
+        runner = types.SimpleNamespace(
+            _dsa_first_sample_traced_req_ids=set(),
+            input_batch=types.SimpleNamespace(
+                req_id_to_index={"request-0": 0},
+                num_prompt_tokens=[16],
+                num_computed_tokens_cpu=[16],
+            ),
+        )
+        scheduler_output = types.SimpleNamespace(
+            req_dsa_stage={"request-0": 1},
+            num_scheduled_tokens={"request-0": 16},
+        )
+        batch_desc = types.SimpleNamespace(
+            num_tokens=16,
+            num_reqs=1,
+        )
+
+        kwargs = {
+            "scheduler_output": scheduler_output,
+            "batch_desc": batch_desc,
+            "req_ids": ["request-0"],
+            "sampled_token_ids": [[42]],
+            "pre_sample_top1": FakeTensor([41]),
+        }
+        trace(runner, **kwargs)
+        trace(runner, **kwargs)
+
+        self.assertEqual(len(warning_calls), 1)
+        self.assertEqual(
+            runner._dsa_first_sample_traced_req_ids,
+            {"request-0"},
+        )
+        self.assertEqual(warning_calls[0][1], "first_sample")
+        self.assertEqual(
+            warning_calls[0][-1],
+            [
+                {
+                    "row": 0,
+                    "input_row": 0,
+                    "req_id": "request-0",
+                    "is_prefill": False,
+                    "prompt_tokens": 16,
+                    "computed_tokens": 16,
+                    "scheduled_tokens": 16,
+                    "dsa_stage": "1",
+                    "top1_before_processors": 41,
+                    "sampled": [42],
+                }
+            ],
+        )
+
+    def test_trace_config_enables_selected_tp_ranks(self):
+        warning_calls = []
+
+        class FakeLogger:
+            def warning(self, *args):
+                warning_calls.append(args)
+
+        fake_vllm = types.ModuleType("vllm")
+        fake_vllm.__path__ = []
+        fake_logger_module = types.ModuleType("vllm.logger")
+        fake_logger_module.logger = FakeLogger()
+
+        path = REPO_ROOT / "vllm_ascend/dsa_sparse/dsa_trace.py"
+        module_name = "_dsa_trace_contract"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "vllm": fake_vllm,
+                "vllm.logger": fake_logger_module,
+                module_name: module,
+            },
+        ):
+            spec.loader.exec_module(module)
+            config = (
+                module.configure_dsa_trace_from_additional_config(
+                    {
+                        "dsa_sparse_config": {
+                            "trace_points": {
+                                "enabled": True,
+                                "points": ["first_sample"],
+                                "ranks": [0],
+                            }
+                        }
+                    }
+                )
+            )
+
+            self.assertTrue(config.enabled)
+            self.assertTrue(
+                module.dsa_trace_enabled(
+                    "first_sample",
+                    tp_rank=0,
+                )
+            )
+            self.assertFalse(
+                module.dsa_trace_enabled(
+                    "first_sample",
+                    tp_rank=1,
+                )
+            )
+            self.assertEqual(len(warning_calls), 1)
+            module.configure_dsa_trace(None)
+            self.assertFalse(
+                module.dsa_trace_enabled(
+                    "first_sample",
+                    tp_rank=0,
+                )
+            )
+
+
 class TestIndexerRopePrecisionContract(unittest.TestCase):
     def test_indexer_k_q_and_cp_share_full_head_rope_helper(self):
         expected_calls = {
