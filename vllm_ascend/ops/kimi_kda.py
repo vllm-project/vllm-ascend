@@ -22,7 +22,7 @@ surface while routing prefill through the Kimi AscendC kernels and decode
 through the recurrent KDA AscendC kernel.
 """
 
-from functools import partial
+from functools import partial, wraps
 
 import torch
 from einops import rearrange
@@ -39,6 +39,7 @@ from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import replace_parameter
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -50,6 +51,7 @@ from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 _KDA_CHUNK_SIZE = 64
+_PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 
 
 def _zero_padded_spec_output(
@@ -182,6 +184,23 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         # static so Dynamo does not need to infer the layout from tensor shapes.
         self.is_vl_first_layer = bool(uses_kimi_k3_global_inputs_embeds(vllm_config) and parse_layer_idx(prefix) == 0)
 
+        # The checkpoint stores three fp32 convolution weights as [C, 1, W],
+        # while the AscendC kernel consumes one activation-dtype [W, 3 * C]
+        # tensor. Keep the derived kernel-format weight on q_conv1d so it uses
+        # the same parameter load/reload lifecycle as other repacked weights.
+        self.q_conv1d.register_parameter(
+            _PACKED_CONV_WEIGHT_NAME,
+            torch.nn.Parameter(
+                torch.empty(
+                    self._packed_conv_shape(),
+                    dtype=self.model_config.dtype,
+                ),
+                requires_grad=False,
+            ),
+        )
+        for conv in (self.q_conv1d, self.k_conv1d, self.v_conv1d):
+            self._wrap_conv_process_weights(conv)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
 
@@ -270,15 +289,55 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         )
         return out
 
-    def _conv_weights_t(self, dtype: torch.dtype) -> torch.Tensor:
-        weights = []
-        for conv in (self.q_conv1d, self.k_conv1d, self.v_conv1d):
-            weight = conv.weight.view(conv.weight.size(0), conv.weight.size(2)).transpose(0, 1)
-            weights.append(weight)
-        # The upstream KDA layer stores short-convolution weights in fp32,
-        # while the AscendC causal-conv contract requires input/weight/cache
-        # dtypes to match.
-        return torch.cat(weights, dim=1).to(dtype=dtype).contiguous()
+    def _packed_conv_shape(self) -> tuple[int, int]:
+        local_channels = self.local_num_heads * self.head_dim
+        return self.conv_size, 3 * local_channels
+
+    def _wrap_conv_process_weights(
+        self,
+        conv: ColumnParallelLinear,
+    ) -> None:
+        """Refresh the packed weight after a complete checkpoint load.
+
+        Kernel-format reloads address ``packed_conv_weights`` directly. They
+        must include that parameter instead of relying on these source-weight
+        post-load hooks.
+        """
+        original_process_weights = conv.quant_method.process_weights_after_loading
+
+        @wraps(original_process_weights)
+        def wrapped_process_weights(*args, **kwargs):
+            result = original_process_weights(*args, **kwargs)
+            self._pack_conv_weights()
+            return result
+
+        conv.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore[method-assign]
+
+    @torch.no_grad()
+    def _pack_conv_weights(self) -> None:
+        source_weights = tuple(conv.weight for conv in (self.q_conv1d, self.k_conv1d, self.v_conv1d))
+        if any(weight.is_meta for weight in source_weights):
+            return
+
+        packed_param = self.q_conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        packed_weights = torch.cat(
+            [
+                weight.view(weight.size(0), weight.size(2))
+                .transpose(0, 1)
+                .to(device=packed_param.device, dtype=packed_param.dtype)
+                for weight in source_weights
+            ],
+            dim=1,
+        ).contiguous()
+        replace_parameter(
+            self.q_conv1d,
+            _PACKED_CONV_WEIGHT_NAME,
+            packed_weights,
+            prefer_copy=True,
+        )
+
+    def _conv_weights_t(self) -> torch.Tensor:
+        return self.q_conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
 
     def _recurrent_gate(self, raw_gate: torch.Tensor) -> torch.Tensor:
         flat_gate = rearrange(raw_gate, "1 n h d -> n (h d)")
@@ -441,7 +500,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
 
         conv_state, recurrent_state = self.kv_cache
         mixed_qkv = torch.cat((q_proj_states, k_proj_states, v_proj_states), dim=-1)
-        conv_weights_t = self._conv_weights_t(mixed_qkv.dtype)
+        conv_weights_t = self._conv_weights_t()
 
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx

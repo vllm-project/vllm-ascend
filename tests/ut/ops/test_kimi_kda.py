@@ -14,15 +14,101 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+from torch import nn
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_ascend.ops.kimi_kda import (
+    _PACKED_CONV_WEIGHT_NAME,
+    AscendKimiGatedDeltaNetAttention,
     _load_a_log,
     _zero_padded_spec_output,
 )
+
+
+class _NoopQuantMethod(QuantizeMethodBase):
+    def create_weights(self, layer: nn.Module, *args, **kwargs):
+        raise NotImplementedError
+
+    def apply(self, layer: nn.Module, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError
+
+
+def _make_conv_pack_attention(
+    *,
+    local_num_heads: int = 2,
+    head_dim: int = 3,
+    conv_size: int = 4,
+    model_dtype: torch.dtype = torch.bfloat16,
+) -> AscendKimiGatedDeltaNetAttention:
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.local_num_heads = local_num_heads
+    attention.head_dim = head_dim
+    attention.conv_size = conv_size
+    attention.model_config = SimpleNamespace(dtype=model_dtype)
+
+    local_channels = local_num_heads * head_dim
+    for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
+        conv = nn.Module()
+        conv.weight = nn.Parameter(
+            torch.empty(
+                local_channels,
+                1,
+                conv_size,
+                dtype=torch.float32,
+            )
+        )
+        conv.weight.weight_loader = default_weight_loader
+        conv.quant_method = _NoopQuantMethod()
+        setattr(attention, name, conv)
+
+    attention.q_conv1d.register_parameter(
+        _PACKED_CONV_WEIGHT_NAME,
+        nn.Parameter(
+            torch.empty(
+                attention._packed_conv_shape(),
+                dtype=model_dtype,
+            ),
+            requires_grad=False,
+        ),
+    )
+    for conv in (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d):
+        attention._wrap_conv_process_weights(conv)
+    return attention
+
+
+def _process_conv_weights(
+    attention: AscendKimiGatedDeltaNetAttention,
+) -> None:
+    for conv in (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d):
+        conv.quant_method.process_weights_after_loading(conv)
+
+
+def _expected_packed_conv_weights(
+    attention: AscendKimiGatedDeltaNetAttention,
+) -> torch.Tensor:
+    return torch.cat(
+        [
+            conv.weight[:, 0, :].transpose(0, 1)
+            for conv in (
+                attention.q_conv1d,
+                attention.k_conv1d,
+                attention.v_conv1d,
+            )
+        ],
+        dim=1,
+    ).to(attention.model_config.dtype)
 
 
 def test_load_a_log_slices_padded_1d_checkpoint_by_tp_rank():
@@ -83,3 +169,116 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.shape == output.shape
     assert masked.dtype == output.dtype
     assert masked.device == output.device
+
+
+def test_conv_post_load_processing_packs_kernel_layout_in_place():
+    attention = _make_conv_pack_attention()
+    convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
+    for shard_id, conv in enumerate(convs):
+        conv.weight.data.copy_(
+            torch.arange(
+                conv.weight.numel(),
+                dtype=torch.float32,
+            ).reshape_as(conv.weight)
+            + shard_id * 100
+        )
+
+    packed = attention.q_conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    original_ptr = packed.data_ptr()
+    _process_conv_weights(attention)
+
+    assert packed.data_ptr() == original_ptr
+    torch.testing.assert_close(packed, _expected_packed_conv_weights(attention))
+    assert packed.dtype == torch.bfloat16
+    assert packed.is_contiguous()
+    assert attention._conv_weights_t().data_ptr() == original_ptr
+    parameter_name = f"q_conv1d.{_PACKED_CONV_WEIGHT_NAME}"
+    assert dict(attention.named_parameters())[parameter_name] is packed
+    assert attention.state_dict()[parameter_name].data_ptr() == original_ptr
+
+    convs[1].weight.data.fill_(777)
+    convs[1].quant_method.process_weights_after_loading(convs[1])
+
+    assert attention._conv_weights_t().data_ptr() == original_ptr
+    torch.testing.assert_close(
+        attention._conv_weights_t(),
+        _expected_packed_conv_weights(attention),
+    )
+
+
+def test_full_checkpoint_reload_refreshes_packed_weight_in_place():
+    attention = _make_conv_pack_attention()
+    convs = (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d)
+    for shard_id, conv in enumerate(convs, start=1):
+        conv.weight.data.fill_(shard_id)
+    _process_conv_weights(attention)
+    original_packed = attention._conv_weights_t()
+    original_ptr = original_packed.data_ptr()
+
+    record_metadata_for_reloading(attention)
+    initialize_layerwise_reload(attention)
+    for shard_id, conv in enumerate(convs, start=11):
+        loaded_weight = torch.full(
+            conv.weight.shape,
+            shard_id,
+            dtype=torch.float32,
+        )
+        conv.weight.weight_loader(conv.weight, loaded_weight)
+    finalize_layerwise_reload(
+        attention,
+        SimpleNamespace(dtype=torch.bfloat16),
+    )
+
+    refreshed = attention._conv_weights_t()
+    assert refreshed is original_packed
+    assert refreshed.data_ptr() == original_ptr
+    torch.testing.assert_close(
+        refreshed,
+        _expected_packed_conv_weights(attention),
+    )
+
+
+def test_repack_waits_until_all_source_weights_are_materialized():
+    attention = _make_conv_pack_attention()
+    packed = attention._conv_weights_t()
+    packed.data.fill_(-1)
+    before = packed.clone()
+    v_shape = attention.v_conv1d.weight.shape
+    attention.v_conv1d.weight = nn.Parameter(
+        torch.empty(v_shape, device="meta"),
+    )
+
+    attention.q_conv1d.quant_method.process_weights_after_loading(attention.q_conv1d)
+
+    torch.testing.assert_close(packed, before)
+
+    attention.v_conv1d.weight = nn.Parameter(
+        torch.full(v_shape, 3, dtype=torch.float32),
+    )
+    attention.v_conv1d.quant_method.process_weights_after_loading(attention.v_conv1d)
+
+    torch.testing.assert_close(packed, _expected_packed_conv_weights(attention))
+
+
+def test_kernel_format_reload_updates_named_packed_parameter():
+    attention = _make_conv_pack_attention(model_dtype=torch.float16)
+    for shard_id, conv in enumerate(
+        (attention.q_conv1d, attention.k_conv1d, attention.v_conv1d),
+        start=1,
+    ):
+        conv.weight.data.fill_(shard_id)
+    _process_conv_weights(attention)
+
+    parameter_name = f"q_conv1d.{_PACKED_CONV_WEIGHT_NAME}"
+    packed = attention.get_parameter(parameter_name)
+    original_ptr = packed.data_ptr()
+    kernel_weight = torch.arange(
+        packed.numel(),
+        dtype=packed.dtype,
+    ).reshape_as(packed)
+
+    with torch.no_grad():
+        attention.get_parameter(parameter_name).copy_(kernel_weight)
+
+    assert attention._conv_weights_t().data_ptr() == original_ptr
+    torch.testing.assert_close(attention._conv_weights_t(), kernel_weight)
