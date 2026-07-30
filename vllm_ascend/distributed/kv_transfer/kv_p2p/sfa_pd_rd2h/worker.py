@@ -121,6 +121,7 @@ class SFAPDRD2HConsumerWorker:
 
         self.layer_metadata: dict[str, LayerMetadata] = {}
         self.engine = None
+        self._mf_read_thread: MembPullReadThread | None = None
 
         self.offload_manager = None
         self._cpu_blocks_by_req: dict[str, int] = {}

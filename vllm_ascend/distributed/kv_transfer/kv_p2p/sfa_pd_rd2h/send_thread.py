@@ -61,7 +61,7 @@ class MembPullSendingThread(threading.Thread):
         self.last_layer_idx = state.last_layer_idx
         self.ready_event = ready_event
         self.send_queue: queue.Queue[SendTask] = queue.Queue()
-        self._persist_ctx = zmq.Context()
+        self._persist_ctx = zmq.Context()  # type: ignore[attr-defined]
         self._dealers: dict[str, Any] = {}
         self._stopped = False
         self.startup_error: BaseException | None = None
@@ -85,10 +85,10 @@ class MembPullSendingThread(threading.Thread):
 
     def _ensure_dealer(self, path: str):
         if path not in self._dealers:
-            dealer = self._persist_ctx.socket(zmq.DEALER)
-            dealer.setsockopt(zmq.LINGER, 0)
-            dealer.setsockopt(zmq.SNDHWM, 0)
-            dealer.setsockopt(zmq.RCVHWM, 0)
+            dealer = self._persist_ctx.socket(zmq.DEALER)  # type: ignore[attr-defined]
+            dealer.setsockopt(zmq.LINGER, 0)  # type: ignore[attr-defined]
+            dealer.setsockopt(zmq.SNDHWM, 0)  # type: ignore[attr-defined]
+            dealer.setsockopt(zmq.RCVHWM, 0)  # type: ignore[attr-defined]
             dealer.connect(path)
             self._dealers[path] = dealer
         return self._dealers[path]
@@ -226,6 +226,8 @@ class MembPullSendingThread(threading.Thread):
             has_endpoint = bool(rm.remote_host) and bool(rm.remote_port)
             chunk_done = layer_idx == self.last_layer_idx and rm.chunk_finish and has_endpoint
             if (p_main_block_ids or p_indexer_block_ids or chunk_done) and has_endpoint:
+                assert rm.remote_host is not None
+                assert rm.remote_port is not None
                 endpoint = (rm.remote_host, rm.remote_port)
                 read_reqs, done_ext_ids = endpoint_payloads.setdefault(endpoint, ([], []))
                 if p_main_block_ids or p_indexer_block_ids:
@@ -306,8 +308,8 @@ class MembPullSendingThread(threading.Thread):
                 try:
                     if not dealer.poll(timeout=0):
                         break
-                    frames = dealer.recv_multipart(flags=zmq.NOBLOCK)
-                except zmq.Again:
+                    frames = dealer.recv_multipart(flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
+                except zmq.Again:  # type: ignore[attr-defined]
                     break
                 payload = [f for f in frames if f != b""]
                 if len(payload) != 1:
