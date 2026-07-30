@@ -5,7 +5,12 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
@@ -134,6 +139,21 @@ def build_layerwise_cache_layout(
     )
 
 
+def _get_layer_kv_cache_specs(
+    kv_cache_config: KVCacheConfig,
+) -> dict[str, KVCacheSpec]:
+    """Expand a group spec into the cache spec used by each logical layer."""
+    layer_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        for layer_name in group.layer_names:
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                layer_specs[layer_name] = group_spec.kv_cache_specs[layer_name]
+            else:
+                layer_specs[layer_name] = group_spec
+    return layer_specs
+
+
 def apply_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -160,11 +180,15 @@ def apply_layerwise_kv_cache_plan(
         raise NotImplementedError("Layerwise KV cache reuse currently supports base transformer layers only.")
 
     layer_names = [tensor.shared_by[0] for tensor in old_tensors]
+    layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
     new_tensors = []
     for slot in layout.storage_indices:
         slot_sizes = {old_tensors[index].size for index in slot}
         if len(slot_sizes) != 1:
             raise ValueError("Layers sharing a layerwise KV buffer must have equal tensor sizes.")
+        reference_spec = layer_specs[layer_names[slot[0]]]
+        if any(layer_specs[layer_names[index]] != reference_spec for index in slot[1:]):
+            raise ValueError("Layers sharing a layerwise KV buffer must have identical cache specs.")
         new_tensors.append(
             KVCacheTensor(
                 shared_by=[layer_names[index] for index in slot],
