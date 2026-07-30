@@ -885,7 +885,36 @@ def _normalize_score_inputs(text_1: str | list[str], text_2: str | list[str]) ->
     return list(text_1), list(text_2)
 
 
-def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, dp_size: int, master_port: int) -> None:
+def _get_data_parallel_device_ids(llm_kwargs: dict[str, Any], dp_rank: int, dp_size: int) -> list[str]:
+    visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+    full_device_ids = [device_id for device_id in visible.split(",") if device_id]
+    if not full_device_ids:
+        full_device_ids = [str(device_id) for device_id in range(torch.npu.device_count())]
+
+    if llm_kwargs.get("distributed_executor_backend") == "ray":
+        chunk = max(len(full_device_ids) // dp_size, 1)
+        start = dp_rank * chunk
+        return full_device_ids[start : start + chunk]
+
+    tp_size = int(llm_kwargs.get("tensor_parallel_size", 1))
+    required_device_count = dp_size * tp_size
+    if len(full_device_ids) < required_device_count:
+        raise ValueError(
+            f"DP={dp_size} and TP={tp_size} require {required_device_count} "
+            f"devices, but only {full_device_ids} are visible"
+        )
+    start = dp_rank * tp_size
+    return full_device_ids[start : start + tp_size]
+
+
+def _run_vllm_runner_dp_worker(
+    conn,
+    llm_kwargs: dict[str, Any],
+    dp_rank: int,
+    dp_size: int,
+    master_port: int,
+    rank_device_ids: list[str],
+) -> None:
     llm = None
     try:
         os.environ["VLLM_DP_RANK"] = str(dp_rank)
@@ -895,29 +924,7 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        import torch
-
-        visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
-        full_device_ids: list[str] = [d for d in visible.split(",") if d]
-        if not full_device_ids:
-            full_device_ids = [str(i) for i in range(torch.npu.device_count())]
-
-        if llm_kwargs.get("distributed_executor_backend") == "ray":
-            devs = full_device_ids
-            chunk = max(len(devs) // dp_size, 1)
-            start = dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-        else:
-            tp_size = int(llm_kwargs.get("tensor_parallel_size", 1))
-            required_device_count = dp_size * tp_size
-            if len(full_device_ids) < required_device_count:
-                raise ValueError(
-                    f"DP={dp_size} and TP={tp_size} require {required_device_count} "
-                    f"devices, but only {full_device_ids} are visible"
-                )
-            start = dp_rank * tp_size
-            rank_device_ids = full_device_ids[start : start + tp_size]
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(rank_device_ids)
+        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(rank_device_ids)
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
@@ -1460,11 +1467,23 @@ class DPVllmRunner(VllmRunner):
         try:
             for dp_rank in range(self._dp_size):
                 parent_conn, child_conn = ctx.Pipe()
+                rank_device_ids = _get_data_parallel_device_ids(llm_kwargs, dp_rank, self._dp_size)
                 proc = ctx.Process(
                     target=_run_vllm_runner_dp_worker,
-                    args=(child_conn, llm_kwargs, dp_rank, self._dp_size, master_port),
+                    args=(child_conn, llm_kwargs, dp_rank, self._dp_size, master_port, rank_device_ids),
                 )
-                proc.start()
+                original_visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(rank_device_ids)
+                try:
+                    # torch_npu 2.10 reads device visibility while the spawned
+                    # interpreter imports this module, before the worker target
+                    # can update its environment.
+                    proc.start()
+                finally:
+                    if original_visible_devices is None:
+                        os.environ.pop("ASCEND_RT_VISIBLE_DEVICES", None)
+                    else:
+                        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = original_visible_devices
                 child_conn.close()
                 self._dp_parent_conns.append(parent_conn)
                 self._dp_processes.append(proc)
