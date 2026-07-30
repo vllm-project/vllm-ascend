@@ -1,4 +1,4 @@
-# Disaggregated encoder
+# Disaggregated-encoder
 
 Disaggregated encoder refers to running the vision (multimodal) encoder stage of a large language model (LLM) in a separate vLLM process/instance from the language model's prefill and decode stages.
 
