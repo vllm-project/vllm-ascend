@@ -158,17 +158,13 @@ class UvaBufferWrapper:
                 # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
                 # pinned and enables true async DMA without an intermediate
                 # tensor or stream sync.
-                self._uva[:n_dirty].copy_(
-                    self._cpu[:n_dirty], non_blocking=True
-                )
+                self._uva[:n_dirty].copy_(self._cpu[:n_dirty], non_blocking=True)
             else:
                 # Sparse modification pattern — fall back to indexed copy.
                 # Explicitly re-pin the CPU source so that non_blocking is
                 # not silently degraded.
                 src = self._cpu[dirty_rows].pin_memory()
-                self._uva[dirty_rows] = src.to(
-                    device="npu", non_blocking=True
-                )
+                self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
         return self._uva
 
