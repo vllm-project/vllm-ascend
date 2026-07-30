@@ -71,23 +71,12 @@ ge::graphStatus CustomFIATiling::ConvertContext(gert::TilingContext &context, In
     ifaContext.key.shape = context.GetInputShape(KEY_INPUT_INDEX);
     OPS_ERR_IF((ifaContext.query.shape == nullptr) || (ifaContext.key.shape == nullptr),
                OPS_LOG_E(context.GetNodeName(), "shape of query or shape of key is null."), return ge::GRAPH_FAILED);
-    auto batchOfQuery = ifaContext.query.shape->GetStorageShape().GetDim(0);
-    auto batchOfKey = ifaContext.key.shape->GetStorageShape().GetDim(0);
-    if (batchOfQuery != batchOfKey) {
-        ifaContext.kCache.resize(batchOfQuery);
-        ifaContext.vCache.resize(batchOfQuery);
-        for (int64_t size = 0; size < batchOfQuery; ++size) {
-            ifaContext.kCache[size] =
-                const_cast<gert::StorageShape *>(context.GetDynamicInputShape(KEY_INPUT_INDEX, size));
-            ifaContext.vCache[size] =
-                const_cast<gert::StorageShape *>(context.GetDynamicInputShape(VALUE_INPUT_INDEX, size));
-        }
-    } else {
-        ifaContext.kCache.resize(1);
-        ifaContext.vCache.resize(1);
-        ifaContext.kCache[0] = const_cast<gert::StorageShape *>(context.GetDynamicInputShape(KEY_INPUT_INDEX, 0));
-        ifaContext.vCache[0] = const_cast<gert::StorageShape *>(context.GetDynamicInputShape(VALUE_INPUT_INDEX, 0));
-    }
+    // Paged attention uses a single shared KV-cache tensor per key/value;
+    // batch addressing is handled by block_table, not by per-batch tensors.
+    ifaContext.kCache.resize(1);
+    ifaContext.vCache.resize(1);
+    ifaContext.kCache[0] = const_cast<gert::StorageShape *>(context.GetDynamicInputShape(KEY_INPUT_INDEX, 0));
+    ifaContext.vCache[0] = const_cast<gert::StorageShape *>(context.GetDynamicInputShape(VALUE_INPUT_INDEX, 0));
 
     ifaContext.value.desc = context.GetInputDesc(VALUE_INPUT_INDEX);
     ifaContext.value.shape = context.GetInputShape(VALUE_INPUT_INDEX);
@@ -392,6 +381,7 @@ ge::graphStatus CustomFIATiling::CustomFIASplitBlock()
 {
     const uint32_t taskNum = GetTotalQTaskNum();
     context_->blockDim = taskNum < context_->blockDim ? taskNum : context_->blockDim;
+    context_->blockDim = context_->blockDim > MAX_CORE_NUM ? MAX_CORE_NUM : context_->blockDim;
     OPS_ERR_IF(context_->blockDim == 0, OPS_LOG_E(context_->opName, "block dim is zero."), return ge::GRAPH_FAILED);
 
     const uint32_t taskNumPerCore = taskNum / context_->blockDim;
