@@ -373,34 +373,18 @@ jobs:
         - name: Download previous coverage data from OBS
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           run: |
-            pip install esdk-obs-python --quiet
             mkdir -p previous-coverage
-            # The OBS SDK calls os.makedirs(dirname(downloadPath)); a bare
-            # filename yields dirname='' and crashes with FileNotFoundError,
-            # so always hand it an absolute path with a real directory.
-            python3 - <<'EOF'
-            import os
-            from obs import ObsClient
-
-            client = ObsClient(
-                access_key_id=os.environ['OBS_ACCESS_KEY'],
-                secret_access_key=os.environ['OBS_SECRET_KEY'],
-                server='https://obs.cn-north-4.myhuaweicloud.com'
-            )
-            download_path = os.path.abspath('previous-coverage.tar')
-            response = client.getObject(
-                'vllm-ascend',
-                'ci/precision-test/coverage.tar',
-                downloadPath=download_path,
-            )
-            if response.status >= 300:
-                raise RuntimeError(
-                    f'Failed to download previous coverage: '
-                    f'{response.status} {response.errorMessage}'
-                )
-            print(f'Downloaded previous coverage data from OBS -> {download_path}')
-            EOF
-            tar xf previous-coverage.tar -C previous-coverage
+            # The historical coverage package is exposed as a public-read
+            # object in OBS, so download it directly via its public URL with
+            # curl (no SDK or credentials needed). On the very first run there
+            # is no history yet (HTTP 404); tolerate that so the downstream
+            # backfill/assemble steps still proceed with the current data.
+            if curl -fSL --retry 3 -o previous-coverage.tar \
+              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar"; then
+              tar xf previous-coverage.tar -C previous-coverage
+            else
+              echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
+            fi
 
         - name: Backfill missing coverage data
           if: steps.coverage-completeness.outputs.has_missing == 'true'
