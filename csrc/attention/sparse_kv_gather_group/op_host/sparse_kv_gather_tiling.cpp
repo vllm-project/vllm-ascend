@@ -95,18 +95,22 @@ ge::graphStatus SKGGroupInfoParser::GetTensorInfo(SKGGroupParamInfo &params) con
     params.outCtkvShape = context_->GetOutputShape(SKG_OUT_CTKV_IDX);
     params.outKpeDesc = context_->GetOutputDesc(SKG_OUT_KPE_IDX);
     params.outKpeShape = context_->GetOutputShape(SKG_OUT_KPE_IDX);
+    params.currentTopkSlotsDesc = context_->GetOutputDesc(SKG_CURRENT_TOPK_SLOTS_IDX);
+    params.currentTopkSlotsShape = context_->GetOutputShape(SKG_CURRENT_TOPK_SLOTS_IDX);
 
     if (params.pagedCtkvDesc == nullptr || params.pagedKpeDesc == nullptr ||
         params.blockTableDesc == nullptr || params.topkIndicesDesc == nullptr ||
         params.curPosDesc == nullptr || params.outCtkvDesc == nullptr ||
-        params.outKpeDesc == nullptr) {
+        params.outKpeDesc == nullptr ||
+        params.currentTopkSlotsDesc == nullptr) {
         OP_LOGE(OP_NAME_STR.c_str(), "Required input or output descriptor is null.");
         return ge::GRAPH_FAILED;
     }
     if (params.pagedCtkvShape == nullptr || params.pagedKpeShape == nullptr ||
         params.blockTableShape == nullptr || params.topkIndicesShape == nullptr ||
         params.curPosShape == nullptr || params.outCtkvShape == nullptr ||
-        params.outKpeShape == nullptr) {
+        params.outKpeShape == nullptr ||
+        params.currentTopkSlotsShape == nullptr) {
         OP_LOGE(OP_NAME_STR.c_str(), "Required input or output shape is null.");
         return ge::GRAPH_FAILED;
     }
@@ -162,6 +166,11 @@ ge::graphStatus SKGGroupInfoParser::CheckDtypes(SKGGroupTilingInfo &info) const
         return ge::GRAPH_FAILED;
     }
 
+    if (info.params.currentTopkSlotsDesc->GetDataType() != ge::DT_INT32) {
+        OP_LOGE(OP_NAME_STR.c_str(), "current_topk_slots must be INT32.");
+        return ge::GRAPH_FAILED;
+    }
+
     const auto blockTableType = info.params.blockTableDesc->GetDataType();
     const auto topkIndicesType = info.params.topkIndicesDesc->GetDataType();
     const auto curPosType = info.params.curPosDesc->GetDataType();
@@ -172,20 +181,6 @@ ge::graphStatus SKGGroupInfoParser::CheckDtypes(SKGGroupTilingInfo &info) const
                 static_cast<int32_t>(blockTableType),
                 static_cast<int32_t>(topkIndicesType),
                 static_cast<int32_t>(curPosType));
-        return ge::GRAPH_FAILED;
-    }
-
-    if (blockTableType != topkIndicesType || blockTableType != curPosType) {
-        OP_LOGE(OP_NAME_STR.c_str(),
-                "block_table, topk_indices and cur_pos must use the same dtype, got %d, %d, %d.",
-                static_cast<int32_t>(blockTableType),
-                static_cast<int32_t>(topkIndicesType),
-                static_cast<int32_t>(curPosType));
-        return ge::GRAPH_FAILED;
-    }
-    if (ctkvType == ge::DT_FLOAT16 && blockTableType != ge::DT_INT32) {
-        OP_LOGE(OP_NAME_STR.c_str(),
-                "FLOAT16 cache currently requires INT32 indices.");
         return ge::GRAPH_FAILED;
     }
 
@@ -261,6 +256,17 @@ ge::graphStatus SKGGroupInfoParser::CheckShapes(SKGGroupTilingInfo &info) const
                           SKG_CTKV_DIM, "out_ctkv") != ge::GRAPH_SUCCESS ||
         CheckExact3DShape(info.params.outKpeShape, info.numActual, info.topkN,
                           SKG_KPE_DIM, "out_kpe") != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    if (CheckRank(info.params.currentTopkSlotsShape, 2,
+                  "current_topk_slots") != ge::GRAPH_SUCCESS ||
+        info.params.currentTopkSlotsShape->GetStorageShape().GetDim(0) !=
+            static_cast<int64_t>(info.numActual) ||
+        info.params.currentTopkSlotsShape->GetStorageShape().GetDim(1) != 8) {
+        OP_LOGE(OP_NAME_STR.c_str(),
+                "current_topk_slots must have shape [%u, 8].",
+                info.numActual);
         return ge::GRAPH_FAILED;
     }
 

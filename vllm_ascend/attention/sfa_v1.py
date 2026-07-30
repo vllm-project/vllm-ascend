@@ -185,6 +185,7 @@ class AscendSFAMetadata:
     #                                   |-- query_len ---|
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
+    positions: torch.Tensor
     seq_lens: torch.Tensor
     seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
@@ -208,6 +209,10 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
+    # Produced by grouped gather and consumed by all shared layers in a group.
+    prefetch_current_topk_slots: torch.Tensor | None = None
+    # Existing INT32 per-request positions used by grouped prefetch.
+    prefetch_positions: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -461,6 +466,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
+            positions=input_positions,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -472,6 +478,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            prefetch_positions=common_attn_metadata.prefetch_positions,
         )
 
     def build_for_graph_capture(
@@ -506,6 +513,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     _prefetched_kv: torch.Tensor | None = None     # [max_prefetch_layers, max_num_seqs, index_topk, kv_lora_rank]
     _prefetched_k_pe: torch.Tensor | None = None   # [max_prefetch_layers, max_num_seqs, index_topk, qk_rope_head_dim]
+    _prefetch_current_topk_slots: torch.Tensor | None = None
     _gather_stream: torch_npu.npu.Stream | None = None
     _gather_done_event: torch_npu.npu.Event | None = None
 
@@ -1202,12 +1210,27 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _ensure_prefetch_buffer(self, kv_cache) -> None:
         """Allocate the shared prefetch buffers on the first producer call."""
-        if AscendSFAImpl._prefetched_kv is not None:
-            return
         max_tokens = self.vllm_config.scheduler_config.max_num_seqs
         device = kv_cache[0].device
         dtype = kv_cache[0].dtype
         topk = self.prefetch_topk_size
+        if (
+            AscendSFAImpl._prefetched_kv is not None
+            and AscendSFAImpl._prefetched_k_pe is not None
+            and AscendSFAImpl._prefetch_current_topk_slots is not None
+            and AscendSFAImpl._prefetch_current_topk_slots.shape
+            == (max_tokens, 8)
+            and AscendSFAImpl._prefetched_kv.shape
+            == (
+                self.prefetch_plan.max_prefetch_layers,
+                max_tokens,
+                topk,
+                self.kv_lora_rank,
+            )
+            and AscendSFAImpl._prefetched_kv.dtype == dtype
+            and AscendSFAImpl._prefetched_kv.device == device
+        ):
+            return
         AscendSFAImpl._prefetched_kv = torch.empty(
             self.prefetch_plan.max_prefetch_layers,
             max_tokens,
@@ -1222,6 +1245,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk,
             self.qk_rope_head_dim,
             dtype=dtype,
+            device=device,
+        )
+        AscendSFAImpl._prefetch_current_topk_slots = torch.empty(
+            max_tokens,
+            8,
+            dtype=torch.int32,
             device=device,
         )
 
@@ -1252,6 +1281,30 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv = AscendSFAImpl._prefetched_kv[self.prefetch_buffer_index][:num_actual_tokens]
         kpe = AscendSFAImpl._prefetched_k_pe[self.prefetch_buffer_index][:num_actual_tokens]
         return kv, kpe
+
+    def _patch_prefetched_current_tokens(
+        self,
+        kv_cache,
+        slot_mapping: torch.Tensor,
+        attn_metadata: AscendSFAMetadata,
+        prefetched_kv: torch.Tensor,
+        prefetched_k_pe: torch.Tensor,
+    ) -> None:
+        """Restore current-token cache entries with one fused Ascend C op."""
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        current_topk_slots = attn_metadata.prefetch_current_topk_slots
+        if current_topk_slots is None:
+            raise RuntimeError(
+                "Grouped SFA prefetch did not publish current-token slots."
+            )
+        torch.ops._C_ascend.npu_sparse_kv_patch_out(
+            kv_cache[0],
+            kv_cache[1],
+            slot_mapping[:num_actual_tokens].contiguous(),
+            current_topk_slots[:num_actual_tokens],
+            prefetched_kv,
+            prefetched_k_pe,
+        )
 
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape
@@ -2102,36 +2155,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                     and attn_metadata.attn_state
                     == AscendAttentionState.DecodeOnly
                 ):
-                    topk_real = topk_indices[:num_actual].reshape(
-                        num_actual, -1
-                    )
-                    current_positions = torch.as_tensor(
-                        attn_metadata.seq_lens[:num_actual],
-                        dtype=torch.int64,
-                        device=topk_real.device,
-                    ) - 1
-                    current_slots = topk_real == current_positions.unsqueeze(-1)
-                    block_ids = attn_metadata.block_table[
-                        torch.arange(num_actual, device=topk_real.device),
-                        current_positions // 128,
-                    ]
-                    offsets = current_positions % 128
-                    current_kv = kv_cache[0][block_ids, offsets, 0]
-                    current_k_pe = kv_cache[1][block_ids, offsets, 0]
-                    current_slots = current_slots.unsqueeze(-1)
-                    prefetched_kv.copy_(
-                        torch.where(
-                            current_slots,
-                            current_kv.unsqueeze(1).expand_as(prefetched_kv),
-                            prefetched_kv,
-                        )
-                    )
-                    prefetched_k_pe.copy_(
-                        torch.where(
-                            current_slots,
-                            current_k_pe.unsqueeze(1).expand_as(prefetched_k_pe),
-                            prefetched_k_pe,
-                        )
+                    self._patch_prefetched_current_tokens(
+                        kv_cache,
+                        slot_mapping_sfa,
+                        attn_metadata,
+                        prefetched_kv,
+                        prefetched_k_pe,
                     )
 
                     kv_len = self.prefetch_topk_size
@@ -2232,11 +2261,23 @@ class AscendSFAImpl(MLAAttentionImpl):
                 topk_indices_for_prefetch = topk_indices[
                     :num_actual_tokens
                 ].reshape(num_actual_tokens, -1)
-                current_positions = torch.as_tensor(
-                    attn_metadata.seq_lens[:num_actual_tokens],
-                    dtype=torch.int64,
-                    device=topk_indices_for_prefetch.device,
-                ) - 1
+                if attn_metadata.prefetch_positions is None:
+                    raise RuntimeError(
+                        "SFA prefetch requires INT32 positions metadata."
+                    )
+                current_positions = attn_metadata.prefetch_positions[
+                    :num_actual_tokens
+                ]
+                current_topk_slots = (
+                    AscendSFAImpl._prefetch_current_topk_slots
+                )
+                assert current_topk_slots is not None
+                current_topk_slots = current_topk_slots[
+                    :num_actual_tokens
+                ]
+                attn_metadata.prefetch_current_topk_slots = (
+                    current_topk_slots
+                )
 
                 if AscendSFAImpl._gather_stream is None:
                     AscendSFAImpl._gather_stream = torch_npu.npu.Stream()
@@ -2281,11 +2322,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     out_ctkv_0, out_kpe_0 = prefetch_outputs[0]
                     out_ctkv_1, out_kpe_1 = prefetch_outputs[1]
                     out_ctkv_2, out_kpe_2 = prefetch_outputs[2]
-                    index_dtype = (
-                        torch.int64
-                        if ctkv_0.dtype == torch.bfloat16
-                        else torch.int32
-                    )
                     torch.ops._C_ascend.npu_sparse_kv_gather_group_out(
                         ctkv_0,
                         kpe_0,
@@ -2293,15 +2329,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                         kpe_1,
                         ctkv_2,
                         kpe_2,
-                        attn_metadata.block_table.to(index_dtype).contiguous(),
-                        topk_indices_for_prefetch.to(index_dtype).contiguous(),
-                        current_positions.to(index_dtype).contiguous(),
+                        attn_metadata.block_table.contiguous(),
+                        topk_indices_for_prefetch.contiguous(),
+                        current_positions.contiguous(),
                         out_ctkv_0,
                         out_kpe_0,
                         out_ctkv_1,
                         out_kpe_1,
                         out_ctkv_2,
                         out_kpe_2,
+                        current_topk_slots,
                         128,
                         num_prefetch_layers,
                     )

@@ -23,6 +23,7 @@ constexpr uint32_t SKG_CUR_POS_IDX      = 8;
 
 constexpr uint32_t SKG_OUT_CTKV_IDX = 0;
 constexpr uint32_t SKG_OUT_KPE_IDX  = 1;
+constexpr uint32_t SKG_CURRENT_TOPK_SLOTS_IDX = 6;
 
 constexpr uint32_t SKG_ATTR_BLOCK_SIZE = 0;
 constexpr uint32_t SKG_ATTR_NUM_CACHE_LAYERS = 1;
@@ -52,6 +53,9 @@ struct SKGGroupParamInfo {
 
     const gert::CompileTimeTensorDesc *outKpeDesc = nullptr;
     const gert::StorageShape *outKpeShape = nullptr;
+
+    const gert::CompileTimeTensorDesc *currentTopkSlotsDesc = nullptr;
+    const gert::StorageShape *currentTopkSlotsShape = nullptr;
 
     const int64_t *blockSize = nullptr;
     const int64_t *numCacheLayers = nullptr;

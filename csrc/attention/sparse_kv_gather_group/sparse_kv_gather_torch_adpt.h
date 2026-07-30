@@ -64,13 +64,6 @@ inline void validate_inputs(
                 "topk_indices must be int32 or int64");
     TORCH_CHECK(is_index_dtype(cur_pos.scalar_type()),
                 "cur_pos must be int32 or int64");
-    TORCH_CHECK(block_table.scalar_type() == topk_indices.scalar_type() &&
-                    block_table.scalar_type() == cur_pos.scalar_type(),
-                "block_table, topk_indices and cur_pos must use the same dtype");
-    TORCH_CHECK(paged_ctkv.scalar_type() != at::kHalf ||
-                    block_table.scalar_type() == at::kInt,
-                "float16 cache currently requires int32 indices");
-
     TORCH_CHECK(paged_ctkv.dim() == 4,
                 "paged_ctkv must have shape [num_blocks, 128, 1, 512]");
     TORCH_CHECK(paged_kpe.dim() == 4,
@@ -139,6 +132,26 @@ inline void validate_outputs(
     TORCH_CHECK(out_kpe.is_contiguous(), "out_kpe must be contiguous");
 }
 
+inline void validate_current_topk_slots(
+    const at::Tensor &paged_ctkv,
+    const at::Tensor &topk_indices,
+    const at::Tensor &current_topk_slots)
+{
+    const int64_t num_actual = topk_indices.size(0);
+    TORCH_CHECK(current_topk_slots.dim() == 2 &&
+                    current_topk_slots.size(0) == num_actual &&
+                    current_topk_slots.size(1) == 8,
+                "current_topk_slots must have shape [",
+                num_actual, ", 8], got ",
+                current_topk_slots.sizes());
+    TORCH_CHECK(current_topk_slots.scalar_type() == at::kInt,
+                "current_topk_slots must be int32");
+    check_same_device(
+        paged_ctkv, current_topk_slots, "current_topk_slots");
+    TORCH_CHECK(current_topk_slots.is_contiguous(),
+                "current_topk_slots must be contiguous");
+}
+
 inline void run_group_unchecked(
     const at::Tensor &c0, const at::Tensor &k0,
     const at::Tensor &c1, const at::Tensor &k1,
@@ -147,11 +160,13 @@ inline void run_group_unchecked(
     const at::Tensor &cur_pos,
     at::Tensor &oc0, at::Tensor &ok0, at::Tensor &oc1, at::Tensor &ok1,
     at::Tensor &oc2, at::Tensor &ok2,
+    at::Tensor &current_topk_slots,
     const int64_t block_size, const int64_t num_cache_layers)
 {
     EXEC_NPU_CMD(aclnnSparseKvGatherGroup, c0, k0, c1, k1, c2, k2,
                  block_table, topk_indices, cur_pos, block_size,
-                 num_cache_layers, oc0, ok0, oc1, ok1, oc2, ok2);
+                 num_cache_layers, oc0, ok0, oc1, ok1, oc2, ok2,
+                 current_topk_slots);
 }
 
 }  // namespace sparse_kv_gather_group_detail
@@ -164,6 +179,7 @@ inline void npu_sparse_kv_gather_group_out(
     const at::Tensor &cur_pos,
     at::Tensor &oc0, at::Tensor &ok0, at::Tensor &oc1, at::Tensor &ok1,
     at::Tensor &oc2, at::Tensor &ok2,
+    at::Tensor &current_topk_slots,
     const int64_t block_size, const int64_t num_cache_layers)
 {
     TORCH_CHECK(num_cache_layers >= 1 && num_cache_layers <= 3,
@@ -178,9 +194,12 @@ inline void npu_sparse_kv_gather_group_out(
         sparse_kv_gather_group_detail::validate_outputs(*ctkvs[i], *kpes[i],
             topk_indices, *out_ctkvs[i], *out_kpes[i]);
     }
+    sparse_kv_gather_group_detail::validate_current_topk_slots(
+        c0, topk_indices, current_topk_slots);
     sparse_kv_gather_group_detail::run_group_unchecked(
         c0, k0, c1, k1, c2, k2, block_table, topk_indices, cur_pos,
-        oc0, ok0, oc1, ok1, oc2, ok2, block_size, num_cache_layers);
+        oc0, ok0, oc1, ok1, oc2, ok2, current_topk_slots,
+        block_size, num_cache_layers);
 }
 
 }  // namespace vllm_ascend

@@ -50,6 +50,7 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "attention/sparse_kv_gather/sparse_kv_gather_torch_adpt.h"
 #include "attention/sparse_kv_gather_group/sparse_kv_gather_torch_adpt.h"
+#include "attention/sparse_kv_patch/sparse_kv_patch_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2773,11 +2774,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor(a!) out_ctkv_0, Tensor(b!) out_kpe_0, "
             "Tensor(c!) out_ctkv_1, Tensor(d!) out_kpe_1, "
             "Tensor(e!) out_ctkv_2, Tensor(f!) out_kpe_2, "
+            "Tensor(g!) current_topk_slots, "
             "int block_size, int num_cache_layers"
         ") -> ()"
     );
     ops.impl("npu_sparse_kv_gather_group_out", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_kv_gather_group_out);
 
+    // Consumer-side current-token repair. The grouped gather emits one slot
+    // per request; this op copies both cache components into that slot with a
+    // single Ascend C launch.
+    ops.def(
+        "npu_sparse_kv_patch_out("
+            "Tensor paged_ctkv, Tensor paged_kpe, "
+            "Tensor slot_mapping, Tensor current_topk_slots, "
+            "Tensor(a!) prefetched_ctkv, Tensor(b!) prefetched_kpe"
+        ") -> ()"
+    );
+    ops.impl("npu_sparse_kv_patch_out", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_kv_patch_out);
 }
 #endif
