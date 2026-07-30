@@ -164,16 +164,19 @@ class CoverageSelector:
     def normalize_test_name(test_name: str) -> str:
         """
         Convert test case directory name to standard script name format:
-        - tests__e2e__... -> tests/e2e/...
-        - tests__e2e__...--test_foo -> tests/e2e/...::test_foo
+        - tests__e2e__... -> tests/e2e/... (file-level) -> tests/e2e/....py (with .py suffix)
+        - tests__e2e__...--test_foo -> tests/e2e/...::test_foo (function-level, no .py suffix)
         - cpu-ut -> cpu-ut (unchanged)
         """
         if test_name == "cpu-ut":
             return test_name
-        # First convert -- to ::
+        # First convert -- to :: (function-level test marker)
         result = test_name.replace("--", "::")
         # Then convert __ to /
         result = result.replace("__", "/")
+        # If no :: (file-level test), add .py suffix
+        if "::" not in result:
+            result = result + ".py"
         return result
 
     def get_covered_lines_from_file(self, cov_file: str, filename: str) -> set[int]:
@@ -936,7 +939,7 @@ class TestSelector:
         print(f"\n{gran_detail_titles.get(expand_reason, 'Details')}:")
         for test_case, affected_detail, total_lines in selected[:10]:
             print(f"\n  {test_case} ({total_lines} lines):")
-            for filepath, lines in sorted(changed_files.items()):
+            for filepath, lines in sorted(affected_detail.items()):
                 line_str = self._format_line_range(sorted(lines))
                 print(f"    - {filepath}: {line_str}")
 

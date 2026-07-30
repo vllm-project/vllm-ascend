@@ -143,7 +143,12 @@ class RecomputeScheduler(Scheduler):
             request.request_id,
             RequestStatus.FINISHED_ABORTED,
         )
-        assert finished_reqs == [(request.request_id, request.client_index)]
+        if vllm_version_is("0.25.1"):
+            assert finished_reqs == [(request.request_id, request.client_index)]
+        else:
+            assert [(r.request_id, r.client_index) for r in finished_reqs] == [
+                (request.request_id, request.client_index)
+            ]
 
     def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
         self.current_step += 1
@@ -993,7 +998,7 @@ class RecomputeScheduler(Scheduler):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
-            if request is not None:
+            if not vllm_version_is("0.25.1") and request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
