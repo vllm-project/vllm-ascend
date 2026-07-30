@@ -62,9 +62,7 @@ class SFAPDRD2HConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.is_producer = vllm_config.kv_transfer_config.is_kv_producer
         self.is_consumer = vllm_config.kv_transfer_config.is_kv_consumer
-        self.requires_full_blocks_on_update_after_alloc = (
-            role == KVConnectorRole.SCHEDULER and self.is_producer
-        )
+        self.requires_full_blocks_on_update_after_alloc = role == KVConnectorRole.SCHEDULER and self.is_producer
         # SFA path is layer-wise on both sides.
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", True)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
@@ -78,13 +76,11 @@ class SFAPDRD2HConnector(KVConnectorBase_V1, SupportsHMA):
         decode_offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
         if self.is_producer:
             assert not decode_offload_enabled, (
-                "SFAPDRD2HConnector producer (P) must run with "
-                "sparse_kv_offload_config.enabled=false."
+                "SFAPDRD2HConnector producer (P) must run with sparse_kv_offload_config.enabled=false."
             )
         if self.is_consumer:
             assert decode_offload_enabled, (
-                "SFAPDRD2HConnector consumer (D) must run with "
-                "sparse_kv_offload_config.enabled=true."
+                "SFAPDRD2HConnector consumer (D) must run with sparse_kv_offload_config.enabled=true."
             )
 
         if role == KVConnectorRole.SCHEDULER:

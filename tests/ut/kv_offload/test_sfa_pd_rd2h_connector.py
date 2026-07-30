@@ -417,9 +417,7 @@ def test_non_tp0_verify_log_marks_shared_main_as_unavailable():
     with (
         patch.object(envs, "VLLM_ASCEND_MF_VERIFY", True),
         patch.object(envs, "VLLM_ASCEND_SFA_DEBUG", False),
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread.logger.info"
-        ) as log_info,
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread.logger.info") as log_info,
     ):
         thread._log_read_result(read_info)
 
@@ -461,9 +459,7 @@ def test_consumer_load_errors_are_unioned_across_tp():
     worker = _make_consumer_worker_for_completion_test()
     worker._mf_read_thread.get_and_clear_done.return_value = set()
     worker._mf_read_thread.get_and_clear_failed.return_value = set()
-    worker._gather_tp_read_status = MagicMock(
-        return_value=[({"req-0"}, set()), ({"req-0"}, {"req-0"})]
-    )
+    worker._gather_tp_read_status = MagicMock(return_value=[({"req-0"}, set()), ({"req-0"}, {"req-0"})])
 
     assert worker.get_finished() == (set(), {"req-0-internal"})
 
@@ -663,9 +659,7 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
 
 @pytest.mark.parametrize("all_groups", [False, True])
 def test_producer_scheduler_cleans_request_state_on_finish(all_groups):
-    scheduler = SFAPDRD2HProducerScheduler.__new__(
-        SFAPDRD2HProducerScheduler
-    )
+    scheduler = SFAPDRD2HProducerScheduler.__new__(SFAPDRD2HProducerScheduler)
     request = SimpleNamespace(request_id="req-0")
     scheduler._reqs_need_send_layerwise = {"req-0": MagicMock()}
 
@@ -679,9 +673,7 @@ def test_producer_scheduler_cleans_request_state_on_finish(all_groups):
 
 
 def test_producer_scheduler_resolves_batch_metadata_by_external_request_id():
-    scheduler = SFAPDRD2HProducerScheduler.__new__(
-        SFAPDRD2HProducerScheduler
-    )
+    scheduler = SFAPDRD2HProducerScheduler.__new__(SFAPDRD2HProducerScheduler)
     scheduler._reqs_need_send_layerwise = {}
     child_params = {
         "do_remote_decode": True,
@@ -714,9 +706,7 @@ def test_producer_scheduler_resolves_batch_metadata_by_external_request_id():
 
 
 def test_producer_scheduler_rejects_missing_batch_metadata():
-    scheduler = SFAPDRD2HProducerScheduler.__new__(
-        SFAPDRD2HProducerScheduler
-    )
+    scheduler = SFAPDRD2HProducerScheduler.__new__(SFAPDRD2HProducerScheduler)
     scheduler._reqs_need_send_layerwise = {}
     request = SimpleNamespace(
         request_id="cmpl-parent-1-12345678",
