@@ -5,7 +5,6 @@ import torch
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.worker.block_table import BlockTable as AscendBlockTable
@@ -111,8 +110,8 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
             )
 
         if max_num_blocks is None:
-            kv_cache_shard_count = get_kv_cache_shard_count()
-            max_num_blocks = [cdiv(max_model_len, block_size * kv_cache_shard_count) for block_size in block_sizes]
+            dcp_world_size = get_decode_context_model_parallel_world_size()
+            max_num_blocks = [cdiv(max_model_len, block_size * dcp_world_size) for block_size in block_sizes]
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(

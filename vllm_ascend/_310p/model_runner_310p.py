@@ -42,7 +42,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
@@ -949,9 +948,9 @@ class NPUModelRunner310(NPUModelRunner):
 
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        kv_cache_shard_count = get_kv_cache_shard_count()
+        dcp_world_size = get_decode_context_model_parallel_world_size()
         for kv_cache_spec in kv_cache_specs:
-            max_num_blocks_per_req = cdiv(max_model_len, kv_cache_spec.block_size * kv_cache_shard_count)
+            max_num_blocks_per_req = cdiv(max_model_len, kv_cache_spec.block_size * dcp_world_size)
             if isinstance(kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
