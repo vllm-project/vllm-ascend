@@ -602,7 +602,7 @@ at::Tensor npu_recurrent_gated_delta_rule_310_meta(
 }
 
 at::Tensor npu_custom_fused_infer_attention_v310_meta(
-    const at::Tensor &query, at::TensorList key, at::TensorList value,
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const c10::optional<at::Tensor> &attn_mask,
     c10::OptionalArrayRef<c10::SymInt> actual_seq_lengths_q,
     c10::OptionalArrayRef<c10::SymInt> actual_seq_lengths_kv,

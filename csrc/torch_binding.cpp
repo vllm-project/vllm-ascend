@@ -2088,18 +2088,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "npu_custom_fused_infer_attention_v310(Tensor query, "
-        "                                       Tensor[] key, "
-        "                                       Tensor[] value, *, "
+        "                                       Tensor key, "
+        "                                       Tensor value, *, "
         "                                       Tensor? attn_mask=None, "
         "                                       SymInt[]? actual_seq_lengths_q=None, "
         "                                       SymInt[]? actual_seq_lengths_kv=None, "
         "                                       Tensor? block_table=None, "
         "                                       int num_heads=1, "
         "                                       float scale_value=1.0, "
-        "                                       str input_layout='BSH', "
+        "                                       str input_layout='BSND', "
         "                                       int num_key_value_heads=0, "
         "                                       int block_size=0, "
-        "                                       int inner_precise=1) -> Tensor");
+        "                                       int inner_precise=2) -> Tensor");
     ops.impl("npu_custom_fused_infer_attention_v310", torch::kPrivateUse1,
              &vllm_ascend::npu_custom_fused_infer_attention_v310);
 

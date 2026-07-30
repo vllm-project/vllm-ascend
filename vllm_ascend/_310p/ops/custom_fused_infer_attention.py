@@ -135,8 +135,8 @@ def custom_fused_infer_attention_v310(
     """
     return torch.ops._C_ascend.npu_custom_fused_infer_attention_v310(
         query,
-        [key],
-        [value],
+        key,
+        value,
         attn_mask=attn_mask,
         actual_seq_lengths_q=actual_seq_lengths_q,
         actual_seq_lengths_kv=actual_seq_lengths_kv,

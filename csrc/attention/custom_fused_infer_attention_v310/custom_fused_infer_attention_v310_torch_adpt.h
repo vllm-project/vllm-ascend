@@ -18,7 +18,7 @@
 namespace vllm_ascend {
 
 at::Tensor npu_custom_fused_infer_attention_v310(
-    const at::Tensor &query, at::TensorList key, at::TensorList value,
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const c10::optional<at::Tensor> &attn_mask,
     c10::OptionalArrayRef<c10::SymInt> actual_seq_lengths_q,
     c10::OptionalArrayRef<c10::SymInt> actual_seq_lengths_kv,
@@ -36,8 +36,14 @@ at::Tensor npu_custom_fused_infer_attention_v310(
 
     std::string input_layout_str = std::string(input_layout);
     const char *input_layout_char = input_layout_str.c_str();
+
+    // The OpDef declares key/value as TensorList; wrap single tensors here
+    // so the Python API accepts plain Tensor instead of Tensor[].
+    at::TensorList keyList({key});
+    at::TensorList valueList({value});
+
     // dispatch hostAPI
-    EXEC_NPU_CMD(aclnnCustomFusedInferAttentionV310, query, key, value, attn_mask,
+    EXEC_NPU_CMD(aclnnCustomFusedInferAttentionV310, query, keyList, valueList, attn_mask,
                  actSeqLenQuery, actSeqLenKey, block_table, num_heads, scale_value, input_layout_char,
                  num_key_value_heads, block_size, inner_precise, output);
     return output;

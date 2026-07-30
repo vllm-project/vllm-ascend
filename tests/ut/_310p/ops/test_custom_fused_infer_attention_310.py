@@ -172,7 +172,6 @@ def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
         block_size=block_size,
         input_layout=layout,
         scale_value=scale,
-        inner_precise=2,
     )
     torch_npu.npu.synchronize()
 
