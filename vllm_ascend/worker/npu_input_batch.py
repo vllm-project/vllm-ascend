@@ -49,6 +49,7 @@ class NPUInputBatch(InputBatch):
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        use_replayssm: bool = False,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -108,6 +109,17 @@ class NPUInputBatch(InputBatch):
             pin_memory=pin_memory,
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
+
+        # Mamba2 ReplaySSM decode ring origin (num_computed at each request's
+        # last full-state write); populated only when the feature is on.
+        self.use_replayssm = use_replayssm
+        self.replayssm_decode_base_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.replayssm_decode_base = self.replayssm_decode_base_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(

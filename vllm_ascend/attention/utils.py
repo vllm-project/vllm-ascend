@@ -283,6 +283,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # encoder-decoder layers needing ``encoder_seq_lens``, the
             # mamba ``is_prefilling`` flag, and FastPrefill's
             # ``logits_indices_padded`` / ``num_logits_indices``).
+            rswa_prefix_lens=_slice_reqs(self.rswa_prefix_lens),
+            replayssm_decode_base_cpu=_slice_reqs(self.replayssm_decode_base_cpu),
             _seq_lens_cpu=_slice_reqs(self._seq_lens_cpu),
             _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
