@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Mapping
 from typing import Any
 
-from transformers import HunYuanVLProcessor
+from transformers import AutoImageProcessor, HunYuanVLProcessor
 
 from vllm_ascend.utils import vllm_version_is
-
-_STALE_PROCESSOR_MODULES = {
-    "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
-    "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
-}
 
 _HUNYUAN_VL_EXTRA_SPECIAL_TOKENS = {
     "image_start_token": "<｜hy_place▁holder▁no▁100｜>",
@@ -32,11 +28,11 @@ _HUNYUAN_VL_SPECIAL_TOKEN_IDS = {
 
 
 def _register_hunyuan_tokenizer_special_tokens(tokenizer: Any) -> None:
-    """Restore the named-token schema required by Transformers 5.13."""
+    """Restore named image tokens missing from older HunyuanOCR snapshots."""
     missing_tokens = {
         name: token
         for name, token in _HUNYUAN_VL_EXTRA_SPECIAL_TOKENS.items()
-        if tokenizer is not None and getattr(tokenizer, name, None) is None
+        if getattr(tokenizer, name, None) is None
     }
     if missing_tokens:
         tokenizer._set_model_specific_special_tokens(special_tokens=missing_tokens)
@@ -56,7 +52,7 @@ def _register_hunyuan_tokenizer_special_tokens(tokenizer: Any) -> None:
 
 
 class _HunYuanVLProcessorCompat(HunYuanVLProcessor):
-    """Native processor with the legacy HunyuanOCR token schema restored."""
+    """Register the tokenizer schema before native processor initialization."""
 
     def __init__(
         self,
@@ -76,34 +72,24 @@ class _HunYuanVLProcessorCompat(HunYuanVLProcessor):
         )
 
 
-def _remove_stale_registry_entries() -> bool:
-    """Backport the lazy-registry cleanup from vLLM PR #47867."""
-    import vllm.transformers_utils.processors as vllm_processors
+def _import_v025_hunyuan_vision() -> Any:
+    """Import v0.25.1 while skipping its obsolete processor registration."""
+    original_descriptor = AutoImageProcessor.__dict__["register"]
+    original_register = AutoImageProcessor.register
 
-    class_to_module = vllm_processors._CLASS_TO_MODULE
-    exported_names = vllm_processors.__all__
-    entries_to_remove = []
-    for class_name, stale_module in _STALE_PROCESSOR_MODULES.items():
-        registered_module = class_to_module.get(class_name)
-        if registered_module is None:
-            continue
-        if registered_module != stale_module:
-            raise RuntimeError(f"Unexpected vLLM processor registry entry for {class_name}: {registered_module!r}")
-        if class_name not in exported_names:
-            raise RuntimeError(f"Missing vLLM processor export for {class_name}")
+    def register(config_class: Any, *args: Any, **kwargs: Any) -> Any:
+        if config_class == "HunYuanVLImageProcessor":
+            return None
+        return original_register(config_class, *args, **kwargs)
 
-        entries_to_remove.append(class_name)
-
-    for class_name in entries_to_remove:
-        del class_to_module[class_name]
-        exported_names.remove(class_name)
-
-    return bool(entries_to_remove)
+    AutoImageProcessor.register = staticmethod(register)  # type: ignore[method-assign]
+    try:
+        return importlib.import_module("vllm.model_executor.models.hunyuan_vision")
+    finally:
+        AutoImageProcessor.register = original_descriptor  # type: ignore[method-assign]
 
 
 def _patch_hunyuan_processor_loader(hunyuan_vision: Any) -> None:
-    """Use the native processor with the complete Hunyuan tokenizer schema."""
-
     def get_hf_processor(self: Any, **kwargs: object) -> Any:
         kwargs.pop("use_fast", None)
         kwargs.setdefault("backend", "pil")
@@ -113,17 +99,6 @@ def _patch_hunyuan_processor_loader(hunyuan_vision: Any) -> None:
 
 
 def _patch_image_token_wrapping(hunyuan_vision: Any) -> None:
-    """Wrap bare image tokens with start/end tokens for HunYuanVLProcessor.
-
-    Transformers' ``HunYuanVLProcessor.validate_inputs`` requires every image
-    placeholder to be surrounded by the image start/end tokens, i.e.
-    ``<no_100><no_102><no_101>``. vLLM main folds this wrapping into
-    ``hunyuan_vision._call_hf_processor`` natively, but vLLM v0.25.1 does not,
-    so prompts built with a bare image token (e.g. the dummy mm batch during
-    ``profile_run``) are rejected by ``validate_inputs``. Backport the wrapping
-    on v0.25.1 only; the ``wrapped not in prompt`` guard keeps it idempotent.
-    """
-
     def call_hf_processor(
         self: Any,
         prompt: str,
@@ -147,13 +122,13 @@ def _patch_image_token_wrapping(hunyuan_vision: Any) -> None:
 
 
 def install_hunyuan_vl_processor_compat() -> None:
-    """Align both supported vLLM refs with Transformers 5.13 Hunyuan APIs."""
-    _remove_stale_registry_entries()
-    from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
+    """Patch supported vLLM versions for older HunyuanOCR tokenizers."""
+    is_v025 = vllm_version_is("0.25.1")
+    if is_v025:
+        hunyuan_vision = _import_v025_hunyuan_vision()
+    else:
+        hunyuan_vision = importlib.import_module("vllm.model_executor.models.hunyuan_vision")
 
-    _patch_hunyuan_processor_loader(main_hunyuan_vision)
-    # vLLM v0.25.1 does not wrap bare image tokens with start/end tokens inside
-    # ``_call_hf_processor`` (that landed on main only), so backport it here.
-    # Main already does this natively, so the patch is v0.25.1-only.
-    if vllm_version_is("0.25.1"):
-        _patch_image_token_wrapping(main_hunyuan_vision)
+    _patch_hunyuan_processor_loader(hunyuan_vision)
+    if is_v025:
+        _patch_image_token_wrapping(hunyuan_vision)
