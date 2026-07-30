@@ -159,7 +159,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name glm-5 \
-    --max-num-seqs 8 \
+    --max-num-seqs 16 \
     --max-model-len 200000 \
     --max-num-batched-tokens 4096 \
     --trust-remote-code \
@@ -194,7 +194,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name glm-5 \
-    --max-num-seqs 8 \
+    --max-num-seqs 16 \
     --max-model-len 40960 \
     --max-num-batched-tokens 4096 \
     --trust-remote-code \
@@ -232,7 +232,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name glm-5 \
-    --max-num-seqs 2 \
+    --max-num-seqs 8 \
     --max-model-len 32768 \
     --max-num-batched-tokens 4096 \
     --trust-remote-code \
