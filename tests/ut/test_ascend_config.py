@@ -522,9 +522,11 @@ class TestScoreEncoderCacheConfig(TestBase):
         ]
 
         for field, user_config in invalid_configs:
-            with self.subTest(field=field, value=user_config[field]):
-                with self.assertRaisesRegex(ValueError, field):
-                    ScoreEncoderCacheConfig(user_config, SimpleNamespace())
+            with (
+                self.subTest(field=field, value=user_config[field]),
+                self.assertRaisesRegex(ValueError, field),
+            ):
+                ScoreEncoderCacheConfig(user_config, SimpleNamespace())
 
     def test_rejects_non_dict_config(self):
         with self.assertRaisesRegex(

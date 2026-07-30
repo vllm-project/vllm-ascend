@@ -33,7 +33,6 @@ therefore guarantees the singleton exists in every DP rank / engine-core
 process regardless of the multiprocessing start method.
 """
 
-
 from vllm.v1.engine.core import EngineCore
 
 _ORIGINAL_ENGINE_CORE_INIT = EngineCore.__init__

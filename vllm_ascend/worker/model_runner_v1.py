@@ -917,10 +917,13 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
     ) -> None:
         self._clear_finished_encoder_cache_copies()
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+            super()._process_encoder_cache_scheduler_output(scheduler_output)
+            return
+
         ec_manager_metadata = self._get_score_encoder_cache_metadata(scheduler_output)
         if ec_manager_metadata is None:
-            for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_cache.pop(mm_hash, None)
+            super()._process_encoder_cache_scheduler_output(scheduler_output)
             return
 
         # Free the cached encoder outputs.
@@ -1026,6 +1029,15 @@ class NPUModelRunner(GPUModelRunner):
         ec_manager_metadata: Any | None,
         free_encoder_mm_hashes: list[str],
     ) -> None:
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+            super()._cache_encoder_output(
+                mm_hash,
+                output,
+                ec_manager_metadata,
+                free_encoder_mm_hashes,
+            )
+            return
+
         promoting_mm_hashes = (
             ec_manager_metadata.promoting_mm_hashes
             if ec_manager_metadata is not None
@@ -1036,11 +1048,6 @@ class NPUModelRunner(GPUModelRunner):
             if ec_manager_metadata is not None
             else []
         )
-
-        if not get_ascend_config().score_encoder_cache_config.enabled:
-            self.encoder_cache[mm_hash] = output
-            self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
-            return
 
         staging = torch.empty_like(output, device="cpu", pin_memory=True)
         staging.copy_(output.detach(), non_blocking=True)
