@@ -188,7 +188,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --port 8015 \
     --max_model_len 135168 \
     --max-num-batched-tokens 16384 \
-    --served-model-name dsv3 \
+    --served-model-name deepseek_v3 \
     --gpu-memory-utilization 0.9 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
