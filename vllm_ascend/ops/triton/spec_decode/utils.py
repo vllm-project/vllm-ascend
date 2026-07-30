@@ -146,9 +146,9 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
 
         query_cache_pos = effective_seq_len + q_idx
         block_num_q = query_cache_pos // block_size
-        block_id_q = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0
-        ).to(tl.int64)
+        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
+            tl.int64
+        )
         slot_q = block_id_q * block_size + (query_cache_pos % block_size)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 

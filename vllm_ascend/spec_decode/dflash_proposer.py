@@ -3,9 +3,8 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-
-from vllm.triton_utils import HAS_TRITON, triton
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState

@@ -109,12 +109,8 @@ CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected", CONFIGS
-)
-def test_copy_and_expand_dflash_dspark(
-    batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected
-):
+@pytest.mark.parametrize("batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected", CONFIGS)
+def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected):
     init_device_properties_triton()
     device = "npu"
     torch.manual_seed(0)
@@ -141,9 +137,7 @@ def test_copy_and_expand_dflash_dspark(
             for i in range(batch_size)
         ]
     )
-    max_blocks = (
-        int((seq_lens.max() + num_query_per_req + KV_BLOCK_SIZE) // KV_BLOCK_SIZE) + 2
-    )
+    max_blocks = int((seq_lens.max() + num_query_per_req + KV_BLOCK_SIZE) // KV_BLOCK_SIZE) + 2
     block_table = torch.randint(1, 10000, (batch_size, max_blocks), dtype=torch.int32, device=device)
 
     if has_num_rejected:
@@ -155,9 +149,7 @@ def test_copy_and_expand_dflash_dspark(
         num_rejected_tokens = None
 
     next_token_ids = torch.randint(0, 150000, (batch_size,), dtype=torch.int32, device=device)
-    context_slot_mapping = torch.randint(
-        0, 1 << 30, (total_ctx,), dtype=torch.int32, device=device
-    )
+    context_slot_mapping = torch.randint(0, 1 << 30, (total_ctx,), dtype=torch.int32, device=device)
 
     # Run PyTorch reference
     ref = copy_and_expand_dflash_dspark_ref(
@@ -198,9 +190,7 @@ def test_copy_and_expand_dflash_dspark(
         block_table_stride=max_blocks,
         query_start_loc_ptr=query_start_loc,
         seq_lens_ptr=seq_lens,
-        num_rejected_tokens_ptr=(
-            num_rejected_tokens if num_rejected_tokens is not None else 0
-        ),
+        num_rejected_tokens_ptr=(num_rejected_tokens if num_rejected_tokens is not None else 0),
         parallel_drafting_token_id=PARALLEL_DRAFTING_TOKEN_ID,
         block_size=KV_BLOCK_SIZE,
         num_query_per_req=num_query_per_req,
