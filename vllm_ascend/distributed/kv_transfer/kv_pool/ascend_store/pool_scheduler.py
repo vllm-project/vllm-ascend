@@ -42,8 +42,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    resolve_request_hash_block_size,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 class KVPoolScheduler:
@@ -110,16 +110,11 @@ class KVPoolScheduler:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = (
-            vllm_config.cache_config.hash_block_size
-            if vllm_version_is("0.25.1")
-            else vllm_config.cache_config.prefix_match_unit
+        self.hash_block_size = resolve_request_hash_block_size(
+            vllm_config,
+            kv_cache_config,
+            self.grouped_block_size[0],
         )
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
