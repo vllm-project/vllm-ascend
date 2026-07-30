@@ -280,7 +280,7 @@ export SOC_VERSION="ascend310p1"
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
-### 22. Why does TPOT increases drastically as concurrency grows?
+### 22. Why does TPOT increase drastically as concurrency grows?
 
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:

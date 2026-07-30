@@ -23,7 +23,7 @@ CPP should be configured on the **P (Prefiller) node** in a PD disaggregation se
 
 ## Supported Scenarios
 
-CPP focuses on optimization during the prefill phase on the **P node in PD disaggregation** scenarios. CPP is recommended for PD(Prefill/Decode) disaggregation scenarios. Supported features are as follows:
+CPP focuses on optimization during the prefill phase on the **P node in PD disaggregation** scenarios. CPP is recommended for PD (Prefill/Decode) disaggregation scenarios. Supported features are as follows:
 
 |         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill |
 | ------- | ----- | ----- | ------ | ------ |
@@ -259,10 +259,14 @@ Configure online calibration data length to match your `max-model-len`. Use `bat
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference products (64GB,A3), the configuration and performance data are as follows.
 =======
 To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, we deploy a P (Prefill) instance on Ascend Atlas A3 inference products (64 GB,A3), the configuration and performance data are as follows.
 >>>>>>> 11972934c... feat: add AIDD related documentation modifications
+=======
+To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, we deploy a P (Prefill) instance on Ascend Atlas A3 inference products (64 GB, A3), the configuration and performance data are as follows.
+>>>>>>> 9fa747801... Apply suggestions from code review
 
 **Fixed-length requests, concurrency=1**:
 
