@@ -415,7 +415,8 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-            if self.use_gva_layerwise and self.kv_role in ["kv_producer", "kv_both"]:
+            can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
+            if self.use_gva_layerwise and can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
@@ -438,7 +439,7 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
-            elif self.kv_role in ["kv_producer", "kv_both"]:
+            elif can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
                     self.m_store,
@@ -977,6 +978,17 @@ class KVPoolWorker:
                 continue
             save_start_block = request.save_start_token // block_size
             save_end_block = request.save_end_token // block_size
+            group_block_hashes = get_block_hashes(
+                request.block_hashes,
+                block_size,
+                self.hash_block_size,
+            )
+            partial_block_index = self._get_partial_block_index(
+                request.target_token_len,
+                block_size,
+                len(group_block_hashes),
+                self.layerwise_offload,
+            )
             # Skip blocks that are hit in the KV pool — their KV is already
             # in the pool (loaded via load_prepare), so re-saving would write
             # to a READABLE blob and fail with MMC_UNMATCHED_KEY.
@@ -990,7 +1002,6 @@ class KVPoolWorker:
             # already-written blobs, causing -3107 which corrupts the blob
             # state and cascades to load failures (-3101/-3102).
             if self.use_gva_layerwise and save_start_block < save_end_block:
-                group_block_hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
                     key = self._make_layerwise_gva_key(
                         group_id, block_hash_to_str(group_block_hashes[save_start_block])
@@ -999,9 +1010,10 @@ class KVPoolWorker:
                         save_start_block += 1
                     else:
                         break
-            if save_start_block >= save_end_block and request.partial_block_index is None:
+            if partial_block_index is None:
+                partial_block_index = request.partial_block_index
+            if save_start_block >= save_end_block and partial_block_index is None:
                 continue
-            partial_block_index = request.partial_block_index
             request_block_ranges.append(
                 LayerBlockRange(
                     request=request,
@@ -1033,19 +1045,32 @@ class KVPoolWorker:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
+            group_block_hashes = get_block_hashes(
+                request.block_hashes,
+                block_size,
+                self.hash_block_size,
+            )
             load_start_block = (
                 request.load_spec.vllm_cached_tokens // block_size
                 if not self.layerwise_offload or layer_id in self.independent_layers
                 else 0
             )
             cached_full_blocks = cached_tokens // block_size
-            full_blocks = min(cached_full_blocks, len(request.block_hashes))
-            needs_last_block_at_boundary = (
-                cached_tokens > 0 and cached_tokens % block_size == 0 and full_blocks < cached_full_blocks
+            full_blocks = min(cached_full_blocks, len(group_block_hashes))
+            partial_block_index = self._get_partial_block_index(
+                cached_tokens,
+                block_size,
+                len(group_block_hashes),
+                self.layerwise_offload,
             )
-            if request.last_block_gva is not None and (cached_tokens % block_size != 0 or needs_last_block_at_boundary):
-                partial_block_index = cached_full_blocks if cached_tokens % block_size != 0 else cached_full_blocks - 1
-            else:
+            if not self.layerwise_offload or layer_id in self.independent_layers:
+                partial_block_index = None
+            partial_gva = (
+                request.partial_load_gvas_by_group[group_id]
+                if group_id < len(request.partial_load_gvas_by_group)
+                else request.last_block_gva
+            )
+            if partial_gva is None or partial_gva <= 0:
                 partial_block_index = None
             if partial_block_index is not None and partial_block_index < load_start_block:
                 partial_block_index = None
@@ -1069,6 +1094,22 @@ class KVPoolWorker:
                 )
             )
 
+    @staticmethod
+    def _get_partial_block_index(
+        token_count: int,
+        block_size: int,
+        hash_count: int,
+        enabled: bool,
+    ) -> int | None:
+        if not enabled or token_count <= 0:
+            return None
+        full_blocks, remainder = divmod(token_count, block_size)
+        if remainder:
+            return full_blocks
+        if full_blocks > hash_count:
+            return full_blocks - 1
+        return None
+
     def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
         """Generate GVA key for layerwise transfer.
 
@@ -1080,6 +1121,15 @@ class KVPoolWorker:
             return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
         else:
             return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+
+    def _make_layerwise_partial_key(
+        self,
+        request: ReqMeta,
+        group_id: int,
+        block_index: int,
+        end_token: int,
+    ) -> str:
+        return f"{self.model_name}@partial@{request.req_id}@{group_id}@{block_index}@{end_token}@{self.head_or_tp_rank}"
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
@@ -1099,12 +1149,11 @@ class KVPoolWorker:
             if request.can_save is None or not request.can_save:
                 continue
             block_hashes = request.block_hashes
-            if not block_hashes:
-                continue
 
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
+            request.partial_save_gvas_by_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
@@ -1174,6 +1223,39 @@ class KVPoolWorker:
                             self._allocated_gvas[key] = gva
                             all_group_save_keys.append(key)
 
+                partial_block_index = self._get_partial_block_index(
+                    request.target_token_len,
+                    effective_block_size,
+                    len(group_block_hashes),
+                    self.layerwise_offload,
+                )
+                if partial_block_index is not None and partial_block_index < len(block_ids_by_group):
+                    partial_key = self._make_layerwise_partial_key(
+                        request,
+                        group_id,
+                        partial_block_index,
+                        request.target_token_len,
+                    )
+                    partial_gva = self._allocated_gvas.get(partial_key)
+                    if partial_gva is None:
+                        allocated = self.m_store.batch_alloc(
+                            [partial_key],
+                            [alloc_size],
+                        )
+                        partial_gva = allocated[0] if allocated else 0
+                        if partial_gva > 0:
+                            self._allocated_gvas[partial_key] = partial_gva
+                            all_group_save_keys.append(partial_key)
+                        else:
+                            logger.error(
+                                "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
+                                request.req_id,
+                                group_id,
+                                partial_block_index,
+                                partial_gva,
+                            )
+                    request.partial_save_gvas_by_group[group_id] = partial_gva
+
                 logger.info(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
                     "new_keys=%d cached_keys=%d alloc_size=%d",
@@ -1223,6 +1305,7 @@ class KVPoolWorker:
 
             all_group_load_gvas: list[np.ndarray] = []
             all_group_load_keys: list[str] = []
+            request.partial_load_gvas_by_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
@@ -1246,7 +1329,18 @@ class KVPoolWorker:
                     continue
                 full_len = len(block_ids_by_group)
 
-                if load_start_block >= full_blocks:
+                partial_block_index = self._get_partial_block_index(
+                    cached_tokens,
+                    effective_block_size,
+                    len(group_block_hashes),
+                    self.layerwise_offload,
+                )
+                if partial_block_index is not None and (
+                    partial_block_index < load_start_block or partial_block_index >= full_len
+                ):
+                    partial_block_index = None
+
+                if load_start_block >= full_blocks and partial_block_index is None:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
@@ -1254,6 +1348,17 @@ class KVPoolWorker:
                     self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
                     for i in range(load_start_block, full_blocks)
                 ]
+                block_indices = list(range(load_start_block, full_blocks))
+                if partial_block_index is not None:
+                    keys.append(
+                        self._make_layerwise_partial_key(
+                            request,
+                            group_id,
+                            partial_block_index,
+                            cached_tokens,
+                        )
+                    )
+                    block_indices.append(partial_block_index)
                 if not keys:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
@@ -1263,17 +1368,15 @@ class KVPoolWorker:
                 valid_keys_for_lease = []
                 valid_block_ids = []
                 invalid_block_ids: list[int] = []
-                for idx, (ki, key) in enumerate(zip(key_infos, keys)):
+                for ki, key, block_idx in zip(key_infos, keys, block_indices):
                     sizes = ki.size()
                     gva = ki.gva_list()[0] if sizes and sizes > 0 else 0
                     gvas.append(gva)
                     if gva > 0:
                         valid_keys_for_lease.append(key)
-                        block_idx = load_start_block + idx
                         if block_idx < len(block_ids_by_group):
                             valid_block_ids.append(int(block_ids_by_group[block_idx]))
                     else:
-                        block_idx = load_start_block + idx
                         if block_idx < len(block_ids_by_group):
                             invalid_block_ids.append(int(block_ids_by_group[block_idx]))
                         logger.warning(
@@ -1335,10 +1438,13 @@ class KVPoolWorker:
 
                 # Pad to match block_ids_by_group length, with 0s before load_start_block
                 full_gvas = [0] * full_len
-                for i, gva in enumerate(gvas):
+                normal_gva_count = full_blocks - load_start_block
+                for i, gva in enumerate(gvas[:normal_gva_count]):
                     if load_start_block + i < len(full_gvas):
                         full_gvas[load_start_block + i] = gva
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
+                if partial_block_index is not None and len(gvas) > normal_gva_count:
+                    request.partial_load_gvas_by_group[group_id] = gvas[normal_gva_count]
 
             if all_group_load_gvas:
                 request.load_keys = all_group_load_keys
@@ -1423,9 +1529,10 @@ class KVPoolWorker:
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+        # Protect the previous partial before allocating the next snapshot.
+        self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
-        self._prepare_load_gvas(requests)
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:

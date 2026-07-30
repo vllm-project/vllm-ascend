@@ -18,6 +18,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
@@ -84,6 +86,14 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 0]]
         result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
         self.assertEqual(result, [48])
+
+    def test_partial_prefill_block_index_boundaries(self):
+        cls = self._make_worker_class()
+
+        self.assertEqual(cls._get_partial_block_index(20, 16, 1, True), 1)
+        self.assertEqual(cls._get_partial_block_index(32, 16, 1, True), 1)
+        self.assertIsNone(cls._get_partial_block_index(32, 16, 2, True))
+        self.assertIsNone(cls._get_partial_block_index(20, 16, 1, False))
 
     def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
         cls = self._make_worker_class()
@@ -1373,6 +1383,23 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(len(layer_tasks), 0)
 
+    def test_layerwise_load_is_prepared_before_next_save_allocation(self):
+        worker = self._make_worker()
+        worker.num_layers = 0
+        call_order = []
+        worker._prepare_load_gvas = MagicMock(
+            side_effect=lambda requests: call_order.append("load")
+        )
+        worker._alloc_gvas_for_save = MagicMock(
+            side_effect=lambda requests: call_order.append("save")
+        )
+        worker._build_shared_save_data = MagicMock()
+        worker._build_shared_load_data = MagicMock()
+
+        worker.process_layer_data([MagicMock()])
+
+        self.assertEqual(call_order, ["load", "save"])
+
     def test_process_save_for_layer_batch_skip_no_save(self):
         worker = self._make_worker()
         req = ReqMeta(req_id="r1", token_len_chunk=32, block_ids=[0, 1], block_hashes=["h0", "h1"], can_save=False)
@@ -1436,6 +1463,127 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         reused_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
+
+    def test_partial_prefill_is_saved_and_loaded_for_reused_layer(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+            pool_worker as _pool_worker,
+        )
+
+        self.assertIsNotNone(_pool_worker)
+        worker = self._make_worker()
+        worker.use_gva_layerwise = True
+        worker.layerwise_offload = True
+        worker.independent_layers = [0]
+        worker.num_kv_cache_groups = 1
+        worker.grouped_block_size = [16]
+        worker.kv_cache_group_families = ["default"]
+        worker.group_block_len = {0: [64]}
+        worker.hash_block_size = 16
+        worker.page_size_bytes = 64
+        worker.head_or_tp_rank = 0
+        worker._allocated_gvas = {}
+        worker.m_store = MagicMock()
+        worker.m_store.batch_alloc.return_value = [101]
+
+        save_request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            save_start_token=16,
+            save_end_token=16,
+            target_token_len=20,
+            num_prompt_tokens=32,
+            block_ids=[0, 1],
+            block_hashes=["h0"],
+            can_save=True,
+            block_ids_np=np.asarray([0, 1], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+        )
+        worker._alloc_gvas_for_save([save_request])
+        worker._process_save_for_layer_batch([save_request], 1)
+
+        self.assertIsNotNone(save_request.save_keys)
+        assert save_request.save_keys is not None
+        partial_key = save_request.save_keys[0]
+        self.assertIn("@partial@r1@0@1@20@", partial_key)
+        self.assertEqual(save_request.partial_save_gvas_by_group, [101])
+        save_range = worker.layer_save_tasks[1][0].block_ranges[0]
+        self.assertEqual(save_range.partial_block_index, 1)
+
+        normal_info = MagicMock()
+        normal_info.size.return_value = 64
+        normal_info.gva_list.return_value = [201]
+        partial_info = MagicMock()
+        partial_info.size.return_value = 64
+        partial_info.gva_list.return_value = [202]
+        worker.m_store.batch_get_key_info.return_value = [
+            normal_info,
+            partial_info,
+        ]
+        worker.m_store.batch_add_lease.return_value = [0, 0]
+
+        load_request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            target_token_len=24,
+            num_prompt_tokens=32,
+            block_ids=[0, 1],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=20,
+                kvpool_cached_tokens=20,
+                can_load=True,
+            ),
+            block_ids_np=np.asarray([0, 1], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+        )
+        worker._prepare_load_gvas([load_request])
+        worker._process_load_for_layer_batch([load_request], 0)
+        worker._process_load_for_layer_batch([load_request], 1)
+
+        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
+        self.assertIn(partial_key, queried_keys)
+        self.assertEqual(load_request.partial_load_gvas_by_group, [202])
+        self.assertEqual(worker.layer_load_tasks[0], [])
+        block_range = worker.layer_load_tasks[1][0].block_ranges[0]
+        self.assertEqual(
+            (
+                block_range.start_block,
+                block_range.end_block,
+                block_range.partial_block_index,
+            ),
+            (0, 1, 1),
+        )
+
+    def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
+        worker = self._make_worker()
+        worker.layerwise_offload = True
+        worker.independent_layers = [0]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=32,
+            save_end_token=32,
+            target_token_len=34,
+            num_prompt_tokens=32,
+            block_ids=[0, 1, 2],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=33,
+                kvpool_cached_tokens=33,
+                can_load=True,
+            ),
+            partial_save_gvas_by_group=[301],
+            partial_load_gvas_by_group=[302],
+        )
+
+        worker._process_save_for_layer_batch([request], 1)
+        worker._process_load_for_layer_batch([request], 1)
+
+        save_range = worker.layer_save_tasks[1][0].block_ranges[0]
+        load_range = worker.layer_load_tasks[1][0].block_ranges[0]
+        self.assertEqual(save_range.partial_block_index, 2)
+        self.assertEqual(load_range.partial_block_index, 2)
 
 
 class TestKVPoolWorkerTpMismatch(unittest.TestCase):
