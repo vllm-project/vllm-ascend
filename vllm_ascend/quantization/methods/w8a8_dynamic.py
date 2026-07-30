@@ -79,6 +79,15 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        # npu_quant_matmul operates on 2D activations. Flatten any leading dims
+        # (e.g. MTP h_proj passes a [num_tokens, hc_mult, hidden] tensor when
+        # hc_mult > 1) and restore the original shape on the output.
+        reshaped = False
+        leading_dims = x.shape[:-1]
+        if x.dim() > 2:
+            x = x.reshape(-1, x.shape[-1])
+            reshaped = True
+
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
         need_unsqz = False
         if pertoken_scale.dim() == 2:
@@ -122,6 +131,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
+        if reshaped:
+            output = output.reshape(*leading_dims, output.shape[-1])
         return output
 
     def process_weights_after_loading(self, layer):
