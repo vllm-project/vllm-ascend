@@ -38,7 +38,6 @@ _server_cmd: &server_cmd
   - "--compilation_config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
-
 _benchmarks: &benchmarks
   perf:
     case_type: performance
