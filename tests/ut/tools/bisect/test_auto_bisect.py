@@ -14,7 +14,7 @@ def test_pick_mid_prefers_midpoint_then_nearest_unskipped_index():
     assert Bisector._pick_mid(0, 3, skipped={0, 1, 2}) is None
 
 
-def test_parse_args_maps_no_assume_built_head_flag():
+def test_parse_args_maps_extended_aop_parameters():
     args = _parse_args(
         [
             "--scene",
@@ -23,17 +23,41 @@ def test_parse_args_maps_no_assume_built_head_flag():
             "case.yaml",
             "--good-commit",
             "good",
+            "--bad-commit",
+            "bad",
+            "--fail-confirm-retries",
+            "3",
+            "--trial-timeout-s",
+            "120",
+            "--barrier-timeout-s",
+            "60",
+            "--no-verify-good",
+            "--no-verify-bad",
+            "--force-initial-build",
             "--no-assume-built-head",
             "--native-check",
             "since-build",
+            "--config-base-path",
+            "custom/configs",
+            "--env-table",
+            "custom/env.csv",
         ]
     )
 
     assert args.scene == "single_node"
     assert args.config_yaml == "case.yaml"
     assert args.good_commit == "good"
+    assert args.bad_commit == "bad"
+    assert args.fail_confirm_retries == 3
+    assert args.trial_timeout_s == 120
+    assert args.barrier_timeout_s == 60
+    assert args.no_verify_good is True
+    assert args.no_verify_bad is True
+    assert args.force_initial_build is True
     assert args.no_assume_built_head is True
     assert args.native_check == "since-build"
+    assert args.config_base_path == "custom/configs"
+    assert args.env_table == "custom/env.csv"
 
 
 def test_resolve_num_nodes_prefers_explicit_value(tmp_path: Path):

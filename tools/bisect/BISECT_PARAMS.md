@@ -163,7 +163,7 @@ PR 评论: /nightly <cases> --aop_enabled --trial-timeout 3600 ...
 |---|---|
 | `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` | leader + worker pod 各新增 11 个 `BISECT_*` 环境变量，并安全转义 YAML 字符串 |
 | `tests/e2e/nightly/multi_node/scripts/lws_560t.yaml.jinja2` | 560T leader + worker pod 同步新增并安全转义 `BISECT_*` 环境变量 |
-| `tests/e2e/nightly/scripts/aop_process.sh` | 接收 10 个新位置参数（`$13`~`$22`）；条件拼接到 `BISECT_CMD` |
+| `tests/e2e/nightly/scripts/aop_process.sh` | 接收 10 个可选控制参数（`$14`~`$23`，`$9` 为 bad commit）；条件拼接到 `BISECT_CMD` |
 | `tests/e2e/nightly/multi_node/scripts/run.sh` | 新增 `build_bisect_extra_args()` 数组构造函数；leader + worker 两条路径复用；`bad_commit` 替换硬编码 `HEAD` |
 
 ### 5. 二分执行与测试（2 个）

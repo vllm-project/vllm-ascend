@@ -18,7 +18,7 @@
 1. 在 **NPU 容器**内、`vllm-ascend` 仓库根目录下运行(例如 `/workspace/vllm-ascend`)。
 2. 直接用 `python -m tools.bisect.auto_bisect ...` 运行(在仓库根目录下,包可被导入)。
 3. **vllm-ascend 必须是 editable 安装**(`pip install -e`)——这样纯 `.py` 改动 checkout 后即时生效、无需重装。nightly 容器默认就是 editable。
-4. **vLLM 不需要改动**,容器里现有的 vLLM 即为配套版本(本工具只切换 vllm-ascend)。
+4. 工具会根据 `env_table.csv` 自动对齐历史提交对应的 **vLLM、CANN 和 torch-npu**;vLLM 从 `/vllm-workspace/vllm` 源码切换并 editable install,目标 CANN 必须已经安装或挂载到容器内。
 5. 依赖:`pytest`、`openai`、`aisbench`、`psutil`、`filelock`、`regex`(nightly 容器已具备)。
 
 ---
@@ -156,7 +156,7 @@ python -m tools.bisect.auto_bisect \
 - 退出码 `0` 但 `benchmark_results/` 里**任一 case 的 json `pass_fail=fail`**(精度/性能未达基线)→ **FAIL**;
 - 退出码 `0` 且无回归 → **PASS**;
 - 退出码 `2/3/4/5` 或超时(收集失败、conftest ImportError、环境问题等)→ **SKIP**;
-- **vLLM 版本不配套**(见 6.1)→ **SKIP**(带明确原因);
+- **运行时环境无法切换或不配套**(见 6.1)→ **SKIP**(带明确原因);
 - SKIP 不作为二分信号,类似 `git bisect skip`。
 
 端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / vLLM 不配套),会**明确报错并中止**而不是给错误结论。
@@ -281,7 +281,7 @@ python -m tools.bisect.auto_bisect \
 #### `--trial-timeout-s`
 
 - **作用**:单轮 pytest 的超时(秒);超时记为 SKIP。
-- **默认**:`5400`(90 分钟)。
+- **默认**:`7200`(120 分钟)。
 - **调整**:大模型起服务 + aisbench 很慢时适当调大,避免正常用例被误杀成 SKIP。
 
 ### 9.6 多机参数(`--scene multi_node` 时)

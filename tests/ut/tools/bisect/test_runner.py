@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from tools.bisect.config import BisectInput, BisectOptions
+from tools.bisect.env_manager import EnvSwitchError
+from tools.bisect.env_table import RuntimeEnv
 from tools.bisect.runner import MultiNodeRunner, SingleNodeRunner, _safe_name
 
 
@@ -53,3 +55,56 @@ def test_multi_node_runner_selects_external_dp_test_path(tmp_path: Path):
     runner = MultiNodeRunner(inp, opt, builder=None, coordinator=None)  # type: ignore[arg-type]
 
     assert runner._test_path().endswith("external_dp/scripts/test_external_dp.py")
+
+
+def test_runtime_env_change_invalidates_build_baseline(tmp_path: Path):
+    inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit="bad")
+    opt = BisectOptions(
+        repo_dir=tmp_path,
+        env_by_commit={
+            "candidate": RuntimeEnv(vllm_ref="vllm-sha", cann_version="9.0.1").to_dict(),
+        },
+    )
+    builder = type("Builder", (), {"invalidate_build_baseline": lambda self, reason: setattr(self, "reason", reason)})()
+    runner = SingleNodeRunner(inp, opt, builder)  # type: ignore[arg-type]
+    runner.env_manager.ensure = lambda target, log: True  # type: ignore[method-assign]
+
+    target = runner._ensure_runtime_env(
+        type("Candidate", (), {"commit": "candidate"})(),  # type: ignore[arg-type]
+        tmp_path / "trial.log",
+    )
+
+    assert target == RuntimeEnv(vllm_ref="vllm-sha", cann_version="9.0.1")
+    assert builder.reason == "runtime env changed for bisect candidate"
+
+
+def test_multi_node_env_failure_broadcasts_skip(tmp_path: Path):
+    inp = BisectInput(scene="multi_node", config_yaml="case.yaml", bad_commit="bad")
+    opt = BisectOptions(
+        repo_dir=tmp_path,
+        env_by_commit={"candidate": RuntimeEnv(vllm_ref="vllm-sha").to_dict()},
+    )
+    published = []
+    coordinator = type(
+        "Coordinator",
+        (),
+        {"publish_command": lambda self, *args, **kwargs: published.append((args, kwargs))},
+    )()
+    runner = MultiNodeRunner(inp, opt, builder=object(), coordinator=coordinator)  # type: ignore[arg-type]
+    runner.env_manager.ensure = lambda target, log: (_ for _ in ()).throw(EnvSwitchError("missing CANN"))  # type: ignore[method-assign]
+    candidate = type("Candidate", (), {"commit": "candidate", "short": "candidate"})()
+
+    outcome = runner.validate(candidate, 1, tmp_path)  # type: ignore[arg-type]
+
+    assert outcome.infra_error is True
+    assert outcome.skip_reason == "missing CANN"
+    assert published == [
+        (
+            (1, "candidate"),
+            {
+                "rebuild": False,
+                "action": "SKIP",
+                "env": RuntimeEnv(vllm_ref="vllm-sha").to_dict(),
+            },
+        )
+    ]

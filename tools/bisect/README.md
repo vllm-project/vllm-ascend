@@ -5,7 +5,10 @@ case fails, by binary-searching the `vllm-ascend` history between the last
 known-good commit and the failing commit. It reuses the existing nightly launch
 entries so the bisect reproduces the real nightly environment.
 
-> 中文使用指南见 [`USAGE_zh.md`](./USAGE_zh.md)。
+> 中文功能总览见 [`AOP_BISECT_FEATURE_zh.md`](./AOP_BISECT_FEATURE_zh.md)，
+> 操作步骤见 [`USAGE_zh.md`](./USAGE_zh.md)，参数扩展见
+> [`BISECT_PARAMS.md`](./BISECT_PARAMS.md)，UT 设计与结果见
+> [`UT_REPORT_zh.md`](./UT_REPORT_zh.md)。
 
 ## How it works
 
@@ -89,9 +92,9 @@ are still checked out at the PR SHA.
 Weekly scheduled workflows run at `0 2 * * 0` (Sunday 10:00 Beijing time).
 Scheduled runs select `all`, test `main`, and enable AOP automatically for the
 single/multi-node workflows that support bisect. The A2 accuracy-model workflow
-uses a different runner and is not yet bisect-capable. Nightly workflows
-currently expose `workflow_dispatch` and are started by the existing
-external/manual dispatch path.
+selects the LM, ASR or RM accuracy entry from the model config and is
+bisect-capable. Nightly workflows expose `workflow_dispatch` and are started by
+the existing external/manual dispatch path.
 
 ## Runtime environment table
 
