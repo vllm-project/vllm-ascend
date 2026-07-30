@@ -902,21 +902,40 @@ def _resolve_to_runners(
             else:
                 generic.append(t)
 
-        # SOC-specific tests — no partition, use original runner.
+        # SOC-specific tests — use configurable partition with SOC-specific key.
         if soc_specific:
             soc_label = _get_soc_label(soc_specific[0])
+            # SOC-specific partition key takes priority; falls back to generic key.
+            soc_partition_key = f"{soc_label}_x{num_npus}"
+            soc_psize = partition_config.get(soc_partition_key, psize)
             runner_soc = _find_runner(num_npus, npu_type, runners, soc=soc_label)
             if runner_soc is not None:
-                result.append(
-                    _build_test_group(
-                        num_npus,
-                        npu_type,
-                        runner_soc,
-                        soc_specific,
-                        "1-1",
-                        label=soc_label,
+                if soc_psize > 1:
+                    buckets = _partition_tests(sorted(soc_specific), soc_psize, estimated_times)
+                    for i, bucket in enumerate(buckets):
+                        if not bucket:
+                            continue
+                        result.append(
+                            _build_test_group(
+                                num_npus,
+                                npu_type,
+                                runner_soc,
+                                bucket,
+                                f"{i + 1}-{soc_psize}",
+                                label=soc_label,
+                            )
+                        )
+                else:
+                    result.append(
+                        _build_test_group(
+                            num_npus,
+                            npu_type,
+                            runner_soc,
+                            soc_specific,
+                            "1-1",
+                            label=soc_label,
+                        )
                     )
-                )
 
         # Generic tests — full partition, use runner pool (no soc).
         if generic:
