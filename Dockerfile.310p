@@ -111,8 +111,8 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
 # ===== Conditional installation based on BUILD_TYPE =====
 # All ARG definitions are in the same stage for better maintainability
 ARG BUILD_TYPE="release"
-ARG TORCH_NPU_VERSION="26.1.0"
-ARG TORCH_NPU_DATE="20260715.4"
+ARG TORCH_NPU_VERSION
+ARG TORCH_NPU_DATE
 
 # Install daily packages only when BUILD_TYPE is set to "daily"
 RUN if [ "$BUILD_TYPE" = "daily" ]; then \
