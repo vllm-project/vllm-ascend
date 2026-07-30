@@ -97,13 +97,32 @@ class KernelComputeWy {
     pipe_->InitBuffer(vFloatBuf_, chunkVElems_ * sizeof(float));
     pipe_->InitBuffer(kBetaBuf_, chunkKElems_ * sizeof(float));
     pipe_->InitBuffer(attnBuf_, ATTEN_ELEMS * sizeof(float));
-    pipe_->InitBuffer(gBuf_, FIXED_CHUNK_SIZE * sizeof(float));
+    // +8 floats: slot FIXED_CHUNK_SIZE holds the Lambda mask sentinel (see BuildLambdaTable).
+    pipe_->InitBuffer(gBuf_, (FIXED_CHUNK_SIZE + 8) * sizeof(float));
     pipe_->InitBuffer(expGBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     // Contiguous C scratch for bulk GemmApplyAdd: [64, max(K,V,64)].
     pipe_->InitBuffer(tmpBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(float));
     pipe_->InitBuffer(rowBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     pipe_->InitBuffer(negABuf_, FIXED_CHUNK_SIZE * sizeof(float));
+    pipe_->InitBuffer(lamOffBuf_, ATTEN_ELEMS * sizeof(uint32_t));
+    BuildLambdaTable();
     valid_ = true;
+  }
+
+  // Byte-offset table for the Lambda row-broadcast Gather, built once per kernel launch.
+  // off[i][j] = &a[i] for j < i (strict lower), else &a[FIXED_CHUNK_SIZE] which holds a
+  // large negative sentinel, so Exp() drives those lanes to 0. This folds the triangular
+  // mask into the gather and costs no extra vector op per task.
+  __aicore__ inline void BuildLambdaTable() {
+    LocalTensor<uint32_t> off = lamOffBuf_.Get<uint32_t>();
+    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
+      const uint32_t rowByte = i * static_cast<uint32_t>(sizeof(float));
+      for (uint32_t j = 0; j < FIXED_CHUNK_SIZE; ++j) {
+        off.SetValue(i * FIXED_CHUNK_SIZE + j,
+                     (j < i) ? rowByte : FIXED_CHUNK_SIZE * static_cast<uint32_t>(sizeof(float)));
+      }
+    }
+    gBuf_.Get<float>().SetValue(FIXED_CHUNK_SIZE, -1.0e20f);
   }
 
   __aicore__ inline void Process() {
@@ -246,23 +265,22 @@ class KernelComputeWy {
   }
 
   // In-place: gramLocal = A = −strictlower(G ⊙ Λ) with Λ_ij = exp(a_i − a_j) for j < i.
-  // Never forms γ_i/γ_j (overflow-safe).
-  // gramLocal must already be negated by the caller (one Muls over the whole 64x64) and
-  // negAj must hold −a_j, so a row costs Adds+Exp+Duplicate+Mul instead of
-  // Duplicate+Sub+Exp+Duplicate+Mul+Muls. a_i comes from the scalar cache, not GetValue.
-  __aicore__ inline void ApplyLambdaNegStrictLower(LocalTensor<float> gramLocal, const LocalTensor<float> negAj,
-                                                   const LocalTensor<float> aLocal, LocalTensor<float> rowTmp) {
-    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-      Adds(rowTmp, negAj, aLocal.GetValue(i), FIXED_CHUNK_SIZE);  // a_i − a_j
-      PipeBarrier<PIPE_V>();
-      Exp(rowTmp, rowTmp, FIXED_CHUNK_SIZE);
-      PipeBarrier<PIPE_V>();
-      // Zero Λ on diag+upper so those entries of A become 0.
-      Duplicate(rowTmp[i], 0.0f, FIXED_CHUNK_SIZE - i);
-      PipeBarrier<PIPE_V>();
-      Mul(gramLocal[i * FIXED_CHUNK_SIZE], gramLocal[i * FIXED_CHUNK_SIZE], rowTmp, FIXED_CHUNK_SIZE);
-      PipeBarrier<PIPE_V>();
-    }
+  // Never forms γ_i/γ_j (overflow-safe: a_i − a_j ≤ 0 on the strict lower triangle).
+  // Whole-block: Gather row-broadcasts a_i (masking folded into the offsets), one Sub with
+  // src1RepStride=0 subtracts a_j without materialising a second 64x64, then Exp and one Mul.
+  // gramLocal must already be negated by the caller. No value passes through the scalar unit.
+  __aicore__ inline void ApplyLambdaNegStrictLower(LocalTensor<float> gramLocal, const LocalTensor<float> aLocal,
+                                                  LocalTensor<float> mat) {
+    Gather(mat, aLocal, lamOffBuf_.Get<uint32_t>(), 0U, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    // mat[i][j] -= a_j : src1 repeat stride 0 replays the 64-float a vector on every row.
+    const BinaryRepeatParams rp{1, 1, 1, 8, 8, 0};
+    Sub(mat, mat, aLocal, FIXED_CHUNK_SIZE, FIXED_CHUNK_SIZE, rp);
+    PipeBarrier<PIPE_V>();
+    Exp(mat, mat, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    Mul(gramLocal, gramLocal, mat, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
   }
 
   // Row-scale by beta, read from the scalar cache rather than GetValue per row.
@@ -334,11 +352,9 @@ class KernelComputeWy {
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     // Hoisted out of the per-row loop: one negation of the whole 64x64 gram, and one
     // vector negation of a to give -a_j for the Adds-based outer difference.
-    LocalTensor<float> negA = negABuf_.Get<float>();
-    Muls(negA, gLocal, -1.0f, FIXED_CHUNK_SIZE);
     Muls(attnLocal, attnLocal, -1.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
-    ApplyLambdaNegStrictLower(attnLocal, negA, gLocal, scratch);
+    ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
 
     // RHS halves: βV in vFloat, γ·Kβ in kBeta (in-place doubling targets).
     BroadcastMulRowsFloat(vFloat, vFloat, betaLocal, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
@@ -379,7 +395,7 @@ class KernelComputeWy {
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
   TBuf<TPosition::VECCALC> kHalfBuf_, qHalfBuf_, vHalfBuf_, kFloatBuf_, vFloatBuf_, kBetaBuf_, attnBuf_, gBuf_,
-      expGBuf_, tmpBuf_, rowBuf_, negABuf_, mmLocalWsBuf_;
+      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, mmLocalWsBuf_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy
