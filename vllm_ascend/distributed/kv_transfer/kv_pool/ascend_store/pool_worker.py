@@ -792,7 +792,7 @@ class KVPoolWorker:
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            grouped_hash_cache = {}
+            grouped_hash_cache: GroupedBlockHashCache = {}
             load_masks = self.token_database.load_mask(
                 request.block_hashes,
                 token_len,
@@ -1675,7 +1675,7 @@ class KVPoolWorker:
         try:
             hits = []
             kv_cache_group_ids = kv_cache_group_ids or [0]
-            grouped_hash_cache = {}
+            grouped_hash_cache: GroupedBlockHashCache = {}
             coordinator_hit = self._lookup_with_coordinator(
                 token_len,
                 block_hashes,
@@ -1884,7 +1884,7 @@ class KVPoolWorker:
             hits: list[list[int]] = []
             max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
-            grouped_hash_cache = {}
+            grouped_hash_cache: GroupedBlockHashCache = {}
             coordinator_hit = self._lookup_with_coordinator(
                 token_len,
                 block_hashes,
