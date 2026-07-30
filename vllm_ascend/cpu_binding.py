@@ -706,8 +706,7 @@ class CpuAlloc:
 
         if not os.access("/proc/irq", os.W_OK):
             logger.warning(
-                "/proc/irq is not writable."
-                "If running in Docker, start the container with '--privileged=true'."
+                "/proc/irq is not writable. If running in Docker, start the container with '--privileged=true'."
             )
             return
 
