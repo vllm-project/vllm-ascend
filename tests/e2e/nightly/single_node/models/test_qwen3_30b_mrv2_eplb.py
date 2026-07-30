@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import os
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -22,7 +23,7 @@ PROMPTS = [
 
 
 def _run_dp4_tp4(*, enable_eplb: bool):
-    runner_kwargs = {
+    runner_kwargs: dict[str, Any] = {
         "data_parallel_size": 4,
         "tensor_parallel_size": 4,
         "enable_expert_parallel": True,
