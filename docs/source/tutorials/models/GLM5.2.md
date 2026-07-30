@@ -315,7 +315,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --port 7000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
-    --async-scheduling \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
@@ -372,7 +371,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --port 7000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
-    --async-scheduling \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
@@ -675,7 +673,6 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
-            --async-scheduling \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -744,7 +741,6 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
-            --async-scheduling \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -900,7 +896,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --seed 1024 \
     --enable-chunked-prefill \
     --served-model-name glm-5 \
-    --async-scheduling \
     --max-model-len 256000 \
     --max-num-batched-tokens 8192 \
     --trust-remote-code \
@@ -1004,7 +999,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --enable-prefix-caching \
     --seed 1024 \
     --served-model-name glm-5 \
-    --async-scheduling \
     --max-model-len 256000 \
     --max-num-batched-tokens 256 \
     --trust-remote-code \
@@ -1122,7 +1116,7 @@ python load_balance_proxy_server_example.py \
 Some configurations for optimization are shown below:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
 

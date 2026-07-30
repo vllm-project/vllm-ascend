@@ -48,62 +48,94 @@ def clean_line(line):
 # ============================================================
 
 
+FAILED_PATTERN = re.compile(r"^FAILED\s+(tests/\S+?\.py::\S+?)\s")
+SUMMARY_SEPARATOR_PATTERN = re.compile(r"^=+\s")
+CPU_LOG_PATH_PATTERN = re.compile(r"(?:^|-)cpu-\d+card(?:-|$)", re.IGNORECASE)
+CPU_FAILURE_LABEL = "cpu-ut"
+
+
+def extract_failed_from_log(log_path):
+    """Extract pytest node IDs from one log's short test summary."""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as exc:
+        print(f"::warning:: Cannot read {log_path}: {exc}")
+        return []
+
+    failed = []
+    in_summary = False
+    for line in lines:
+        text = clean_line(line)
+
+        if "short test summary info" in text:
+            in_summary = True
+            continue
+
+        if not in_summary:
+            continue
+
+        if SUMMARY_SEPARATOR_PATTERN.match(text):
+            in_summary = False
+            continue
+
+        match = FAILED_PATTERN.match(text)
+        if match:
+            failed.append(match.group(1))
+
+    return failed
+
+
+def is_cpu_log(log_path):
+    """Return whether a log belongs to a CPU selected-test artifact."""
+    if log_path.stem.lower().endswith("-cpu-ut"):
+        return True
+
+    return any(CPU_LOG_PATH_PATTERN.search(part) for part in log_path.parent.parts)
+
+
 def extract_failed_from_logs(log_dir):
     """
-    Recursively scan .log and .txt log files:
-      - Locate "short test summary info" marker
-      - Read subsequent lines until the next "=====" separator
-      - Match "FAILED tests/...::..." lines
-      - Deduplicate across all files
+    Scan CPU logs first and represent all CPU failures as one ``cpu-ut`` item.
+    Scan all remaining logs with the existing pytest node-ID behavior.
     """
     base = Path(log_dir)
     if not base.is_dir():
         print(f"::warning:: Log directory not found: {log_dir}")
         return []
 
-    FAILED_PAT = re.compile(r"^FAILED\s+(tests/\S+?\.py::\S+?)\s")
-    SEP_PAT = re.compile(r"^=+\s")
-
-    all_failed = []
-    seen = set()
-
     # Scan both real .log files (from run_selected_tests.sh) and mock .txt files
     candidates = []
     candidates.extend(base.rglob("*.log"))
     candidates.extend(base.rglob("*.txt"))
-    for candidate in sorted(candidates):
-        if candidate.suffix == ".txt" and "run-selected-tests" not in candidate.name:
-            continue
-        try:
-            lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception as exc:
-            print(f"::warning:: Cannot read {candidate.name}: {exc}")
-            continue
+    candidates = [
+        candidate
+        for candidate in sorted(candidates)
+        if candidate.suffix != ".txt" or "run-selected-tests" in candidate.name
+    ]
 
-        in_summary = False
-        for line in lines:
-            text = clean_line(line)
+    cpu_candidates = []
+    regular_candidates = []
+    for candidate in candidates:
+        target = cpu_candidates if is_cpu_log(candidate) else regular_candidates
+        target.append(candidate)
 
-            # Enter: found the bookmark
-            if "short test summary info" in text:
-                in_summary = True
-                continue
+    all_failed = []
+    seen = set()
 
-            if not in_summary:
-                continue
+    cpu_failed = False
+    for candidate in cpu_candidates:
+        if extract_failed_from_log(candidate):
+            cpu_failed = True
 
-            # Exit: hit the separator line ("======= 2 failed, 100 passed =======")
-            if SEP_PAT.match(text):
-                in_summary = False
-                continue
+    if cpu_failed:
+        seen.add(CPU_FAILURE_LABEL)
+        all_failed.append(CPU_FAILURE_LABEL)
 
-            # Collect: FAILED line inside the block
-            m = FAILED_PAT.match(text)
-            if m:
-                tp = m.group(1)
-                if tp not in seen:
-                    seen.add(tp)
-                    all_failed.append(tp)
+    for candidate in regular_candidates:
+        for test_path in extract_failed_from_log(candidate):
+            if test_path not in seen:
+                seen.add(test_path)
+                all_failed.append(test_path)
 
     return all_failed
 
@@ -137,6 +169,8 @@ def normalize_test_path(test_path):
     normalized = test_path.strip().replace("\\", "/").removeprefix("./")
     file_path, separator, test_name = normalized.partition("::")
     file_path = file_path.removesuffix(".py")
+    if separator:
+        test_name = test_name.partition("[")[0]
     return f"{file_path}{separator}{test_name}" if separator else file_path
 
 
@@ -210,7 +244,7 @@ def generate_report(failed, recommended, matched, log_dir, recommendations_sourc
     # ================================================================
     out.append("---")
     out.append("")
-    out.append(f"## Failed Test Cases（共 {len(failed)} 个）")
+    out.append(f"## Failed Test Cases（ {len(failed)} total）")
     out.append("")
     if failed:
         for i, t in enumerate(failed, 1):

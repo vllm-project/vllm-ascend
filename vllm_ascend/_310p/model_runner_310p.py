@@ -54,7 +54,11 @@ from vllm_ascend.distributed.utils import get_decode_context_model_parallel_worl
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_rc_device, lmhead_tp_enable
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    is_rc_device,
+    lmhead_tp_enable,
+)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
