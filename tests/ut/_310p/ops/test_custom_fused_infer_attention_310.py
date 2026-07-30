@@ -148,13 +148,13 @@ def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
     query_lens_npu = query_lens_cpu_abs.npu()
 
     # Reshape KV cache to NZ layout expected by the operator
-    adn_k_cache = (
+    k_cache = (
         key_cache.reshape(key_cache.shape[0], key_cache.shape[1], -1)
         .reshape(key_cache.shape[0], key_cache.shape[1], -1, 16)
         .permute(0, 2, 1, 3)
         .contiguous()
     )
-    adn_v_cache = (
+    v_cache = (
         value_cache.reshape(value_cache.shape[0], value_cache.shape[1], -1)
         .reshape(value_cache.shape[0], value_cache.shape[1], -1, 16)
         .permute(0, 2, 1, 3)
@@ -163,8 +163,8 @@ def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
 
     attention_output_npu = custom_fused_infer_attention_v310(
         query=query,
-        key=adn_k_cache,
-        value=adn_v_cache,
+        key=k_cache,
+        value=v_cache,
         actual_seq_lengths_q=query_lens_npu.tolist(),
         actual_seq_lengths_kv=kv_seq_lens_npu.tolist(),
         block_table=block_table,

@@ -111,7 +111,7 @@ ge::graphStatus CustomFIATiling::CheckCustomFIAInputDtype()
         return ge::GRAPH_FAILED);
 
     OPS_ERR_IF((inputKvType_ != ge::DT_FLOAT16),
-        OPS_LOG_E(context_->opName, "key and vaule dtype %u invalid, should be float16", inputKvType_),
+        OPS_LOG_E(context_->opName, "key and value dtype %u invalid, should be float16", inputKvType_),
         return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
