@@ -467,6 +467,45 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_transfer_threads_use_grouped_block_sizes(self, send_thread, recv_thread, _event):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"load_async": True})
+        worker.grouped_block_size = [128, 128, 128, 128, 8, 32]
+
+        worker._start_kv_transfer_threads()
+
+        self.assertEqual(send_thread.call_args.args[2], worker.grouped_block_size)
+        self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
+        autospec=True,
+    )
+    def test_async_load_failure_is_reported_by_worker(self, start_thread):
+        worker = self._make_worker(kv_role="kv_consumer", extra_config={"load_async": True})
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        worker.m_store.get.return_value = [1]
+        start_thread.side_effect = lambda thread: thread.ready_event.set()
+        worker._start_kv_transfer_threads()
+
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+        worker.start_load_kv(meta)
+
+        recv_thread = worker.kv_recv_thread
+        recv_thread._handle_request(recv_thread.request_queue.get_nowait())
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
     def test_start_load_kv(self):
         cases = [
             (16, [0], ["h0"], LoadSpec(0, 16, True, token_len=16), True),
