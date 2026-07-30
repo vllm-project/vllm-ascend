@@ -498,7 +498,30 @@ class TestReqMeta(unittest.TestCase):
             cache_transfer_granularity=16,
             block_hashes=["h0"],
             discard_partial_chunks=True,
-            save_partial_prefill=True,
+            save_partial_block=True,
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertTrue(meta.can_save)
+        self.assertEqual(meta.save_start_token, 16)
+        self.assertEqual(meta.save_end_token, 16)
+        self.assertEqual(meta.target_token_len, 20)
+        self.assertEqual(tracker.num_saved_tokens, 16)
+
+    def test_from_request_tracker_keeps_partial_layerwise_decode_save(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=20,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=16,
+            num_prompt_tokens=16,
+        )
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=["h0"],
+            discard_partial_chunks=True,
+            save_partial_block=True,
         )
 
         self.assertIsNotNone(meta)

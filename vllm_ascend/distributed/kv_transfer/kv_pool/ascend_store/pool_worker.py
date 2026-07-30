@@ -1050,8 +1050,6 @@ class KVPoolWorker:
                     partial_save_end = (
                         request.target_token_len
                         if self.layerwise_offload
-                        and request.num_prompt_tokens is not None
-                        and request.target_token_len < request.num_prompt_tokens
                         and request.target_token_len % block_size
                         else None
                     )
@@ -1089,8 +1087,6 @@ class KVPoolWorker:
                     partial_load_end = (
                         cached_tokens
                         if self.layerwise_offload
-                        and request.num_prompt_tokens is not None
-                        and cached_tokens < request.num_prompt_tokens
                         and cached_tokens % block_size
                         else None
                     )

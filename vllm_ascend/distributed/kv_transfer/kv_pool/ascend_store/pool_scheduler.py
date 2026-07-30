@@ -713,7 +713,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
-            save_partial_prefill=(self.layerwise_offload and request_tracker.token_len < len(prompt_token_ids)),
+            save_partial_block=self.layerwise_offload,
         )
 
     def _process_new_request(

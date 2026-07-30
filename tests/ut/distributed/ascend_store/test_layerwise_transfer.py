@@ -177,7 +177,7 @@ def _partial_plan():
     )
 
 
-def test_preparer_saves_partial_prefill_with_request_scoped_key():
+def test_preparer_saves_partial_block_with_request_scoped_key():
     backend = MagicMock()
     backend.batch_alloc.return_value = [1_000, 2_000]
     preparer = LayerwiseTransferPreparer(
@@ -203,7 +203,7 @@ def test_preparer_saves_partial_prefill_with_request_scoped_key():
     np.testing.assert_array_equal(resolved[0][0].block_ids_arr, [7, 8])
 
 
-def test_preparer_loads_partial_prefill_with_same_request_scoped_key():
+def test_preparer_loads_partial_block_with_same_request_scoped_key():
     backend = MagicMock()
     backend.batch_get_key_info.return_value = [
         _key_info([1_000]),

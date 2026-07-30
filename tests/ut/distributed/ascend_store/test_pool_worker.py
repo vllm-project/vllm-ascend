@@ -1608,13 +1608,13 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(len(layer_tasks), 0)
 
-    def test_process_save_for_layer_batch_skip_no_save(self):
+    def test_layerwise_plan_skips_disabled_save(self):
         worker = self._make_worker()
         req = ReqMeta(req_id="r1", token_len_chunk=32, block_ids=[0, 1], block_hashes=["h0", "h1"], can_save=False)
-        worker._process_save_for_layer_batch([req], 0)
-        self.assertEqual(len(worker.layer_save_tasks[0]), 0)
+        plan = worker._build_group_batch_plans([req])[0]
+        self.assertEqual(plan.save_ranges, [])
 
-    def test_process_save_for_layer_batch_skip_zero_range(self):
+    def test_layerwise_plan_skips_empty_save_range(self):
         worker = self._make_worker()
         req = ReqMeta(
             req_id="r1",
@@ -1625,16 +1625,16 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             save_start_token=16,
             save_end_token=16,
         )
-        worker._process_save_for_layer_batch([req], 0)
-        self.assertEqual(len(worker.layer_save_tasks[0]), 0)
+        plan = worker._build_group_batch_plans([req])[0]
+        self.assertEqual(plan.save_ranges, [])
 
-    def test_process_load_for_layer_batch_skip_no_load(self):
+    def test_layerwise_plan_skips_missing_load(self):
         worker = self._make_worker()
         req = ReqMeta(req_id="r1", token_len_chunk=32, block_ids=[0, 1], block_hashes=["h0", "h1"], load_spec=None)
-        worker._process_load_for_layer_batch([req], 0)
-        self.assertEqual(len(worker.layer_load_tasks[0]), 0)
+        plan = worker._build_group_batch_plans([req])[0]
+        self.assertEqual(plan.full_load_ranges, [])
 
-    def test_process_load_for_layer_batch_skip_cannot_load(self):
+    def test_layerwise_plan_skips_disabled_load(self):
         worker = self._make_worker()
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=0, can_load=False, token_len=0)
         req = ReqMeta(
@@ -1644,13 +1644,12 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_hashes=["h0", "h1"],
             load_spec=load_spec,
         )
-        worker._process_load_for_layer_batch([req], 0)
-        self.assertEqual(len(worker.layer_load_tasks[0]), 0)
+        plan = worker._build_group_batch_plans([req])[0]
+        self.assertEqual(plan.full_load_ranges, [])
 
-    def test_reused_layer_loads_full_cached_prefix(self):
+    def test_layerwise_plan_separates_hbm_tail_from_full_prefix(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
-        worker.independent_layers = [0]
         request = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
@@ -1664,13 +1663,12 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        worker._process_load_for_layer_batch([request], 0)
-        worker._process_load_for_layer_batch([request], 1)
+        plan = worker._build_group_batch_plans([request])[0]
 
-        independent_range = worker.layer_load_tasks[0][0].block_ranges[0]
-        reused_range = worker.layer_load_tasks[1][0].block_ranges[0]
-        self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
-        self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
+        hbm_tail_range = plan.hbm_tail_load_ranges[0]
+        full_range = plan.full_load_ranges[0]
+        self.assertEqual((hbm_tail_range.start_block, hbm_tail_range.end_block), (1, 2))
+        self.assertEqual((full_range.start_block, full_range.end_block), (0, 2))
 
     def test_layerwise_plan_restores_and_updates_partial_prefill_block(self):
         worker = self._make_worker()
@@ -1712,6 +1710,87 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             (0, 2, 20),
         )
         self.assertEqual(plan.hbm_tail_load_ranges, [])
+
+    def test_layerwise_plan_restores_and_updates_partial_decode_block(self):
+        worker = self._make_worker()
+        worker.layerwise_offload = True
+        worker.use_gva_layerwise = True
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=32,
+            save_end_token=32,
+            target_token_len=34,
+            num_prompt_tokens=32,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=33,
+                kvpool_cached_tokens=33,
+                can_load=True,
+            ),
+        )
+
+        plan = worker._build_group_batch_plans([request])[0]
+
+        self.assertEqual(
+            (
+                plan.save_ranges[0].start_block,
+                plan.save_ranges[0].end_block,
+                plan.save_ranges[0].partial_end_token,
+            ),
+            (2, 3, 34),
+        )
+        self.assertEqual(
+            (
+                plan.full_load_ranges[0].start_block,
+                plan.full_load_ranges[0].end_block,
+                plan.full_load_ranges[0].partial_end_token,
+            ),
+            (0, 3, 33),
+        )
+        self.assertEqual(plan.hbm_tail_load_ranges, [])
+
+    def test_layerwise_plan_promotes_partial_decode_block_at_boundary(self):
+        worker = self._make_worker()
+        worker.layerwise_offload = True
+        worker.use_gva_layerwise = True
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            save_start_token=32,
+            save_end_token=48,
+            target_token_len=48,
+            num_prompt_tokens=32,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=["h0", "h1", "h2"],
+            can_save=True,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=47,
+                kvpool_cached_tokens=47,
+                can_load=True,
+            ),
+        )
+
+        plan = worker._build_group_batch_plans([request])[0]
+
+        self.assertEqual(
+            (
+                plan.save_ranges[0].start_block,
+                plan.save_ranges[0].end_block,
+                plan.save_ranges[0].partial_end_token,
+            ),
+            (2, 3, None),
+        )
+        self.assertEqual(
+            (
+                plan.full_load_ranges[0].start_block,
+                plan.full_load_ranges[0].end_block,
+                plan.full_load_ranges[0].partial_end_token,
+            ),
+            (0, 3, 47),
+        )
 
 
 class TestKVPoolWorkerTpMismatch(unittest.TestCase):
