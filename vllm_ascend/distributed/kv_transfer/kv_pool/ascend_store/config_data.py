@@ -321,10 +321,15 @@ class ChunkedTokenDatabase:
         self,
         block_hashes: list[BlockHash],
         token_len: int,
+        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
     ) -> tuple[list[bool], ...] | None:
         if self.cache_coordinator is None:
             return None
-        return self.cache_coordinator.load_mask(block_hashes, token_len)
+        return self.cache_coordinator.load_mask(
+            block_hashes,
+            token_len,
+            grouped_hash_cache=grouped_hash_cache,
+        )
 
     def mask_allows_chunk(
         self,
@@ -479,6 +484,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         if not block_hashes:
             return
@@ -487,7 +493,12 @@ class ChunkedTokenDatabase:
             cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
         cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
         effective_block_size = base_block_size * cache_family_ratio
-        grouped_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
+        grouped_hashes = get_block_hashes(
+            block_hashes,
+            effective_block_size,
+            self.hash_block_size,
+            grouped_hash_cache=grouped_hash_cache,
+        )
         if not grouped_hashes:
             return
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, effective_block_size)) if token_len > 0 else 0
@@ -583,6 +594,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -596,6 +608,7 @@ class ChunkedTokenDatabase:
             chunk_filter=chunk_filter,
             shard_rank=shard_rank,
             shard_size=shard_size,
+            grouped_hash_cache=grouped_hash_cache,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
@@ -639,11 +652,48 @@ def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | 
     raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
 
 
+class RequestGroupedBlockHashCache:
+    """Cache grouped block hashes for one request."""
+
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash | str],
+        hash_block_size: int,
+    ) -> None:
+        self._block_hashes = block_hashes
+        self._hash_block_size = hash_block_size
+        self._grouped_hashes: dict[int, Sequence[BlockHash | str]] = {}
+
+    def get(
+        self,
+        block_hashes: Sequence[BlockHash | str],
+        group_block_size: int,
+        hash_block_size: int,
+    ) -> Sequence[BlockHash | str]:
+        if block_hashes is not self._block_hashes or hash_block_size != self._hash_block_size:
+            raise ValueError("RequestGroupedBlockHashCache cannot be shared across requests")
+        if group_block_size == hash_block_size:
+            return block_hashes
+        assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        grouped_hashes = self._grouped_hashes.get(group_block_size)
+        if grouped_hashes is None:
+            grouped_hashes = _LazyGroupedBlockHashList(
+                block_hashes,
+                group_block_size // hash_block_size,
+                memoize=True,
+            )
+            self._grouped_hashes[group_block_size] = grouped_hashes
+        return grouped_hashes
+
+
 def get_block_hashes(
     block_hashes: BlockHashList | list[str],
     group_block_size: int,
     hash_block_size: int,
+    grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
 ) -> Sequence[BlockHash | str]:
+    if grouped_hash_cache is not None:
+        return grouped_hash_cache.get(block_hashes, group_block_size, hash_block_size)
     if group_block_size == hash_block_size:
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
@@ -651,10 +701,16 @@ def get_block_hashes(
 
 
 class _LazyGroupedBlockHashList(Sequence[BlockHash]):
-    def __init__(self, block_hashes: Sequence[BlockHash | str], scale_factor: int) -> None:
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash | str],
+        scale_factor: int,
+        memoize: bool = False,
+    ) -> None:
         self._block_hashes = block_hashes
         self._scale_factor = scale_factor
         self._length = len(block_hashes) // scale_factor
+        self._cache: dict[int, BlockHash] | None = {} if memoize else None
 
     def __len__(self) -> int:
         return self._length
@@ -666,8 +722,13 @@ class _LazyGroupedBlockHashList(Sequence[BlockHash]):
             index += self._length
         if index < 0 or index >= self._length:
             raise IndexError(index)
+        if self._cache is not None and index in self._cache:
+            return self._cache[index]
         start = index * self._scale_factor
-        return _rehash_block_hash_group(self._block_hashes[start : start + self._scale_factor])
+        grouped_hash = _rehash_block_hash_group(self._block_hashes[start : start + self._scale_factor])
+        if self._cache is not None:
+            self._cache[index] = grouped_hash
+        return grouped_hash
 
 
 def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
