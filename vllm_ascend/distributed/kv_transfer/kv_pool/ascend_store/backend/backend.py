@@ -29,9 +29,6 @@ class Backend(ABC):
     def exists(self, keys: list[str]) -> list[int]:
         pass
 
-    def batch_is_exist(self, keys: list[str]) -> list[int]:
-        return self.exists(keys)
-
     def batch_get_key_info(self, keys: list[str]):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
