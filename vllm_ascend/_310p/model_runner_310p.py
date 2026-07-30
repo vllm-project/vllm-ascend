@@ -280,56 +280,65 @@ class NPUModelRunner310(NPUModelRunner):
         cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
+        use_async_device_metadata = (
+            self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and bool(prev_req_id_to_index)
+            and not self.use_cp
+        )
 
-        if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
-                    np.where(new_mask, 0, prev_idx)
-                ]
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
-            else:
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
-        else:
-            if is_rc_device():
+        if not use_async_device_metadata:
+            if self.num_accepted_tokens_event is not None:
+                self.num_accepted_tokens_event.synchronize()
+                if self.use_async_scheduling and prev_req_id_to_index:
+                    prev_idx = self.prev_positions.np[:num_reqs]
+                    new_mask = prev_idx < 0
+                    self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
+                        np.where(new_mask, 0, prev_idx)
+                    ]
+                    self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
+                else:
+                    self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                 self.num_accepted_tokens.np[num_reqs:].fill(1)
                 self.num_accepted_tokens.copy_to_gpu()
             else:
-                self.num_accepted_tokens.np.fill(1)
-                self.num_accepted_tokens.gpu.fill_(1)
+                if is_rc_device():
+                    self.num_accepted_tokens.np[num_reqs:].fill(1)
+                    self.num_accepted_tokens.copy_to_gpu()
+                else:
+                    self.num_accepted_tokens.np.fill(1)
+                    self.num_accepted_tokens.gpu.fill_(1)
 
-        need_async_num_computed_update = (
-            self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
-        )
+            need_async_num_computed_update = (
+                self.use_async_spec_decode
+                and self.valid_sampled_token_count_gpu is not None
+                and prev_req_id_to_index
+            )
 
-        if need_async_num_computed_update:
-            self.prev_positions.copy_to_gpu(num_reqs)
-            self.prev_num_draft_tokens.copy_to_gpu()
-            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-                device=self.device, non_blocking=True
-            )
-            update_num_computed_tokens_for_batch_change(
-                self.num_computed_tokens,
-                self.num_accepted_tokens.gpu[:num_reqs],
-                self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu,
-                self.prev_num_draft_tokens.gpu,
-                cpu_values,
-            )
-            # Make sure D2H is synchronized.
-            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].copy_(
-                self.num_computed_tokens[:num_reqs], non_blocking=False
-            )
-        else:
-            self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
-                non_blocking=True,
-            )
+            if need_async_num_computed_update:
+                self.prev_positions.copy_to_gpu(num_reqs)
+                self.prev_num_draft_tokens.copy_to_gpu()
+                cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+                    device=self.device, non_blocking=True
+                )
+                update_num_computed_tokens_for_batch_change(
+                    self.num_computed_tokens,
+                    self.num_accepted_tokens.gpu[:num_reqs],
+                    self.prev_positions.gpu[:num_reqs],
+                    self.valid_sampled_token_count_gpu,
+                    self.prev_num_draft_tokens.gpu,
+                    cpu_values,
+                )
+                # Make sure D2H is synchronized.
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].copy_(
+                    self.num_computed_tokens[:num_reqs], non_blocking=False
+                )
+            else:
+                self.num_computed_tokens[:num_reqs].copy_(
+                    self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                    non_blocking=True,
+                )
         # Make sure when you update the positions and slot mapping, num_computed_tokens_cpu
         # has been corrected.
         positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
@@ -339,13 +348,6 @@ class NPUModelRunner310(NPUModelRunner):
             out=positions_np,
         )
         block_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        use_async_device_metadata = (
-            self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and bool(prev_req_id_to_index)
-            and not self.use_cp
-        )
         if not use_async_device_metadata:
             block_table.compute_slot_mapping(
                 req_indices,

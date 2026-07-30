@@ -57,6 +57,20 @@ def test_prepare_inputs_uses_device_metadata_after_async_correction() -> None:
     assert "self.seq_lens[:num_reqs] = self.num_computed_tokens" in source
     assert "self.optimistic_seq_lens_cpu[:num_reqs]" in source
 
+    fallback_start = source.index("        if not use_async_device_metadata:")
+    fallback_end = source.index(
+        "        # Make sure when you update the positions and slot mapping",
+        fallback_start,
+    )
+    fallback_source = source[fallback_start:fallback_end]
+    assert "self.num_accepted_tokens_event.synchronize()" in fallback_source
+    assert "update_num_computed_tokens_for_batch_change(" in fallback_source
+
+    device_start = source.index("        if use_async_device_metadata:", fallback_end)
+    device_end = source.index("        self.req_indices.np", device_start)
+    device_source = source[device_start:device_end]
+    assert device_source.count("update_num_computed_tokens_for_batch_change(") == 1
+
 
 def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
     runner = object.__new__(NPUModelRunner310)
