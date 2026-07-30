@@ -337,6 +337,7 @@ class KVTransferThread(threading.Thread):
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
+        self._fatal_error: BaseException | None = None
 
     def _get_block_size(self, kv_cache_group_id: int = 0) -> int:
         if isinstance(self.block_size, list):
@@ -372,6 +373,10 @@ class KVTransferThread(threading.Thread):
     def discard_finished_requests(self, req_ids: set[str]) -> None:
         with self.done_task_lock:
             self.finished_requests -= req_ids
+
+    def raise_if_failed(self) -> None:
+        if self._fatal_error is not None:
+            raise RuntimeError(f"{self.name} failed during asynchronous transfer") from self._fatal_error
 
     def set_finished_request(self, req_id):
         with self.done_task_lock:
@@ -505,14 +510,14 @@ class KVTransferThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                if request_data is not None:
-                    self._handle_request_exception(request_data)
+                self._fatal_error = e
                 logger.error(
                     "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
                     self.name,
                     type(e).__name__,
                     e,
                 )
+                return
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -1431,14 +1436,19 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                     res,
                 )
             if res != 0:
-                logger.error("Layerwise %d save batch_copy failed with return code %d", physical_layer, res)
+                raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
             if all_save_keys:
                 save_keys = list(dict.fromkeys(all_save_keys))
                 for key in save_keys:
                     self.write_results[key] = self.write_results.get(key, 0) or res
                 if physical_layer == self.final_layer_id:
                     results = [self.write_results.pop(key) for key in save_keys]
-                    self.m_store.batch_write_finish(save_keys, results)
+                    finish_results = self.m_store.batch_write_finish(save_keys, results)
+                    if len(finish_results) != len(save_keys) or any(result != 0 for result in finish_results):
+                        raise RuntimeError(
+                            f"Layerwise save batch_write_finish failed: "
+                            f"expected={len(save_keys)}, results={finish_results}"
+                        )
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
@@ -1625,7 +1635,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 res,
             )
         if res != 0:
-            logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
+            raise RuntimeError(f"Layerwise {layer_id} load batch_copy failed with return code {res}")
 
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))
