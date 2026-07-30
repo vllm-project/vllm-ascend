@@ -172,6 +172,10 @@ def build_attn_metadata(
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
+    # ModelRunner V2 callers can omit this legacy Ascend field. The scheduled
+    # token count is the valid positions and rotary-embedding extent.
+    if num_input_tokens <= 0:
+        num_input_tokens = num_tokens
 
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise

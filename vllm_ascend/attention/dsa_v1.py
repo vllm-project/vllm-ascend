@@ -657,14 +657,21 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual")
+        # ModelRunner V1 passes caches shared by the ratio-specific attention
+        # groups. ModelRunner V2 does not currently expose those caches, so
+        # keep them local to this builder invocation. Supplied dictionaries
+        # retain the V1 sharing behavior.
         self.prefill_ratio_to_sas_metadata = kwargs.get("prefill_ratio_to_sas_metadata")
+        if self.prefill_ratio_to_sas_metadata is None:
+            self.prefill_ratio_to_sas_metadata = {}
         self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata")
-        assert self.prefill_ratio_to_sas_metadata is not None
-        assert self.decode_ratio_to_sas_metadata is not None
-        self.block_size = kwargs.get("block_size", 128)
+        if self.decode_ratio_to_sas_metadata is None:
+            self.decode_ratio_to_sas_metadata = {}
+        self.block_size = kwargs.get("block_size", self.kv_cache_spec.block_size)
 
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
-        assert self.common_ratio_to_sas_metadata is not None
+        if self.common_ratio_to_sas_metadata is None:
+            self.common_ratio_to_sas_metadata = {}
 
         if self.common_ratio_to_sas_metadata.get("num_decodes", None) is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
