@@ -244,7 +244,13 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
-
+          
+      - name: POST_INSTALL_SLEEP_HOLD
+        if: ${{ matrix.group.npu_type != 'cpu' }}
+        run: |
+          echo "vllm‑ascend install finished, hold pod for manual kubectl exec debug"
+          sleep 99999
+          
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |
