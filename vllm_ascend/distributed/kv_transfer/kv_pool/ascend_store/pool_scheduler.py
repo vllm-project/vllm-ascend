@@ -45,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
-    get_layerwise_physical_layer_index,
 )
 
 
@@ -192,14 +191,6 @@ class KVPoolScheduler:
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False
         if self.use_gva_layerwise:
-            if kv_cache_config is not None:
-                physical_layers = {
-                    get_layerwise_physical_layer_index(layer_name, self.num_layers)
-                    for group in kv_cache_config.kv_cache_groups
-                    for layer_name in group.layer_names
-                }
-                if len(physical_layers) >= self.num_layers:
-                    self.num_layers = len(physical_layers)
             self.layerwise_offload = build_layerwise_cache_layout(
                 self.num_layers,
                 vllm_config.kv_transfer_config.kv_connector_extra_config,
