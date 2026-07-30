@@ -65,10 +65,20 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.e_proj = ReplicatedLinear(
-            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
+            return_bias=False,
         )
         self.h_proj = ReplicatedLinear(
-            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
+            return_bias=False,
         )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
