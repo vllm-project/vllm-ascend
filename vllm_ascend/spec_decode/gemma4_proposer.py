@@ -133,6 +133,16 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         # Sync wrapper→impl so the Ascend runtime path can resolve target cache.
         self._sync_kv_sharing_target_to_impl()
 
+    def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None):
+        """Flatten per-group kernel_block_sizes and delegate to base class."""
+        if kernel_block_sizes is not None:
+            kernel_block_sizes = [sz if isinstance(sz, int) else sz[0] for sz in kernel_block_sizes]
+        super().initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+
+    def set_per_group_block_table(self, gid: int, block_table_tensor):
+        """Cache per-group block table for _swap_per_group_block_table."""
+        self._per_group_block_tables[gid] = block_table_tensor
+
     def _should_skip_image_token_index(self, model_name: str) -> bool:
         """Gemma4 target has image_token_id but no image_token_index;
         the draft receives hidden states, not multimodal inputs."""

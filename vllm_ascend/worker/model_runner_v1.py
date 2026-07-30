@@ -3040,10 +3040,7 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
-            if (
-                self.speculative_config
-                and isinstance(self.drafter, AscendGemma4Proposer)
-            ):
+            if self.speculative_config:
                 self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(
@@ -3611,18 +3608,7 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDSparkProposer
                 | AscendDraftModelProposer,
             )
-            if isinstance(self.drafter, AscendGemma4Proposer):
-                # Gemma4 MTP needs per-group kernel_block_sizes (flat list of
-                # ints), not a single block_size.
-                kernel_block_sizes = [
-                    sz if isinstance(sz, int) else sz[0]
-                    for sz in self.kernel_block_sizes
-                ]
-                self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
-            else:
-                block_size = (self.kernel_block_sizes[0] if isinstance(
-                    self.kernel_block_sizes, list) else self.kernel_block_sizes)
-                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
