@@ -684,10 +684,12 @@ class NPUWorker(WorkerBase):
     def _run_to_completion(self, num_tokens, eager) -> float:
         import time
 
-        mode = True if eager else False
         for _ in range(5):
             self.model_runner._dummy_run(
-                num_tokens=num_tokens, is_profile=mode, uniform_decode=True, force_attention=True,
+                num_tokens=num_tokens,
+                is_profile=eager,
+                uniform_decode=True,
+                force_attention=True,
             )
 
         latencies: list[float] = []
@@ -695,7 +697,10 @@ class NPUWorker(WorkerBase):
             torch.npu.synchronize()
             start = time.perf_counter()
             self.model_runner._dummy_run(
-                num_tokens=num_tokens, is_profile=mode, uniform_decode=True, force_attention=True,
+                num_tokens=num_tokens,
+                is_profile=eager,
+                uniform_decode=True,
+                force_attention=True,
             )
             torch.npu.synchronize()
             latencies.append((time.perf_counter() - start) * 1000)
@@ -703,24 +708,24 @@ class NPUWorker(WorkerBase):
         return sorted(latencies)[len(latencies) // 2]
 
     def _suggest_max_capture_size(self) -> None:
-        cudagraph_capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+        cudagraph_capture_sizes = sorted(set(self.vllm_config.compilation_config.cudagraph_capture_sizes))
         if len(cudagraph_capture_sizes) < 2:
             return
 
-        x1 = cudagraph_capture_sizes[0]
-        x2 = cudagraph_capture_sizes[-1]
-        y1 = self._run_to_completion(x1, False)
-        y2 = self._run_to_completion(x2, False)
+        x1, x2 = cudagraph_capture_sizes[0], cudagraph_capture_sizes[-1]
+        y1, y2 = (self._run_to_completion(x, False) for x in (x1, x2))
 
         k = (y2 - y1) / (x2 - x1)
         b = y2 - k * x2
+        if k <= 0:
+            return
 
         eager_t0 = self._run_to_completion(x1, True)
         eager_t1 = self._run_to_completion(min(x2, 256), True)
 
         ccs = ((eager_t0 + eager_t1) / 2 - b) // k
 
-        logger.info("We suggest max-cudagraph-size is: %d", ccs)
+        logger.info("We suggest setting max-cudagraph-capture-size of roughly %d", ccs)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
