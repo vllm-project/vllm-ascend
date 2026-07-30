@@ -100,24 +100,6 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError(
                 "MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only."
             )
-    def prepare_dummy_attn(
-        self,
-        num_reqs: int,
-        num_tokens: int,
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        """Return capture buffers with the same addresses as PCP replay."""
-        assert self._local_block_tables is not None
-        if num_reqs > self._local_block_tables[0].shape[0]:
-            raise RuntimeError(
-                "PCP dummy request count exceeds the local block-table buffer: "
-                f"{num_reqs} > {self._local_block_tables[0].shape[0]}."
-            )
-        for block_table in self._local_block_tables:
-            block_table[:num_reqs].zero_()
-        return (
-            tuple(block_table[:num_reqs] for block_table in self._local_block_tables),
-            self.get_dummy_slot_mappings(num_tokens),
-        )
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""

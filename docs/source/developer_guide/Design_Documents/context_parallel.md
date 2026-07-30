@@ -62,8 +62,6 @@ PCP-local batch and PCP-local slot mappings. `_prepare_pcp_inputs_to_capture`
 therefore passes the dummy batch through `AscendPCPManager.partition_batch` and
 `prepare_attn` before building capture metadata. Dummy attention metadata is
 marked `DecodeOnly`, so capture never enters prefill-only PCP cache gathers.
-`AscendPCPManager.prepare_dummy_attn` also returns the same block-table and
-slot-mapping buffers used by replay, preserving graph input addresses.
 
 ### Last three commits of PR #13038
 
