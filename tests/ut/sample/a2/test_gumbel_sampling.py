@@ -474,6 +474,86 @@ class TestGumbelSampling:
             assert (draft_logits[req, 0, :] == 0).all(), f"Col 0 should be zeros for req {req}"
             assert (draft_logits[req, 2, :] == 0).all(), f"Col 2 should be zeros for req {req}"
 
+    def test_gumbel_sample_skips_padded_requests(self):
+        """ACLGraph padding rows with idx_mapping=-1 must not access request state.
+
+        Probabilistic EAGLE fills padded request mappings with -1. The sampled
+        value of a padding row is ignored by the caller, while valid rows must
+        keep their normal sampled values and processed-logits writes.
+        """
+        torch.manual_seed(202)
+        num_tokens = 4
+        num_reqs = 3
+        vocab_size = 2048
+        num_steps = 3
+
+        logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
+        expanded_idx_mapping = torch.tensor([0, 1, 2, -1], dtype=torch.int32, device=DEVICE)
+        temperature = torch.tensor([0.7, 1.0, 1.3], dtype=torch.float32, device=DEVICE)
+        seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
+        draft_logits = torch.zeros(num_reqs, num_steps, vocab_size, dtype=torch.float32, device=DEVICE)
+        draft_step = torch.tensor(1, dtype=torch.int64, device=DEVICE)
+
+        sampled = gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature=True,
+            output_processed_logits=draft_logits,
+            output_processed_logits_col=draft_step,
+        )
+        torch.npu.synchronize()
+
+        valid_sampled = gumbel_sample(
+            logits[:num_reqs],
+            expanded_idx_mapping[:num_reqs],
+            temperature,
+            seed,
+            pos[:num_reqs],
+            apply_temperature=True,
+        )
+        torch.npu.synchronize()
+
+        assert torch.equal(sampled[:num_reqs], valid_sampled)
+        assert sampled[-1].item() == 0
+        expected = logits[:num_reqs] / temperature[:, None]
+        assert torch.allclose(draft_logits[:, 1, :], expected, atol=1e-4, rtol=1e-4)
+        assert (draft_logits[:, 0, :] == 0).all()
+        assert (draft_logits[:, 2, :] == 0).all()
+
+    def test_gumbel_sample_ignores_invalid_processed_logits_col(self):
+        """An out-of-range draft step must not write outside the output buffer."""
+        torch.manual_seed(203)
+        num_tokens = 3
+        vocab_size = 2048
+        num_steps = 3
+
+        logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
+        expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
+        temperature = torch.ones(num_tokens, dtype=torch.float32, device=DEVICE)
+        seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
+        draft_logits = torch.zeros(num_tokens, num_steps, vocab_size, dtype=torch.float32, device=DEVICE)
+        invalid_draft_step = torch.tensor(num_steps, dtype=torch.int64, device=DEVICE)
+
+        sampled = gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature=True,
+            output_processed_logits=draft_logits,
+            output_processed_logits_col=invalid_draft_step,
+        )
+        torch.npu.synchronize()
+
+        assert (sampled >= 0).all() and (sampled < vocab_size).all()
+        assert (draft_logits == 0).all()
+
     def test_gumbel_sample_processed_logits_mixed_temp(self):
         """Processed logits with mixed temperature (1:1 token-to-request mapping):
         - temp=0: stored logits should be raw (no scaling)

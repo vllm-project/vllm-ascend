@@ -69,12 +69,18 @@ Philox4x32-10 生成。相同输入、seed 和 pos 会产生确定性相同的�
 - 三维缓冲区按
   `output_processed_logits[idx_mapping[i], output_processed_logits_col, :]`
   写回。
+- ACLGraph padding 请求的 `idx_mapping[i]` 为 `-1`。算子会跳过该行的
+  temperature、seed 和 processed logits 访问，并将 sampled 占位值写为
+  `0`；该值会被上层忽略。
+- 当 `output_processed_logits_col` 超出三维缓冲区的 speculative step
+  范围时，算子不执行 processed logits 写回，避免越界访问。
 - 写回内容不包含 Gumbel 噪声。
 - 当 `temperature[idx_mapping[i]] != 0` 且
   `apply_temperature=True` 时，写回 `logits[i] / temperature`；其他情况写回
   原始 `logits[i]`。
 - Model Runner V2 仅在上层采样流程需要保存 processed logits 时提供该缓冲区。
-  当前 Eagle3 + Qwen3 的常规执行路径中该参数为 `None`，因此不触发写回。
+  Eagle3 默认 greedy draft 路径中该参数为 `None`；当
+  `draft_sample_method="probabilistic"` 时会为每个 draft step 提供该缓冲区。
 
 ## 约束说明
 
@@ -162,3 +168,17 @@ temperature、greedy sampling、多个请求状态和 processed logits 写回：
 pytest -v -s \
   tests/e2e/nightly/single_node/ops/singlecard_ops/test_gumbel_sample.py
 ```
+
+## Eagle3 probabilistic 性能复测
+
+测试配置为 Qwen3-8B + Eagle3、`draft_sample_method="probabilistic"`、
+40 并发、40 请求、输入 1024 tokens、输出 100 tokens、temperature 0.01。
+以下数据为三轮复测均值，两种实现的接受率均为 100%，平均接受长度均为 4：
+
+| 实现 | 平均 TTFT (ms) | 平均 TPOT (ms) | 输出吞吐 (tok/s) | 总吞吐 (tok/s) |
+|---|---:|---:|---:|---:|
+| Triton | 2929.477 | 65.460 | 417.203 | 4722.753 |
+| AscendC | 2937.597 | 37.050 | 593.793 | 6721.757 |
+
+相较 Triton，AscendC 输出吞吐提升 42.33%，平均 TPOT 降低 43.40%。
+TTFT 主要由 prefill 和排队开销决定，两者基本持平。

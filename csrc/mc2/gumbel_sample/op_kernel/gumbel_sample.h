@@ -40,6 +40,7 @@ public:
 
 private:
     __aicore__ inline void ProcessOneRow(uint32_t reqIdx);
+    __aicore__ inline void WriteSampled(uint32_t reqIdx, int64_t tokenId);
     __aicore__ inline void GenerateGumbelTile(uint32_t tileOffset, uint32_t curLen,
                                               uint32_t alignedLen,
                                               uint32_t gumbelSeedLo, uint32_t gumbelSeedHi);
@@ -89,6 +90,7 @@ private:
     uint32_t hasProcessedLogitsCol_ = 0;
     uint32_t processedLogitsStride_ = 0;
     uint32_t processedLogitsCol_ = 0;
+    uint32_t numSpeculativeSteps_ = 0;
 };
 
 // =================================================================
@@ -111,6 +113,7 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     hasProcessedLogits_ = t.hasProcessedLogits;
     hasProcessedLogitsCol_ = t.hasProcessedLogitsCol;
     processedLogitsStride_ = t.processedLogitsStride;
+    numSpeculativeSteps_ = t.numSpeculativeSteps;
 
     uint32_t blockIdx   = GetBlockIdx();
     uint32_t formerNum  = t.formerNum;
@@ -225,6 +228,14 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
         SetFlag<HardEvent::MTE2_S>(eCol);
         WaitFlag<HardEvent::MTE2_S>(eCol);
         processedLogitsCol_ = static_cast<uint32_t>(colLocal.GetValue(0));
+    }
+    if (hasProcessedLogits_ != 0) {
+        bool isProcessedColValid =
+            (numSpeculativeSteps_ == 0 && processedLogitsCol_ == 0) ||
+            (numSpeculativeSteps_ != 0 && processedLogitsCol_ < numSpeculativeSteps_);
+        if (!isProcessedColValid) {
+            hasProcessedLogits_ = 0;
+        }
     }
 }
 
@@ -362,6 +373,34 @@ __aicore__ inline int32_t GumbelSampleOp<APPLY_TEMPERATURE>::FindFirstMatchIdx(
 }
 
 // =================================================================
+// WriteSampled: 写回 sampled[reqIdx]
+// =================================================================
+template <bool APPLY_TEMPERATURE>
+__aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::WriteSampled(
+    uint32_t reqIdx, int64_t tokenId)
+{
+    LocalTensor<int64_t> outLocal = outQueueSampled_.AllocTensor<int64_t>();
+    outLocal.SetValue(0, tokenId);
+
+    event_t eSMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_MTE3));
+    SetFlag<HardEvent::S_MTE3>(eSMte3);
+    WaitFlag<HardEvent::S_MTE3>(eSMte3);
+
+    outQueueSampled_.EnQue(outLocal);
+    outLocal = outQueueSampled_.DeQue<int64_t>();
+
+    DataCopyExtParams outParams;
+    outParams.blockCount = 1;
+    outParams.blockLen   = static_cast<uint32_t>(sizeof(int64_t));
+    outParams.srcStride  = 0;
+    outParams.dstStride  = 0;
+    outParams.rsv        = 0;
+    DataCopyPad(sampledGm_[reqIdx], outLocal, outParams);
+
+    outQueueSampled_.FreeTensor(outLocal);
+}
+
+// =================================================================
 // ProcessOneRow: 单请求 r 完整流程
 // =================================================================
 template <bool APPLY_TEMPERATURE>
@@ -374,6 +413,12 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
     LocalTensor<int64_t> posLocal        = posUbBuf_.Get<int64_t>();
     // reqIdx = batch_idx (token row); reqStateIdx = idx_mapping[batch_idx]
     int64_t reqStateIdx = static_cast<int64_t>(idxMappingLocal.GetValue(reqIdx));
+    // ACLGraph 会用 -1 标记 padding 请求。无效行必须在访问 UB/GM 前退出，
+    // 否则有符号索引转为 uint32_t/uint64_t 后会产生越界读写。
+    if (reqStateIdx < 0 || reqStateIdx >= static_cast<int64_t>(numReqStates_)) {
+        WriteSampled(reqIdx, 0);
+        return;
+    }
     float   temp        = tempLocal.GetValue(static_cast<uint32_t>(reqStateIdx));
     int64_t seed64      = seedsLocal.GetValue(static_cast<uint32_t>(reqStateIdx));
     int64_t posI64      = posLocal.GetValue(reqIdx);
@@ -486,25 +531,7 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
     }
 
     // ----- (3) 写回 sampled[reqIdx] -----
-    LocalTensor<int64_t> outLocal = outQueueSampled_.AllocTensor<int64_t>();
-    outLocal.SetValue(0, static_cast<int64_t>(runningIdx));
-
-    event_t eSMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_MTE3));
-    SetFlag<HardEvent::S_MTE3>(eSMte3);
-    WaitFlag<HardEvent::S_MTE3>(eSMte3);
-
-    outQueueSampled_.EnQue(outLocal);
-    outLocal = outQueueSampled_.DeQue<int64_t>();
-
-    DataCopyExtParams outParams;
-    outParams.blockCount = 1;
-    outParams.blockLen   = static_cast<uint32_t>(sizeof(int64_t));
-    outParams.srcStride  = 0;
-    outParams.dstStride  = 0;
-    outParams.rsv        = 0;
-    DataCopyPad(sampledGm_[reqIdx], outLocal, outParams);
-
-    outQueueSampled_.FreeTensor(outLocal);
+    WriteSampled(reqIdx, static_cast<int64_t>(runningIdx));
 }
 
 }  // namespace NsGumbelSample
