@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,21 +67,6 @@ def _parse_int_config(value: Any, name: str) -> int:
         raise TypeError(f"{name} must be an integer, got {value!r}") from err
 
 
-def _parse_layer_indices(value: Any) -> list[int]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return []
-        return [int(index.strip()) for index in value.split(",")]
-    if isinstance(value, int) and not isinstance(value, bool):
-        return [value]
-    if isinstance(value, Iterable):
-        return [_parse_int_config(index, _INDEPENDENT_LAYERS) for index in value]
-    raise TypeError(f"{_INDEPENDENT_LAYERS} must be a comma-separated string or an iterable of integers")
-
-
 def build_layerwise_cache_layout(
     num_layers: int,
     extra_config: dict[str, Any] | None = None,
@@ -110,8 +94,10 @@ def build_layerwise_cache_layout(
         layer_indices = [0, num_layers - 1]
     elif isinstance(independent_value, str) and independent_value.strip().lower() == "all":
         layer_indices = list(range(num_layers))
+    elif isinstance(independent_value, list):
+        layer_indices = [_parse_int_config(index, _INDEPENDENT_LAYERS) for index in independent_value]
     else:
-        layer_indices = _parse_layer_indices(independent_value)
+        raise TypeError(f"{_INDEPENDENT_LAYERS} must be a list of integers or 'all'")
 
     normalized_indices = set()
     for layer_index in layer_indices:

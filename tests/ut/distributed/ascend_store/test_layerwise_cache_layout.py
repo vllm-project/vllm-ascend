@@ -85,8 +85,8 @@ def test_reuse_layout_matches_round_robin_storage_slots():
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("3,5,10", [3, 5, 10]),
-        ("-1", [26]),
+        ([3, 5, 10], [3, 5, 10]),
+        ([-1], [26]),
         ([1, 4], [1, 4]),
         ("all", list(range(27))),
     ],
@@ -104,6 +104,8 @@ def test_invalid_layout_config_is_rejected():
         build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 0})
     with pytest.raises(ValueError):
         build_layerwise_cache_layout(27, {"layerwise_independent_layers": 27})
+    with pytest.raises(TypeError):
+        build_layerwise_cache_layout(27, {"layerwise_independent_layers": "1,4"})
 
 
 def test_prefetch_count_can_be_overridden():
