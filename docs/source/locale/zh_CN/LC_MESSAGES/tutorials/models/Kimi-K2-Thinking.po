@@ -206,7 +206,7 @@ msgid ""
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
 " for general tuning methods."
 msgstr ""
-"通用调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+"通用调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
 msgid ""
 "Please refer to the [Feature "

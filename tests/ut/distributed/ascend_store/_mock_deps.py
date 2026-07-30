@@ -175,15 +175,11 @@ class _FakeKVCacheSpec:
         return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
 
 
-class _FakeAttentionSpec(_FakeKVCacheSpec):
+class _FakeFullAttentionSpec(_FakeKVCacheSpec):
     pass
 
 
-class _FakeFullAttentionSpec(_FakeAttentionSpec):
-    pass
-
-
-class _FakeSlidingWindowSpec(_FakeAttentionSpec):
+class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
     def __init__(self, block_size=16, sliding_window=32, **kwargs):
         super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
 
@@ -226,11 +222,6 @@ class _FakeKVCacheConfig:
 
 _kv_cache_utils_mod.KVCacheBlock = _FakeKVCacheBlock  # type: ignore[attr-defined]
 _kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
-
-
-_kv_cache_utils_mod.resolve_kv_cache_block_sizes = (  # type: ignore[attr-defined]
-    lambda _, config: (config.cache_config.block_size,) * 2
-)
 
 
 class _FakeBlockPool:
@@ -330,7 +321,6 @@ _single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
 
 _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
-_kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
@@ -386,9 +376,14 @@ def _make_pkg(name, path=""):
     return mod
 
 
-for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
+_vllm_ascend_real_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "vllm_ascend"))
+_vllm_ascend_package_paths = {
+    "vllm_ascend": _vllm_ascend_real_path,
+    "vllm_ascend.distributed": os.path.join(_vllm_ascend_real_path, "distributed"),
+}
+for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
-        sys.modules[_pkg] = _make_pkg(_pkg)
+        sys.modules[_pkg] = _make_pkg(_pkg, _path)
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]

@@ -92,6 +92,20 @@ logger = logging.getLogger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--msa-m3-sparse-backend",
+        action="store",
+        default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "all"),
+        choices=("all", "triton", "torch_npu"),
+        help=(
+            "MiniMax M3 sparse-attention kernel backend for "
+            "test_minimax_m3_sparse_attn.py: all, triton reference, or msa_m3_npu (torch_npu)."
+        ),
+    )
+
+
 DISAGG_EPD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
 )
@@ -962,7 +976,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         **kwargs,
@@ -979,7 +992,6 @@ class VllmRunner:
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1393,7 +1405,6 @@ class DPVllmRunner(VllmRunner):
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = True,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         quantization: str | None = None,
         data_parallel_size: int = 2,
@@ -1416,7 +1427,6 @@ class DPVllmRunner(VllmRunner):
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
@@ -1924,7 +1934,9 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    # vLLM's Hunyuan prompt update adds the image start/end tokens around
+    # this placeholder. Supplying the wrapper here would duplicate it.
+    placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 

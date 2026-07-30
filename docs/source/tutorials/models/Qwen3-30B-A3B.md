@@ -24,7 +24,19 @@ The following model variants are available. It is recommended to download the mo
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+
+**Quantized Versions for Atlas inference products:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+
+**Quantized Versions for Atlas inference products:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -120,6 +132,31 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
+=== "Atlas inference products"
+
+    **Docker Run:**
+
+    ```bash
+
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 !!! tip
     The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
@@ -162,6 +199,14 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    pip install -e .
    ```
 
+!!! note
+
+    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```   
+
 **Installation Verification:**
 
 ```bash
@@ -184,34 +229,67 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-**Atlas 800I A2/A3:**
+=== "Atlas 800I A2/A3"
 
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
-export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+    export HCCL_BUFFSIZE=1024
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --trust-remote-code \
-    --max-num-seqs 100 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --tensor-parallel-size 4 \
-    --enable-expert-parallel \
-    --quantization ascend \
-    --distributed_executor_backend "mp" \
-    --no-enable-prefix-caching \
-    --async-scheduling \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
-    --gpu-memory-utilization 0.95 \
-    --port 8000 \
-    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
-```
+    vllm serve your_model_path \
+        --served-model-name qwen3 \
+        --trust-remote-code \
+        --max-num-seqs 100 \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 16384 \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --distributed_executor_backend "mp" \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+        --gpu-memory-utilization 0.95 \
+        --port 8000 \
+        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
+    ```
+
+=== "Atlas inference products"
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+
+    vllm serve your_model_path  \
+        --host 127.0.0.1 \
+        --port 8000 \
+        --tensor-parallel-size 2 \
+        --max-num-seqs 32 \
+        --served_model_name qwen3 \
+        --dtype float16 \
+        --quantization ascend \
+        --max-model-len 16384 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
+        --no-enable-prefix-caching
+    ```
+
+    **Key parameters:**
+
+    - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
+    - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
+    - `--max-model-len 16384` is intentionally conservative. On Atlas inference products, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
+    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
+    - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
+    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
 
 !!! note
 

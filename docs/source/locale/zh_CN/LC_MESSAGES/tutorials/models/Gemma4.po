@@ -382,7 +382,7 @@ msgid ""
 "Please refer to [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 msgid "Recommended tuning order:"
 msgstr "推荐调优顺序："

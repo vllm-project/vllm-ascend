@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import cast
+from importlib import import_module
+from typing import Any, cast
 
+from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
@@ -12,22 +15,29 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
-    _block_hash_to_bytes,
+    block_hash_to_bytes,
     get_block_hashes,
-    get_cache_family_granularity,
 )
+from vllm_ascend.utils import vllm_version_is
+
+_CACHE_MISSING = object()
+_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 
 
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by external AscendStore key existence."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
         # exists=None is used for load/store masks where hit length has already
         # been decided and each manager only needs to apply its own reachability.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
@@ -38,7 +48,7 @@ class ExternalCachedBlockPool:
     ) -> list[KVCacheBlock] | None:
         if self._exists is None:
             return [self._present_block] * len(group_ids)
-        h = _block_hash_to_bytes(block_hash)
+        h = block_hash_to_bytes(block_hash)
         if all((group_id, h) in self._exists for group_id in group_ids):
             return [self._present_block] * len(group_ids)
         return None
@@ -77,7 +87,7 @@ class AscendStoreCoordinator:
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = [
-            get_cache_family_granularity(block_size, family)
+            _cache_family_granularity(block_size, family)
             for block_size, family in zip(group_block_sizes, group_cache_families, strict=True)
         ]
         for effective_block_size in self.group_effective_block_sizes:
@@ -158,7 +168,7 @@ class AscendStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return tuple(
@@ -168,34 +178,57 @@ class AscendStoreCoordinator:
             for group_id, mask in enumerate(masks)
         )
 
-    def store_mask(
+    def _reachable_masks(
         self,
         aligned_token_len: int,
-        num_prompt_tokens: int | None = None,
-    ) -> tuple[list[bool], ...]:
+        retention_interval: int | None,
+        num_prompt_tokens: int | None,
+    ) -> list[tuple[int, list[bool] | None]]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
-        masks: list[list[bool]] = []
+        masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
-                masks.append([True] * num_chunks)
+                masks.append((num_chunks, None))
                 continue
             manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
-            mask = manager_cls.reachable_block_mask(
+            mask = _reachable_block_mask(
+                manager_cls,
                 start_block=0,
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
                 use_eagle=group_id in self.eagle_reachable_group_ids,
-                retention_interval=self.retention_interval,
+                retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )
-            masks.append([True] * num_chunks if mask is None else mask)
-        return tuple(masks)
+            masks.append((num_chunks, mask))
+        return masks
+
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool], ...]:
+        masks = self._reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
+        return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
+
+    def lookup_mask(
+        self,
+        aligned_token_len: int,
+    ) -> tuple[list[bool] | None, ...]:
+        masks = self._reachable_masks(aligned_token_len, None, None)
+        for num_chunks, mask in masks:
+            if mask is not None:
+                assert len(mask) == num_chunks
+        return tuple(None if mask is None or all(mask) else mask for _, mask in masks)
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+        if not vllm_version_is("0.25.1"):
+            # vLLM #46384 moved hash-size resolution into each manager.
+            return block_hashes
         if spec.block_size == self.hash_block_size:
             return block_hashes
         return cast(BlockHashList, get_block_hashes(block_hashes, spec.block_size, self.hash_block_size))
@@ -212,7 +245,8 @@ class AscendStoreCoordinator:
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = manager_cls.find_longest_cache_hit(
+            hit_blocks, hit_length = _find_longest_cache_hit(
+                manager_cls,
                 block_hashes=hashes,
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
@@ -224,10 +258,11 @@ class AscendStoreCoordinator:
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(len(self.kv_cache_groups))]
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[group_id] = blocks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            return tuple(blocks_by_group), hit_length
 
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
+        hit_length_by_group: list[int] = [0] * len(self.kv_cache_groups)
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
         )
@@ -237,9 +272,10 @@ class AscendStoreCoordinator:
             curr_hit_length = hit_length
 
             for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                cached = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
-                    curr_hit_length = curr_hit_length // spec.block_size * spec.block_size
+                    curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
                 drop_eagle_block = index in eagle_indices and index not in eagle_verified
@@ -247,7 +283,8 @@ class AscendStoreCoordinator:
                 if drop_eagle_block:
                     max_group_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = manager_cls.find_longest_cache_hit(
+                hit_blocks, new_hit_length = _find_longest_cache_hit(
+                    manager_cls,
                     block_hashes=hashes,
                     max_length=max_group_length,
                     kv_cache_group_ids=group_ids,
@@ -256,7 +293,6 @@ class AscendStoreCoordinator:
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
-                new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(index)
                 elif new_hit_length < curr_hit_length:
@@ -264,6 +300,7 @@ class AscendStoreCoordinator:
                 curr_hit_length = new_hit_length
                 for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                     hit_blocks_by_group[group_id] = blocks
+                    hit_length_by_group[group_id] = new_hit_length
 
             if curr_hit_length >= hit_length:
                 break
@@ -273,11 +310,12 @@ class AscendStoreCoordinator:
 
         spec0, group_ids0, _ = self.attention_groups[0]
         if isinstance(spec0, FullAttentionSpec):
-            num_blocks = hit_length // spec0.block_size
+            num_blocks = cdiv(hit_length, spec0.block_size)
             for group_id in group_ids0:
                 full_blocks = hit_blocks_by_group[group_id]
                 assert full_blocks is not None
                 del full_blocks[num_blocks:]
+                hit_length_by_group[group_id] = hit_length
 
         return (
             tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group),
@@ -300,10 +338,101 @@ def _copy_spec_with_block_size(spec: KVCacheSpec, block_size: int) -> KVCacheSpe
     return replace(spec, block_size=block_size)
 
 
+def _get_manager_class_cache() -> dict[str, Any]:
+    cache = getattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, cache)
+    return cast(dict[str, Any], cache)
+
+
 def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
-    manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
-    assert manager_cls is not None, f"No manager registered for KVCacheSpec {type(spec)}"
+    cache = _get_manager_class_cache()
+    compress_ratio = getattr(spec, "compress_ratio", None)
+    if compress_ratio is not None and compress_ratio > 1:
+        compress_manager = cache.get("compress_manager", _CACHE_MISSING)
+        if compress_manager is _CACHE_MISSING:
+            try:
+                from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+            except ImportError:
+                compress_manager = None
+            else:
+                compress_manager = CompressAttentionManager
+            cache["compress_manager"] = compress_manager
+        if compress_manager is not None:
+            return cast(type[SingleTypeKVCacheManager], compress_manager)
+
+    registry = cache.get("registry", _CACHE_MISSING)
+    if registry is _CACHE_MISSING:
+        try:
+            registry_module = import_module("vllm.v1.kv_cache_spec_registry")
+            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
+        except ImportError:
+            registry = None
+        cache["registry"] = registry
+
+    if registry is not None:
+        manager_cls = registry.get_manager_class(spec)
+        if manager_cls is not None:
+            return manager_cls
+
+    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
+    if spec_manager_map is _CACHE_MISSING:
+        try:
+            manager_module = import_module("vllm.v1.core.single_type_kv_cache_manager")
+            spec_manager_map = vars(manager_module)["spec_manager_map"]
+        except Exception as exc:
+            raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
+        cache["spec_manager_map"] = spec_manager_map
+
+    try:
+        manager_cls = spec_manager_map[type(spec)]
+    except Exception as exc:
+        raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
     return manager_cls
+
+
+def _find_longest_cache_hit(
+    manager_cls: type[SingleTypeKVCacheManager],
+    **kwargs: Any,
+) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    hit_result = manager_cls.find_longest_cache_hit(**kwargs)
+    if vllm_version_is("0.25.1"):
+        hit_blocks = cast(tuple[list[KVCacheBlock], ...], hit_result)
+        hit_length = len(hit_blocks[0]) * kwargs["kv_cache_spec"].block_size
+        return hit_blocks, hit_length
+    return cast(tuple[tuple[list[KVCacheBlock], ...], int], hit_result)
+
+
+def _reachable_block_mask(
+    manager_cls: type[SingleTypeKVCacheManager],
+    **kwargs: Any,
+) -> list[bool] | None:
+    reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
+    if reachable_block_mask is None:
+        return None
+    try:
+        return reachable_block_mask(**kwargs)
+    except TypeError as exc:
+        if "retention_interval" not in str(exc) and "num_prompt_tokens" not in str(exc):
+            logger.debug("KV cache manager does not support reachable_block_mask kwargs: %s", exc)
+            return reachable_block_mask(
+                start_block=kwargs["start_block"],
+                end_block=kwargs["end_block"],
+                alignment_tokens=kwargs["alignment_tokens"],
+                kv_cache_spec=kwargs["kv_cache_spec"],
+                use_eagle=kwargs["use_eagle"],
+            )
+        kwargs.pop("retention_interval", None)
+        kwargs.pop("num_prompt_tokens", None)
+        return reachable_block_mask(**kwargs)
+
+
+def _cache_family_granularity(block_size: int, cache_family: str | None) -> int:
+    if not cache_family or not cache_family.startswith("c"):
+        return block_size
+    ratio = cache_family[1:]
+    return block_size * int(ratio) if ratio.isdigit() else block_size
 
 
 def _uses_reachable_mask(cache_family: str | None) -> bool:

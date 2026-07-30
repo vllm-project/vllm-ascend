@@ -78,7 +78,6 @@ def override_envs_for_invariance():
 
     ascend_config = get_ascend_config()
     ascend_config.weight_nz_mode = 0
-    ascend_config.enable_matmul_allreduce = False
 
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
@@ -88,8 +87,8 @@ def override_envs_for_invariance():
     torch.use_deterministic_algorithms(True, warn_only=True)
 
     logger.debug(
-        "Batch-invariant env override: weight_nz_mode=0, enable_matmul_allreduce=False, "
-        "HCCL_DETERMINISTIC=strict, LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
+        "Batch-invariant env override: weight_nz_mode=0, HCCL_DETERMINISTIC=strict, "
+        "LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
     )
 
 

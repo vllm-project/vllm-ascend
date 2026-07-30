@@ -84,8 +84,8 @@ public:
 
     __aicore__ inline SparseAttnSharedkvScfa(){};
     __aicore__ inline void Init(__gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *cmpKV,
-                                __gm__ uint8_t *cmpSparseIndices, __gm__ uint8_t *oriBlockTable,
-                                __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
+                                __gm__ uint8_t *oriSparseIndices, __gm__ uint8_t *cmpSparseIndices,
+                                __gm__ uint8_t *oriBlockTable, __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
                                 __gm__ uint8_t* cuSeqlensKV, __gm__ uint8_t *cuSeqlensCmpKV,
                                 __gm__ uint8_t *seqUsedQ, __gm__ uint8_t *seqUsedKV, __gm__ uint8_t *sinks,
                                 __gm__ uint8_t *metadata, __gm__ uint8_t *attentionOut,
@@ -195,6 +195,7 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::InitTilingData()
     // singleCoreTensorSize
     constInfo.mmResUbSize = tilingData->baseParams.mmResUbSize;
     constInfo.bmm2ResUbSize = tilingData->baseParams.bmm2ResUbSize;
+    constInfo.usedCoreNum = tilingData->baseParams.usedCoreNum;
 
     // baseParams
     constInfo.batchSize = tilingData->baseParams.batchSize;
@@ -376,7 +377,8 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::GetSparseActualSeqLen()
 template <typename SAST>
 __aicore__ inline void SparseAttnSharedkvScfa<SAST>::UpdateInnerLoopCond()
 {
-    if ((tempLoopInfo.actCmpS2Size == 0 && tempLoopInfo.actOriS2Size == 0) || (tempLoopInfo.actS1Size == 0)) {
+    bool hasOriWindow = tempLoopInfo.oriMaskRight >= tempLoopInfo.oriMaskLeft;
+    if ((tempLoopInfo.actCmpS2Size == 0 && !hasOriWindow) || (tempLoopInfo.actS1Size == 0)) {
         tempLoopInfo.curActSeqLenIsZero = true;
         return;
     }
@@ -388,13 +390,14 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::UpdateInnerLoopCond()
 
 template <typename SAST>
 __aicore__ inline void SparseAttnSharedkvScfa<SAST>::Init(
-    __gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *cmpKV, __gm__ uint8_t *cmpSparseIndices,
-    __gm__ uint8_t *oriBlockTable, __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
+    __gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *cmpKV, __gm__ uint8_t *oriSparseIndices,
+    __gm__ uint8_t *cmpSparseIndices, __gm__ uint8_t *oriBlockTable, __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
     __gm__ uint8_t* cuSeqlensKV, __gm__ uint8_t *cuSeqlensCmpKV, __gm__ uint8_t *seqUsedQ,
     __gm__ uint8_t *seqUsedKV, __gm__ uint8_t *sinks, __gm__ uint8_t *metadata, __gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxLse,
     __gm__ uint8_t *workspace, const SparseAttnSharedkvTilingData *__restrict tiling, __gm__ uint8_t *gmTiling,
     TPipe *tPipe)
 {
+    (void)oriSparseIndices;
     if ASCEND_IS_AIV {
         tmpBlockIdx = GetBlockIdx(); // vec:0-47
         aiCoreIdx = tmpBlockIdx / 2;
@@ -453,23 +456,23 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::Init(
     mm1ResGm.SetGlobalBuffer(
         (__gm__ MM1_OUT_T *)(workspace + offset +
                              aiCoreIdx * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(MM1_OUT_T)));
-    offset += GetBlockNum() * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(MM1_OUT_T);
+    offset += constInfo.usedCoreNum * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(MM1_OUT_T);
 
     vec1ResGm.SetGlobalBuffer(
         (__gm__ Q_T *)(workspace + offset + aiCoreIdx * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(KV_T)));
-    offset += GetBlockNum() * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(KV_T);
+    offset += constInfo.usedCoreNum * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(KV_T);
 
     mm2ResGm.SetGlobalBuffer(
         (__gm__ MM2_OUT_T *)(workspace + offset +
                              aiCoreIdx * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(MM2_OUT_T)));
-    offset += GetBlockNum() * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(MM2_OUT_T);
+    offset += constInfo.usedCoreNum * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(MM2_OUT_T);
 
     vec2ResGm.SetGlobalBuffer(
         (__gm__ T *)(workspace + offset + aiCoreIdx * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(T)));
-    offset += GetBlockNum() * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(T);
+    offset += constInfo.usedCoreNum * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(T);
 
     kvMergeGm_.SetGlobalBuffer((__gm__ KV_T *)(workspace + offset + aiCoreIdx * 512 * 512 * 4 * sizeof(KV_T)));
-    offset += GetBlockNum() * 512 * 512 * 4 * sizeof(KV_T);
+    offset += constInfo.usedCoreNum * 512 * 512 * 4 * sizeof(KV_T);
 
     kvValidSizeGm_.SetGlobalBuffer(
         (__gm__ int32_t *)(workspace + offset + (aiCoreIdx * 2) * 128 * 4 * sizeof(int32_t)));
@@ -670,7 +673,7 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::GetBN2Idx(uint32_t bN2Idx, 
 template <typename SAST>
 __aicore__ inline void SparseAttnSharedkvScfa<SAST>::ProcessBalance()
 {
-    RunInfo extraInfo[SAS_PRELOAD_TASK_CACHE_SIZE];
+    RunInfo extraInfo[SAS_PRELOAD_TASK_CACHE_SIZE] = {};
     uint32_t gloop = 0;
     uint32_t cmpLoop = 0;
     uint32_t gS1LoopEnd = 0;
@@ -714,6 +717,7 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::ProcessBalance()
             // 此处均为闭区间
             tempLoopInfo.oriMaskRight = tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                         static_cast<int32_t>(tempLoopInfo.s1EndIdx) + constInfo.oriWinRight;
+            tempLoopInfo.oriMaskRight = Min(tempLoopInfo.oriMaskRight, tempLoopInfo.actOriS2Size - 1);
             tempLoopInfo.oriMaskLeft = Max(tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                                static_cast<int32_t>(tempLoopInfo.s1EndIdx) - constInfo.oriWinLeft,
                                            0);
@@ -721,7 +725,8 @@ __aicore__ inline void SparseAttnSharedkvScfa<SAST>::ProcessBalance()
             GetSparseActualSeqLen();
             UpdateInnerLoopCond();
 
-            uint32_t oriS2Size = tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1;
+            uint32_t oriS2Size = (tempLoopInfo.oriMaskRight >= tempLoopInfo.oriMaskLeft) ?
+                static_cast<uint32_t>(tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1) : 0U;
             uint32_t oriSplitNum = 0;
             uint32_t cmpSplitNum = 0;
             uint32_t cmpS2Size = 0;
