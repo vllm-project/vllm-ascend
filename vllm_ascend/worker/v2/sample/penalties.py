@@ -192,8 +192,8 @@ def _apply_penalties_draft_kernel(
     for candidate_pos in tl.range(local_pos):
         draft_token = tl.load(token_ids_ptr + draft_start_idx + candidate_pos + 1)
 
-        draft_count = 0
-        earlier_count = 0
+        draft_count = 0 * local_pos  # to ensure the type is tl.int32
+        earlier_count = 0 * local_pos  # to ensure the type is tl.int32
         for scan_pos in tl.range(local_pos):
             scan_token = tl.load(token_ids_ptr + draft_start_idx + scan_pos + 1)
             is_same = scan_token == draft_token
