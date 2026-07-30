@@ -40,24 +40,9 @@ pytestmark = pytest.mark.skipif(
     reason="PR #47728 backport is a no-op once vLLM ships Request.num_in_flight_tokens",
 )
 
-_MAX_CONCURRENT_BATCHES = 2
-_MAX_NUM_BATCHED_TOKENS = 4096
-
 
 class _SWABackportTestBase:
     """Shared helpers for the SWA in-flight-free backport tests."""
-
-    @staticmethod
-    def _make_vllm_config(
-        *,
-        max_concurrent_batches: int = _MAX_CONCURRENT_BATCHES,
-        max_num_batched_tokens: int = _MAX_NUM_BATCHED_TOKENS,
-    ) -> SimpleNamespace:
-        """Minimal config consumed by the budget-publishing wrapper."""
-        return SimpleNamespace(
-            max_concurrent_batches=max_concurrent_batches,
-            scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
-        )
 
     @staticmethod
     def _scheduler_output(num_scheduled_tokens: dict[str, int]) -> SimpleNamespace:
@@ -140,24 +125,6 @@ class TestInFlightAccounting(_SWABackportTestBase):
         monkeypatch.setattr(swa, "_orig_update_from_output", lambda *a, **k: None)
         swa._update_from_output(object(), self._scheduler_output({"req-0": 6}), None)
         assert swa._inflight == {"req-0": 6}
-
-
-class TestSchedulerInitPublishesBudget(_SWABackportTestBase):
-    """Guard: ``_inflight_token_budget`` is published as
-    ``max_concurrent_batches * max_num_batched_tokens``, for both call styles —
-    keyword (EngineCore -> AsyncScheduler forwarding) and positional
-    (ProfilingChunkScheduler)."""
-
-    @pytest.mark.parametrize("call_style", ["keyword", "positional"])
-    def test_publishes_budget_for_both_call_styles(self, monkeypatch, call_style):
-        monkeypatch.setattr(swa, "_orig_scheduler_init", lambda *a, **k: None)
-        swa._inflight_token_budget = None
-        vllm_config = self._make_vllm_config()
-        if call_style == "keyword":
-            swa._scheduler_init(object(), vllm_config=vllm_config)
-        else:
-            swa._scheduler_init(object(), vllm_config)
-        assert swa._inflight_token_budget == (_MAX_CONCURRENT_BATCHES * _MAX_NUM_BATCHED_TOKENS)
 
 
 class TestSpecDecodeArithmetic(_SWABackportTestBase):

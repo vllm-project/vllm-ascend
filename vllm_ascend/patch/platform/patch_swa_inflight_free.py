@@ -14,13 +14,8 @@ from vllm.v1.request import Request
 # Request.num_in_flight_tokens, which v0.25.1 lacks).
 _inflight: dict[str, int] = {}
 
-# max_concurrent_batches * max_num_batched_tokens, published at Scheduler init
-# for patch_kv_cache_coordinator._select_kv_token_budget.
-_inflight_token_budget: int | None = None
-
 if not hasattr(Request, "num_in_flight_tokens"):
     _orig_remove_skipped_blocks = _kvcc.KVCacheCoordinator.remove_skipped_blocks
-    _orig_scheduler_init = _sched.Scheduler.__init__
     _orig_update_after_schedule = _sched.Scheduler._update_after_schedule
     _orig_update_from_output = _sched.Scheduler.update_from_output
 
@@ -28,20 +23,6 @@ if not hasattr(Request, "num_in_flight_tokens"):
     def _remove_skipped_blocks(self, request_id, total_computed_tokens, num_prompt_tokens=None):
         processed = max(0, total_computed_tokens - _inflight.get(request_id, 0))
         _orig_remove_skipped_blocks(self, request_id, processed, num_prompt_tokens)
-
-    @wraps(_orig_scheduler_init)
-    def _scheduler_init(self, *args, **kwargs):
-        global _inflight_token_budget
-        # vllm_config may arrive as a keyword arg (EngineCore passes it as one
-        # and AsyncScheduler forwards via `super().__init__(*args, **kwargs)`)
-        # or positionally; handle both. If neither, args[0] fast-fails.
-        vllm_config = kwargs.get("vllm_config")
-        if vllm_config is None:
-            vllm_config = args[0]
-        _inflight_token_budget = (
-            vllm_config.max_concurrent_batches * vllm_config.scheduler_config.max_num_batched_tokens
-        )
-        return _orig_scheduler_init(self, *args, **kwargs)
 
     @wraps(_orig_update_after_schedule)
     def _update_after_schedule(self, scheduler_output):
@@ -61,6 +42,5 @@ if not hasattr(Request, "num_in_flight_tokens"):
         return _orig_update_from_output(self, scheduler_output, model_runner_output)
 
     _kvcc.KVCacheCoordinator.remove_skipped_blocks = _remove_skipped_blocks
-    _sched.Scheduler.__init__ = _scheduler_init
     _sched.Scheduler._update_after_schedule = _update_after_schedule
     _sched.Scheduler.update_from_output = _update_from_output

@@ -45,11 +45,7 @@ def _select_kv_token_budget(
     max_num_batched_tokens: int | None,
 ) -> int:
     if vllm_version_is("0.25.1"):
-        token_budget = max_in_flight_tokens
-        if token_budget is None:
-            from vllm_ascend.patch.platform import patch_swa_inflight_free as _swa
-
-            token_budget = _swa._inflight_token_budget
+        token_budget = max_num_batched_tokens
     else:
         token_budget = max_in_flight_tokens
     return token_budget if token_budget is not None else max_model_len
