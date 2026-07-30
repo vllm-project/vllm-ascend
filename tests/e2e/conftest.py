@@ -903,12 +903,10 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
             full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
         if llm_kwargs.get("distributed_executor_backend") == "ray":
-            # Since vLLM PR #45026, RayExecutorV2 manages device assignment
-            # via assigned_physical_gpu_ids instead of ASCEND_RT_VISIBLE_DEVICES.
-            # Pre-sharding the env var breaks aclInit() in the worker because
-            # the inherited env var hides device 0. Pass device_ids instead so
-            # the executor can shard devices correctly per DP rank.
-            llm_kwargs["device_ids"] = full_device_ids
+            devs = full_device_ids
+            chunk = max(len(devs) // dp_size, 1)
+            start = dp_rank * chunk
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
         else:
             llm_kwargs["device_ids"] = full_device_ids
 
