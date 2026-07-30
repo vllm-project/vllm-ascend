@@ -67,6 +67,35 @@ def test_step3p5_first_pass_forwards_rejected_token_counts() -> None:
     assert "set_inputs_first_pass" not in step_methods
 
 
+def test_step3p5_dynamic_sd_per_step_k_contract() -> None:
+    """Dynamic SD: the Step3.5 ``_propose`` override does not call
+    ``super()._propose``, so it must replicate the base class's per-step K
+    entry logic:
+
+    * refresh ``self.num_speculative_tokens`` from
+      ``scheduler_output.num_spec_tokens_to_schedule``,
+    * return an empty draft when the per-step K is 0,
+    * NOT refresh ``self.decode_threshold`` -- it only feeds the FULL-graph
+      ``slicing_length``, which must stay at the static max-K graph bucket.
+    """
+    step_propose_src = _src(_method(STEP3P5, "AscendStep3p5MTPProposer", "_propose"))
+    base_propose_src = _src(_method(BASE_PROPOSER, "AscendSpecDecodeBaseProposer", "_propose"))
+
+    k_refresh = "self.num_speculative_tokens = scheduler_output.num_spec_tokens_to_schedule"
+    empty_draft = "torch.empty(batch_size, 0"
+
+    # The override and the base must stay in sync on the DSD entry path.
+    assert k_refresh in step_propose_src
+    assert k_refresh in base_propose_src
+    assert "self.num_speculative_tokens == 0" in step_propose_src
+    assert empty_draft in step_propose_src
+
+    # decode_threshold is assigned once at init and must never be re-derived
+    # from the per-step K inside _propose (neither override nor base).
+    assert "self.decode_threshold = " not in step_propose_src
+    assert "self.decode_threshold = " not in base_propose_src
+
+
 def test_step3p5_draft_window_and_config_contracts() -> None:
     base_run = _method(BASE_PROPOSER, "AscendSpecDecodeBaseProposer", "_run_merged_draft")
     step_run = _method(STEP3P5, "AscendStep3p5MTPProposer", "_run_merged_draft")

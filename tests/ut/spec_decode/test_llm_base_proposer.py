@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -153,3 +155,94 @@ class TestDisableFlashCommV1Context:
         with pytest.raises(RuntimeError, match="boom"), _disable_flash_comm_v1_context():
             raise RuntimeError("boom")
         assert ctx.flash_comm_v1_enabled is True
+
+
+class TestDynamicSpeculativeDecoding:
+    """Dynamic SD: ``_propose`` must honor the per-step K carried on
+    ``scheduler_output.num_spec_tokens_to_schedule``.
+
+    Key contracts:
+    * ``self.num_speculative_tokens`` is refreshed to the per-step K so all
+      downstream loops / reshapes see it.
+    * ``self.decode_threshold`` stays at the configured max (1 + max K): it
+      only feeds the FULL-graph ``slicing_length``, which must match the
+      static max-K graph bucket.
+    * K == 0 returns an empty draft so the target runs a plain decode.
+    """
+
+    MAX_K = 3
+
+    @staticmethod
+    def _make_proposer() -> AscendSpecDecodeBaseProposer:
+        """Bypass ``__init__`` and set only the attrs the DSD entry path reads."""
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.device = torch.device("cpu")
+        proposer.method = "mtp"
+        proposer.num_speculative_tokens = TestDynamicSpeculativeDecoding.MAX_K
+        # decode_threshold as set once at init from the configured max K.
+        proposer.decode_threshold = 1 + TestDynamicSpeculativeDecoding.MAX_K
+        return proposer
+
+    @staticmethod
+    def _propose_with_k(proposer: AscendSpecDecodeBaseProposer, per_step_k: int | None, batch_size: int = 4):
+        """Enter ``_propose`` far enough to exercise the DSD entry path.
+
+        ``per_step_k=None`` models the non-DSD path (no scheduler_output).
+        """
+        common_attn_metadata = SimpleNamespace(batch_size=lambda: batch_size)
+        scheduler_output = None if per_step_k is None else SimpleNamespace(num_spec_tokens_to_schedule=per_step_k)
+        return proposer._propose(
+            target_token_ids=torch.zeros(0, dtype=torch.long),
+            target_positions=torch.zeros(0, dtype=torch.long),
+            target_hidden_states=torch.zeros(0, 0),
+            next_token_ids=torch.zeros(batch_size, dtype=torch.long),
+            token_indices_to_sample=torch.zeros(batch_size, dtype=torch.long),
+            common_attn_metadata=common_attn_metadata,
+            target_model_batch_desc=None,
+            sampling_metadata=None,
+            scheduler_output=scheduler_output,
+        )
+
+    def test_zero_per_step_k_returns_empty_draft(self):
+        """DSD chose K=0 for this batch size: empty (batch_size, 0) int64 draft."""
+        proposer = self._make_proposer()
+        scheduler_k = 0
+
+        draft = self._propose_with_k(proposer, scheduler_k, batch_size=4)
+
+        assert draft.shape == (4, 0)
+        assert draft.dtype == torch.int64
+        assert proposer.num_speculative_tokens == 0
+
+    def test_decode_threshold_not_refreshed_to_per_step_k(self):
+        """Regression: decode_threshold must stay at 1 + max K even when the
+        per-step K is smaller (it sizes the static max-K FULL graph bucket)."""
+        proposer = self._make_proposer()
+
+        self._propose_with_k(proposer, per_step_k=0)
+
+        assert proposer.num_speculative_tokens == 0
+        assert proposer.decode_threshold == 1 + self.MAX_K
+
+    def test_per_step_k_refresh_happens_before_propose(self):
+        """A smaller per-step K replaces the configured max before any drafting
+        work runs (verified via a sentinel raised at the first downstream use)."""
+        proposer = self._make_proposer()
+        proposer.set_inputs_first_pass = Mock(side_effect=RuntimeError("sentinel"))
+
+        with pytest.raises(RuntimeError, match="sentinel"):
+            self._propose_with_k(proposer, per_step_k=2)
+
+        assert proposer.num_speculative_tokens == 2
+        assert proposer.decode_threshold == 1 + self.MAX_K
+
+    def test_no_scheduler_output_keeps_configured_k(self):
+        """Non-DSD path: without scheduler_output the configured max K is used."""
+        proposer = self._make_proposer()
+        proposer.set_inputs_first_pass = Mock(side_effect=RuntimeError("sentinel"))
+
+        with pytest.raises(RuntimeError, match="sentinel"):
+            self._propose_with_k(proposer, per_step_k=None)
+
+        assert proposer.num_speculative_tokens == self.MAX_K
+        assert proposer.decode_threshold == 1 + self.MAX_K

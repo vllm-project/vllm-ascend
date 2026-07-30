@@ -347,9 +347,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         # the scheduler. This override of ``_propose`` does not call
         # ``super()._propose``, so it must replicate the per-step K refresh that
         # the base class does at its entry (see llm_base_proposer.py).
+        # ``self.decode_threshold`` is left at the configured max (not refreshed
+        # to the per-step K): it only feeds the FULL-graph ``slicing_length``,
+        # which must match the static max-K graph bucket. See
+        # llm_base_proposer.py for the full rationale.
         if scheduler_output is not None:
             self.num_speculative_tokens = scheduler_output.num_spec_tokens_to_schedule
-            self.decode_threshold = 1 + self.num_speculative_tokens
 
         # No draft tokens requested for this batch size (e.g. Dynamic SD chose
         # K=0). Return an empty draft so the target model runs a plain decode.

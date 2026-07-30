@@ -757,13 +757,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # .num_spec_tokens_to_schedule``. This mirrors upstream
         # ``SpecDecodeBaseProposer.propose``, which receives the per-step K as
         # an explicit argument. The model runner already forwards the
-        # ``scheduler_output`` to us, so we recover the per-step K here and
-        # refresh the derived ``decode_threshold`` accordingly. All downstream
-        # loops / reshapes read ``self.num_speculative_tokens``, so updating it
-        # once at the entry propagates through the rest of ``_propose``.
+        # ``scheduler_output`` to us, so we recover the per-step K here. All
+        # downstream loops / reshapes read ``self.num_speculative_tokens``, so
+        # updating it once at the entry propagates through the rest of
+        # ``_propose``.
+        #
+        # ``self.decode_threshold`` is deliberately left at the configured
+        # maximum (1 + max K, set once at init) and NOT refreshed to the per-step
+        # K. It is only consumed by the FULL cuda-graph ``slicing_length``
+        # below, which must match the graph bucket ``num_reqs_padded *
+        # (1 + max K)`` (captured from the static ``uniform_decode_query_len``).
+        # DSD runs the drafter eager/piecewise when K < max K, so that path is
+        # not reached; when K == max K the two coincide. Driving it down to the
+        # per-step K would shrink ``slicing_length`` below the block-table size
+        # the FULL graph actually processes, risking an out-of-bounds access.
         if scheduler_output is not None:
             self.num_speculative_tokens = scheduler_output.num_spec_tokens_to_schedule
-            self.decode_threshold = 1 + self.num_speculative_tokens
 
         # No draft tokens requested for this batch size (e.g. Dynamic SD chose
         # K=0). Return an empty draft so the target model runs a plain decode.

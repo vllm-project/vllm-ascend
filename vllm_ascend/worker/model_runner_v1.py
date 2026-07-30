@@ -901,7 +901,7 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens,
                 self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
-                self.num_spec_tokens,
+                scheduler_output.num_spec_tokens_to_schedule,
                 prev_positions=prev_positions_gpu,
             )
 
@@ -1130,7 +1130,7 @@ class NPUModelRunner(GPUModelRunner):
                 arange_np=self.arange_np,
                 cu_num_tokens=cu_num_tokens,
                 draft_token_ids=self._draft_token_ids,  # type: ignore[has-type]
-                num_spec_tokens=self.num_spec_tokens,
+                num_spec_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 prepare_input_ids=self._prepare_input_ids,
             )
         else:
