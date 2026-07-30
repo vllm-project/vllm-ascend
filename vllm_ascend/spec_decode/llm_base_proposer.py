@@ -621,13 +621,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     # update long_seq related params and flatten block_table
                     common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
 
-                # The per-group metadata build below needs common_attn_metadata,
-                # which is only constructed above inside the FULL-graph branch.
-                # Keep this assert + loop INSIDE the FULL block: in non-FULL
-                # contexts (the NONE-mode warmup in _warmup_and_capture; profile
-                # is skipped earlier in the runner) the per-group machinery is
-                # neither needed nor available, and the draft model runs below in
-                # eager mode using the common attention metadata.
+                # Per-group metadata build requires common_attn_metadata from
+                # the FULL-graph branch; keep inside the FULL block.
                 assert len(self.draft_attn_groups) > 0
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
@@ -655,8 +650,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                         step_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
 
-                    # Build per-group metadata with correct block_table for
-                    # multi-group KV cache models (e.g. Gemma4 MTP).
+                    # Build per-group metadata for multi-group KV cache models.
                     per_layer_attn_metadata = dict()
                     for attn_group in self.draft_attn_groups:
                         gid = attn_group.kv_cache_group_id
@@ -925,13 +919,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata, num_input_tokens, num_tokens
         )
 
-        # Gemma4 MTP has multiple KV cache groups (sliding + full attention).
-        # During chunked prefill, build_draft_attn_metadata inherits the
-        # target's ChunkedPrefill attn_state.  Patch every group's output
-        # metadata to SpecDecoding so the FIA backend picks the decode
-        # kernel path.  We patch outputs rather than mutating the shared
-        # common_attn_metadata to avoid side effects on the target object.
-        # Deferred import avoids circular dependency.
+        # Gemma4 MTP: patch per-group attn_state to SpecDecoding so the FIA
+        # backend picks the decode kernel path (chunked prefill inherited
+        # ChunkedPrefill from target).  Deferred import avoids circular dep.
         if self.method == "mtp":
             from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 
@@ -1542,9 +1532,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
-        # Per-group block_table swap for multi-group KV cache models
-        # (e.g. Gemma4 MTP).  Each KV cache group has its own physical
-        # cache and needs the corresponding block_table.
+        # Per-group block_table swap for multi-group KV cache models.
         gid = attn_group.kv_cache_group_id
         per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
         if per_group_bt is not None:
@@ -1587,9 +1575,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
-        # The loop part.
-        # MTP (constant_draft_positions) predicts all draft tokens from
-        # the same target position — skip position advancing.
+        # MTP (constant_draft_positions): all draft tokens share the same
+        # target position — skip position and seq_len advancing.
         if not getattr(self, "constant_draft_positions", False):
             used_update_positions += 1
 
@@ -1626,8 +1613,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # operations in case they are modified in next step's `prepare_input`
         # of main model.
         # Increment the sequence lengths.
-        # MTP (constant_draft_positions) keeps the same seq_lens as
-        # the target's last position — no increment between draft steps.
+        # MTP (constant_draft_positions): keep target's last seq_lens.
         if not getattr(self, "constant_draft_positions", False):
             common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
@@ -2154,11 +2140,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
-            # Per-group block_table swap for multi-group KV cache models
-            # (e.g. Gemma4 MTP has separate sliding and full_attention
-            # groups with different physical caches).  Without this swap
-            # every group reads the first group's block_table, causing
-            # full_attention layers to read K/V from wrong blocks.
+            # Per-group block_table swap for multi-group KV cache models.
             cm = common_attn_metadata
             per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
             if per_group_bt is not None:

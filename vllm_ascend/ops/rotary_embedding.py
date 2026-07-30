@@ -243,9 +243,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        # Gemma4 MTP Q-only: key=None (K/V from target cache). Gate on key,
-        # not config — draft forward's config has no speculative_config.
-        # See ops.rope_q_only.gemma4_q_only_rope.
+        # Gemma4 MTP Q-only: K/V come from target cache, so key is None.
         if key is None:
             from vllm_ascend.ops.rope_q_only import gemma4_q_only_rope
 

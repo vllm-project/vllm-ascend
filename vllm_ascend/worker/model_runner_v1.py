@@ -3039,9 +3039,7 @@ class NPUModelRunner(GPUModelRunner):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            # MTP: Capture per-group block tables for multi-group proposers
-            # (e.g. Gemma4 MTP). Each KV cache group has its own block_table;
-            # the draft model needs all of them to read the correct KV cache.
+            # Capture per-group block tables for multi-group proposers.
             if (
                 self.speculative_config
                 and isinstance(self.drafter, AscendGemma4Proposer)
@@ -3614,12 +3612,8 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDraftModelProposer,
             )
             if isinstance(self.drafter, AscendGemma4Proposer):
-                # Gemma4 MTP needs per-group kernel_block_sizes (list of ints),
-                # not a single block_size.  vllm-ascend stores
-                # self.kernel_block_sizes as list[list[int]] (one inner list
-                # per kv_cache_group, e.g. [[128], [128]]), but upstream
-                # vLLM's initialize_attn_backend expects a flat list[int]
-                # indexed by kv_cache_group_id.  Flatten the inner lists.
+                # Gemma4 MTP needs per-group kernel_block_sizes (flat list of
+                # ints), not a single block_size.
                 kernel_block_sizes = [
                     sz if isinstance(sz, int) else sz[0]
                     for sz in self.kernel_block_sizes
