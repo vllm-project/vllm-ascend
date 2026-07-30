@@ -150,11 +150,15 @@ class UvaBufferWrapper:
     def uva(self):
         """Get the device data of the buffer."""
         if not is_uva_available() and self._modified_indices:
-            # Sort for better memory access locality
-            dirty_rows = sorted(self._modified_indices)
-            # can't use copy_ method, because copy_ for index tensor
-            #  will malloc new memory.
-            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu", non_blocking=True)
+            # copy_to_uva always writes a contiguous prefix dst[:n] = x,
+            # so dirty rows are always [0..n-1].  Use a contiguous slice
+            # copy_ (instead of indexed assignment) to:
+            #  1. keep the CPU source pinned (slice is a view, not a copy),
+            #     so non_blocking is not silently degraded.
+            #  2. avoid the intermediate tensor from .to() and the implicit
+            #     stream sync between .to() and __setitem__ on NPU.
+            n = len(self._modified_indices)
+            self._uva[:n].copy_(self._cpu[:n], non_blocking=True)
             self._modified_indices.clear()
         return self._uva
 
