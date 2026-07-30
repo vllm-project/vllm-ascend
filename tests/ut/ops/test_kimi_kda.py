@@ -82,6 +82,47 @@ def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
     assert torch.all((beta >= 0.0) & (beta <= 1.0))
 
 
+def test_kda_mixed_projection_keeps_qkv_packed_for_ascend_forward():
+    class TupleProjection(nn.Module):
+        def __init__(self, values: torch.Tensor) -> None:
+            super().__init__()
+            self.values = values
+
+        def forward(self, hidden_states: torch.Tensor):
+            return self.values[: hidden_states.shape[0]], None
+
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.uses_mixed_projection = True
+    attention.local_projection_size = 6
+    attention.head_dim = 2
+    attention.local_num_heads = 1
+    attention.in_proj_padding = 0
+
+    mixed_qkv = torch.arange(36, dtype=torch.float32).reshape(2, 18)
+    projected_gfab = torch.arange(18, dtype=torch.float32).reshape(2, 9)
+    attention.in_proj_qkvgfab = TupleProjection(mixed_qkv)
+    attention.in_proj_gfab = TupleProjection(projected_gfab)
+    attention.f_b_proj = TupleProjection(torch.ones(2, 2))
+    attention.o_proj = TupleProjection(torch.zeros(2, 2))
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_forward(**kwargs):
+        captured.update(kwargs)
+        kwargs["core_attn_out"].zero_()
+
+    attention._forward = fake_forward
+    output = attention(torch.zeros(2, 4), torch.zeros(2, dtype=torch.long))
+
+    torch.testing.assert_close(captured["mixed_qkv"], mixed_qkv)
+    assert captured["mixed_qkv"].shape == (2, 18)
+    assert captured["g1"].shape == (1, 2, 1, 2)
+    assert captured["g2"].shape == (2, 1, 2)
+    assert captured["beta"].shape == (1, 2, 1)
+    assert output.shape == (2, 2)
+
+
 def test_prefill_fuses_raw_gate_and_updates_v_first_state():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
