@@ -17,6 +17,7 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
+
 class AscendDSparkProposer(AscendDflashProposer):
     """DeepSeek V4 DSpark block proposer.
 
@@ -67,9 +68,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.positions = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._slot_mapping_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
         self._request_slots_buffer = torch.zeros(self.max_query_tokens, dtype=torch.int32, device=self.device)
-        self._dspark_window_offsets = torch.arange(self._dspark_window_size, dtype=torch.int64, device=self.device).view(
-            1, -1
-        )
+        self._dspark_window_offsets = torch.arange(
+            self._dspark_window_size, dtype=torch.int64, device=self.device
+        ).view(1, -1)
         window_shape = (self.max_graph_batch_size, self._dspark_window_size)
         self._dspark_context_cache_indices_buffer = torch.zeros(window_shape, dtype=torch.int64, device=self.device)
         self._dspark_context_cache_valid_buffer = torch.zeros(window_shape, dtype=torch.bool, device=self.device)
@@ -84,7 +85,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         self._dspark_capture_sizes: list[int] = []
         self._dspark_block_table_buffer: torch.Tensor | None = None
-        self._dspark_block_table_tensor: torch.Tensor | None = None
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         self._dspark_max_request_slots = max(
             1, int(getattr(scheduler_config, "max_num_seqs", self.max_batch_size) or self.max_batch_size)
@@ -260,7 +260,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=self.device,
         )
-        self._dspark_block_table_tensor = self._dspark_block_table_buffer
         self._draft_attn_layer_names = set(cache_layer_names)
         self.attn_layer_names = cache_layer_names
         self.piece_all_attn_layer_name = [[] for _ in range(self.num_speculative_tokens)]
@@ -320,7 +319,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         graph_batch_size = num_input_tokens // block_size
         fused_attn_metadata = self._prepare_dspark_fused_attention_metadata(graph_batch_size)
         context_cache_indices, context_cache_valid, context_request_slots = self._prepare_dspark_window_inputs(
-            num_input_tokens
+            num_input_tokens,
+            graph_batch_size,
         )
 
         with set_ascend_forward_context(
@@ -407,6 +407,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 self._dspark_req_id_to_slot[req_id] = slot
                 self._dspark_slots_to_reset.append(slot)
             slots.append(self._dspark_req_id_to_slot[req_id])
+        if len(slots) != len(set(slots)):
+            raise RuntimeError("Duplicate DSpark request cache slots in the active batch")
         return slots
 
     def _copy_dspark_block_table(
@@ -414,29 +416,28 @@ class AscendDSparkProposer(AscendDflashProposer):
         block_table: torch.Tensor | None,
         seq_lens: torch.Tensor | None = None,
     ) -> None:
-        block_table_buffer = self._dspark_block_table_buffer
-        if block_table_buffer is None:
-            self._dspark_block_table_tensor = block_table
+        if self._dspark_block_table_buffer is None:
+            if block_table is not None:
+                raise RuntimeError("DSpark block table buffer is not initialized.")
             return
-        block_table_buffer.fill_(-1)
+        self._dspark_block_table_buffer.fill_(-1)
         if block_table is not None:
-            num_rows = min(block_table.shape[0], block_table_buffer.shape[0])
+            num_rows = min(block_table.shape[0], self._dspark_block_table_buffer.shape[0])
             if seq_lens is not None:
                 num_rows = min(num_rows, seq_lens.shape[0])
-            num_cols = min(block_table.shape[1], block_table_buffer.shape[1])
-            block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
+            num_cols = min(block_table.shape[1], self._dspark_block_table_buffer.shape[1])
+            self._dspark_block_table_buffer[:num_rows, :num_cols].copy_(block_table[:num_rows, :num_cols])
             if seq_lens is not None and num_rows > 0:
                 valid_block_counts = torch.div(
-                    seq_lens[:num_rows].to(device=block_table_buffer.device, dtype=torch.int64)
+                    seq_lens[:num_rows].to(device=self._dspark_block_table_buffer.device, dtype=torch.int64)
                     + self.kernel_block_size
                     - 1,
                     self.kernel_block_size,
                     rounding_mode="floor",
                 )
-                block_indices = torch.arange(num_cols, device=block_table_buffer.device).view(1, -1)
+                block_indices = torch.arange(num_cols, device=self._dspark_block_table_buffer.device).view(1, -1)
                 invalid_blocks = block_indices >= valid_block_counts.view(-1, 1)
-                block_table_buffer[:num_rows, :num_cols].masked_fill_(invalid_blocks, -1)
-        self._dspark_block_table_tensor = block_table_buffer
+                self._dspark_block_table_buffer[:num_rows, :num_cols].masked_fill_(invalid_blocks, -1)
 
     def set_inputs_first_pass(
         self,
@@ -470,7 +471,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             valid_query_end = query_end
         valid_query_end = torch.maximum(query_start, valid_query_end)
 
-        num_context = min(target_token_ids.shape[0], target_hidden_states.shape[0], target_positions.shape[0])
+        num_context = target_token_ids.shape[0]
+        if target_positions.shape[0] < num_context or target_hidden_states.shape[0] < num_context:
+            raise ValueError(
+                "DSpark context inputs are shorter than target_token_ids: "
+                f"tokens={num_context}, positions={target_positions.shape[0]}, "
+                f"hidden_states={target_hidden_states.shape[0]}."
+            )
         self._dflash_num_context = num_context
         if num_context > 0:
             context_token_indices = self.arange_dflash[:num_context]
@@ -565,15 +572,18 @@ class AscendDSparkProposer(AscendDflashProposer):
     def _prepare_dspark_window_inputs(
         self,
         num_input_tokens: int,
+        batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        block_size = self.num_speculative_tokens
-        if num_input_tokens % block_size != 0:
+        tokens_per_request = self.num_speculative_tokens
+        expected_num_input_tokens = batch_size * tokens_per_request
+        if num_input_tokens != expected_num_input_tokens:
             raise ValueError(
-                f"DSpark decode requires a multiple of block_size tokens, got "
-                f"{num_input_tokens} tokens for block_size={block_size}"
+                "DSpark decode input shape mismatch: "
+                f"num_input_tokens={num_input_tokens}, "
+                f"batch_size={batch_size}, "
+                f"tokens_per_request={tokens_per_request}."
             )
-        batch_size = num_input_tokens // block_size
-        draft_positions = self.positions[:num_input_tokens].view(batch_size, block_size)
+        draft_positions = self.positions[:num_input_tokens].view(batch_size, tokens_per_request)
         context_end = draft_positions[:, :1].to(torch.int64) - 1
         context_start = torch.clamp(context_end + 1 - self._dspark_window_size, min=0)
         context_positions = context_start + self._dspark_window_offsets
@@ -581,7 +591,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cache_valid = context_positions <= context_end
         request_slots = (
             self._request_slots_buffer[:num_input_tokens]
-            .view(batch_size, block_size)[:, :1]
+            .view(batch_size, tokens_per_request)[:, :1]
             .to(torch.int64)
             .expand(-1, self._dspark_window_size)
         )
@@ -595,9 +605,10 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._dspark_context_request_slots_buffer[:batch_size],
         )
 
-    def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
+    def build_model_inputs_first_pass(self, num_input_tokens: int, batch_size: int) -> dict[str, Any]:
         context_cache_indices, context_cache_valid, context_request_slots = self._prepare_dspark_window_inputs(
-            num_input_tokens
+            num_input_tokens,
+            batch_size,
         )
         return {
             "input_ids": self.input_ids[:num_input_tokens],
@@ -605,7 +616,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             "inputs_embeds": None,
             "request_slots": self._request_slots_buffer[:num_input_tokens],
             "slot_mapping": self._slot_mapping_buffer[:num_input_tokens],
-            "block_table": self._dspark_block_table_tensor,
+            "block_table": self._dspark_block_table_buffer,
             "context_cache_indices": context_cache_indices,
             "context_cache_valid": context_cache_valid,
             "context_request_slots": context_request_slots,
@@ -634,7 +645,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._context_slot_mapping_buffer[:num_context],
         )
         self.model.model.sync_context_cache_from_paged(
-            self._dspark_block_table_tensor,
+            self._dspark_block_table_buffer,
             self._dspark_context_lens,
             self._dspark_context_request_slots,
         )
@@ -693,11 +704,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         for req_idx in range(num_reqs):
             generator_idx = runner_idx_mapping_cpu[req_idx] if runner_idx_mapping_cpu is not None else req_idx
             generator = sampling_metadata.generators.get(generator_idx)
-            seed_values.append(
-                int(generator.initial_seed())
-                if generator is not None
-                else base_seed + req_idx
-            )
+            seed_values.append(int(generator.initial_seed()) if generator is not None else base_seed + req_idx)
         seeds = self._dspark_sampling_seed_buffer[:num_reqs]
         seed_values_cpu = torch.tensor(seed_values, dtype=torch.int64, device="cpu")
         seeds.copy_(seed_values_cpu)
@@ -792,7 +799,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         batch_size: int,
         sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
-        model_inputs = self.build_model_inputs_first_pass(num_input_tokens)
+        model_inputs = self.build_model_inputs_first_pass(num_input_tokens, batch_size)
         hidden_states = self.model(**model_inputs)
         return self._sample_sequential(
             batch_size,
