@@ -142,6 +142,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             [0],
             use_layerwise=False,
             include_all_ranks=False,
+            grouped_hash_cache={},
         )
 
         self.assertEqual(hit, 128)

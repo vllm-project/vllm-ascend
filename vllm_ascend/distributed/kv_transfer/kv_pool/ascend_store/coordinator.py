@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
-    RequestGroupedBlockHashCache,
+    GroupedBlockHashCache,
     block_hash_to_bytes,
     get_block_hashes,
 )
@@ -144,7 +144,7 @@ class AscendStoreCoordinator:
         cached_block_pool: ExternalCachedBlockPool,
         *,
         apply_eagle: bool = True,
-        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
+        grouped_hash_cache: GroupedBlockHashCache | None = None,
     ) -> tuple[tuple[list[bool], ...], int]:
         blocks_per_group, hit_length = self._find_hit_blocks(
             block_hashes,
@@ -160,7 +160,7 @@ class AscendStoreCoordinator:
         self,
         block_hashes: list[BlockHash],
         token_len: int,
-        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
+        grouped_hash_cache: GroupedBlockHashCache | None = None,
     ) -> tuple[list[bool], ...]:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
@@ -227,7 +227,7 @@ class AscendStoreCoordinator:
         self,
         block_hashes: list[BlockHash],
         spec: KVCacheSpec,
-        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
+        grouped_hash_cache: GroupedBlockHashCache | None = None,
     ) -> BlockHashList:
         if spec.block_size == self.hash_block_size:
             return block_hashes
@@ -248,7 +248,7 @@ class AscendStoreCoordinator:
         cached_block_pool: ExternalCachedBlockPool,
         *,
         apply_eagle: bool = True,
-        grouped_hash_cache: RequestGroupedBlockHashCache | None = None,
+        grouped_hash_cache: GroupedBlockHashCache | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
         if len(self.attention_groups) == 1:

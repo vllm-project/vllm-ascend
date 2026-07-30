@@ -27,7 +27,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
-    RequestGroupedBlockHashCache,
     get_block_hashes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
@@ -112,7 +111,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             hash_block_size=8,
         )
         db.cache_coordinator = coord
-        grouped_hash_cache = RequestGroupedBlockHashCache(block_hashes, 8)
+        grouped_hash_cache = {}
 
         with patch.object(
             config_data,

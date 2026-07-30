@@ -25,7 +25,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
-    RequestGroupedBlockHashCache,
     SharedBlockData,
 )
 # isort: on
@@ -715,10 +714,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         def should_skip(start: int, end: int) -> bool:
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        grouped_hash_cache = RequestGroupedBlockHashCache(
-            req_meta.block_hashes,
-            self.token_database.hash_block_size,
-        )
+        grouped_hash_cache = {}
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
             cache_family = self.token_database.group_cache_families["kv"].get(group_id)
@@ -930,10 +926,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             key_list = []
             block_id_list: list[int] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
-            grouped_hash_cache = RequestGroupedBlockHashCache(
-                req_meta.block_hashes,
-                self.token_database.hash_block_size,
-            )
+            grouped_hash_cache = {}
             load_masks = self.token_database.load_mask(
                 req_meta.block_hashes,
                 token_len,
