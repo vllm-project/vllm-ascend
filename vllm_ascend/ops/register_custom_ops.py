@@ -17,6 +17,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import enable_sp_by_pass, is_vl_model
+from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -52,7 +53,11 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
                 x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
-            if enable_sp_by_pass():  # TODO: do unpad
+            # Skip DP unpad when SP bypass is active OR when ubatch overlap is
+            # running. Under ubatch overlap, each ubatch slice is rank-local
+            # (no DP padding is applied per-slice), so the unpad logic that
+            # uses dp_metadata.num_tokens_across_dp_cpu would read wrong values.
+            if enable_sp_by_pass() or get_ubatch_runtime_manager().is_ubatch_running:  # TODO: do unpad
                 return x
             # unpad
             num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
@@ -89,7 +94,10 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
             x = F.pad(x, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
-        if enable_sp_by_pass():
+        # Skip DP pad/reduce_scatter when SP bypass is active OR when ubatch
+        # overlap is running. Under ubatch overlap, each ubatch slice is
+        # rank-local, so skip straight to EP reduce_scatter.
+        if enable_sp_by_pass() or get_ubatch_runtime_manager().is_ubatch_running:
             return get_ep_group().reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # padding
         dp_size = get_dp_group().world_size

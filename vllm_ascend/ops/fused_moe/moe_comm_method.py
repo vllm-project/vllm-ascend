@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -47,6 +48,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -105,6 +107,25 @@ class MoECommMethod(ABC):
         self.prepare_finalize.set_lora_context(lora_context)
         self.token_dispatcher.set_lora_context(lora_context)
 
+    @property
+    def comm_in_dispatch_combine(self) -> bool:
+        """Whether real collective communication happens inside
+        ``token_dispatch`` / ``token_combine`` rather than inside
+        ``prepare`` / ``finalize``.
+
+        - **AllGather**: communication (all_gather / reduce_scatter) is in
+          ``prepare`` / ``finalize`` -> returns *False*.  ubatch wraps those
+          two calls with ``comm_section``.
+        - **AlltoAll / MC2**: communication (all_to_all / npu_moe_distribute_*)
+          is inside ``token_dispatch`` / ``token_combine`` -> returns *True*.
+          ubatch wraps those two calls with ``comm_section`` instead.
+
+        In both cases every MoE layer enters exactly **two** ``comm_section``
+        blocks, preserving the ping-pong symmetry required by the dual-batch
+        overlap runtime.
+        """
+        return False
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -147,6 +168,9 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
+        rt = get_ubatch_runtime_manager()
+        use_comm_section = rt.is_ubatch_running and self.comm_in_dispatch_combine
+
         before_dispatch_evt = torch.npu.current_stream().record_event()
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
@@ -156,7 +180,8 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
         )
-        token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        with rt.comm_section() if use_comm_section else nullcontext():
+            token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
@@ -167,10 +192,11 @@ class MoECommMethod(ABC):
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
         before_combine_evt = torch.npu.current_stream().record_event()
-        routed_out = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output,
-            combine_metadata=token_dispatch_output.combine_metadata,
-        )
+        with rt.comm_section() if use_comm_section else nullcontext():
+            routed_out = self.token_dispatcher.token_combine(
+                hidden_states=mlp_output,
+                combine_metadata=token_dispatch_output.combine_metadata,
+            )
 
         return FusedExpertsResult(
             routed_out=routed_out,
@@ -236,6 +262,10 @@ class MC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
+    @property
+    def comm_in_dispatch_combine(self) -> bool:
+        return True
+
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
@@ -255,6 +285,10 @@ class AlltoAllCommImpl(MoECommMethod):
     between data parallel ranks before and after the MLP computation. It should
     have better performance than AllGatherCommImpl when DP size > 1.
     """
+
+    @property
+    def comm_in_dispatch_combine(self) -> bool:
+        return True
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]

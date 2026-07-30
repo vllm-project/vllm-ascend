@@ -7,29 +7,72 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     pos_embed_interpolate_native,
 )
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
 
 
-def tensor_parallel_wrap(func):
-    def wrap(*args, **kwargs):
-        deepstack_input_embeds = func(*args, **kwargs)
-        if deepstack_input_embeds is None:
-            return deepstack_input_embeds
-        try:
-            flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
-        except (AssertionError, AttributeError, KeyError):
-            flash_comm_v1_enabled = False
-        if flash_comm_v1_enabled:
-            tp_size = get_tensor_model_parallel_world_size()
-            tp_rank = get_tensor_model_parallel_rank()
-            deepstack_input_embeds.tensors = {
-                k: v.chunk(tp_size)[tp_rank] for k, v in deepstack_input_embeds.tensors.items()
-            }
-        return deepstack_input_embeds
+def _ubatch_token_slice(num_tokens: int) -> tuple[int, int]:
+    """Return the [start, stop) token range this call should read/clear.
 
-    return wrap
+    Under ubatch overlap each worker thread must operate on the slice
+    ``[start:stop]`` bound by ``UBatchRuntimeManager.exec`` (the same
+    thread-local mechanism used by ``get_cos_and_sin_slice`` in rotary
+    embedding). When ubatch is disabled or the caller is not on a worker
+    thread, fall back to the whole ``[0:num_tokens]`` range so non-ubatch
+    runs are unaffected.
+    """
+    token_slice = get_ubatch_runtime_manager().get_current_token_slice()
+    if token_slice is not None:
+        return token_slice.start, token_slice.stop
+    return 0, num_tokens
+
+
+def _patched_get_deepstack_input_embeds(self, num_tokens: int):
+    if not getattr(self, "deepstack_input_embeds", None):
+        return None  # If vision tower is skipped
+
+    # Keep the upstream resize guard: if the buffer is smaller than the full
+    # token count, grow (and zero) it first. This must use the *full*
+    # num_tokens (not the ubatch slice) because the buffer is shared across
+    # ubatches and written once by the vision encoder before any ubatch
+    # worker reads from it.
+    if num_tokens > self.deepstack_input_embeds[0].size(0):
+        self._resize_deepstack_input_embeds(num_tokens)
+
+    start, stop = _ubatch_token_slice(num_tokens)
+    deepstack_input_embeds = IntermediateTensors(
+        {
+            f"deepstack_input_embeds_{idx}": self.deepstack_input_embeds[idx][start:stop]
+            for idx in range(self.deepstack_num_level)
+        }
+    )
+
+    # TP chunk under flash_comm_v1 (mirrors the original tensor_parallel_wrap):
+    # when SP/flash_comm is active each rank only needs its own shard.
+    try:
+        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
+    except (AssertionError, AttributeError, KeyError):
+        flash_comm_v1_enabled = False
+    if flash_comm_v1_enabled:
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        deepstack_input_embeds.tensors = {
+            k: v.chunk(tp_size)[tp_rank] for k, v in deepstack_input_embeds.tensors.items()
+        }
+    return deepstack_input_embeds
+
+
+def _patched_clear_deepstack_input_embeds(self, num_tokens: int) -> None:
+    if not getattr(self, "deepstack_input_embeds", None):
+        return
+
+    start, stop = _ubatch_token_slice(num_tokens)
+    if stop > start:
+        for idx in range(self.deepstack_num_level):
+            self.deepstack_input_embeds[idx][start:stop].zero_()
 
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
@@ -69,9 +112,36 @@ def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_s
 
 Qwen3Attention.forward = forward_with_split_qkv_rmsnorm_mrope
 Qwen3MoeAttention.forward = forward_with_split_qkv_rmsnorm_mrope
-Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wrap(
-    Qwen3VLForConditionalGeneration._get_deepstack_input_embeds
-)
+
+
+def _apply_deepstack_patches(model_cls) -> None:
+    """Patch DeepStack cross-layer buffer accessors to be both TP-aware and
+    ubatch-thread-safe.
+
+    This combines the original tensor_parallel_wrap (TP chunk under
+    flash_comm_v1) with ubatch overlap support: each worker thread reads/clears
+    the [start:stop] slice bound by UBatchRuntimeManager.exec. The resize guard
+    from the upstream implementation is preserved. Sets the
+    ``_ubatch_deepstack_patched`` marker so ``NPUModelRunner._ubatch_blocked_reason``
+    lifts the DeepStack gate and allows ubatch overlap on these models.
+    """
+    model_cls._get_deepstack_input_embeds = _patched_get_deepstack_input_embeds
+    model_cls._clear_deepstack_input_embeds = _patched_clear_deepstack_input_embeds
+    model_cls._ubatch_deepstack_patched = True
+
+
+_apply_deepstack_patches(Qwen3VLForConditionalGeneration)
+
+# Qwen3OmniMoeThinker does not inherit from Qwen3VLForConditionalGeneration but
+# has an identical DeepStack buffer implementation, so apply the same patches.
+try:
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    _apply_deepstack_patches(Qwen3OmniMoeThinkerForConditionalGeneration)
+except ImportError:
+    pass
 
 
 def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:

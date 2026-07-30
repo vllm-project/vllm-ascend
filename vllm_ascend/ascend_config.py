@@ -24,6 +24,14 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+# Default minimum padded token count required to enable ubatch overlap for a
+# scheduler step. Below this the host-side thread/event ping-pong overhead
+# exceeds the MoE-comm latency being hidden, so the batch runs on the standard
+# single-batch path. Tuned for sparse-MoE prefill on Ascend 910B/C; override
+# via the ``ubatch_trigger_threshold`` additional_config key when needed.
+DEFAULT_UBATCH_TRIGGER_THRESHOLD = 2048
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -265,6 +273,42 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        # Number of concurrent ubatches ("micro-batches") used to overlap MoE
+        # collective communication with dense compute (prefill only). A value of
+        # 1 (the default) disables ubatch overlap entirely. The value 2 splits
+        # each scheduler step's token batch into 2 slices executed on 2 NPU
+        # streams so one slice's MoE comm overlaps the other's dense compute.
+        # Only 1 and 2 are supported: the lock-step handoff in
+        # UBatchRuntimeManager is a two-stream ping-pong by design; values > 2
+        # do not yield additional overlap (the streams serialize into a single
+        # rotation chain with extra sync overhead) and are rejected here.
+        # Performance-critical for sparse-MoE models.
+        num_ubatches = max(1, int(additional_config.get("num_ubatches", 1)))
+        assert num_ubatches in (1, 2), (
+            f"num_ubatches must be 1 or 2, got {num_ubatches}. The ubatch "
+            "overlap lock-step handoff only supports two-stream ping-pong; "
+            "values > 2 do not provide additional overlap."
+        )
+        # Ubatch overlap is only implemented for the first pipeline-parallel
+        # rank: the per-ubatch forward passes share a single incoming
+        # intermediate_tensors, which is None only on the first PP rank. Reject
+        # the combination at config time instead of letting non-first PP ranks
+        # crash with an AssertionError on their first prefill step.
+        if num_ubatches > 1 and vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise RuntimeError(
+                f"num_ubatches={num_ubatches} is not supported with "
+                f"pipeline_parallel_size="
+                f"{vllm_config.parallel_config.pipeline_parallel_size} > 1. "
+                "Ubatch overlap only runs on the first pipeline-parallel rank."
+            )
+        self.num_ubatches = num_ubatches
+        # Minimum padded token count required to enable ubatch overlap for a
+        # given scheduler step. Below this threshold the batch runs on the
+        # standard single-batch path.
+        self.ubatch_trigger_threshold = int(
+            additional_config.get("ubatch_trigger_threshold", DEFAULT_UBATCH_TRIGGER_THRESHOLD)
+        )
 
         # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
         # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens

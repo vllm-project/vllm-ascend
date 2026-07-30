@@ -168,6 +168,14 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.ubatch_utils import (
+    get_ubatch_runtime_manager,
+    resolve_num_tokens_across_dp,
+    should_enable_ubatch,
+    should_run_ubatch,
+    slice_model_inputs_for_ubatch,
+    split_ascend_common_metadata,
+)
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -318,6 +326,13 @@ class NPUModelRunner(GPUModelRunner):
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
+        # `with_prefill` is refreshed in `_prepare_inputs` before the real
+        # forward path reads it, but `_determine_batch_execution_and_padding`
+        # can be reached earlier through `_dummy_run` (profile_run / cudagraph
+        # capture) before `_prepare_inputs` ever runs. Default to True so the
+        # ubatch path does not crash on an uninitialized attribute; the
+        # profiling/warmup batches are prefill-like anyway.
+        self.with_prefill: bool = True
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -640,37 +655,110 @@ class NPUModelRunner(GPUModelRunner):
         allow_dp_padding: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
-        # our case, we still need to sync the other two flags as well. So we need to
-        # include them in the all_reduce operation, and more over, we CANNOT skip it
+        # our case, we still need to sync the other two flags as well. So we need
+        # to include them in the all_reduce operation, and more over, we CANNOT skip it
         # even if we are running in eager mode, which harms performance.
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
+        # Delegate the collective to _sync_ubatch_across_dp (which owns the
+        # single 4-row all_reduce) with should_ubatch=False: we only need the
+        # synced num_tokens + cudagraph_mode here, and pass allow_dp_padding
+        # through so the non-ubatch padding tensor is built with the same rules
+        # as before.
+        _, max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode = (
+            self._sync_ubatch_across_dp(
+                num_tokens=num_tokens,
+                num_tokens_padded=num_tokens,
+                cudagraph_mode=cudagraph_mode,
+                should_ubatch=False,
+                allow_dp_padding=not should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model),
+            )
+        )
+        return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
+
+    def _sync_ubatch_across_dp(
+        self,
+        num_tokens: int,
+        num_tokens_padded: int,
+        cudagraph_mode: CUDAGraphMode,
+        should_ubatch: bool,
+        allow_dp_padding: bool = False,
+    ) -> tuple[bool, int, torch.Tensor | None, CUDAGraphMode]:
+        """DP-coordinated metadata + ubatch sync via a single 4-row all_reduce.
+
+        The 4-row tensor carries:
+          row 0: num_tokens_padded (max -> common padded size)
+          row 1: cudagraph_mode    (post-processed -> common graph mode)
+          row 2: num_tokens (real) (min -> conservative real-token floor)
+          row 3: should_ubatch flag (all==1 -> unanimous intent)
+
+        ``should_enable_ubatch`` is re-evaluated with the global
+        min(real)/max(padded) pair so every rank reaches the same ubatch
+        verdict — the collective MoE comm would deadlock if some ranks
+        ubatched and others did not.
+
+        ``_sync_metadata_across_dp`` calls this with ``should_ubatch=False``
+        and reuses the last three return values; the ubatch-eligible prefill
+        path calls this directly and consumes the leading ``should_ubatch``.
+
+        Returns ``(should_ubatch, max_num_tokens_padded, num_tokens_after_padding,
+        synced_cudagraph_mode)``.
+        """
         if self.dp_size == 1:
-            return num_tokens, None, cudagraph_mode
+            return should_ubatch, num_tokens_padded, None, cudagraph_mode
 
-        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
-            num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
-            return num_tokens, num_tokens_after_padding, cudagraph_mode
-
-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
-        packed_tensor[0][self.dp_rank] = num_tokens
+        packed_tensor = torch.zeros(4, self.dp_size, device="cpu", dtype=torch.int32)
+        packed_tensor[0][self.dp_rank] = num_tokens_padded
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        packed_tensor[2][self.dp_rank] = num_tokens
+        packed_tensor[3][self.dp_rank] = 1 if should_ubatch else 0
         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]
-        max_tokens_across_dp = int(num_tokens_across_dp.max().item())
+        max_num_tokens_padded = int(num_tokens_across_dp.max().item())
+        min_num_tokens = int(packed_tensor[2, :].min().item())
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
-        # Create a tensor for num_tokens_after_padding
-        if allow_dp_padding or is_draft_model:
+        should_ubatch = bool(torch.all(packed_tensor[3] == 1).item()) and should_enable_ubatch(
+            min_num_tokens, max_num_tokens_padded
+        )
+
+        if should_ubatch and (enable_sp(self.vllm_config) or enable_sp_by_pass()):
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            rt = get_ubatch_runtime_manager()
+            new_max_num_tokens = round_up(max_num_tokens_padded, tp_size * rt.num_ubatches)
+
+            if should_enable_ubatch(min_num_tokens, new_max_num_tokens):
+                max_num_tokens_padded = new_max_num_tokens
+            else:
+                should_ubatch = False
+
+        if allow_dp_padding or is_draft_model or should_ubatch:
             num_tokens_after_padding = torch.tensor(
-                [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
+                [max_num_tokens_padded] * self.dp_size, device="cpu", dtype=torch.int32
             )
         else:
             num_tokens_after_padding = num_tokens_across_dp.cpu()
 
-        return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
+        return should_ubatch, max_num_tokens_padded, num_tokens_after_padding, synced_cudagraph_mode
+
+    def _ubatch_blocked_reason(self) -> str | None:
+        assert self.model is not None
+        # NOTE: main-ubatch has no Prefill Context Parallelism (PCP), so the
+        # PCP incompatibility check from the v0.23.0 backport is intentionally
+        # omitted here.
+        uses_deepstack = getattr(self.model, "use_deepstack", False)
+        has_deepstack_buffer = hasattr(self.model, "deepstack_input_embeds")
+        is_patched = getattr(self.model, "_ubatch_deepstack_patched", False)
+        if uses_deepstack and has_deepstack_buffer and not is_patched:
+            return (
+                "model uses DeepStack cross-layer buffer which is not "
+                "thread-safe under ubatch; ensure patch_qwen3vl is loaded "
+                "(it sets _ubatch_deepstack_patched) or set num_ubatches=1"
+            )
+
+        return None
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -1875,6 +1963,7 @@ class NPUModelRunner(GPUModelRunner):
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                     force_eager=self.model_config.enforce_eager,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                    allow_microbatching=True,
                 )
 
                 if logger.isEnabledFor(logging.DEBUG):
@@ -1889,13 +1978,15 @@ class NPUModelRunner(GPUModelRunner):
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+                rt = get_ubatch_runtime_manager()
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                     should_ubatch,
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    self.parallel_config.num_ubatches,
+                    rt.num_ubatches,
                 )
+                rt.ubatch_slices = ubatch_slices_padded
 
                 if self.dynamic_eplb:
                     self.update_eplb_heat_collection_status(num_tokens_padded)
@@ -1958,7 +2049,21 @@ class NPUModelRunner(GPUModelRunner):
                     )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+                # Under ubatch overlap each per-ubatch forward context runs with
+                # the PADDED token count (rt.ubatch_slices = ubatch_slices_padded),
+                # so o_proj_input / q / kv fed to aclnnInplacePartialRotaryMul
+                # carry the padded token count. The DSA attention builder, on the
+                # other hand, sizes cos/sin from num_input_tokens of the per-ubatch
+                # common attention metadata. If that metadata is built from the
+                # UNpadded slices (pad_attn == False under FULL_DECODE_ONLY),
+                # cos ends up shorter than the padded rotary inputs and the
+                # inplace_partial_rotary_mul kernel aborts with
+                # "dim0 must be equal" (EZ9999). The non-ubatch path avoids this
+                # by setting num_input_tokens = num_tokens_padded on the shared
+                # common metadata (see the AscendCommonAttentionMetadata build
+                # above); mirror that here by always using the padded slices for
+                # the per-ubatch attention metadata when ubatch overlap is on.
+                ubatch_slices_attn = ubatch_slices_padded if (pad_attn or should_ubatch) else ubatch_slices
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
@@ -2031,6 +2136,63 @@ class NPUModelRunner(GPUModelRunner):
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
         )
+
+        if should_ubatch:
+            rt = get_ubatch_runtime_manager()
+            rt.forward_contexts = []
+
+            num_remain_tokens = scheduler_output.total_num_scheduled_tokens
+            num_tokens_across_dp_ub = resolve_num_tokens_across_dp(
+                num_tokens_across_dp, num_tokens_padded
+            )
+            num_tokens_across_dp_len = len(num_tokens_across_dp_ub)
+            for ubid, ubatch_slice in enumerate(rt.ubatch_slices):
+                num_actual_tokens = min(num_remain_tokens, ubatch_slice.num_tokens)
+                # Reuse a single CPU tensor, filling it with this slice's token
+                # count for every DP rank (the slice size is rank-local).
+                tokens_across_dp = num_tokens_across_dp_ub.new_full(
+                    (num_tokens_across_dp_len,), ubatch_slice.num_tokens
+                )
+                # Slice input_ids for this ubatch. Some MoE scoring paths read
+                # forward_context.input_ids unconditionally (e.g. the sqrtsoftplus
+                # hash-routing in experts_selector.select_experts), so the
+                # per-ubatch context must carry the sliced input_ids just like
+                # the non-ubatch context carries the full input_ids.
+                ubatch_input_ids = (
+                    input_ids[ubatch_slice.token_slice]
+                    if input_ids is not None
+                    else None
+                )
+                with set_ascend_forward_context(
+                    attn_metadata[ubid],
+                    self.vllm_config,
+                    num_tokens=ubatch_slice.num_tokens,
+                    num_tokens_across_dp=tokens_across_dp,
+                    aclgraph_runtime_mode=cudagraph_mode,
+                    batch_descriptor=batch_desc,
+                    num_actual_tokens=num_actual_tokens,
+                    model_instance=self.model,
+                    # NOTE: main-ubatch has no PCP, so max_tokens_across_pcp uses
+                    # the default 0 (omitted) instead of self.pcp_manager.
+                    skip_compiled=has_encoder_input,
+                    has_sinks=self._has_sinks,
+                    input_ids=ubatch_input_ids,
+                    eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                ):
+                    # set_ascend_forward_context derives ``mc2_mask`` as an
+                    # in-place view of the process-global ``_reserved_mc2_mask``
+                    # buffer. Because all per-ubatch contexts share that single
+                    # buffer (and the outer non-ubatch forward context below
+                    # would overwrite it again with a full-padded all-True
+                    # mask), each context must hold its own independent copy so
+                    # the per-slice real-token mask survives until the worker
+                    # thread actually runs the MoE comm.
+                    fc = get_forward_context()
+                    if fc.mc2_mask is not None:
+                        fc.mc2_mask = fc.mc2_mask.clone()
+                    rt.forward_contexts.append(fc)
+                num_remain_tokens = max(0, num_remain_tokens - ubatch_slice.num_tokens)
+
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2056,9 +2218,20 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+            if should_ubatch:
+                rt = get_ubatch_runtime_manager()
+                rt.count_enabled += 1
+                rt.num_tokens_enabled += num_tokens_padded
+                hidden_states = self._model_forward_ubatches(
+                    input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
+            else:
+                rt = get_ubatch_runtime_manager()
+                rt.count_disabled += 1
+                rt.num_tokens_disabled += num_tokens_padded
+                hidden_states = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2617,6 +2790,75 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
+    def _model_forward_ubatches(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: dict[str, Any],
+    ):
+        # Ubatch overlap is only supported on the first pipeline-parallel rank,
+        # where ``intermediate_tensors`` is None (no incoming PP activations).
+        # That is why ``intermediate_tensors`` is shared unsliced across all
+        # ubatch worker threads below. AscendConfig already rejects
+        # num_ubatches>1 with pipeline_parallel_size>1, so this assertion is a
+        # defensive invariants check rather than the primary guard.
+        assert get_pp_group().is_first_rank is True
+        assert intermediate_tensors is None, (
+            "ubatch overlap does not support incoming intermediate_tensors "
+            "(PP intermediate/last ranks are not supported yet)"
+        )
+        rt = get_ubatch_runtime_manager()
+
+        rt.forward_init()
+        futures = []
+        for ubid, ubatch_slice in enumerate(rt.ubatch_slices):
+            token_slice = ubatch_slice.token_slice
+            slice_num_tokens = ubatch_slice.num_tokens
+            (
+                input_ids_slice,
+                positions_slice,
+                inputs_embeds_slice,
+            ) = slice_model_inputs_for_ubatch(
+                token_slice, input_ids, positions, inputs_embeds
+            )
+
+            future = rt.add_task_and_get_future(
+                self._model_forward, ubid, slice_num_tokens,
+                input_ids_slice, positions_slice,
+                intermediate_tensors, inputs_embeds_slice, **model_kwargs,
+            )
+            futures.append(future)
+        has_error = False
+        try:
+            results = [future.result() for future in futures]
+        except Exception:
+            # A worker raised. Release any peer parked in yield_thread() so
+            # it can finish or raise, then discard the thread pool entirely.
+            # We do NOT try to drain the remaining Futures with a timeout —
+            # that would block error propagation for up to 120s. The old
+            # daemon threads will finish or hit the yield_thread timeout on
+            # their own; reset_thread_pool() ensures the next step uses a
+            # fresh pool.
+            has_error = True
+            rt.release_parked_workers()
+            rt.reset_thread_pool()
+            raise
+        finally:
+            # forward_finished() resets is_ubatch_running, joins all NPU
+            # streams, and restores the runtime to a clean state. On the error
+            # path skip the NPU event wait — some events may never be recorded
+            # and waiting would block forever.
+            rt.forward_finished(skip_event_wait=has_error)
+
+        if isinstance(results[0], tuple):
+            hidden_states = torch.cat([result[0] for result in results], dim=0)
+            aux_hidden_states = [torch.cat(items, dim=0) for items in zip(*[result[1] for result in results])]
+            return hidden_states, aux_hidden_states
+
+        return torch.cat(results, dim=0)
+
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
@@ -2733,11 +2975,58 @@ class NPUModelRunner(GPUModelRunner):
             )
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
-        should_ubatch, num_tokens_across_dp = False, None
+        should_ubatch, num_tokens_across_dp = should_enable_ubatch(num_tokens, num_tokens_padded), None
+        should_ubatch = should_run_ubatch(should_ubatch, self.with_prefill)
+        # Gate: check model-specific ubatch incompatibilities (e.g. DeepStack
+        # cross-layer buffers, DSA global mutable state) before SP alignment
+        # and DP synchronization so that blocked models skip the extra
+        # token-count rounding and collective sync entirely.
+        if should_ubatch:
+            blocked_reason = self._ubatch_blocked_reason()
+            if blocked_reason is not None:
+                logger.warning_once("Ubatch disabled for this step: %s", blocked_reason)
+                should_ubatch = False
+        # When ubatch overlap runs under sequence parallelism, each ubatch
+        # slice must still be a multiple of tensor_parallel_size so that the
+        # per-slice SP all_gather/reduce_scatter stays aligned. The DP>1 path
+        # already rounds num_tokens up to tp_size * num_ubatches inside
+        # _sync_ubatch_across_dp; apply the same rounding here for DP==1 so the
+        # two paths are consistent. Only round when ubatch is actually going to
+        # run (initial should_ubatch verdict), and re-check the trigger against
+        # the enlarged token count: if rounding pushes it below the threshold
+        # behavior, drop ubatch for this step (matching the DP>1 branch).
+        if (
+            should_ubatch
+            and self.vllm_config.parallel_config.data_parallel_size == 1
+            and (enable_sp(self.vllm_config) or enable_sp_by_pass())
+        ):
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            rt = get_ubatch_runtime_manager()
+            aligned_tokens = round_up(num_tokens_padded, tp_size * rt.num_ubatches)
+            if should_enable_ubatch(num_tokens, aligned_tokens):
+                num_tokens_padded = aligned_tokens
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded, use_cascade_attn or has_encoder_output
+                )
+                num_tokens_padded = batch_descriptor.num_tokens
+            else:
+                should_ubatch = False
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
-                num_tokens=num_tokens_padded,
+            # Single DP sync for both ubatch and non-ubatch paths:
+            # _sync_ubatch_across_dp runs the 4-row all_reduce and returns the
+            # unanimous ubatch verdict plus the synced token count / cudagraph
+            # mode. When ubatch is not in play (or is voted down) the last three
+            # values are exactly what _sync_metadata_across_dp would return.
+            (
+                should_ubatch,
+                _,
+                num_tokens_across_dp,
+                synced_cudagraph_mode,
+            ) = self._sync_ubatch_across_dp(
+                num_tokens=num_tokens,
+                num_tokens_padded=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
+                should_ubatch=allow_microbatching and should_ubatch,
                 allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
                                   or enable_sp(self.vllm_config)
                                   or oproj_tp_enable()
@@ -3036,14 +3325,43 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     spec_decode_common_attn_metadata = cm
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                _build_attn_group_metadata(
-                    kv_cache_gid,
-                    attn_gid,
-                    cm,
-                    prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata,
-                    common_ratio_to_sas_metadata,
-                )
+                if ubatch_slices is not None:
+                    # DSA builders cache per-step results (num_decodes /
+                    # seq_lens / query_lens / cos / sin / input_positions) in
+                    # the ``*_ratio_to_sas_metadata`` dicts, keyed on whether
+                    # the dict already holds ``"num_decodes"``. Under ubatch
+                    # each ubid has its own DSA builder instance, but if every
+                    # ubid shares the same dict, ubid=0 populates it with
+                    # ubatch-0's values and every later ubid reuses those
+                    # values (its own ``self.block_table`` is sliced correctly
+                    # for *its* sub-metadata, so ``block_table[reqs_start:]``
+                    # ends up empty and aclnnSparseAttnSharedkv fails with
+                    # "ori_block_table cannot be empty tensor"). Give each
+                    # ubid a private dict set so every builder runs its
+                    # first-build branch against its own sub-metadata.
+                    per_ubatch_dicts = [
+                        ({}, {}, {}) for _ in ubatch_slices
+                    ]
+                    for ubid, sub_cm in enumerate(split_ascend_common_metadata(ubatch_slices, cm)):
+                        prefill_d, decode_d, common_d = per_ubatch_dicts[ubid]
+                        _build_attn_group_metadata(
+                            kv_cache_gid,
+                            attn_gid,
+                            sub_cm,
+                            prefill_d,
+                            decode_d,
+                            common_d,
+                            ubid,
+                        )
+                else:
+                    _build_attn_group_metadata(
+                        kv_cache_gid,
+                        attn_gid,
+                        cm,
+                        prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata,
+                    )
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
@@ -4479,14 +4797,15 @@ class NPUModelRunner(GPUModelRunner):
             attn_groups: list[AttentionGroup] = []
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
                 attn_metadata_builders = []
-                attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
-                        kv_cache_spec,
-                        layer_names,
-                        self.vllm_config,
-                        self.device,
+                for _ in range(get_ubatch_runtime_manager().num_ubatches):
+                    attn_metadata_builders.append(
+                        attn_backend.get_builder_cls()(
+                            kv_cache_spec,
+                            layer_names,
+                            self.vllm_config,
+                            self.device,
+                        )
                     )
-                )
                 attn_group = AttentionGroup(
                     attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
                 )

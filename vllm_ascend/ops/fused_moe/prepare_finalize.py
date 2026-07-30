@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import threading
 from abc import ABC, abstractmethod
 
 import torch
@@ -51,9 +52,55 @@ class PrepareAndFinalize(ABC):
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
         self.lora_context = None
+        # Thread-local storage for prepare→finalize transient state.
+        # ``get_moe_comm_method()`` returns a process-wide singleton, so when
+        # ubatch overlap runs two MoE forwards concurrently on two worker
+        # threads they share the same PrepareAndFinalize instance. Without
+        # per-thread isolation, the peer thread's prepare() overwrites
+        # ``num_tokens`` (and the replace_allreduce / enable_shared_expert_dp
+        # flags) before this thread's finalize() reads them, causing finalize
+        # to truncate the output to the wrong token count and producing a
+        # shape mismatch in the downstream residual add. Each ubatch worker
+        # thread runs on its own OS thread, so threading.local gives every
+        # worker an independent slot.
+        self._tls = threading.local()
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
+
+    # -- thread-local prepare→finalize transient state ----------------------
+
+    @property
+    def num_tokens(self) -> int:
+        return getattr(self._tls, "num_tokens", 0)
+
+    @num_tokens.setter
+    def num_tokens(self, value: int) -> None:
+        self._tls.num_tokens = value
+
+    @property
+    def num_tokens_pcp(self) -> int:
+        return getattr(self._tls, "num_tokens_pcp", 0)
+
+    @num_tokens_pcp.setter
+    def num_tokens_pcp(self, value: int) -> None:
+        self._tls.num_tokens_pcp = value
+
+    @property
+    def replace_allreduce(self) -> bool:
+        return getattr(self._tls, "replace_allreduce", False)
+
+    @replace_allreduce.setter
+    def replace_allreduce(self, value: bool) -> None:
+        self._tls.replace_allreduce = value
+
+    @property
+    def enable_shared_expert_dp(self) -> bool:
+        return getattr(self._tls, "enable_shared_expert_dp", False)
+
+    @enable_shared_expert_dp.setter
+    def enable_shared_expert_dp(self, value: bool) -> None:
+        self._tls.enable_shared_expert_dp = value
 
     @abstractmethod
     def prepare(

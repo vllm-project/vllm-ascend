@@ -16,6 +16,7 @@
 #
 # ruff: noqa: E501
 from collections.abc import Callable
+from contextlib import nullcontext
 from copy import copy
 from dataclasses import dataclass, field
 from functools import wraps
@@ -53,6 +54,7 @@ from vllm_ascend.utils import (
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
 )
+from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -636,13 +638,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self._quant_method, lora_context)
 
-        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp,
-            quant_type=self.quant_type,
+        rt = get_ubatch_runtime_manager()
+        _moe_comm_method = _EXTRA_CTX.moe_comm_method
+        _comm_section_for_prepare_finalize = (
+            rt.is_ubatch_running and _moe_comm_method is not None and not _moe_comm_method.comm_in_dispatch_combine
         )
+        with rt.comm_section() if _comm_section_for_prepare_finalize else nullcontext():
+            prepare_output = _moe_comm_method.prepare(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
+                enable_shared_expert_dp=self.enable_shared_expert_dp,
+                quant_type=self.quant_type,
+            )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
         mc2_mask = prepare_output.mc2_mask
@@ -697,11 +705,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             else:
                 self.moe_load.add_(local_load)
 
-        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
-            hidden_states=fused_experts_results.routed_out,
-            reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
-            padded_hidden_states_shape=padded_hidden_states_shape,
-        )
+        with rt.comm_section() if _comm_section_for_prepare_finalize else nullcontext():
+            routed_out = _moe_comm_method.finalize(
+                hidden_states=fused_experts_results.routed_out,
+                reduce_results=isinstance(_moe_comm_method, AllGatherCommImpl),
+                padded_hidden_states_shape=padded_hidden_states_shape,
+            )
 
         # clear per-forward LoRA state from long-lived singletons.
         if lora_context is not None:

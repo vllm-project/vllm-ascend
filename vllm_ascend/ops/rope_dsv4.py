@@ -21,6 +21,21 @@ class RopeGlobalState:
 _ROPE_STATE = RopeGlobalState()
 
 
+def _ubatch_running() -> bool:
+    """Return True if ubatch overlap is active for the current step.
+
+    Lazy import avoids a circular dependency (ubatch_utils imports custom ops
+    that can transitively import this module). Returns False if the ubatch
+    runtime manager has not been created yet (num_ubatches == 1 / not serving).
+    """
+    try:
+        from vllm_ascend.worker.ubatch_utils import get_ubatch_runtime_manager
+
+        return get_ubatch_runtime_manager().is_ubatch_running
+    except Exception:
+        return False
+
+
 class RopeDataProxy:
     def __init__(self, data_map, is_cos=True):
         self._data = data_map
@@ -123,7 +138,23 @@ def get_cos_and_sin_dsa(
                     buf_cos[:num_tokens].copy_(curr_cos)
                     buf_sin[:num_tokens].copy_(curr_sin)
 
-                    batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
+                    # Under ubatch overlap, two ubatches build their decode
+                    # metadata sequentially on the main thread but run their
+                    # forwards concurrently on two worker threads. The
+                    # runtime_buffer is a process-global singleton, so without
+                    # cloning, ubid=0's returned cos/sin would be a VIEW of the
+                    # same buffer that ubid=1 subsequently overwrites during its
+                    # own metadata build — corrupting ubid=0's rotary and
+                    # causing aclnnInplacePartialRotaryMul "dim0 must be equal"
+                    # (and silent wrong results). Clone so each ubatch owns an
+                    # independent tensor.
+                    if _ubatch_running():
+                        batch_result[config_key][group_name] = (
+                            buf_cos[:num_tokens].clone(),
+                            buf_sin[:num_tokens].clone(),
+                        )
+                    else:
+                        batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
                 else:
                     buf_cos[draft_index - 1][:num_tokens].copy_(curr_cos)
                     buf_sin[draft_index - 1][:num_tokens].copy_(curr_sin)
