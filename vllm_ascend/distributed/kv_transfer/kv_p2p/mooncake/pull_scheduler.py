@@ -159,7 +159,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         prompt_len = len(prompt_token_ids)
         num_prompt_blocks = math.ceil(prompt_len / self.block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, prompt_len)
-        computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         num_computed_blocks = sum(len(group_block_ids) for group_block_ids in computed_block_ids)
         delay_free_blocks = num_computed_blocks > 0
         if delay_free_blocks:

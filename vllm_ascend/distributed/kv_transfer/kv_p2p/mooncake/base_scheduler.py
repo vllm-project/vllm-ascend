@@ -3,7 +3,6 @@
 """Common scheduler-side logic for Mooncake KV transfer connectors."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -18,7 +17,6 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -34,15 +32,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class GroupTransferInfo:
-    """Transfer-relevant properties of one KV cache group."""
-
-    tokens_per_block: int
-    blocks_per_window: int
-    is_state_group: bool
 
 
 class MooncakeBaseConnectorScheduler:
@@ -61,6 +50,11 @@ class MooncakeBaseConnectorScheduler:
         self.kv_cache_config = kv_cache_config
         self.engine_id = engine_id
         self.block_size = vllm_config.cache_config.block_size
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config is not None
+            else 0
+        )
 
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
@@ -81,49 +75,28 @@ class MooncakeBaseConnectorScheduler:
         # Handshake base port for this DP group.
         self.side_channel_port = (
             self.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
-            * self.tp_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+            + vllm_config.parallel_config.data_parallel_rank * self.tp_size * self.pp_size * self.pcp_size
         )
 
         # Worker metadata for a DP group that may span multiple nodes.
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
-        self.use_compress = self._model_uses_compress()
-        self.group_transfer_info = [self._get_group_transfer_info(group) for group in self.kv_cache_groups]
-        self.need_truncate = self.use_compress or any(info.is_state_group for info in self.group_transfer_info)
+        self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
+        self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
+        self.need_truncate = self._needs_prefill_token_truncation()
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
-    def _model_uses_compress(self) -> bool:
+    def _needs_prefill_token_truncation(self) -> bool:
+        """Return whether Prefill must leave the last prompt token to Decode."""
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
         compress_ratios = getattr(hf_config, "compress_ratios", None)
-        return isinstance(compress_ratios, (list, tuple, dict))
-
-    def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
-        specs = self._get_group_unique_specs(group)
-        first_spec = specs[0] if specs else group.kv_cache_spec
-        block_size = getattr(
-            group.kv_cache_spec,
-            "block_size",
-            getattr(first_spec, "block_size", self.block_size),
+        uses_compressed_cache = isinstance(compress_ratios, (list, tuple, dict))
+        has_state_group = any(
+            isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
-        sliding_window = 0
-        compress_ratio = 1
-        for spec in specs:
-            if isinstance(spec, SlidingWindowSpec):
-                sliding_window = spec.sliding_window
-            elif hasattr(spec, "compress_ratio"):
-                compress_ratio = spec.compress_ratio
-
-        return GroupTransferInfo(
-            tokens_per_block=block_size * max(1, int(compress_ratio)),
-            blocks_per_window=(cdiv(sliding_window, block_size) + 1 if sliding_window else 0),
-            is_state_group=is_state_group,
-        )
+        return uses_compressed_cache or has_state_group
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
@@ -138,39 +111,31 @@ class MooncakeBaseConnectorScheduler:
         return specs
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
-        """Drop non-prompt attention blocks while retaining state groups."""
+        """Return prompt blocks while retaining evicted-block padding.
+
+        Attention groups are clipped by their block size. Mamba groups are not
+        prompt-block aligned, so only their speculative tail blocks are removed.
+        """
         if not block_ids:
             return block_ids
 
-        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
+        assert len(block_ids) == len(self.group_unique_specs), "Number of KV cache groups must match"
 
-        transfer_block_ids = []
+        transfer_block_ids: list[list[int]] = []
         cp_size = max(1, self.pcp_size * self.dcp_size)
-        for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            if group_info.is_state_group:
-                transfer_block_ids.append(blocks)
+        for blocks, block_size, group_specs in zip(
+            block_ids,
+            self.group_block_size,
+            self.group_unique_specs,
+        ):
+            if any(isinstance(spec, MambaSpec) for spec in group_specs):
+                if self.num_speculative_tokens > 0:
+                    transfer_block_ids.append(blocks[: -self.num_speculative_tokens])
+                else:
+                    transfer_block_ids.append(blocks)
             else:
-                num_prompt_blocks = cdiv(
-                    prompt_len,
-                    group_info.tokens_per_block * cp_size,
-                )
+                num_prompt_blocks = cdiv(prompt_len, block_size * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
-        return tuple(transfer_block_ids)
-
-    def _get_swa_transfer_block_ids(self, block_ids: BlockIds) -> BlockIds:
-        """Clip SWA groups to their window tail and drop block zero."""
-        if not block_ids:
-            return block_ids
-
-        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
-
-        transfer_block_ids = []
-        for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            if group_info.is_state_group or group_info.blocks_per_window == 0:
-                transfer_block_ids.append(blocks)
-            else:
-                window_blocks = blocks[-group_info.blocks_per_window :]
-                transfer_block_ids.append([block_id for block_id in window_blocks if block_id != 0])
         return tuple(transfer_block_ids)
 
     def _state_prefill_token_count(self, num_prompt_tokens: int) -> int:
@@ -182,7 +147,12 @@ class MooncakeBaseConnectorScheduler:
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """Drop the last P-side prompt token for stateful model transfer."""
         params = request.kv_transfer_params
-        if params is None or params.get("_p_side_truncated") or request.num_prompt_tokens <= 1:
+        if (
+            params is None
+            or not self.need_truncate
+            or params.get("_p_side_truncated")
+            or request.num_prompt_tokens <= 1
+        ):
             return
 
         if request.prompt_token_ids is not None:
@@ -270,4 +240,4 @@ class MooncakeBaseConnectorScheduler:
         self.set_xfer_handshake_metadata_from_workers(metadata)
 
 
-__all__ = ["GroupTransferInfo", "MooncakeBaseConnectorScheduler"]
+__all__ = ["MooncakeBaseConnectorScheduler"]
