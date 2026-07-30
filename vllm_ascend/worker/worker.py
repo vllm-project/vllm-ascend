@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+from contextlib import suppress
 from types import NoneType
 from typing import Any
 
@@ -300,8 +301,39 @@ class NPUWorker(WorkerBase):
                 "VLLM_ASCEND_ENABLE_NZ=0."
             )
 
-    def start_weight_update(self) -> None:
-        """Begin a new weight update; prepares the model for layerwise reload."""
+    def _get_draft_model(self):
+        """Return the MTP/eagle draft model for weight update, or None."""
+        drafter = getattr(self.model_runner, "drafter", None)
+        if drafter is None:
+            return None
+        # AscendEagleProposer stores the draft model in .model (may be wrapped)
+        draft_model = getattr(drafter, "model", None)
+        if draft_model is None:
+            return None
+        # Unwrap ACLGraphWrapper if present
+        if hasattr(drafter, "get_model"):
+            with suppress(Exception):
+                draft_model = drafter.get_model()
+        # Draft model must have load_weights for checkpoint-format update
+        if not hasattr(draft_model, "load_weights"):
+            return None
+        return draft_model
+
+    def _bind_draft_model_to_engine(self) -> None:
+        """Attach MTP draft model to the transfer engine for this update cycle."""
+        assert self.weight_transfer_engine is not None
+        draft_model = self._get_draft_model()
+        self.weight_transfer_engine.draft_model = draft_model
+        drafter = getattr(self.model_runner, "drafter", None)
+        self.weight_transfer_engine.draft_model_config = getattr(drafter, "draft_model_config", None)
+
+    def start_weight_update(self, is_checkpoint_format: bool | None = None) -> None:
+        """Begin a new weight update; prepares the model for layerwise reload.
+
+        ``is_checkpoint_format`` is accepted for RL-client compatibility but
+        ignored: checkpoint-format handling belongs to each transfer engine
+        after the weight-transfer lifecycle refactor (#12876).
+        """
         self._check_weight_transfer_engine()
 
         if self._weight_update_active:
@@ -312,6 +344,7 @@ class NPUWorker(WorkerBase):
         self._check_nz_disabled()
 
         assert self.weight_transfer_engine is not None
+        self._bind_draft_model_to_engine()
         self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 

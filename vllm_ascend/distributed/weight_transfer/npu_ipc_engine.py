@@ -163,6 +163,10 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         )
 
         initialize_layerwise_reload(self.model)
+        draft_model = getattr(self, "draft_model", None)
+        if draft_model is not None:
+            # Also prepare MTP/eagle draft model for layerwise reload.
+            initialize_layerwise_reload(draft_model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
@@ -171,6 +175,19 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        draft_model = getattr(self, "draft_model", None)
+        if draft_model is not None:
+            draft_cfg = getattr(self, "draft_model_config", None) or self.model_config
+            finalize_layerwise_reload(draft_model, draft_cfg)
+
+    def _load_weights_with_draft(self, weights):
+        """Load weights into target model and MTP draft model when present."""
+        weights_list = list(weights)
+        self.model.load_weights(weights_list)
+        draft_model = getattr(self, "draft_model", None)
+        if draft_model is not None:
+            # Draft load_weights filters by name; MTP-only params go to draft.
+            draft_model.load_weights(weights_list)
 
     def receive_weights(
         self,
@@ -197,7 +214,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
             )
-            self.model.load_weights(weights)
+            self._load_weights_with_draft(weights)
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
             # must not be imported at module load time on non-NPU hosts.
@@ -227,7 +244,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-            self.model.load_weights(weights)
+            self._load_weights_with_draft(weights)
 
     def shutdown(self) -> None:
         pass

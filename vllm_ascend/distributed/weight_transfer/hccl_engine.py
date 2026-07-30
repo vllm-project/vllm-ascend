@@ -130,6 +130,10 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         )
 
         initialize_layerwise_reload(self.model)
+        draft_model = getattr(self, "draft_model", None)
+        if draft_model is not None:
+            # Also prepare MTP/eagle draft model for layerwise reload.
+            initialize_layerwise_reload(draft_model)
 
     def finish_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import (
@@ -137,6 +141,19 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        draft_model = getattr(self, "draft_model", None)
+        if draft_model is not None:
+            draft_cfg = getattr(self, "draft_model_config", None) or self.model_config
+            finalize_layerwise_reload(draft_model, draft_cfg)
+
+    def _load_weights_with_draft(self, weights):
+        """Load weights into target model and MTP draft model when present."""
+        weights_list = list(weights)
+        self.model.load_weights(weights_list)
+        draft_model = getattr(self, "draft_model", None)
+        if draft_model is not None:
+            # Draft load_weights filters by name; MTP-only params go to draft.
+            draft_model.load_weights(weights_list)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """
@@ -195,7 +212,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
-                post_unpack_func=self.model.load_weights,
+                post_unpack_func=self._load_weights_with_draft,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
             )
@@ -205,7 +222,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 dtype = getattr(torch, dtype_name)
                 weight = torch.empty(shape, dtype=dtype, device="npu")
                 self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
-                self.model.load_weights([(name, weight)])
+                self._load_weights_with_draft([(name, weight)])
                 del weight
 
     def shutdown(self) -> None:
