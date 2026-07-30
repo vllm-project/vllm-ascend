@@ -211,7 +211,7 @@ vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
 --port 8015 \
 --max_model_len 135168 \
 --max-num-batched-tokens 16384 \
---served-model-name dsv3 \
+--served-model-name deepseek_v3 \
 --gpu-memory-utilization 0.9 \
 --data-parallel-size 1 \
 --tensor-parallel-size 8 \
