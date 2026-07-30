@@ -120,7 +120,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_version:
-          - ${{ needs.select-full-tests.outputs.release_tag }}
+          - ${{ needs.select-full-tests.outputs.main_commit }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
