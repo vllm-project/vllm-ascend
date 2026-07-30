@@ -7,7 +7,6 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -26,7 +25,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import (
     all_gather_async,
 )
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -436,19 +434,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )  # [b,s,64,64+64]
-
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
+        q_li = self._apply_indexer_rope(q_li, cos, sin)
 
         q = q_li
 

@@ -939,26 +939,85 @@ class TestV023LifecycleContract(unittest.TestCase):
 
 
 class TestIndexerRopePrecisionContract(unittest.TestCase):
-    def test_non_triton_indexer_rope_honors_model_style(self):
-        style_dispatch = re.compile(
-            r"if self\.is_rope_neox_style:\n"
-            r"\s+\w+ = torch_npu\.npu_rotary_mul\(.*?\)\n"
-            r"\s+else:\n"
-            r"\s+\w+ = torch_npu\.npu_interleave_rope\(.*?\)",
-            re.DOTALL,
-        )
-        for function_name in (
-            "indexer_select_pre_process",
-            "_prepare_indexer_query_and_weights",
-        ):
-            function = ast.unparse(
-                _function_node(
-                    "vllm_ascend/attention/sfa_v1.py",
-                    function_name,
-                )
+    def test_indexer_k_q_and_cp_share_full_head_rope_helper(self):
+        expected_calls = {
+            "vllm_ascend/attention/sfa_v1.py": (
+                (
+                    "indexer_select_pre_process",
+                    "self._apply_indexer_rope(k_li, cos, sin)",
+                ),
+                (
+                    "_prepare_indexer_query_and_weights",
+                    "self._apply_indexer_rope(q_li, cos, sin)",
+                ),
+            ),
+            "vllm_ascend/attention/context_parallel/sfa_cp.py": (
+                (
+                    "indexer_select_post_process",
+                    "self._apply_indexer_rope(q_li, cos, sin)",
+                ),
+            ),
+        }
+        for relative_path, contracts in expected_calls.items():
+            for function_name, expected_call in contracts:
+                function = ast.unparse(_function_node(relative_path, function_name))
+                with self.subTest(
+                    relative_path=relative_path,
+                    function_name=function_name,
+                ):
+                    self.assertIn(expected_call, function)
+
+    def test_non_triton_indexer_rope_honors_operator_contract(self):
+        function = ast.unparse(
+            _function_node(
+                "vllm_ascend/attention/sfa_v1.py",
+                "_apply_indexer_rope",
             )
-            with self.subTest(function_name=function_name):
-                self.assertRegex(function, style_dispatch)
+        )
+        self.assertIn("if x.shape[-1] != self.head_dim", function)
+        self.assertIn(
+            "cos.reshape(-1, 1, 1, self.qk_rope_head_dim).contiguous()",
+            function,
+        )
+        self.assertIn(
+            "sin.reshape(-1, 1, 1, self.qk_rope_head_dim).contiguous()",
+            function,
+        )
+        self.assertIn(
+            "x_pe = torch_npu.npu_interleave_rope(x_pe, cos, sin)",
+            function,
+        )
+        self.assertIn(
+            "x_pe = _restore_npu_interleave_rope_layout(x_pe)",
+            function,
+        )
+
+    def test_interleave_layout_restore_matches_gptj_reference(self):
+        x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        cos_pair = [0.8, 0.6, 0.4, 0.2]
+        sin_pair = [0.2, 0.4, 0.6, 0.8]
+        cos_half = cos_pair + cos_pair
+        sin_half = sin_pair + sin_pair
+
+        even = x[::2]
+        odd = x[1::2]
+        half_layout = even + odd
+        rotated_half = [
+            half_layout[index] * cos_half[index] - half_layout[index + 4] * sin_half[index] for index in range(4)
+        ] + [
+            half_layout[index + 4] * cos_half[index + 4] + half_layout[index] * sin_half[index + 4]
+            for index in range(4)
+        ]
+        restored = [value for pair in zip(rotated_half[:4], rotated_half[4:]) for value in pair]
+        reference = [
+            value
+            for index in range(4)
+            for value in (
+                even[index] * cos_pair[index] - odd[index] * sin_pair[index],
+                odd[index] * cos_pair[index] + even[index] * sin_pair[index],
+            )
+        ]
+        self.assertEqual(restored, reference)
 
     def test_glm_indexer_rope_matches_sfa_interleave_style(self):
         function = ast.unparse(

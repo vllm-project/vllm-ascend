@@ -84,6 +84,21 @@ if TYPE_CHECKING:
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 
+def _restore_npu_interleave_rope_layout(x: torch.Tensor) -> torch.Tensor:
+    """Restore GPT-J pair ordering after ``npu_interleave_rope``.
+
+    ``npu_interleave_rope`` first converts adjacent pairs to a two-half
+    layout and returns the rotated tensor in that layout. SFA projection
+    weights are reordered to consume it directly, but Indexer projections
+    are not. Convert the result back to adjacent-pair order so the
+    non-Triton Indexer matches the Triton and model-reference paths.
+    """
+    shape = x.shape
+    if shape[-1] % 2:
+        raise ValueError(f"Interleaved RoPE requires an even rotary dimension, got {shape[-1]}.")
+    return x.view(*shape[:-1], 2, shape[-1] // 2).transpose(-1, -2).reshape(shape)
+
+
 class _ByteGatherPart(NamedTuple):
     name: str
     shape: tuple[int, ...]
@@ -1557,36 +1572,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
-            k_li_pe = k_li_pe.unsqueeze(2)
-            if self.is_rope_neox_style:
-                k_li_pe = torch_npu.npu_rotary_mul(
-                    k_li_pe,
-                    cos,
-                    sin,
-                )
-            else:
-                k_li_pe = torch_npu.npu_interleave_rope(
-                    k_li_pe,
-                    cos,
-                    sin,
-                )
-            k_li_pe = k_li_pe.squeeze(2)
-
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+        k_li = self._apply_indexer_rope(k_li, cos, sin)
 
         if self.enable_sparse_li_c8:
             k_li = k_li @ AscendSFAImpl.k_hadamard
@@ -1597,6 +1583,47 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li_scale = None
 
         return k_li, k_li_scale
+
+    def _apply_indexer_rope(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply partial RoPE while preserving the Indexer's head layout."""
+        if x.shape[-1] != self.head_dim:
+            raise ValueError(
+                f"Indexer RoPE requires the complete Indexer head tensor, expected {self.head_dim}, got {x.shape[-1]}."
+            )
+
+        if HAS_TRITON:
+            return rope_forward_triton_siso(
+                x,
+                cos.view(-1, self.qk_rope_head_dim),
+                sin.view(-1, self.qk_rope_head_dim),
+                rope_dim=self.qk_rope_head_dim,
+                is_neox_style=self.is_rope_neox_style,
+            )
+
+        x_pe, x_nope = torch.split(
+            x,
+            [
+                self.qk_rope_head_dim,
+                self.head_dim - self.qk_rope_head_dim,
+            ],
+            dim=-1,
+        )
+        cos = cos.reshape(-1, 1, 1, self.qk_rope_head_dim).contiguous()
+        sin = sin.reshape(-1, 1, 1, self.qk_rope_head_dim).contiguous()
+        x_pe = x_pe.unsqueeze(2).contiguous()
+
+        if self.is_rope_neox_style:
+            x_pe = torch_npu.npu_rotary_mul(x_pe, cos, sin)
+        else:
+            x_pe = torch_npu.npu_interleave_rope(x_pe, cos, sin)
+            x_pe = _restore_npu_interleave_rope_layout(x_pe)
+
+        return torch.cat([x_pe.squeeze(2), x_nope], dim=-1)
 
     def _prepare_indexer_query_and_weights(
         self,
@@ -1652,38 +1679,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li,
-                cos,
-                sin,
-                rope_dim=self.qk_rope_head_dim,
-                is_neox_style=self.is_rope_neox_style,
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li,
-                [
-                    self.qk_rope_head_dim,
-                    self.head_dim - self.qk_rope_head_dim,
-                ],
-                dim=-1,
-            )
-            q_li_pe = q_li_pe.unsqueeze(2)
-            if self.is_rope_neox_style:
-                q_li_pe = torch_npu.npu_rotary_mul(
-                    q_li_pe,
-                    cos,
-                    sin,
-                )
-            else:
-                q_li_pe = torch_npu.npu_interleave_rope(
-                    q_li_pe,
-                    cos,
-                    sin,
-                )
-            q_li = torch.cat(
-                [q_li_pe.squeeze(2), q_li_nope], dim=-1)
+        q_li = self._apply_indexer_rope(q_li, cos, sin)
 
         q_li_scale = None
         q_li_shape = None
