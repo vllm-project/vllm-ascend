@@ -914,7 +914,7 @@ Take the `serve` as an example. Run the code as follows.
 vllm bench serve --model /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot  --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result.
+After several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
 
