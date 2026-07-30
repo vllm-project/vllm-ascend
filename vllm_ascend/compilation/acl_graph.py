@@ -37,6 +37,36 @@ _STREAM_RESOURCE_GUIDANCE = (
     "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
     "temporarily disabling graph mode to confirm the failure is capture-related."
 )
+# NPU stream synchronize error codes surfaced during acl graph *replay*
+# (not capture). 107020 is the generic `AclrtSynchronizeStreamWithTimeout`
+# result code; 107027 is the "stream is captured" variant. Without an
+# explicit catch + re-raise these exceptions bubble up to vLLM and get
+# wrapped as `torch.OutOfMemoryError` because the upstream message contains
+# "synchronize ... error code ...", which sends triage down the wrong path.
+# In practice 107020/107027 are usually a *consequence* of an earlier
+# device-side failure (e.g. ACL 207001 / EL0004 Memory_Allocation_Failure)
+# that left a kernel pending on the stream — i.e. they are stream-state
+# errors, not OOM.
+_STREAM_REPLAY_TIMEOUT_CODES = ("107020", "107027")
+_STREAM_REPLAY_TIMEOUT_GUIDANCE = (
+    "ACL graph replay failed because synchronize() timed out on the NPU "
+    "stream (ACL error 107020 / 107027). This is usually a *consequence* of "
+    "an earlier device-side failure (often a failed `aclrtMalloc` such as "
+    "207001 / EL0004 / Memory_Allocation_Failure) that left a kernel pending "
+    "on the stream, NOT a Python- or vLLM-side OOM. Without re-classifying "
+    "the exception here, vLLM's upstream layer wraps it as "
+    "`torch.OutOfMemoryError` and misroutes triage. Recommended steps:\n"
+    "  1. Search the worker log for `Memory_Allocation_Failure` or "
+    "`alloc device memory failed, runtime result = 207001` emitted *before* "
+    "the synchronize timeout; that is the real root cause.\n"
+    "  2. Check HBM headroom: lower `--max-model-len`, `--max-num-seqs`, or "
+    "`--gpu-memory-utilization`.\n"
+    "  3. Tighten `cudagraph_capture_sizes` or set `--enforce-eager` to rule "
+    "out graph-buffer allocation pressure.\n"
+    "  4. If the failing request followed a recently aborted one, restart "
+    "the vllm process (or `npu-smi info -t reset`) to clear any residual "
+    "stream state before retrying."
+)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -49,6 +79,25 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
 
 def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
     raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+
+
+def _is_acl_replay_synchronize_timeout(exc: RuntimeError) -> bool:
+    """Detect NPU stream synchronize timeouts that surface during acl graph
+    replay (NOT capture). The capture path is handled by
+    ``_is_stream_resource_capture_error``; this helper is the replay
+    counterpart and exists so that we can re-raise with actionable guidance
+    instead of letting the exception propagate as ``OutOfMemoryError``.
+    """
+    message = str(exc)
+    if not any(code in message for code in _STREAM_REPLAY_TIMEOUT_CODES):
+        return False
+    # 107020/107027 are reused for several ACL calls; only the synchronize
+    # path in this wrapper is what we want to intercept here.
+    return "synchron" in message.lower()
+
+
+def _raise_acl_replay_synchronize_timeout(exc: RuntimeError) -> None:
+    raise RuntimeError(f"{_STREAM_REPLAY_TIMEOUT_GUIDANCE}\nOriginal error:\n{exc}") from exc
 
 
 @dataclasses.dataclass
@@ -253,7 +302,18 @@ class ACLGraphWrapper:
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
-            torch.npu.current_stream().synchronize()
+            try:
+                torch.npu.current_stream().synchronize()
+            except RuntimeError as exc:
+                # NPU stream synchronize timeouts (ACL 107020 / 107027) are
+                # typically downstream of an earlier device-side failure
+                # (e.g. 207001 Memory_Allocation_Failure) and are NOT OOM.
+                # Without this re-raise they bubble up to vLLM and get
+                # wrapped as `torch.OutOfMemoryError`, which sends triage
+                # down the wrong path. See issue for the full error chain.
+                if _is_acl_replay_synchronize_timeout(exc):
+                    _raise_acl_replay_synchronize_timeout(exc)
+                raise
         entry.aclgraph.replay()
         return entry.output
 
