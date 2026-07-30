@@ -531,6 +531,19 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_transfer_threads_use_grouped_block_sizes(self, mock_send_thread, mock_recv_thread, mock_event):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
+        worker.grouped_block_size = [128, 8, 32]
+
+        worker._start_kv_transfer_threads()
+
+        self.assertEqual(mock_send_thread.call_args.args[2], [128, 8, 32])
+        self.assertEqual(mock_recv_thread.call_args.args[2], [128, 8, 32])
+        mock_event.return_value.wait.assert_called()
+
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
         worker.m_store.get = MagicMock()
