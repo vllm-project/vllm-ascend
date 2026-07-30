@@ -127,8 +127,8 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass, field, replace
+from enum import Enum, IntEnum
 from multiprocessing.managers import BaseManager
 from pathlib import Path
 from typing import Any, cast
@@ -167,11 +167,150 @@ class InstanceInfo:
 TAINT_PRIORITY = 1e15
 
 
+class CBState(IntEnum):
+    """Circuit-breaker states (mirrors vllm-router 0.1.15)."""
+
+    CLOSED = 0  # normal, requests allowed
+    OPEN = 1  # tripped, can_execute() == False
+    HALF_OPEN = 2  # trial period, limited requests allowed
+
+
+_CB_NAME = {CBState.CLOSED: "closed", CBState.OPEN: "open", CBState.HALF_OPEN: "half_open"}
+
+
+def _cb_name(state) -> str:
+    if state is None:
+        return "disabled"
+    return _CB_NAME.get(state, str(state))
+
+
+class CircuitBreaker:
+    """Three-state circuit breaker mirroring vllm-router 0.1.15 semantics.
+
+    State machine:
+      CLOSED    --(consecutive failures >= failure_threshold)--> OPEN
+      OPEN      --(after recovery_timeout, lazily on can_execute)--> HALF_OPEN
+      HALF_OPEN --(any failure)--> OPEN
+      HALF_OPEN --(consecutive successes >= success_threshold)--> CLOSED
+
+    4xx client errors are NOT counted as failures (only 5xx / network errors).
+
+    Thread-safety: a threading.Lock guards all mutations. In normal operation
+    everything runs on the single event-loop thread, so contention is nil; the
+    lock is defensive (keeps correctness if called from another thread, e.g.
+    the NodeListener probe path). The on_transition/on_outcome callbacks run
+    while the lock is held and must NOT re-acquire the scheduler RLock (to
+    avoid lock-order inversion: callers always take RLock -> cb lock).
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        success_threshold: int = 2,
+        recovery_timeout: float = 10.0,
+        enabled: bool = True,
+        name: str = "",
+        on_transition=None,  # callback(name, old_state, new_state)
+        on_outcome=None,  # callback(name, outcome_str)
+    ):
+        self.failure_threshold = failure_threshold
+        self.success_threshold = success_threshold
+        self.recovery_timeout = recovery_timeout
+        self.enabled = enabled
+        self.name = name
+        self._state = CBState.CLOSED
+        self._consecutive_failures = 0
+        self._consecutive_successes = 0
+        self._last_state_change = time.monotonic()
+        self._lock = threading.Lock()
+        self._on_transition = on_transition
+        self._on_outcome = on_outcome
+
+    def _transition(self, new_state: CBState) -> None:
+        old_state = self._state
+        self._state = new_state
+        self._last_state_change = time.monotonic()
+        if new_state == CBState.OPEN:
+            self._consecutive_failures = 0
+        elif new_state == CBState.CLOSED:
+            self._consecutive_successes = 0
+        if old_state != new_state and self._on_transition is not None:
+            self._on_transition(self.name, old_state, new_state)
+
+    def can_execute(self) -> bool:
+        """Whether a request may be sent to this node. Lazily transitions
+        OPEN -> HALF_OPEN once recovery_timeout has elapsed."""
+        if not self.enabled:
+            return True
+        with self._lock:
+            if self._state == CBState.OPEN:
+                if time.monotonic() - self._last_state_change >= self.recovery_timeout:
+                    self._transition(CBState.HALF_OPEN)
+                    return True  # allow one trial request
+                if self._on_outcome is not None:
+                    self._on_outcome(self.name, "rejected")
+                return False
+            return True
+
+    def record_success(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            if self._on_outcome is not None:
+                self._on_outcome(self.name, "success")
+            self._consecutive_failures = 0
+            if self._state == CBState.HALF_OPEN:
+                self._consecutive_successes += 1
+                if self._consecutive_successes >= self.success_threshold:
+                    self._transition(CBState.CLOSED)
+
+    def record_failure(self, status_code: int | None = None) -> None:
+        if not self.enabled:
+            return
+        # 4xx client errors are not failures (mirror vllm-router).
+        if status_code is not None and 400 <= status_code < 500:
+            return
+        with self._lock:
+            if self._on_outcome is not None:
+                self._on_outcome(self.name, "failure")
+            self._consecutive_successes = 0
+            self._consecutive_failures += 1
+            if self._state == CBState.HALF_OPEN:
+                self._transition(CBState.OPEN)
+            elif self._state == CBState.CLOSED and self._consecutive_failures >= self.failure_threshold:
+                self._transition(CBState.OPEN)
+
+    @property
+    def state(self) -> CBState:
+        with self._lock:
+            return self._state
+
+
+class NoAvailableNodeError(Exception):
+    """Raised when no healthy/circuit-closed node is available for selection."""
+
+
+class DecodeEarlyError(Exception):
+    """Decode failed before any chunk reached the client (failover-able)."""
+
+    def __init__(self, message: str = "", status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class DecodeLateError(Exception):
+    """Decode failed after chunks were already sent (cannot failover)."""
+
+    def __init__(self, message: str = "", status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def extract_cached_tokens(response_json: dict) -> int | None:
     usage = response_json.get("usage") or {}
     prompt_tokens_details = usage.get("prompt_tokens_details") or {}
     cached_tokens = prompt_tokens_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else 0
+    return cached_tokens if isinstance(cached_tokens, int) else None
 
 
 def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
@@ -206,6 +345,25 @@ class BackendServer:
     active_tokens: float = 0.0
     active_kv_cache: float = 0.0
     heap_seq: int = 0
+    # --- dual-layer health state (mirrors vllm-router 0.1.15) ---
+    # Layer 1: passive /health probe result (maintained by NodeListener)
+    healthy: bool = True
+    consecutive_health_failures: int = 0
+    consecutive_health_successes: int = 0
+    # Layer 2: active circuit breaker driven by real request outcomes
+    circuit_breaker: CircuitBreaker | None = None
+
+    def is_available(self) -> bool:
+        """Dual-layer availability: passive health AND active circuit breaker.
+
+        Used by _pop_valid to hard-filter nodes out of the candidate pool.
+        ``can_execute`` lazily transitions OPEN -> HALF_OPEN past recovery_timeout.
+        """
+        if not self.healthy:
+            return False
+        if self.circuit_breaker is None:
+            return True
+        return self.circuit_breaker.can_execute()
 
 
 @dataclass
@@ -262,6 +420,106 @@ def build_base_url(host: str, port: int) -> str:
     return f"{build_server_url(host, port)}/v1"
 
 
+class MetricsCollector:
+    """Zero-dependency Prometheus metrics collector living in the scheduler
+    process so counters aggregate across all uvicorn workers (which reach it
+    via RPC). /metrics renders the current snapshot as Prometheus text.
+    """
+
+    def __init__(self, scheduler=None):
+        self.scheduler = scheduler
+        self._cb_transitions: dict[tuple, int] = {}
+        self._cb_outcomes: dict[tuple, int] = {}
+        self._prefill_errors: dict[tuple, int] = {}
+        self._decode_errors: dict[tuple, int] = {}
+        self._failovers: dict[str, int] = {}
+        self._requests = 0
+
+    def record_cb_transition(self, role: str, instance: str, old_state, new_state) -> None:
+        key = (role, instance, _cb_name(old_state), _cb_name(new_state))
+        self._cb_transitions[key] = self._cb_transitions.get(key, 0) + 1
+
+    def record_cb_outcome(self, role: str, instance: str, outcome: str) -> None:
+        key = (role, instance, outcome)
+        self._cb_outcomes[key] = self._cb_outcomes.get(key, 0) + 1
+
+    def record_health_transition(self, role: str, instance: str, healthy: bool) -> None:
+        # health is a live gauge rendered from ServerState; nothing to accumulate
+        pass
+
+    def record_prefill_error(self, instance: str, reason: str) -> None:
+        key = (instance, reason or "unknown")
+        self._prefill_errors[key] = self._prefill_errors.get(key, 0) + 1
+
+    def record_decode_error(self, instance: str, reason: str) -> None:
+        key = (instance, reason or "unknown")
+        self._decode_errors[key] = self._decode_errors.get(key, 0) + 1
+
+    def record_failover(self, role: str) -> None:
+        self._failovers[role] = self._failovers.get(role, 0) + 1
+
+    def record_request(self) -> None:
+        self._requests += 1
+
+    def render(self) -> str:
+        lines: list[str] = []
+        if self.scheduler is not None:
+            snapshot = self.scheduler.get_health_snapshot()
+            lines.append("# HELP pd_proxy_worker_health 1 if node passed /health probe, else 0")
+            lines.append("# TYPE pd_proxy_worker_health gauge")
+            lines.append("# HELP pd_proxy_cb_state Circuit breaker state: 0=closed,1=open,2=half_open")
+            lines.append("# TYPE pd_proxy_cb_state gauge")
+            lines.append("# HELP pd_proxy_worker_available 1 if node is selectable, else 0")
+            lines.append("# TYPE pd_proxy_worker_available gauge")
+            for role, inst, healthy, cb_state, available in snapshot:
+                lines.append(
+                    f'pd_proxy_worker_health{{role="{role}",instance="{inst}"}} {1 if healthy else 0}'
+                )
+                lines.append(
+                    f'pd_proxy_cb_state{{role="{role}",instance="{inst}"}} {int(cb_state)}'
+                )
+                lines.append(
+                    f'pd_proxy_worker_available{{role="{role}",instance="{inst}"}} {1 if available else 0}'
+                )
+        if self._cb_transitions:
+            lines.append("# HELP pd_proxy_cb_state_transitions_total Circuit breaker state transitions")
+            lines.append("# TYPE pd_proxy_cb_state_transitions_total counter")
+            for (role, inst, frm, to), cnt in sorted(self._cb_transitions.items()):
+                lines.append(
+                    f'pd_proxy_cb_state_transitions_total{{role="{role}",instance="{inst}",from="{frm}",to="{to}"}} {cnt}'
+                )
+        if self._cb_outcomes:
+            lines.append("# HELP pd_proxy_cb_outcomes_total Circuit breaker outcomes")
+            lines.append("# TYPE pd_proxy_cb_outcomes_total counter")
+            for (role, inst, outcome), cnt in sorted(self._cb_outcomes.items()):
+                lines.append(
+                    f'pd_proxy_cb_outcomes_total{{role="{role}",instance="{inst}",outcome="{outcome}"}} {cnt}'
+                )
+        if self._prefill_errors:
+            lines.append("# HELP pd_proxy_prefill_errors_total Prefill failures")
+            lines.append("# TYPE pd_proxy_prefill_errors_total counter")
+            for (inst, reason), cnt in sorted(self._prefill_errors.items()):
+                lines.append(
+                    f'pd_proxy_prefill_errors_total{{prefiller="{inst}",reason="{reason}"}} {cnt}'
+                )
+        if self._decode_errors:
+            lines.append("# HELP pd_proxy_decode_errors_total Decode failures")
+            lines.append("# TYPE pd_proxy_decode_errors_total counter")
+            for (inst, reason), cnt in sorted(self._decode_errors.items()):
+                lines.append(
+                    f'pd_proxy_decode_errors_total{{decoder="{inst}",reason="{reason}"}} {cnt}'
+                )
+        if self._failovers:
+            lines.append("# HELP pd_proxy_failover_attempts_total Node-level failover attempts")
+            lines.append("# TYPE pd_proxy_failover_attempts_total counter")
+            for role, cnt in sorted(self._failovers.items()):
+                lines.append(f'pd_proxy_failover_attempts_total{{role="{role}"}} {cnt}')
+        lines.append("# HELP pd_proxy_requests_total Total requests handled")
+        lines.append("# TYPE pd_proxy_requests_total counter")
+        lines.append(f"pd_proxy_requests_total {self._requests}")
+        return "\n".join(lines) + "\n"
+
+
 class SharedProxyScheduler:
     """Centralized mutable scheduling state shared by all uvicorn workers.
 
@@ -279,11 +537,39 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
+        self.metrics = MetricsCollector(self)
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
         for host, port in decoder_instances:
             self._add_server_no_lock(ServerRole.DECODE, host, port)
+
+    def _wire_circuit_breaker(self, role: ServerRole, entry: BackendServer) -> None:
+        """Attach a configured CircuitBreaker with metrics hooks to a server."""
+        args = get_global_args()
+        entry.circuit_breaker = CircuitBreaker(
+            failure_threshold=args.cb_failure_threshold,
+            success_threshold=args.cb_success_threshold,
+            recovery_timeout=args.cb_recovery_timeout_secs,
+            enabled=not args.disable_circuit_breaker,
+            name=f"{role.value}:{server_key(entry.host, entry.port)}",
+            on_transition=self._on_cb_transition,
+            on_outcome=self._on_cb_outcome,
+        )
+
+    def _on_cb_transition(self, name: str, old_state, new_state) -> None:
+        try:
+            role, instance = name.split(":", 1)
+        except ValueError:
+            return
+        self.metrics.record_cb_transition(role, instance, old_state, new_state)
+
+    def _on_cb_outcome(self, name: str, outcome: str) -> None:
+        try:
+            role, instance = name.split(":", 1)
+        except ValueError:
+            return
+        self.metrics.record_cb_outcome(role, instance, outcome)
 
     def _pool(self, role: ServerRole) -> RolePools:
         return self._pools[role]
@@ -316,16 +602,37 @@ class SharedProxyScheduler:
         if len(pool.heap) > 2 * len(pool.servers):
             self._reset_heap(role)
 
-    def _pop_valid(self, role: ServerRole) -> str:
+    def _pop_valid(self, role: ServerRole, *, exclude: set[str] | None = None) -> str:
+        """Pop the lowest-priority *available* server key.
+
+        Hard-isolates nodes that are not ``is_available()`` (unhealthy or
+        circuit open) and any key in ``exclude`` (per-request failover
+        exclusions): such entries are collected and pushed back so recovered
+        nodes rejoin the pool automatically. Tainted (draining) nodes are NOT
+        skipped here -- the taint mechanism is for manual /instances/remove.
+        """
         pool = self._pool(role)
+        exclude = exclude or set()
+        skipped: list[tuple[float, int, int, str]] = []
+        key: str | None = None
         while pool.heap:
-            _, _, seq, key = heapq.heappop(pool.heap)
-            if key not in pool.servers:
+            entry_tuple = heapq.heappop(pool.heap)
+            _, _, seq, k = entry_tuple
+            if k not in pool.servers:
                 continue
-            entry = pool.servers[key]
-            if entry.heap_seq == seq:
-                return key
-        raise RuntimeError(f"No available {role.value} servers")
+            entry = pool.servers[k]
+            if entry.heap_seq != seq:
+                continue
+            if k in exclude or not entry.is_available():
+                skipped.append(entry_tuple)
+                continue
+            key = k
+            break
+        for item in skipped:
+            heapq.heappush(pool.heap, item)
+        if key is None:
+            raise RuntimeError(f"No available {role.value} servers")
+        return key
 
     def _reset_heap(self, role: ServerRole, *, bump_seq: bool = False) -> None:
         pool = self._pool(role)
@@ -342,7 +649,9 @@ class SharedProxyScheduler:
         pool = self._pool(role)
         if key in pool.servers:
             return False
-        pool.servers[key] = BackendServer(host, int(port), self._next_ordinal())
+        entry = BackendServer(host, int(port), self._next_ordinal())
+        self._wire_circuit_breaker(role, entry)
+        pool.servers[key] = entry
         self._push_heap(role, key)
         return True
 
@@ -368,13 +677,49 @@ class SharedProxyScheduler:
             [f"{s['host']}:{s['port']}" for s in snapshot["decode_instances"]],
         )
 
+    def _node_info(self, role: ServerRole, key: str, entry: BackendServer) -> dict[str, Any]:
+        cb_state = entry.circuit_breaker.state if entry.circuit_breaker is not None else None
+        return {
+            "instance": key,
+            "healthy": entry.healthy,
+            "cb": _cb_name(cb_state),
+            "available": entry.is_available(),
+        }
+
+    def get_health_snapshot(self) -> list[tuple[str, str, bool, CBState | None, bool]]:
+        """Return per-node health/cb/availability for /metrics rendering.
+
+        Tuple: (role_value, key, healthy, cb_state_or_None, available).
+        Runs under the lock so the snapshot is consistent.
+        """
+        with self._lock:
+            out: list[tuple[str, str, bool, CBState | None, bool]] = []
+            for role in ServerRole:
+                for key, entry in sorted(self._pool(role).servers.items(), key=lambda i: i[1].ordinal):
+                    cb_state = entry.circuit_breaker.state if entry.circuit_breaker is not None else None
+                    out.append((role.value, key, entry.healthy, cb_state, entry.is_available()))
+            return out
+
     def healthcheck(self) -> dict[str, Any]:
         with self._lock:
+            prefillers = [
+                self._node_info(ServerRole.PREFILL, k, e)
+                for k, e in sorted(self.prefillers.items(), key=lambda i: i[1].ordinal)
+            ]
+            decoders = [
+                self._node_info(ServerRole.DECODE, k, e)
+                for k, e in sorted(self.decoders.items(), key=lambda i: i[1].ordinal)
+            ]
+            total = len(prefillers) + len(decoders)
+            avail = sum(1 for n in prefillers + decoders if n["available"])
+            status = "unavailable" if avail == 0 else ("degraded" if avail < total else "ok")
             return {
-                "status": "ok",
+                "status": status,
                 "prefill_instances": len(self.prefillers),
                 "decode_instances": len(self.decoders),
                 "request_num": self.request_num,
+                "prefillers": prefillers,
+                "decoders": decoders,
             }
 
     def _pick_server(
@@ -384,8 +729,9 @@ class SharedProxyScheduler:
         *,
         active_tokens: bool = False,
         kv_cache: bool = False,
+        exclude: set[str] | None = None,
     ) -> dict[str, Any]:
-        key = self._pop_valid(role)
+        key = self._pop_valid(role, exclude=exclude)
         entry = self._pool(role).servers[key]
         if active_tokens:
             entry.active_tokens += load
@@ -427,6 +773,90 @@ class SharedProxyScheduler:
     def pick_decoder(self, load: float) -> dict[str, Any]:
         with self._lock:
             return self._pick_server(ServerRole.DECODE, load, active_tokens=True)
+
+    def pick_prefiller_excluding(self, load: float, exclude_keys: list[str]) -> dict[str, Any]:
+        """Pick an available prefiller for recompute/failover, excluding given keys."""
+        with self._lock:
+            return self._pick_server(
+                ServerRole.PREFILL, load, kv_cache=True, exclude=set(exclude_keys)
+            )
+
+    def pick_decoder_excluding(self, load: float, exclude_keys: list[str]) -> dict[str, Any]:
+        """Pick an available decoder, excluding given (failed) keys for failover."""
+        with self._lock:
+            return self._pick_server(
+                ServerRole.DECODE, load, active_tokens=True, exclude=set(exclude_keys)
+            )
+
+    def is_node_available(self, role: ServerRole, key: str) -> bool:
+        with self._lock:
+            entry = self._pool(role).servers.get(key)
+            if entry is None:
+                return False
+            return entry.is_available()
+
+    def record_outcome(
+        self, role: ServerRole, key: str, success: bool, status_code: int = 0
+    ) -> None:
+        """Feed a real request outcome into a node's circuit breaker.
+
+        Called by workers via runtime.schedule (RPC in multi-process mode).
+        Only scalar args cross the wire; the CircuitBreaker object never leaves
+        the scheduler process.
+        """
+        with self._lock:
+            entry = self._pool(role).servers.get(key)
+            if entry is None or entry.circuit_breaker is None:
+                return
+            if success:
+                entry.circuit_breaker.record_success()
+            else:
+                entry.circuit_breaker.record_failure(status_code=status_code or None)
+
+    def apply_health_result(self, role: ServerRole, key: str, healthy: bool) -> None:
+        """Apply a passive /health probe result, flipping ``healthy`` at the
+        configured success/failure thresholds. Called by NodeListener in the
+        scheduler's own process."""
+        args = get_global_args()
+        with self._lock:
+            entry = self._pool(role).servers.get(key)
+            if entry is None:
+                return
+            if healthy:
+                entry.consecutive_health_failures = 0
+                entry.consecutive_health_successes += 1
+                if (
+                    not entry.healthy
+                    and entry.consecutive_health_successes >= args.health_success_threshold
+                ):
+                    entry.healthy = True
+                    logger.info("[health] %s %s recovered (healthy=True)", role.value, key)
+                    self.metrics.record_health_transition(role.value, key, True)
+            else:
+                entry.consecutive_health_successes = 0
+                entry.consecutive_health_failures += 1
+                if (
+                    entry.healthy
+                    and entry.consecutive_health_failures >= args.health_failure_threshold
+                ):
+                    entry.healthy = False
+                    logger.warning("[health] %s %s marked unhealthy (healthy=False)", role.value, key)
+                    self.metrics.record_health_transition(role.value, key, False)
+
+    def record_prefill_error(self, key: str, reason: str) -> None:
+        self.metrics.record_prefill_error(key, reason)
+
+    def record_decode_error(self, key: str, reason: str) -> None:
+        self.metrics.record_decode_error(key, reason)
+
+    def record_failover(self, role: str) -> None:
+        self.metrics.record_failover(role)
+
+    def record_request(self) -> None:
+        self.metrics.record_request()
+
+    def render_metrics(self) -> str:
+        return self.metrics.render()
 
     def release_prefill_kv(self, key: str, load: float) -> None:
         with self._lock:
@@ -607,6 +1037,13 @@ class NodeListener:
     def _run(self) -> None:
         while True:
             args = get_global_args()
+            # Passive /health probing of active nodes (mirrors vllm-router).
+            if not args.disable_health_check:
+                try:
+                    asyncio.run(self._probe_all())
+                except Exception as e:  # noqa: BLE001
+                    logger.error("health probe cycle error: %s", e)
+
             for key, (instance_type, server, retries) in list(self.scheduler.get_waiting_nodes().items()):
                 host, port = server
                 is_valid = asyncio.run(self.check_instance_status(host, port))
@@ -621,17 +1058,46 @@ class NodeListener:
                     self.scheduler.mark_waiting_retry(key, retries)
 
             self.scheduler.finalize_tainted_instances()
-            time.sleep(args.waiting_retry_interval)
+            interval = (
+                args.health_check_interval
+                if not args.disable_health_check
+                else args.waiting_retry_interval
+            )
+            time.sleep(interval)
+
+    async def _probe_all(self) -> None:
+        """Concurrently probe /health of every active prefiller/decoder and
+        feed results into ``apply_health_result``. Uses a bare-host URL (NOT
+        the server client's base_url=.../v1, which would turn /health into
+        /v1/health -> 404 on mock/real vLLM)."""
+        snapshot = self.scheduler.get_snapshot()
+        targets: list[tuple[ServerRole, str, str, int]] = []
+        for s in snapshot["prefill_instances"]:
+            targets.append((ServerRole.PREFILL, server_key(s["host"], s["port"]), s["host"], s["port"]))
+        for s in snapshot["decode_instances"]:
+            targets.append((ServerRole.DECODE, server_key(s["host"], s["port"]), s["host"], s["port"]))
+
+        async def probe(role: ServerRole, key: str, host: str, port: int) -> None:
+            ok = await self.check_instance_status(host, port)
+            self.scheduler.apply_health_result(role, key, ok)
+
+        await asyncio.gather(*[probe(*t) for t in targets], return_exceptions=True)
 
     @staticmethod
     async def check_instance_status(host: str, port: int) -> bool:
-        endpoint = "/models"
+        """Probe the node's health endpoint at the ROOT path (not /v1/...).
+
+        2xx => healthy. Uses a bare-host client so /health resolves correctly
+        instead of being mangled into /v1/health (which 404s).
+        """
+        args = get_global_args()
+        endpoint = args.health_check_endpoint
+        url = f"{build_server_url(host, port)}{endpoint}"
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
         try:
-            async with httpx.AsyncClient(timeout=5.0, base_url=build_base_url(host, port)) as client:
-                response = await client.get(endpoint, headers=headers)
-                response.raise_for_status()
-                return True
+            async with httpx.AsyncClient(timeout=args.health_check_timeout) as client:
+                response = await client.get(url, headers=headers)
+                return response.status_code < 400
         except (httpx.RequestError, httpx.HTTPStatusError):
             return False
 
@@ -693,6 +1159,84 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Number of uvicorn worker processes. Scheduling state is shared across workers.",
+    )
+    # --- health check (passive /health probing; mirrors vllm-router) ---
+    parser.add_argument(
+        "--health-check-interval",
+        type=float,
+        default=5,
+        help="Seconds between /health probes of active nodes",
+    )
+    parser.add_argument(
+        "--health-check-timeout",
+        type=float,
+        default=2,
+        help="Timeout (seconds) for a single /health probe",
+    )
+    parser.add_argument(
+        "--health-failure-threshold",
+        type=int,
+        default=2,
+        help="Consecutive probe failures to mark a node unhealthy",
+    )
+    parser.add_argument(
+        "--health-success-threshold",
+        type=int,
+        default=2,
+        help="Consecutive probe successes to mark a node healthy again",
+    )
+    parser.add_argument(
+        "--health-check-endpoint",
+        type=str,
+        default="/health",
+        help="Health probe endpoint (root path, not /v1/...)",
+    )
+    parser.add_argument(
+        "--disable-health-check",
+        action="store_true",
+        help="Disable passive /health probing of active nodes",
+    )
+    # --- circuit breaker (active, driven by request outcomes) ---
+    parser.add_argument(
+        "--cb-failure-threshold",
+        type=int,
+        default=3,
+        help="Consecutive request failures to open a node's circuit",
+    )
+    parser.add_argument(
+        "--cb-success-threshold",
+        type=int,
+        default=2,
+        help="Half-open consecutive successes to close a circuit",
+    )
+    parser.add_argument(
+        "--cb-recovery-timeout-secs",
+        type=float,
+        default=10,
+        help="Seconds in OPEN before lazily transitioning to HALF_OPEN",
+    )
+    parser.add_argument(
+        "--disable-circuit-breaker",
+        action="store_true",
+        help="Disable the circuit breaker (can_execute always True)",
+    )
+    # --- request-level failover (the gap vllm-router leaves open in PD mode) ---
+    parser.add_argument(
+        "--failover-max-retries",
+        type=int,
+        default=3,
+        help="Max distinct prefiller nodes tried on prefill failure",
+    )
+    parser.add_argument(
+        "--failover-max-decoders",
+        type=int,
+        default=3,
+        help="Max distinct decoder nodes tried on decode failure",
+    )
+    parser.add_argument(
+        "--disable-failover",
+        action="store_true",
+        help="Disable node-level failover (fall back to same-node retries)",
     )
     parser.add_argument(
         "--log-level",
@@ -868,46 +1412,45 @@ async def stream_service_response_with_retry(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
+    """Stream a decode response, classifying failures as early vs late.
+
+    - DecodeEarlyError: failed before any chunk reached the caller -> the
+      caller (generate_stream) may fail over to another decoder.
+    - DecodeLateError: failed after chunks were already yielded -> cannot
+      fail over (would duplicate tokens); the caller truncates the stream.
+
+    When node-level failover is enabled the caller passes max_retries=1 so
+    retries do not waste time on a node the circuit breaker is already
+    counting; with --disable-failover the caller passes the full max_retries
+    to retain the original same-node retry behavior.
+    """
     headers = auth_headers(request_id)
     for attempt in range(1, max_retries + 1):
+        first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
                 return
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if first_chunk_sent:
+                raise DecodeLateError(str(exc), status_code=status_code) from exc
             if attempt < max_retries:
                 logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
+                continue
+            raise DecodeEarlyError(str(exc), status_code=status_code) from exc
         except Exception as exc:
-            if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
+            if first_chunk_sent:
+                raise DecodeLateError(str(exc)) from exc
             if attempt < max_retries:
                 logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
-
-
-async def _abort_prefill_selection(
-    runtime: WorkerRuntime,
-    prefiller_key: str,
-    prefiller_score: float,
-    *,
-    is_initial_request: bool,
-) -> None:
-    if is_initial_request:
-        await runtime.schedule("finish_request", prefiller_key, prefiller_score, None, 0.0, release_prefill_kv=True)
-    else:
-        await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+                continue
+            raise DecodeEarlyError(str(exc)) from exc
 
 
 async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, release_prefill_kv: bool) -> None:
@@ -921,34 +1464,172 @@ async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, releas
     )
 
 
+class DeferredStreamingResponse(StreamingResponse):
+    """A StreamingResponse that defers committing the HTTP status line until
+    the first chunk is produced.
+
+    Why: Starlette's StreamingResponse sends ``http.response.start`` (status
+    200) BEFORE iterating the body iterator. So if the generator raises before
+    the first chunk, the client already has a 200 and ends up with an empty
+    body -- the "silent 200" failure mode. This subclass pulls the first chunk
+    first: if the generator raises (or yields nothing) before producing it, we
+    send a 503 + JSON error body instead. Once the first chunk is out,
+    behavior matches StreamingResponse (a later error can only truncate).
+    """
+
+    def __init__(
+        self,
+        content,
+        error_status: int = 503,
+        error_body: bytes = b'{"error":"upstream decode failed"}',
+        **kwargs,
+    ):
+        super().__init__(content, **kwargs)
+        self._error_status = error_status
+        self._error_body = error_body
+
+    async def stream_response(self, send) -> None:
+        aiter = self.body_iterator.__aiter__()
+        sent_start = False
+        try:
+            try:
+                first = await aiter.__anext__()
+            except StopAsyncIteration:
+                # Empty stream -> treat as error to avoid 200 + empty body.
+                await send(
+                    {"type": "http.response.start", "status": self._error_status, "headers": []}
+                )
+                await send(
+                    {"type": "http.response.body", "body": self._error_body, "more_body": False}
+                )
+                return
+            # First chunk produced OK -> now commit the real status + headers.
+            await send(
+                {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
+            )
+            sent_start = True
+            if not isinstance(first, (bytes, memoryview)):
+                first = first.encode(self.charset)
+            await send({"type": "http.response.body", "body": first, "more_body": True})
+            async for chunk in aiter:
+                if not isinstance(chunk, (bytes, memoryview)):
+                    chunk = chunk.encode(self.charset)
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except Exception:
+            if not sent_start:
+                # Generator failed before first chunk -> return an explicit error.
+                await send(
+                    {"type": "http.response.start", "status": self._error_status, "headers": []}
+                )
+                await send(
+                    {"type": "http.response.body", "body": self._error_body, "more_body": False}
+                )
+            else:
+                # Headers already committed -> can only end the stream.
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
 async def assign_instances(
     api: str,
     req_data: Any,
     request_length: int,
     *,
     is_initial_request: bool,
+    excluded_prefillers: set[str] | None = None,
 ) -> InstanceInfo:
+    """Pick a prefiller, run the prefill request, then pick a decoder.
+
+    Request-level failover (PD mode): when failover is enabled the inner HTTP
+    retry count is reduced to 1 and on prefill failure we exclude the failed
+    prefiller and select a different one, up to ``failover_max_retries``
+    distinct nodes. Each outcome is fed to the node's circuit breaker. With
+    ``--disable-failover`` the original same-node retry behavior is preserved.
+    """
     runtime = get_runtime()
     args = get_global_args()
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
-    pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
-    prefiller = await runtime.schedule(pick_prefill, prefiller_score)
-    prefiller_key = prefiller["key"]
 
-    try:
-        response = await send_request_to_service(
-            await runtime.get_client(ServerRole.PREFILL, prefiller_key),
-            api,
-            req_data,
-            request_id,
-            max_retries=args.max_retries,
-            base_delay=args.retry_delay,
-        )
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        raise
+    failover_enabled = not args.disable_failover
+    max_nodes = 1 if not failover_enabled else max(1, args.failover_max_retries)
+    inner_retries = args.max_retries if not failover_enabled else 1
+    excluded = set(excluded_prefillers) if excluded_prefillers else set()
+    began = False  # did begin_request bump request_num?
+
+    response = None
+    prefiller_key: str | None = None
+    for attempt in range(max_nodes + 1):
+        # --- pick a prefiller (with exclusion on failover attempts) ---
+        try:
+            if attempt == 0:
+                if is_initial_request:
+                    prefiller = await runtime.schedule("begin_request", prefiller_score)
+                    began = True
+                else:
+                    prefiller = await runtime.schedule("reserve_prefill_kv", prefiller_score)
+            else:
+                prefiller = await runtime.schedule(
+                    "pick_prefiller_excluding", prefiller_score, list(excluded)
+                )
+        except RuntimeError:
+            # No available prefiller in the pool (all unhealthy / circuit open).
+            break
+        prefiller_key = prefiller["key"]
+
+        # --- send the prefill request ---
+        try:
+            response = await send_request_to_service(
+                await runtime.get_client(ServerRole.PREFILL, prefiller_key),
+                api,
+                req_data,
+                request_id,
+                max_retries=inner_retries,
+                base_delay=args.retry_delay,
+            )
+            await runtime.schedule("record_outcome", ServerRole.PREFILL, prefiller_key, True, 200)
+            break  # success
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None) or 0
+            await runtime.schedule("record_outcome", ServerRole.PREFILL, prefiller_key, False, status_code)
+            await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+            response = None
+            if not failover_enabled:
+                prefiller_key = None
+                break
+            excluded.add(prefiller_key)
+            await runtime.schedule("record_failover", "prefill")
+            await runtime.schedule(
+                "record_prefill_error", prefiller_key, f"http{status_code}" if status_code else "network"
+            )
+            logger.warning(
+                "[failover] prefiller %s failed (%s); trying another", prefiller_key,
+                f"http{status_code}" if status_code else "network",
+            )
+            prefiller_key = None
+            continue
+        except Exception as exc:
+            await runtime.schedule("record_outcome", ServerRole.PREFILL, prefiller_key, False, 0)
+            await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+            response = None
+            if not failover_enabled:
+                prefiller_key = None
+                break
+            excluded.add(prefiller_key)
+            await runtime.schedule("record_failover", "prefill")
+            await runtime.schedule("record_prefill_error", prefiller_key, str(exc)[:40])
+            logger.warning("[failover] prefiller %s failed (%s); trying another", prefiller_key, str(exc)[:40])
+            prefiller_key = None
+            continue
+
+    if response is None:
+        # All prefillers exhausted: undo the request_num bump from begin_request.
+        if began:
+            await runtime.schedule("finish_request", None, 0.0, None, 0.0, False)
+        if excluded:
+            raise NoAvailableNodeError(f"prefill failed on all tried prefillers {sorted(excluded)}")
+        raise NoAvailableNodeError("no available prefiller")
 
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
@@ -958,9 +1639,12 @@ async def assign_instances(
 
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        raise
+    except RuntimeError:
+        # No available decoder.
+        await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+        if began:
+            await runtime.schedule("finish_request", None, 0.0, None, 0.0, False)
+        raise NoAvailableNodeError("no available decoder")
 
     prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
     decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
@@ -994,6 +1678,7 @@ async def handle_completions_impl(api: str, request: Request):
     args = get_global_args()
     request_released = False
     try:
+        await runtime.schedule("record_request")
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
@@ -1016,9 +1701,12 @@ async def handle_completions_impl(api: str, request: Request):
             generated_token = ""
             released_kv = False
             retry_count = 0
-            retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            # Per-request failover state for the decode leg.
+            failover_enabled = not args.disable_failover
+            decode_retries = args.max_retries if not failover_enabled else 1
+            excluded_decoders: set[str] = set()
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1029,76 +1717,186 @@ async def handle_completions_impl(api: str, request: Request):
                     released_kv = True
 
             try:
-                while retry:
-                    retry = False
-                    decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                    async for chunk in stream_service_response_with_retry(
-                        decoder_client,
-                        api,
-                        req_data,
-                        request_id=instance_info.request_id,
-                        max_retries=args.max_retries,
-                        base_delay=args.retry_delay,
-                    ):
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
-                        choices = chunk_json.get("choices", [])
-                        if not choices or not stream_flag:
-                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
+                # Outer loop: decode-failover. The inner `while retry` loop
+                # handles the recomputed-triggered re-prefill path.
+                while True:
+                    retry = True
+                    try:
+                        while retry:
+                            retry = False
+                            decoder_client = await runtime.get_client(
+                                ServerRole.DECODE, instance_info.decoder_key
+                            )
+                            async for chunk in stream_service_response_with_retry(
+                                decoder_client,
+                                api,
+                                req_data,
+                                request_id=instance_info.request_id,
+                                max_retries=decode_retries,
+                                base_delay=args.retry_delay,
+                            ):
+                                if not released_kv and chunk:
+                                    await release_prefill_kv_once()
+                                try:
+                                    chunk_str = chunk.decode("utf-8").strip()
+                                except UnicodeDecodeError:
+                                    logger.debug("Skipping chunk: %s", chunk)
+                                    yield chunk
+                                    continue
+                                if not chunk_str:
+                                    continue
+                                is_sse = chunk_str.startswith("data: ")
+                                if is_sse:
+                                    chunk_str = chunk_str[len("data: ") :]
+                                try:
+                                    chunk_json = json.loads(chunk_str)
+                                except json.JSONDecodeError:
+                                    logger.debug("Skipping chunk: %s", chunk_str)
+                                    yield chunk
+                                    continue
+                                choices = chunk_json.get("choices", [])
                                 if not choices:
+                                    if update_cached_tokens_in_chunk(
+                                        chunk_json, reported_prefiller_cached_tokens
+                                    ):
+                                        chunk = encode_response_chunk(chunk_json, is_sse)
                                     yield chunk
                                     continue
 
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
+                                choice = choices[0]
+                                delta = choice.get("delta") or {}
+                                message = choice.get("message") or {}
+                                content = (
+                                    delta.get("content")
+                                    or message.get("content")
+                                    or choice.get("text")
+                                    or ""
+                                )
+                                generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
-                        usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens", 0))
+                                stop_reason = choice.get("stop_reason")
+                                usage = chunk_json.get("usage", {})
+                                completion_tokens = (
+                                    (completion_tokens + 1)
+                                    if stream_flag
+                                    else (completion_tokens + usage.get("completion_tokens", 0))
+                                )
+                                if stop_reason == "recomputed":
+                                    retry = True
+                                    retry_count += 1
+                                    if chat_flag:
+                                        messages[0]["content"] = origin_prompt + generated_token
+                                    else:
+                                        req_data["prompt"] = origin_prompt + generated_token
+                                    req_data["max_tokens"] = (
+                                        origin_max_tokens - completion_tokens + retry_count
+                                    )
+                                    tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
+                                    instance_info = await reassign_instances(
+                                        api, req_data, tmp_request_length, instance_info
+                                    )
+                                    released_kv = False
+                                    break
+                                if retry_count > 0 and not stream_flag:
+                                    if chat_flag:
+                                        choice["message"]["content"] = generated_token
+                                    else:
+                                        choice["text"] = generated_token
+                                    chunk = encode_response_chunk(chunk_json, is_sse)
+                                yield chunk
+                        # Decode stream completed normally.
+                        await runtime.schedule(
+                            "record_outcome", ServerRole.DECODE, instance_info.decoder_key, True, 200
                         )
-                        if stop_reason == "recomputed":
-                            retry = True
-                            retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = origin_prompt + generated_token
-                            else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                        break
+                    except DecodeLateError as exc:
+                        # Chunks already sent to the client -> cannot fail over.
+                        await runtime.schedule(
+                            "record_outcome",
+                            ServerRole.DECODE,
+                            instance_info.decoder_key,
+                            False,
+                            exc.status_code or 0,
+                        )
+                        await runtime.schedule(
+                            "record_decode_error", instance_info.decoder_key, "late"
+                        )
+                        logger.error(
+                            "[decode] late failure from %s:%s: %s; stream truncated",
+                            instance_info.decoder_host,
+                            instance_info.decoder_port,
+                            exc,
+                        )
+                        raise
+                    except DecodeEarlyError as exc:
+                        # No chunk reached the client yet -> failover-able.
+                        await runtime.schedule(
+                            "record_outcome",
+                            ServerRole.DECODE,
+                            instance_info.decoder_key,
+                            False,
+                            exc.status_code or 0,
+                        )
+                        await runtime.schedule(
+                            "release_decoder", instance_info.decoder_key, instance_info.decoder_score
+                        )
+                        if not failover_enabled:
+                            await runtime.schedule(
+                                "record_decode_error", instance_info.decoder_key, "early"
+                            )
+                            logger.error(
+                                "[decode] early failure from %s:%s: %s; failover disabled",
+                                instance_info.decoder_host,
+                                instance_info.decoder_port,
+                                exc,
+                            )
+                            raise
+                        excluded_decoders.add(instance_info.decoder_key)
+                        await runtime.schedule(
+                            "record_decode_error", instance_info.decoder_key, "early"
+                        )
+                        await runtime.schedule("record_failover", "decode")
+                        if len(excluded_decoders) > args.failover_max_decoders:
+                            logger.error(
+                                "[decode] failover exhausted, excluded=%s",
+                                sorted(excluded_decoders),
+                            )
+                            raise NoAvailableNodeError("decode failover exhausted")
+                        logger.warning(
+                            "[decode] early failure from %s:%s (%s); trying another decoder",
+                            instance_info.decoder_host,
+                            instance_info.decoder_port,
+                            f"http{exc.status_code}" if exc.status_code else "network",
+                        )
+                        # If the prefiller is still available, reuse its KV and
+                        # only swap the decoder; otherwise re-prefill on a
+                        # fresh prefiller/decoder pair (KV lost).
+                        prefiller_ok = await runtime.schedule(
+                            "is_node_available", ServerRole.PREFILL, instance_info.prefiller_key
+                        )
+                        if prefiller_ok:
+                            try:
+                                new_decoder = await runtime.schedule(
+                                    "pick_decoder_excluding",
+                                    instance_info.decoder_score,
+                                    list(excluded_decoders),
+                                )
+                            except RuntimeError:
+                                raise NoAvailableNodeError("no available decoder after failover")
+                            instance_info = replace(
+                                instance_info,
+                                decoder_key=new_decoder["key"],
+                                decoder_host=new_decoder["host"],
+                                decoder_port=new_decoder["port"],
+                            )
+                            # released_kv stays as-is: KV release is per-prefiller.
+                        else:
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
+                            instance_info = await reassign_instances(
+                                api, req_data, tmp_request_length, instance_info
+                            )
                             released_kv = False
-                            break
-                        if retry_count > 0 and not stream_flag:
-                            if chat_flag:
-                                choice["message"]["content"] = generated_token
-                            else:
-                                choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
-                        yield chunk
+                        continue
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1107,21 +1905,44 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
                 raise
+            except NoAvailableNodeError:
+                # Re-raise so DeferredStreamingResponse surfaces a 503.
+                raise
             except Exception as exc:
                 logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
+                    "Error during streaming from decoder %s:%s: %s while handling request %s; "
+                    "releasing prefiller KV",
                     instance_info.decoder_host,
                     instance_info.decoder_port,
                     exc,
                     instance_info.request_id,
                 )
+                raise
             finally:
                 await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
                 released_kv = True
                 request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        # DeferredStreamingResponse delays committing the status line until the
+        # first chunk, so a decode failure before any chunk surfaces as a 503
+        # instead of a silent 200 + empty body.
+        return DeferredStreamingResponse(
+            generate_stream(),
+            media_type=media_type,
+            error_body=b'{"error":{"message":"upstream decode failed","type":"decode_failed"}}',
+        )
+    except NoAvailableNodeError as e:
+        logger.error("No available node for %s: %s", api, e)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": f"no available backend: {e}",
+                    "type": "no_available_node",
+                }
+            },
+        )
     except Exception:
         import traceback
 
@@ -1213,6 +2034,14 @@ async def reset_prefix_cache(request: Request):
     if failures:
         return JSONResponse(status_code=500, content={"failed": failures})
     return Response(status_code=200)
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(
+        content=get_runtime().scheduler.render_metrics(),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 @app.get("/healthcheck")
