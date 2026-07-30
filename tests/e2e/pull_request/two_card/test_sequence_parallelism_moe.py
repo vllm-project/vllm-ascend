@@ -46,7 +46,9 @@ from vllm.distributed.parallel_state import (
 from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
-from tests.e2e.pull_request.one_card.compile.backend import TestBackend as CompileTestBackend
+from tests.e2e.pull_request.quarter_card.compile.backend import (
+    TestBackend as CompileTestBackend,
+)
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.sequence_parallelism_moe import (
     SequenceParallelismMoePass,
