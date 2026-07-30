@@ -289,7 +289,7 @@ Run docker container to start the vLLM server on single-NPU:
     --gpu-memory-utilization 0.91 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
     --mm-processor-cache-gb 0 
 
     ```
