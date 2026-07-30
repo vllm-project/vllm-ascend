@@ -302,6 +302,18 @@ Key deployment parameters:
 | `--additional-config` | Enables Ascend CPU binding and FlashComm1. |
 | `HCCL_IF_IP` and socket interface variables | Bind HCCL, Gloo, and TP communication to the selected interface. |
 
+:::{note}
+Serving a 1M-token context requires at least eight Atlas 800 A3 (64G × 16) nodes. Change the following parameters on every node:
+
+| Parameter | Four-node default | 1M context |
+| --- | --- | --- |
+| `--data-parallel-size` | `4` | `8` |
+| `--max-model-len` | `131027` | `1048576` |
+| `--max-num-batched-tokens` | `24576` | `8192` |
+
+Run the worker command on Nodes 1 through 7 and assign each node a unique `--data-parallel-start-rank` from `1` through `7`.
+:::
+
 If a worker exits immediately, confirm that Node 0 is already running, `--data-parallel-address` resolves to Node 0, and every worker uses a unique `--data-parallel-start-rank`.
 
 Verify the service through Node 0:
