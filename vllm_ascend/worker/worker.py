@@ -964,34 +964,20 @@ class NPUWorker(WorkerBase):
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
-        layout = build_layerwise_cache_layout(num_layers, extra_config)
-        if not layout.has_layer_reuse:
-            return num_layers, num_layers, 1.0
-        num_slots = len(layout.storage_indices)
-
-        layer_layout, storage_slots = build_layerwise_reuse_layout(
+        reuse_layout = build_layerwise_reuse_layout(
             kv_cache_spec,
             base_layers,
             extra_config,
         )
-        if len(layer_layout) != num_layers or len(storage_slots) != num_slots:
-            raise RuntimeError("Layerwise KV cache memory layout does not match the physical layer reuse plan.")
+        if not reuse_layout.has_layer_reuse:
+            return num_layers, num_layers, 1.0
+        num_slots = len(reuse_layout.storage_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = 0
-        for slot_layers in storage_slots:
-            for component in ("main", "indexer"):
-                component_specs = [
-                    kv_cache_spec[layer_layout[layer][component]]
-                    for layer in slot_layers
-                    if component in layer_layout[layer]
-                ]
-                if not component_specs:
-                    continue
-                page_sizes = {spec.page_size_bytes for spec in component_specs}
-                if len(page_sizes) != 1:
-                    raise ValueError(f"Layers sharing a layerwise slot must have equal {component} page sizes.")
-                physical_page_bytes += page_sizes.pop()
+        physical_page_bytes = sum(
+            sum(entry.spec.page_size_bytes for entry in reuse_layout.layer_entries[slot_layers[0]])
+            for slot_layers in reuse_layout.storage_slots
+        )
         return num_layers, num_slots, logical_page_bytes / physical_page_bytes
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

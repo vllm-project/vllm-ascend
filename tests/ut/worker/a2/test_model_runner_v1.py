@@ -129,7 +129,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dtype=torch.int8,
             scale_dim=1,
             scale_dtype=torch.float16,
-            cache_sparse_c8=True,
+            cache_sparse_li_c8=True,
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
