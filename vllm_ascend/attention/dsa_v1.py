@@ -27,12 +27,14 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.mxfp_compat import is_rms_norm_dynamic_mx_quant_fusion_available
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -126,6 +128,37 @@ def _is_w8a8_dynamic(linear) -> bool:
         return False
     inner = getattr(qm, "quant_method", None)
     return isinstance(inner, AscendW8A8DynamicLinearMethod)
+
+
+def _is_w8a8_mxfp8_dynamic(linear) -> bool:
+    """True iff ``linear`` is wired up with ``AscendW8A8MXFP8DynamicLinearMethod``."""
+    qm = getattr(linear, "quant_method", None)
+    if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
+        return False
+    inner = getattr(qm, "quant_method", None)
+    return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
+
+
+def _can_fuse_q_norm_mx_quant(
+    is_mxfp8: bool,
+    fusion_available: bool,
+    qr_consumed_by_topk: bool,
+) -> bool:
+    return is_mxfp8 and fusion_available and not qr_consumed_by_topk
+
+
+def _rms_norm_dynamic_mx_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+        x,
+        weight,
+        epsilon=eps,
+        dst_type=torch.float8_e4m3fn,
+    )
+    return out[0], out[1]
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
@@ -1753,6 +1786,17 @@ class AscendDSAImpl(DSAAttentionImpl):
         aux_stream = dsv4_dsa_overlap_stream()
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
+        is_mxfp8 = _is_w8a8_mxfp8_dynamic(self.wq_b)
+        fusion_available = is_rms_norm_dynamic_mx_quant_fusion_available()
+        qr_consumed_by_topk = self.compress_ratio == 4 and not self.skip_topk
+        # compress_ratio=4 uses qr as BF16 input for indexer topk selection.
+        # The fused MX op returns quantized qr only, so keep the generic path
+        # whenever qr is still consumed downstream.
+        can_fuse_q_norm_mx_quant = _can_fuse_q_norm_mx_quant(
+            is_mxfp8=is_mxfp8,
+            fusion_available=fusion_available,
+            qr_consumed_by_topk=qr_consumed_by_topk,
+        )
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
@@ -1774,7 +1818,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             torch.npu.current_stream().wait_event(e_part2_start)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
-        if is_prefill:
+        if can_fuse_q_norm_mx_quant:
+            q_b_quant, q_b_scale = _rms_norm_dynamic_mx_quant(wq_a_result, self.q_norm.weight, self.eps)
+            qr = None
+            qr_pertoken_scale = None
+        elif is_prefill:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
@@ -1807,7 +1855,13 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
-        if is_prefill:
+        if can_fuse_q_norm_mx_quant:
+            q = self.wq_b.quant_method.apply(
+                self.wq_b,
+                (q_b_quant, q_b_scale),
+                self.wq_b.bias,
+            ).unflatten(-1, (self.n_local_heads, self.head_dim))
+        elif is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
         elif is_w8a8:
             q = torch_npu.npu_quant_matmul(

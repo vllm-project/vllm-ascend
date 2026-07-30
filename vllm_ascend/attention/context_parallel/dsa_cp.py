@@ -22,18 +22,19 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.mxfp_compat import is_rms_norm_dynamic_mx_quant_fusion_available
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
     olora_tp_enable,
 )
-
 
 def hadamard_transform_ref(
     x: torch.Tensor,
@@ -62,6 +63,36 @@ def _has_prefill(attn_state: AscendAttentionState) -> bool:
         AscendAttentionState.DecodeOnly,
         AscendAttentionState.SpecDecoding,
     }
+
+
+def _is_w8a8_mxfp8_dynamic(linear) -> bool:
+    qm = getattr(linear, "quant_method", None)
+    if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
+        return False
+    inner = getattr(qm, "quant_method", None)
+    return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
+
+
+def _can_fuse_q_norm_mx_quant(
+    is_mxfp8: bool,
+    fusion_available: bool,
+    qr_consumed_by_topk: bool,
+) -> bool:
+    return is_mxfp8 and fusion_available and not qr_consumed_by_topk
+
+
+def _rms_norm_dynamic_mx_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+        x,
+        weight,
+        epsilon=eps,
+        dst_type=torch.float8_e4m3fn,
+    )
+    return out[0], out[1]
 
 
 @dataclass
@@ -1309,9 +1340,30 @@ class AscendDSACPImpl(DSAAttentionImpl):
         has_prefill = _has_prefill(common_attn_metadata.attn_state)
         hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
 
-        if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
+        is_w8a8 = (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
-        ):
+        )
+        is_mxfp8 = _is_w8a8_mxfp8_dynamic(self.wq_b)
+        fusion_available = is_rms_norm_dynamic_mx_quant_fusion_available()
+        # CP compress_ratio=4 always consumes qr_local for indexer topk.
+        qr_consumed_by_topk = self.compress_ratio == 4
+        can_fuse_q_norm_mx_quant = _can_fuse_q_norm_mx_quant(
+            is_mxfp8=is_mxfp8,
+            fusion_available=fusion_available,
+            qr_consumed_by_topk=qr_consumed_by_topk,
+        )
+
+        if can_fuse_q_norm_mx_quant:
+            q_a = self.wq_a(hidden_states_local)
+            q_b_quant, q_b_scale = _rms_norm_dynamic_mx_quant(q_a, self.q_norm.weight, self.eps)
+            q = self.wq_b.quant_method.apply(
+                self.wq_b,
+                (q_b_quant, q_b_scale),
+                self.wq_b.bias,
+            )
+            qr_local = None
+            qr_pertoken_scale_local = None
+        elif is_w8a8:
             q_a = self.wq_a(hidden_states_local)
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
