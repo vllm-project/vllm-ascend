@@ -5,11 +5,29 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm.triton_utils import HAS_TRITON, triton
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+_COPY_EXPAND_BLOCK_SIZE = 256
+
+
+def _copy_and_expand_grid(total_input_tokens: int, num_query_total: int) -> tuple[int]:
+    """Grid for copy_and_expand kernel: one program per BLOCK_SIZE chunk,
+    capped at the vector-core count (the kernel grid-strides over the rest).
+
+    ``init_device_properties_triton`` is idempotent (guarded by an unset
+    sentinel), so calling it here keeps the helper self-contained for unit
+    tests that bypass worker startup.
+    """
+    init_device_properties_triton()
+    num_blocks_needed = triton.cdiv(total_input_tokens + num_query_total, _COPY_EXPAND_BLOCK_SIZE)
+    return (min(num_blocks_needed, get_vectorcore_num()),)
 
 
 class AscendDflashProposer(AscendEagleProposer):
@@ -92,7 +110,9 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
-        copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+        copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[
+            _copy_and_expand_grid(num_context, num_query_total)
+        ](
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,

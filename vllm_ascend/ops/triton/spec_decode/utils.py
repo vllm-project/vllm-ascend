@@ -94,53 +94,74 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    BLOCK_SIZE: tl.constexpr = 256,
 ):
-    for req_idx in range(0, batch_size):
-        ctx_start = tl.load(query_start_loc_ptr + req_idx)
-        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
-        num_ctx = ctx_end - ctx_start
+    # Grid-stride kernel: launch grid is capped at the vector-core count by
+    # the caller (grid = min(cdiv(total_work, BLOCK_SIZE), num_vectorcore)),
+    # each program processes BLOCK_SIZE elements per iteration and strides by
+    # num_programs * BLOCK_SIZE.
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    block_start_step = num_programs * BLOCK_SIZE
 
-        for j in range(0, num_ctx):
-            ctx_pos_idx = ctx_start + j
-            pos = tl.load(target_positions_ptr + ctx_pos_idx)
-            tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
+    # --- Part 1: context positions / slot_mapping copy ---
+    # query_start_loc is a contiguous partition of [0, total_input_tokens),
+    # so the per-request copy loops of the original kernel union into one
+    # flat range that can be vectorized directly.
+    block_start = pid * BLOCK_SIZE
+    while block_start < total_input_tokens:
+        offs = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offs < total_input_tokens
+        pos = tl.load(target_positions_ptr + offs, mask=mask)
+        tl.store(out_context_positions_ptr + offs, pos, mask=mask)
+        slot = tl.load(context_slot_mapping_ptr + offs, mask=mask)
+        tl.store(out_context_slot_mapping_ptr + offs, slot, mask=mask)
+        block_start += block_start_step
 
-            slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
+    # --- Part 2: query block expand ---
+    # Flat offs covers [0, batch_size * num_query_per_req); req_idx / q_idx
+    # are recovered from offs instead of iterating two serial loops.
+    num_query_total = batch_size * num_query_per_req
+    block_start = pid * BLOCK_SIZE
+    while block_start < num_query_total:
+        offs = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offs < num_query_total
 
+        req_idx = offs // num_query_per_req
+        q_idx = offs % num_query_per_req
+
+        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=mask, other=0)
         if HAS_NUM_REJECTED:
-            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
-            valid_ctx_end = ctx_end - num_rejected
+            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx, mask=mask, other=0)
         else:
-            num_rejected = 0
-            valid_ctx_end = ctx_end
+            num_rejected = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
+        valid_ctx_end = ctx_end - num_rejected
 
-        seq_len = tl.load(seq_lens_ptr + req_idx)
+        seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
 
-        for q_idx in range(0, num_query_per_req):
-            query_pos = last_pos + 1 + q_idx
-            query_out_idx = req_idx * num_query_per_req + q_idx
+        query_pos = last_pos + 1 + q_idx
+        tl.store(out_query_positions_ptr + offs, query_pos, mask=mask)
 
-            tl.store(out_query_positions_ptr + query_out_idx, query_pos)
+        query_cache_pos = effective_seq_len + q_idx
+        block_num_q = query_cache_pos // block_size
+        block_id_q = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0
+        ).to(tl.int64)
+        slot_q = block_id_q * block_size + (query_cache_pos % block_size)
+        tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
-            query_cache_pos = effective_seq_len + q_idx
-            block_num_q = query_cache_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
-            slot_q = block_id_q * block_size + (query_cache_pos % block_size)
-            tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
+        bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
+        in_id = tl.where(q_idx == 0, bonus, parallel_drafting_token_id)
+        tl.store(out_input_ids_ptr + offs, in_id, mask=mask)
 
-            if q_idx == 0:
-                bonus_token = tl.load(next_token_ids_ptr + req_idx)
-                tl.store(out_input_ids_ptr + query_out_idx, bonus_token)
-            else:
-                tl.store(out_input_ids_ptr + query_out_idx, parallel_drafting_token_id)
+        if SAMPLE_FROM_ANCHOR:
+            sample_out_idx = req_idx * num_speculative_tokens + q_idx
+            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=mask)
+        else:
+            sample_mask = mask & (q_idx > 0)
+            sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
+            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=sample_mask)
 
-            if SAMPLE_FROM_ANCHOR:
-                sample_out_idx = req_idx * num_speculative_tokens + q_idx
-                tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
-            else:
-                if q_idx > 0:
-                    sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
-                    tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+        block_start += block_start_step
