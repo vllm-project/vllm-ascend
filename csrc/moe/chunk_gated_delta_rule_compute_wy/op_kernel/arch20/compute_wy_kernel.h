@@ -105,7 +105,11 @@ class KernelComputeWy {
     pipe_->InitBuffer(rowBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     pipe_->InitBuffer(negABuf_, FIXED_CHUNK_SIZE * sizeof(float));
     pipe_->InitBuffer(lamOffBuf_, ATTEN_ELEMS * sizeof(uint32_t));
+    pipe_->InitBuffer(gOffBuf_, FIXED_CHUNK_SIZE * sizeof(uint32_t));
+    pipe_->InitBuffer(betaOffBuf_, FIXED_CHUNK_SIZE * sizeof(uint32_t));
+    pipe_->InitBuffer(betaHalfBuf_, FIXED_CHUNK_SIZE * sizeof(half));
     BuildLambdaTable();
+    BuildColumnGatherTables();
     valid_ = true;
   }
 
@@ -123,6 +127,18 @@ class KernelComputeWy {
       }
     }
     gBuf_.Get<float>().SetValue(FIXED_CHUNK_SIZE, -1.0e20f);
+  }
+
+  // g and beta arrive as [64, vNumHead] blocks; we need one strided column. Byte-offset
+  // tables let a single Gather extract it, so the column never round-trips through the
+  // scalar unit. numHeads is fixed for the launch, so these are built once.
+  __aicore__ inline void BuildColumnGatherTables() {
+    LocalTensor<uint32_t> gOff = gOffBuf_.Get<uint32_t>();
+    LocalTensor<uint32_t> betaOff = betaOffBuf_.Get<uint32_t>();
+    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
+      gOff.SetValue(i, i * vNumHead_ * static_cast<uint32_t>(sizeof(float)));
+      betaOff.SetValue(i, i * vNumHead_ * static_cast<uint32_t>(sizeof(half)));
+    }
   }
 
   __aicore__ inline void Process() {
@@ -193,16 +209,18 @@ class KernelComputeWy {
   }
   __aicore__ inline void LoadHeadScalarChunk(GlobalTensor<float> srcGm, LocalTensor<float> dstLocal,
                                              LocalTensor<float> scratch, uint32_t scratchElems, uint32_t b,
-                                             uint32_t tokenStart, uint32_t headIdx, uint32_t numHeads) const {
+                                             uint32_t tokenStart, uint32_t headIdx, uint32_t numHeads) {
     const uint32_t span = FIXED_CHUNK_SIZE * numHeads;
     const uint64_t chunkBase = (static_cast<uint64_t>(b) * seqlen_ + tokenStart) * numHeads;
-    if (span <= scratchElems) {
+    // Gather table is built for vNumHead_; fall back to the scalar path otherwise.
+    if (span <= scratchElems && numHeads == vNumHead_) {
       DataCopyParams copyParams{1, BytesToBlocks(span * sizeof(float)), 0, 0};
       DataCopy(scratch, srcGm[chunkBase], copyParams);
-      SyncEvent<HardEvent::MTE2_S>(HardEvent::MTE2_S);
-      for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-        dstLocal.SetValue(i, scratch.GetValue(i * numHeads + headIdx));
-      }
+      SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+      Gather(dstLocal, scratch, gOffBuf_.Get<uint32_t>(),
+             headIdx * static_cast<uint32_t>(sizeof(float)), FIXED_CHUNK_SIZE);
+      // Vector wrote dstLocal; the cumsum below reads it on the scalar unit.
+      SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     } else {
       const uint64_t base = chunkBase + headIdx;
       for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
@@ -218,10 +236,14 @@ class KernelComputeWy {
     if (span <= scratchElems) {
       DataCopyParams copyParams{1, BytesToBlocks(span * sizeof(half)), 0, 0};
       DataCopy(scratch, betaGm_[chunkBase], copyParams);
-      SyncEvent<HardEvent::MTE2_S>(HardEvent::MTE2_S);
-      for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-        dstLocal.SetValue(i, static_cast<float>(scratch.GetValue(i * vNumHead_ + vHeadIdx)));
-      }
+      SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+      LocalTensor<half> betaHalf = betaHalfBuf_.Get<half>();
+      Gather(betaHalf, scratch, betaOffBuf_.Get<uint32_t>(),
+             vHeadIdx * static_cast<uint32_t>(sizeof(half)), FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
+      Cast(dstLocal, betaHalf, RoundMode::CAST_NONE, FIXED_CHUNK_SIZE);
+      // Vector wrote dstLocal; the row-scale loops read it on the scalar unit.
+      SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     } else {
       const uint64_t base = chunkBase + vHeadIdx;
       for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
@@ -395,7 +417,7 @@ class KernelComputeWy {
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
   TBuf<TPosition::VECCALC> kHalfBuf_, qHalfBuf_, vHalfBuf_, kFloatBuf_, vFloatBuf_, kBetaBuf_, attnBuf_, gBuf_,
-      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, mmLocalWsBuf_;
+      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, gOffBuf_, betaOffBuf_, betaHalfBuf_, mmLocalWsBuf_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy
