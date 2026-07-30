@@ -43,6 +43,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
+    get_layerwise_physical_layer_index,
+)
 
 
 class KVPoolScheduler:
@@ -186,6 +190,20 @@ class KVPoolScheduler:
         else:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.layerwise_offload = False
+        if self.use_gva_layerwise:
+            if kv_cache_config is not None:
+                physical_layers = {
+                    get_layerwise_physical_layer_index(layer_name, self.num_layers)
+                    for group in kv_cache_config.kv_cache_groups
+                    for layer_name in group.layer_names
+                }
+                if len(physical_layers) >= self.num_layers:
+                    self.num_layers = len(physical_layers)
+            self.layerwise_offload = build_layerwise_cache_layout(
+                self.num_layers,
+                vllm_config.kv_transfer_config.kv_connector_extra_config,
+            ).has_layer_reuse
         self.model_name = model_config.model.split("/")[-1]
 
         # Keep this in sync with pool_worker.py because it affects GVA allocation size.
@@ -854,7 +872,14 @@ class KVPoolScheduler:
                 request_tracker.last_block_key = last_block_key
         if new_block_ids is not None:
             request_tracker.update(new_block_ids)
-        load_spec = None
+        if self.layerwise_offload and num_current_tokens > 0:
+            load_spec = LoadSpec(
+                vllm_cached_tokens=num_current_tokens,
+                kvpool_cached_tokens=num_current_tokens,
+                can_load=True,
+            )
+        else:
+            load_spec = None
         return self._build_req_meta(
             request_tracker,
             request.block_hashes,
@@ -951,7 +976,7 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids and not self.tp_mismatch:
+                if not new_block_ids and not self.tp_mismatch and not self.layerwise_offload:
                     continue
                 if req_id in self._preempted_req_ids:
                     if not new_block_ids:
