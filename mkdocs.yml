@@ -248,6 +248,7 @@ nav:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
+        - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
         - user_guide/feature_guide/graph_mode.md

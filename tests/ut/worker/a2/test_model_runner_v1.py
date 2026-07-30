@@ -1,4 +1,5 @@
 import unittest
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -964,6 +965,83 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_k_cache.dtype, torch.int8)
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
+
+
+class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
+    @staticmethod
+    def _build_runner():
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.encoder_cache = {"device": object()}
+        runner.tmp_encoder_cache = {}
+        runner.cpu_encoder_cache = {}
+        runner.cached = {}
+        runner._pending_encoder_cache_copies = deque()
+        runner.late_interaction_runner = MagicMock()
+        runner._sync_device = MagicMock()
+        return runner
+
+    def test_reset_clears_score_encoder_cache_state(self):
+        runner = self._build_runner()
+        runner.tmp_encoder_cache["tmp"] = object()
+        runner.cpu_encoder_cache["cpu"] = object()
+        runner.cached["tmp"] = {"request"}
+        runner._pending_encoder_cache_copies.append((object(), MagicMock()))
+
+        runner.reset_encoder_cache()
+
+        runner._sync_device.assert_called_once_with()
+        self.assertFalse(runner.encoder_cache)
+        self.assertFalse(runner.tmp_encoder_cache)
+        self.assertFalse(runner.cpu_encoder_cache)
+        self.assertFalse(runner.cached)
+        self.assertFalse(runner._pending_encoder_cache_copies)
+        runner.late_interaction_runner.clear.assert_called_once_with()
+
+    def test_reset_without_score_cache_state_does_not_sync(self):
+        runner = self._build_runner()
+
+        runner.reset_encoder_cache()
+
+        runner._sync_device.assert_not_called()
+        self.assertFalse(runner.encoder_cache)
+        runner.late_interaction_runner.clear.assert_called_once_with()
+
+
+class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
+    def test_processes_cpu_and_npu_freed_separately(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.encoder_cache = {
+            "npu-freed": object(),
+            "cpu-freed": object(),
+            "legacy-freed": object(),
+        }
+        runner.cpu_encoder_cache = {
+            "npu-freed": object(),
+            "cpu-freed": object(),
+            "legacy-freed": object(),
+        }
+        runner.tmp_encoder_cache = {}
+        runner.use_score_encoder_cache = True
+        runner._clear_finished_encoder_cache_copies = MagicMock()
+        metadata = SimpleNamespace(
+            promoting_mm_hashes=[],
+            cpu_get_encoder_mm_hashes=[],
+            npu_freed=["npu-freed"],
+            cpu_freed=["cpu-freed"],
+        )
+        scheduler_output = SimpleNamespace(
+            ec_manager_metadata=metadata,
+            free_encoder_mm_hashes=["legacy-freed"],
+        )
+
+        runner._process_encoder_cache_scheduler_output(scheduler_output)
+
+        self.assertNotIn("npu-freed", runner.encoder_cache)
+        self.assertIn("npu-freed", runner.cpu_encoder_cache)
+        self.assertIn("cpu-freed", runner.encoder_cache)
+        self.assertNotIn("cpu-freed", runner.cpu_encoder_cache)
+        self.assertIn("legacy-freed", runner.encoder_cache)
+        self.assertIn("legacy-freed", runner.cpu_encoder_cache)
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):

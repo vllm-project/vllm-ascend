@@ -174,6 +174,10 @@ TITLES = {
     "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
+    "user_guide/configuration/encoder_cache_manager.md": {
+        "en": "Score Encoder Cache Manager",
+        "zh": "Score 编码器缓存管理器",
+    },
     "user_guide/configuration/env_vars.md": {"en": "Environment Variables", "zh": "环境变量"},
     "user_guide/deployment_guide/using_mindie_motor.md": {"en": "Using MindIE Motor", "zh": "使用 MindIE Motor"},
     "user_guide/deployment_guide/using_volcano_kthena.md": {"en": "Using Volcano Kthena", "zh": "使用 Volcano Kthena"},

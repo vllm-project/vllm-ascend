@@ -1,11 +1,15 @@
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
 
-from vllm_ascend.ascend_config import get_ascend_config, get_score_encoder_cache_config
+from vllm_ascend.ascend_config import ScoreEncoderCacheConfig
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -14,13 +18,16 @@ class CacheEntry:
     freq: int  # Access frequency
     clock: int  # Clock value used for aging
     num_embeds: int  # Number of slots occupied by this embedding
-    cal_cost: int  # Theoretical recomputation cost of this embedding (used for score calculation)
+    # Theoretical recomputation cost per storage slot (used for score calculation)
+    cal_cost: float
 
 
 @dataclass
 class ScoreEncoderCacheManagerMetadata(EncoderCacheManagerMetadata):
     promoting_mm_hashes: list[str]
     cpu_get_encoder_mm_hashes: list[str]
+    npu_freed: list[str]
+    cpu_freed: list[str]
 
 
 class ScoreEncoderCacheManager(EncoderCacheManager):
@@ -40,18 +47,26 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
        from occupying the cache for too long
     """
 
-    def __init__(self, cache_size: int):
+    @classmethod
+    def from_vllm_config(
+        cls,
+        *,
+        cache_size: int,
+        vllm_config: "VllmConfig",
+    ) -> "ScoreEncoderCacheManager":
+        return cls(cache_size=cache_size, vllm_config=vllm_config)
+
+    def __init__(self, cache_size: int, vllm_config: "VllmConfig"):
         super().__init__(cache_size)
 
-        vllm_config = get_ascend_config().vllm_config
-        score_encoder_cache_config = get_score_encoder_cache_config(vllm_config)
+        config = ScoreEncoderCacheConfig.from_dict(vllm_config.ec_manager_config.manager_config)
         # ---------------- NPU cache ----------------
         self.cache_size = cache_size
         self.npu_num_free_slots = cache_size  # Empty slots
         self.npu_num_freeable_slots = cache_size  # Reclaimable capacity: reclaimable slots + empty slots
 
         # ---------------- CPU cache ----------------
-        self.cpu_cache_size = score_encoder_cache_config.cpu_cache_slots
+        self.cpu_cache_size = config.cpu_cache_slots
         self.cpu_num_free_slots = self.cpu_cache_size
         self.cpu_num_freeable_slots = self.cpu_cache_size
 
@@ -72,14 +87,16 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         self.req_cnt = 0
 
-        self.watermark = score_encoder_cache_config.watermark
-        self.promote_percentile = score_encoder_cache_config.promote_percentile
-        self.max_clock = score_encoder_cache_config.max_clock
-        self.clock_decay_every = score_encoder_cache_config.clock_decay_every
+        self.watermark = config.watermark
+        self.promote_percentile = config.promote_percentile
+        self.max_clock = config.max_clock
+        self.clock_decay_every = config.clock_decay_every
 
         # Actions to execute in the current round
         self.promoting: list[str] = []  # mm_hashes to be promoted from CPU -> NPU
         self.cpu_get_encoder_mm_hashes: list[str] = []  # mm_hashes whose embeddings need to be prefetched from CPU
+        self.npu_freed: list[str] = []
+        self.cpu_freed: list[str] = []
 
         # ---------------- Load model config (used to estimate theoretical compute cost) ----------------
         self.attn_heads = vllm_config.model_config.hf_config.vision_config.num_heads
@@ -94,15 +111,20 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.alpha = 4 * self.hidden_size + 5 * self.attn_heads
         self.beta = self.hidden_size * (8 * self.hidden_size + 6 * self.feedforward + 14)
 
-    def score(self, ent: CacheEntry) -> float:
-        return (ent.freq + ent.clock) * ent.cal_cost
+    def score(self, ent: CacheEntry, *, include_clock: bool = True) -> float:
+        """Score an entry, including clock only for NPU residency."""
+        clock = ent.clock if include_clock else 0
+        return (ent.freq + clock) * ent.cal_cost
 
     def evict_from_npu(self, ent: CacheEntry):
         """
         Evict an entry from the NPU cache.
         """
         del self.npu_cache[ent.mm_hash]
-        self.freed.append(ent.mm_hash)
+        ent.clock = 0
+        if ent.mm_hash not in self.cpu_cache:
+            self.cached.pop(ent.mm_hash, None)
+        self.npu_freed.append(ent.mm_hash)
         self.npu_num_free_slots += ent.num_embeds
 
     def should_promote(self, mm_hash: str) -> bool:
@@ -124,7 +146,8 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             # The NPU has free space, place it directly
             return True
 
-        ent_value = self.score(ent)
+        # A CPU-only entry has no NPU residency freshness.
+        ent_value = self.score(ent, include_clock=False)
         scored = []
         for cur_hash, cur_ent in self.npu_freeable.items():
             value = self.score(cur_ent)
@@ -137,17 +160,24 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         if ent_value < threshold:
             return False
 
-        free_slots = max(
-            self.cache_size * self.watermark - self.npu_num_free_slots, ent.num_embeds - self.npu_num_free_slots
+        required_slots = ent.num_embeds - self.npu_num_free_slots
+        # Prefer to reach the target free-slot watermark, but always release
+        # enough space for the new entry. An unreachable watermark is capped
+        # by the capacity of entries that are actually reclaimable.
+        watermark_slots = self.cache_size * self.watermark - self.npu_num_free_slots
+        max_evictable_slots = sum(cur_ent.num_embeds for _, _, cur_ent in scored)
+        slots_to_evict = max(
+            required_slots,
+            min(watermark_slots, max_evictable_slots),
         )
 
         i = 0
-        while free_slots > 0:
+        while slots_to_evict > 0:
             min_hash = scored[i][1]
             evict_ent = self.npu_freeable.pop(min_hash)
             self.evict_from_npu(evict_ent)
             i += 1
-            free_slots -= evict_ent.num_embeds
+            slots_to_evict -= evict_ent.num_embeds
 
         return True
 
@@ -179,7 +209,6 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         if request.request_id not in self.cached[mm_hash]:
             self.cached[mm_hash].add(request.request_id)
-            ent = None
             if mm_hash in self.npu_cache:
                 ent = self.npu_cache[mm_hash]
             else:
@@ -197,7 +226,8 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
             self.on_request()
             ent.freq += 1
-            ent.clock = self.max_clock
+            if mm_hash in self.npu_cache:
+                ent.clock = self.max_clock
 
         self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
         return True
@@ -207,10 +237,6 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         if self.req_cnt % self.clock_decay_every == 0:
             for ent in self.npu_cache.values():
                 ent.clock = max(0, ent.clock - 1)
-
-        # TODO(zkx): Enabled only in debug mode.
-        if self.req_cnt % 1000 == 0:
-            self._check_invariant()
 
     def can_allocate(
         self,
@@ -232,6 +258,12 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         """
 
         num_embeds = request.get_num_encoder_embeds(input_id)
+        if num_embeds > self.cpu_cache_size:
+            raise ValueError(
+                f"Encoder output requires {num_embeds} cache slots, but "
+                "manager_config.cpu_cache_slots is "
+                f"{self.cpu_cache_size}."
+            )
 
         # Not enough compute budget
         if num_embeds > encoder_compute_budget:
@@ -244,29 +276,33 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         while num_embeds > self.cpu_num_free_slots:
             mm_hash, ent = self.cpu_freeable.popitem(last=False)
-            del self.cached[mm_hash]
             del self.cpu_cache[mm_hash]
-            self.freed.append(mm_hash)
+            if mm_hash not in self.npu_cache:
+                self.cached.pop(mm_hash, None)
+            self.cpu_freed.append(mm_hash)
             self.cpu_num_free_slots += ent.num_embeds
 
         return True
 
     def cal_theory_cost_storage_cost(self, seq_len: int) -> float:
         """
-        Compute the theoretical recomputation cost of an encoder output.
+        Compute the theoretical recomputation cost per storage slot.
 
         The return value represents:
-            A rough estimate of the time required to recompute the embedding
-            (derived from FLOPs / hardware_flops)
+            A rough estimate of the recomputation time per cache slot
+            (derived from FLOPs / hardware_flops / storage cost).
 
         Notes:
         - The input parameter uses seq_len as an approximation of embedding size
         - The current formula is a rough theoretical estimate based on the vision encoder
-        - b*s[(4h+5a)s +(14h+8h**2 +6h*ffn)]
+        - recomputation_cost = 32 * s * (alpha * s + beta)
+        - storage_cost is proportional to s
+        - Therefore, recomputation_cost / storage_cost =
+          32 * (alpha * s + beta), with s cancelled out
         """
 
-        cost = 32 * (self.alpha * seq_len + self.beta)
-        return cost / self.hardware_flops
+        recomputation_cost_per_storage_slot = 32 * (self.alpha * seq_len + self.beta)
+        return recomputation_cost_per_storage_slot / self.hardware_flops
 
     def allocate(self, request: Request, input_id: int) -> None:
         """
@@ -286,7 +322,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         cache_entry = CacheEntry(
             mm_hash=mm_hash,
             freq=1,
-            clock=self.max_clock,
+            clock=0,
             num_embeds=num_encoder_embeds,
             cal_cost=self.cal_theory_cost_storage_cost(num_encoder_embeds),
         )
@@ -329,10 +365,20 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.promoting = []
         cpu_get_encoder_mm_hashes = self.cpu_get_encoder_mm_hashes
         self.cpu_get_encoder_mm_hashes = []
+        npu_freed = self.npu_freed
+        self.npu_freed = []
+        cpu_freed = self.cpu_freed
+        self.cpu_freed = []
         return ScoreEncoderCacheManagerMetadata(
             promoting_mm_hashes=promoting,
             cpu_get_encoder_mm_hashes=cpu_get_encoder_mm_hashes,
+            npu_freed=npu_freed,
+            cpu_freed=cpu_freed,
         )
+
+    def get_freed_mm_hashes(self) -> list[str]:
+        """Report evictions through layer-specific manager metadata."""
+        return []
 
     def get_promoting_mm_hashes(self) -> list[str]:
         promoting = self.promoting
@@ -346,7 +392,9 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
     def _check_invariant(self):
         """
-        Validate internal state.
+        Validate internal state in unit tests and debugging.
+
+        This scans all cache entries and must not run on the scheduling hot path.
 
         Main checks:
         1. Occupied cache slots + free slots = total capacity
@@ -406,9 +454,10 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.cached.clear()
         self.request_cached_ids.clear()
         self.freeable.clear()
-        self.freed.clear()
         self.promoting.clear()
         self.cpu_get_encoder_mm_hashes.clear()
+        self.npu_freed.clear()
+        self.cpu_freed.clear()
 
         self.npu_num_free_slots = self.cache_size
         self.npu_num_freeable_slots = self.cache_size
