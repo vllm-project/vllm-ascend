@@ -287,17 +287,29 @@ def _select_a5_moe_comm_method(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
-    num_experts_per_tok = getattr(
-        vllm_config.model_config.hf_text_config,
-        "num_experts_per_tok",
-        getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
-    )
+    hf_text_config = vllm_config.model_config.hf_text_config
+    num_experts_per_tok = getattr(hf_text_config, "num_experts_per_tok", None)
+    top_k_experts = getattr(hf_text_config, "top_k_experts", 1)
+    num_experts_per_top = num_experts_per_tok if num_experts_per_tok is not None else top_k_experts
     world_size = vllm_config.parallel_config.world_size_across_dp
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
-        return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
-        return MoECommType.ALLGATHER
-    return MoECommType.ALLTOALL
+        moe_comm_type = MoECommType.MC2
+    elif world_size <= num_experts_per_top:
+        moe_comm_type = MoECommType.ALLGATHER
+    else:
+        moe_comm_type = MoECommType.ALLTOALL
+    logger.info(
+        "A5 MoE comm method selection: world_size=%s, "
+        "mc2_tokens_capacity=%s, num_experts_per_top=%s, "
+        "top_k_experts=%s, num_tokens=%s, method=%s",
+        world_size,
+        mc2_tokens_capacity,
+        num_experts_per_top,
+        top_k_experts,
+        num_tokens,
+        moe_comm_type,
+    )
+    return moe_comm_type
 
 
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
