@@ -14,6 +14,10 @@ _GLUON_LANGUAGE_MODULE_NAME = f"{_GLUON_MODULE_NAME}.language"
 
 class _UnavailableGluonModule(ModuleType):
     def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            # Module introspection relies on missing dunder attributes raising
+            # AttributeError (for example, inspect probes ``__file__``).
+            raise AttributeError(name)
         raise RuntimeError(
             f"Triton Gluon attribute {name!r} is unavailable on Ascend. "
             "Gluon is only imported by vLLM for ROCm Inkling kernels."

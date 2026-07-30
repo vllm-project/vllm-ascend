@@ -23,8 +23,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 
-from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead, AscendVocabParallelEmbedding
+from vllm_ascend.ops.vocab_parallel_embedding import (
+    AscendParallelLMHead,
+    AscendVocabParallelEmbedding,
+)
 from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.version import vllm_version_is
 
 
 class AscendUnquantizedEmbeddingMethod310(UnquantizedEmbeddingMethod):
@@ -50,10 +54,24 @@ class AscendVocabParallelEmbedding310(AscendVocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
-        super().__init__(
-            num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
-        )
+        if vllm_version_is("0.26.0"):
+            super().__init__(
+                num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
+            )
+        else:
+            super().__init__(
+                num_embeddings,
+                embedding_dim,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+                disable_tp=disable_tp,
+            )
         if quant_config is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()
 
@@ -73,10 +91,32 @@ class AscendParallelLMHead310(AscendParallelLMHead):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
-        super().__init__(
-            num_embeddings, embedding_dim, bias, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
-        )
+        if vllm_version_is("0.26.0"):
+            super().__init__(
+                num_embeddings,
+                embedding_dim,
+                bias,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+            )
+        else:
+            super().__init__(
+                num_embeddings,
+                embedding_dim,
+                bias,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+                disable_tp=disable_tp,
+            )
 
         if quant_config is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()

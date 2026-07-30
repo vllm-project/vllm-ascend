@@ -15,6 +15,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     use_multistage_eplb_load,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.version import vllm_version_is
 
 
 def _build_weight_layer():
@@ -176,6 +177,35 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner.use_dp_chunking is False
     assert runner._fused_output_is_reduced is expected
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
+
+
+@pytest.mark.skipif(vllm_version_is("0.26.0"), reason="explicit reduction state is a target-main contract")
+def test_runner_explicit_reduction_state(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    reduce_op = MagicMock(side_effect=lambda states: states + 1)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER, flash_comm_v1_enabled=False),
+    )
+    monkeypatch.setattr(torch.ops.vllm, "maybe_all_reduce_tensor_model_parallel", reduce_op)
+    states = torch.ones(2, 3)
+
+    torch.testing.assert_close(
+        runner._maybe_reduce_shared_expert_output(states, True),
+        states + 1,
+    )
+    reduce_op.reset_mock()
+
+    torch.testing.assert_close(
+        runner._maybe_reduce_final_output(states, None, True),
+        states,
+    )
+    reduce_op.assert_not_called()
+    torch.testing.assert_close(
+        runner._maybe_reduce_final_output(states, None, False),
+        states + 1,
+    )
 
 
 class _Projection(nn.Module):

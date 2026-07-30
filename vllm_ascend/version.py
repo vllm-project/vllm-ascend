@@ -33,7 +33,12 @@ def vllm_version_is(target_vllm_version: str) -> bool:
             vllm_version = vllm.__version__
 
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
+        installed_version = Version(vllm_version)
+        target_version = Version(target_vllm_version)
+        # Source and device-specific wheels may append a PEP 440 local version
+        # (for example, ``0.26.0+empty``). The local suffix does not change the
+        # upstream vLLM release that compatibility gates target.
+        return installed_version.public == target_version.public
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "

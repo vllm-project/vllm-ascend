@@ -27,6 +27,7 @@ from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.version import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -52,6 +53,10 @@ class NPUInputBatch(InputBatch):
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
+        # vLLM PR #48018 added ReplaySSM state used by inherited InputBatch
+        # methods. ReplaySSM is CUDA-only, so Ascend keeps it disabled.
+        if not vllm_version_is("0.26.0"):
+            self.use_replayssm = False
         # Added for compatibility with InputBatch methods that reference these
         # attributes after PR vllm-project/vllm#34668. NPU does not use
         # thinking budget, so the holder is always None.

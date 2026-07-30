@@ -25,6 +25,10 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendParallelLMHead,
     AscendVocabParallelEmbedding,
 )
+from vllm_ascend.version import vllm_version_is
+
+if not vllm_version_is("0.26.0"):
+    from vllm.model_executor.parameter import BasevLLMParameter
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
@@ -141,6 +145,59 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         # Verify all_reduce was called once
         mock_reduce_tp1.assert_called_once()
+
+    @unittest.skipIf(vllm_version_is("0.26.0"), "disable_tp is a target-main contract")
+    def test_disable_tp_uses_full_weight_and_updates_parameter_metadata(self):
+        quant_method = MagicMock()
+
+        def create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            _input_size,
+            _output_size,
+            params_dtype,
+            **_extra_weight_attrs,
+        ):
+            weight = BasevLLMParameter(
+                torch.empty(sum(output_partition_sizes), input_size_per_partition, dtype=params_dtype),
+                weight_loader=layer.weight_loader,
+            )
+            layer.register_parameter("weight", weight)
+
+        quant_method.create_weights.side_effect = create_weights
+        quant_config = MagicMock()
+        quant_config.get_quant_method.return_value = quant_method
+
+        with (
+            patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group") as get_lmhead_tp_group,
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group") as get_tp_group,
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=1),
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=2),
+        ):
+            layer = AscendVocabParallelEmbedding(
+                num_embeddings=self.num_embeddings,
+                embedding_dim=self.embedding_dim,
+                padding_size=self.padding_size,
+                quant_config=quant_config,
+                prefix="markov_head.markov_w2",
+                disable_tp=True,
+            )
+
+        self.assertTrue(layer.disable_tp)
+        self.assertEqual(layer.tp_rank, 0)
+        self.assertEqual(layer.tp_size, 1)
+        self.assertEqual(layer.num_embeddings_per_partition, layer.num_embeddings_padded)
+        self.assertEqual(layer.weight.tp_rank, 0)
+        self.assertEqual(layer.weight.tp_size, 1)
+        get_lmhead_tp_group.assert_not_called()
+        get_tp_group.assert_not_called()
+        quant_method.embedding.return_value = torch.randn(3, self.embedding_dim)
+        with patch("torch.ops.vllm.maybe_pad_and_reduce") as reduce_op:
+            output = layer.forward(torch.tensor([1, 2, 3]))
+        reduce_op.assert_not_called()
+        self.assertEqual(output.shape, (3, self.embedding_dim))
 
     def test_forward_with_tp(self):
         layer = self._create_layer()
@@ -260,3 +317,26 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         hidden_state = torch.randn(1, self.org_num_embeddings)
         processor._get_logits(hidden_state, lmhead)
         self.mock_quant_method.apply.assert_called_once()
+
+    @unittest.skipIf(vllm_version_is("0.26.0"), "disable_tp is a target-main contract")
+    def test_disable_tp_lm_head_skips_tp_communication(self):
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+        self.mock_ascend_config.enable_reduce_sample = False
+        lmhead = AscendParallelLMHead(
+            num_embeddings=self.num_embeddings,
+            embedding_dim=self.embedding_dim,
+            prefix="markov_head.markov_w2",
+            disable_tp=True,
+        )
+        lmhead.quant_method = self.mock_quant_method
+        hidden_state = torch.randn(1, self.embedding_dim)
+
+        with (
+            patch.object(processor, "_get_logits_lmheadtp") as get_logits_lmheadtp,
+            patch.object(processor, "_gather_logits") as gather_logits,
+        ):
+            logits = processor._get_logits(hidden_state, lmhead)
+
+        get_logits_lmheadtp.assert_not_called()
+        gather_logits.assert_not_called()
+        self.assertEqual(logits.shape, (1, self.vocab_size))

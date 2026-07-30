@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
+from vllm_ascend.version import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -118,6 +119,11 @@ def model_runner():
         # so the next test case can reinitialize cleanly.
         acl_graph._graph_params = None
         acl_graph._draft_graph_params = None
+
+
+@pytest.mark.skipif(vllm_version_is("0.26.0"), reason="ReplaySSM state is a target-main contract")
+def test_replayssm_is_disabled(model_runner):
+    assert model_runner.input_batch.use_replayssm is False
 
 
 @pytest.mark.parametrize(

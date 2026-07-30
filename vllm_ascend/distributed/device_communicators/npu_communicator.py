@@ -19,6 +19,8 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 
+from vllm_ascend.version import vllm_version_is
+
 
 class _NpuAll2AllManager:
     """No-op all2all_manager for NPU. Used by vLLM main's fault-tolerance
@@ -44,8 +46,20 @@ class NPUCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: dist.ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        # vLLM PR #47288 moves the all-to-all enablement decision from the
+        # communicator base to GroupCoordinator and threads it through here.
+        if vllm_version_is("0.26.0"):
+            super().__init__(cpu_group, device, device_group, unique_name)
+        else:
+            super().__init__(
+                cpu_group,
+                device,
+                device_group,
+                unique_name,
+                use_all2all=use_all2all,
+            )
         # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
         # init device according to rank
         self.device = torch.npu.current_device()

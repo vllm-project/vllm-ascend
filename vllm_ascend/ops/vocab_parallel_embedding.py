@@ -40,6 +40,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
 from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
+from vllm_ascend.version import vllm_version_is
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -58,19 +59,30 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
         nn.Module.__init__(self)
         self.forward_type = None
-        if lmhead_tp_enable() and "head" in prefix:
-            self.comm_group = get_lmhead_tp_group()
-        elif embedding_tp_enable() and "embed_tokens" in prefix:
-            self.comm_group = get_embed_tp_group()
-            self.forward_type = "embed_tp"
+        if not vllm_version_is("0.26.0"):
+            self.disable_tp = disable_tp
+        # vLLM PR #49731 defines disable_tp as a fully replicated layer:
+        # rank zero owns the full weight and no TP communication is performed.
+        if not vllm_version_is("0.26.0") and disable_tp:
+            self.comm_group = None
+            self.tp_size = 1
+            self.tp_rank = 0
         else:
-            self.comm_group = get_tp_group()
+            if lmhead_tp_enable() and "head" in prefix:
+                self.comm_group = get_lmhead_tp_group()
+            elif embedding_tp_enable() and "embed_tokens" in prefix:
+                self.comm_group = get_embed_tp_group()
+                self.forward_type = "embed_tp"
+            else:
+                self.comm_group = get_tp_group()
 
-        self.tp_size = self.comm_group.world_size
-        self.tp_rank = self.comm_group.rank_in_group
+            self.tp_size = self.comm_group.world_size
+            self.tp_rank = self.comm_group.rank_in_group
 
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
@@ -133,6 +145,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
+        if not vllm_version_is("0.26.0") and disable_tp:
+            self.update_param_tp_status()
 
     def _mask_input_for_vocab_range(
         self,
@@ -169,6 +183,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
     def _forward_embed_tp(self, input_):
         num_tokens = input_.shape[0]
+        comm_group = self.comm_group
+        assert comm_group is not None
 
         # potential_max_tokens is computed once in the model runner __init__, so
         # reading it here is a cheap global lookup. Validate before allocating so
@@ -202,7 +218,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Pad input into the address-stable all_gather input buffer.
         self._embed_ag_in_buf.zero_()
         self._embed_ag_in_buf[:num_tokens].copy_(input_)
-        dist.all_gather_into_tensor(self._embed_ag_out_buf, self._embed_ag_in_buf, group=self.comm_group.device_group)
+        dist.all_gather_into_tensor(self._embed_ag_out_buf, self._embed_ag_in_buf, group=comm_group.device_group)
         complete_input = self._embed_ag_out_buf
 
         # Masking unchanged; padding rows map to OOB and get masked to 0
@@ -221,7 +237,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         output_parallel = self.quant_method.embedding(self, masked_input.long())
         self._embed_rs_in_buf.copy_(output_parallel)
         self._embed_rs_in_buf.masked_fill_(input_mask.unsqueeze(-1), 0)
-        dist.reduce_scatter_tensor(self._embed_rs_out_buf, self._embed_rs_in_buf, group=self.comm_group.device_group)
+        dist.reduce_scatter_tensor(self._embed_rs_out_buf, self._embed_rs_in_buf, group=comm_group.device_group)
 
         # Strip padding rows; preserve the original return shape.
         return self._embed_rs_out_buf[:num_tokens].view(num_tokens, -1)
@@ -244,6 +260,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        if not vllm_version_is("0.26.0") and self.disable_tp:
+            return output_parallel
         # Reduce across all the model parallel GPUs.
         output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
         return output
@@ -263,10 +281,32 @@ class AscendParallelLMHead(ParallelLMHead):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
-        AscendVocabParallelEmbedding.__init__(
-            self, num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
-        )
+        if vllm_version_is("0.26.0"):
+            AscendVocabParallelEmbedding.__init__(
+                self,
+                num_embeddings,
+                embedding_dim,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+            )
+        else:
+            AscendVocabParallelEmbedding.__init__(
+                self,
+                num_embeddings,
+                embedding_dim,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+                disable_tp=disable_tp,
+            )
 
         self.quant_config = quant_config
         if bias:
@@ -302,7 +342,9 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
-        if lmhead_tp_enable():
+        # vLLM PR #49731 allows small sequential LM heads to be replicated.
+        # Such heads must bypass Ascend's fine-grained LM-head TP path too.
+        if lmhead_tp_enable() and (vllm_version_is("0.26.0") or not lm_head.disable_tp):
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
             return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
@@ -336,7 +378,7 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        if not get_ascend_config().enable_reduce_sample and (vllm_version_is("0.26.0") or not lm_head.disable_tp):
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
