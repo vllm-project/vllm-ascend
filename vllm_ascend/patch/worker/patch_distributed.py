@@ -98,6 +98,9 @@ def _patch_destroy_distributed_environment():
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
+    # vLLM PR #47288 threads this flag through GroupCoordinator for CUDA and
+    # ROCm all-to-all managers. NPU always uses its HCCL implementation, so it
+    # only needs to accept the upstream constructor contract.
     def __init__(
         self,
         group_ranks: list[list[int]],
@@ -106,6 +109,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)

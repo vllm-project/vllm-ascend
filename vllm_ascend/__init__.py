@@ -15,6 +15,16 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from vllm_ascend.version import vllm_version_is
+
+# vLLM PR #48841 imports ROCm-only Gluon symbols from the global
+# triton_utils module. Triton Ascend 3.2.1 does not provide that API, so make
+# those unused symbols importable before any vLLM module is loaded.
+if not vllm_version_is("0.26.0"):
+    from vllm_ascend.patch.triton_utils_compat import install_triton_utils_compat
+
+    install_triton_utils_compat()
+
 _GLOBAL_PATCH_APPLIED = False
 
 
