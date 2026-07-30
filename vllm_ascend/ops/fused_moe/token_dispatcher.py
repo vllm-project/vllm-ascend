@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import ABC, abstractmethod
+import logging
 from typing import Generic
 
 import torch
@@ -51,6 +52,8 @@ from vllm_ascend.utils import (
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
+
+logger = logging.getLogger(__name__)
 
 
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
@@ -412,7 +415,33 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             and dynamic_scale is not None
             and hidden_states.dtype == torch.float8_e4m3fn
         )
+        logger.info(
+            "MoE AllGather dispatch routing gate: quant_type=%s, "
+            "dispatch_with_quant=%s, with_quant=%s, is_mxfp=%s, "
+            "quant_mode=%s, act_quant_type=%s, hidden_dtype=%s, "
+            "hidden_shape=%s, dynamic_scale_dtype=%s, dynamic_scale_shape=%s, "
+            "unquantized_mxfp_dispatch=%s, route_mxfp8_activation=%s, "
+            "expert_map=%s, topk_ids_shape=%s",
+            quant_type,
+            token_dispatch_input.quant.dispatch_with_quant,
+            with_quant,
+            is_mxfp,
+            quant_mode,
+            act_quant_type,
+            hidden_states.dtype,
+            tuple(hidden_states.shape),
+            None if dynamic_scale is None else dynamic_scale.dtype,
+            None if dynamic_scale is None else tuple(dynamic_scale.shape),
+            unquantized_mxfp_dispatch,
+            route_mxfp8_activation,
+            expert_map is not None,
+            tuple(topk_ids.shape),
+        )
         if route_mxfp8_activation:
+            logger.info(
+                "MoE AllGather dispatch routes W4A8 MXFP FP8 activation "
+                "and scale separately."
+            )
             sorted_hidden_states, expanded_row_idx, expert_tokens, _ = DeviceOperator.npu_moe_init_routing(
                 hidden_states.view(torch.bfloat16),
                 topk_ids,
@@ -427,6 +456,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             )
             dynamic_scale = routed_scale.to(dynamic_scale.dtype).view(-1, *scale_shape)
         else:
+            logger.info("MoE AllGather dispatch uses default init routing path.")
             sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
                 hidden_states,
                 topk_ids,
