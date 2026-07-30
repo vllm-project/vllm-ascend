@@ -918,17 +918,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata, num_input_tokens, num_tokens
         )
 
-        # Gemma4 MTP: patch per-group attn_state to SpecDecoding so the FIA
-        # backend picks the decode kernel path (chunked prefill inherited
-        # ChunkedPrefill from target).  Deferred import avoids circular dep.
-        if self.method == "mtp":
-            from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
-
-            if isinstance(self, AscendGemma4Proposer):
-                for layer_meta in multi_steps_attn_metadata[0].values():
-                    layer_meta.attn_state = AscendAttentionState.SpecDecoding
-                if hasattr(attn_metadata_i, "causal") and not attn_metadata_i.causal:
-                    attn_metadata_i.attn_mask = None
+        self._patch_draft_attn_metadata(multi_steps_attn_metadata[0], attn_metadata_i)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1533,7 +1523,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata = self._swap_per_group_block_table(
             attn_group.kv_cache_group_id, common_attn_metadata, common_attn_metadata.num_reqs
         )
-        _const_pos = getattr(self, "constant_draft_positions", False)
 
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -1574,7 +1563,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # MTP (constant_draft_positions): all draft tokens share the same
         # target position — skip position and seq_len advancing.
-        if not _const_pos:
+        if self._should_advance_positions():
             used_update_positions += 1
 
         # Clone the data so that when calculating the data at position 2 and position 3
@@ -1611,24 +1600,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # of main model.
         # Increment the sequence lengths.
         # MTP (constant_draft_positions): keep target's last seq_lens.
-        if not _const_pos:
+        if self._should_advance_positions():
             common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
         if common_attn_metadata.seq_lens_cpu is not None:
-            if not _const_pos:
+            if self._should_advance_positions():
                 common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
             exceeds_mask_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_cpu, 1)
         if common_attn_metadata._seq_lens_cpu is not None:
-            if not _const_pos:
+            if self._should_advance_positions():
                 common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
             exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
-            if not _const_pos:
+            if self._should_advance_positions():
                 common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
@@ -2184,3 +2173,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
             buf[self._dflash_num_context :].fill_(-1)
+
+    def _should_advance_positions(self) -> bool:
+        """Return True to advance position/seq_len between draft steps."""
+        return True
+
+    def _patch_draft_attn_metadata(self, step0_metadata, common_attn_metadata):
+        """Override to patch per-layer metadata (e.g. attn_state, attn_mask)."""

@@ -5,8 +5,8 @@ Combines upstream Gemma4Proposer (GPU logic) with vllm-ascend's
 AscendSpecDecodeBaseProposer (NPU initialization, ACL graph, attention metadata).
 """
 
-from dataclasses import replace
 import copy
+from dataclasses import replace
 
 import torch
 from vllm.config import get_layers_from_vllm_config
@@ -25,7 +25,9 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
     def __init__(self, vllm_config, device, runner=None):
         AscendSpecDecodeBaseProposer.__init__(
-            self, vllm_config, device,
+            self,
+            vllm_config,
+            device,
             pass_hidden_states_to_model=True,
             runner=runner,
         )
@@ -113,7 +115,8 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
     def load_model(self, target_model):
         target_attn_layer_names = set(
             get_layers_from_vllm_config(
-                self.vllm_config, AttentionLayerBase,
+                self.vllm_config,
+                AttentionLayerBase,
             ).keys()
         )
 
@@ -129,6 +132,24 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
         # Sync wrapper→impl so the Ascend runtime path can resolve target cache.
         self._sync_kv_sharing_target_to_impl()
+
+    def _should_advance_positions(self) -> bool:
+        """Gemma4 MTP predicts all draft tokens from the same target position."""
+        return False
+
+    def _patch_draft_attn_metadata(self, step0_metadata, common_attn_metadata):
+        """Patch per-layer attn_state to SpecDecoding for FIA backend.
+
+        During chunked prefill, build_draft_attn_metadata inherits the target's
+        ChunkedPrefill attn_state.  Override to SpecDecoding so the FIA backend
+        picks the decode kernel path.
+        """
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        for layer_meta in step0_metadata.values():
+            layer_meta.attn_state = AscendAttentionState.SpecDecoding
+        if hasattr(common_attn_metadata, "causal") and not common_attn_metadata.causal:
+            common_attn_metadata.attn_mask = None
 
     def _swap_per_group_block_table(self, gid: int, cm, num_reqs: int):
         """Return cm with block_table_tensor swapped to the per-group one for gid.
