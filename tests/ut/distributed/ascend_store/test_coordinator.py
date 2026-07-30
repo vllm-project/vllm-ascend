@@ -111,7 +111,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             hash_block_size=8,
         )
         db.cache_coordinator = coord
-        grouped_hash_cache = {}
+        grouped_hash_cache: config_data.GroupedBlockHashCache = {}
 
         with patch.object(
             config_data,
