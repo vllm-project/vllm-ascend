@@ -1926,43 +1926,36 @@ def olmoe_lora_files():
 
 @pytest.fixture(scope="session")
 def qwen2vl_lora_files():
-    return "/data1/models/qwen2-vl-lora-pokemon"
     return snapshot_download(repo_id="vllm-ascend/qwen2-vl-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
 def qwen25vl_lora_files():
-    return "/data1/models/qwen25-vl-lora-pokemon"
     return snapshot_download(repo_id="vllm-ascend/qwen25-vl-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
 def qwen25vl_vision_lora_files():
-    return "/data1/models/qwen2.5-3b-vl-lora-vision-connector"
     return snapshot_download(repo_id="vllm-ascend/qwen2.5-3b-vl-lora-vision-connector")
 
 
 @pytest.fixture(scope="session")
 def qwen3vl_vision_lora_files():
-    return "/data1/models/qwen3-4b-vl-lora-vision-connector"
     return snapshot_download(repo_id="vllm-ascend/qwen3-4b-vl-lora-vision-connector")
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_language_lora_files():
-    return "/data1/models/qwen2vl-flickr-lora-language"
     return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-language")
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_vision_tower_connector_lora_files():
-    return "/data1/models/qwen2vl-flickr-lora-tower-connector"
     return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower-connector")
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_vision_tower_lora_files():
-    return "/data1/models/qwen2vl-flickr-lora-tower"
     return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower")
 
 
