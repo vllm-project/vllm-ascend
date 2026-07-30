@@ -45,7 +45,7 @@ DCP reuses the TP devices and does not increase the world size.
     vllm serve deepseek-ai/DeepSeek-V2-Lite \
         --tensor-parallel-size 2 \
         --decode-context-parallel-size 2 \
-        --prefill-context-parallel-size 2
+        --prefill-context-parallel-size 2 \
     ```
 
 The total world size is `tensor_parallel_size` * `prefill_context_parallel_size`, so the examples above need 4 NPUs for each.
