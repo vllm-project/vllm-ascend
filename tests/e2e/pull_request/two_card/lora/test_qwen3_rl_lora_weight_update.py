@@ -65,13 +65,13 @@ from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
-MODEL_NAME = "/home/w00899129/models_lora/qwen/Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 # Two self-cognition LoRA adapters that share the same base model.
 # Alice completes with "Alice"; Bob completes with "Bob".
 LORA_NAME = "self_cognition"
-ALICE_PATH = "/home/w00899129/models_lora/alice/charent/self_cognition_Alice"
-BOB_PATH = "/home/w00899129/models_lora/bob/charent/self_cognition_Bob"
+ALICE_PATH = "charent/self_cognition_Alice"
+BOB_PATH = "charent/self_cognition_Bob"
 
 TENSOR_PARALLEL_SIZE = 1
 
