@@ -63,6 +63,16 @@ _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
+def _snapshot_num_computed_tokens_to_device(
+    num_computed_tokens_cpu: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    return num_computed_tokens_cpu.clone().to(
+        device=device,
+        non_blocking=True,
+    )
+
+
 class NPUModelRunner310(NPUModelRunner):
     """
     310P model runner with a distinct ACL graph capture/replay contract from 910B:
@@ -319,8 +329,9 @@ class NPUModelRunner310(NPUModelRunner):
             if need_async_num_computed_update:
                 self.prev_positions.copy_to_gpu(num_reqs)
                 self.prev_num_draft_tokens.copy_to_gpu()
-                cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-                    device=self.device, non_blocking=True
+                cpu_values = _snapshot_num_computed_tokens_to_device(
+                    self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                    self.device,
                 )
                 update_num_computed_tokens_for_batch_change(
                     self.num_computed_tokens,
@@ -542,8 +553,9 @@ class NPUModelRunner310(NPUModelRunner):
         if use_async_device_metadata:
             self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
-            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-                device=self.device, non_blocking=True
+            cpu_values = _snapshot_num_computed_tokens_to_device(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                self.device,
             )
             update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,

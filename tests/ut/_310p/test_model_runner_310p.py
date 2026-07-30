@@ -22,7 +22,10 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 from tests.ut.base import TestBase
-from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend._310p.model_runner_310p import (
+    NPUModelRunner310,
+    _snapshot_num_computed_tokens_to_device,
+)
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
@@ -70,6 +73,22 @@ def test_prepare_inputs_uses_device_metadata_after_async_correction() -> None:
     device_end = source.index("        self.req_indices.np", device_start)
     device_source = source[device_start:device_end]
     assert device_source.count("update_num_computed_tokens_for_batch_change(") == 1
+    assert "_snapshot_num_computed_tokens_to_device(" in device_source
+
+
+def test_num_computed_tokens_snapshot_isolated_from_deferred_correction() -> None:
+    num_computed_tokens_cpu = torch.tensor([119, 88], dtype=torch.int32)
+
+    snapshot = _snapshot_num_computed_tokens_to_device(
+        num_computed_tokens_cpu,
+        torch.device("cpu"),
+    )
+    num_computed_tokens_cpu.sub_(torch.tensor([14, 7], dtype=torch.int32))
+
+    torch.testing.assert_close(
+        snapshot,
+        torch.tensor([119, 88], dtype=torch.int32),
+    )
 
 
 def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
