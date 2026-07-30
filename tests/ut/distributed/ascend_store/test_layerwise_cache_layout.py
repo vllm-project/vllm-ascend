@@ -55,8 +55,7 @@ def test_base_layers_are_merged_into_shared_slots():
 
     assert [tensor.shared_by for tensor in kv_cache_config.kv_cache_tensors] == [
         ["model.layers.0.self_attn"],
-        ["model.layers.5.self_attn"],
-        ["model.layers.1.self_attn", "model.layers.3.self_attn"],
+        ["model.layers.1.self_attn", "model.layers.3.self_attn", "model.layers.5.self_attn"],
         ["model.layers.2.self_attn", "model.layers.4.self_attn"],
     ]
 
@@ -67,7 +66,7 @@ def test_default_layout_keeps_one_buffer_per_layer():
     assert layout.has_layer_reuse is False
     assert layout.num_shared_buffers == 27
     assert layout.num_prefetch_layers == 8
-    assert layout.independent_layers == [0, 26]
+    assert layout.independent_layers == [0]
     assert len(layout.storage_indices) == 27
 
 
@@ -77,8 +76,9 @@ def test_reuse_layout_matches_round_robin_storage_slots():
     assert layout.has_layer_reuse is True
     assert layout.prefetch_layer_map[7] == 1
     assert layout.prefetch_layer_map[8] == 2
-    assert layout.storage_indices[:2] == [[0], [26]]
-    assert layout.storage_indices[2] == [1, 7, 13, 19, 25]
+    assert layout.storage_indices[0] == [0]
+    assert layout.storage_indices[1] == [1, 7, 13, 19, 25]
+    assert layout.storage_indices[2] == [2, 8, 14, 20, 26]
     assert sorted(layer for slot in layout.storage_indices for layer in slot) == list(range(27))
 
 
