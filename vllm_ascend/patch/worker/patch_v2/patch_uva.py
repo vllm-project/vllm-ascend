@@ -150,15 +150,25 @@ class UvaBufferWrapper:
     def uva(self):
         """Get the device data of the buffer."""
         if not is_uva_available() and self._modified_indices:
-            # copy_to_uva always writes a contiguous prefix dst[:n] = x,
-            # so dirty rows are always [0..n-1].  Use a contiguous slice
-            # copy_ (instead of indexed assignment) to:
-            #  1. keep the CPU source pinned (slice is a view, not a copy),
-            #     so non_blocking is not silently degraded.
-            #  2. avoid the intermediate tensor from .to() and the implicit
-            #     stream sync between .to() and __setitem__ on NPU.
-            n = len(self._modified_indices)
-            self._uva[:n].copy_(self._cpu[:n], non_blocking=True)
+            dirty_rows = sorted(self._modified_indices)
+            n_dirty = len(dirty_rows)
+            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
+                # Common path: dirty rows are a contiguous prefix [0..n-1].
+                # This is always the case when copy_to_uva writes via
+                # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
+                # pinned and enables true async DMA without an intermediate
+                # tensor or stream sync.
+                self._uva[:n_dirty].copy_(
+                    self._cpu[:n_dirty], non_blocking=True
+                )
+            else:
+                # Sparse modification pattern — fall back to indexed copy.
+                # Explicitly re-pin the CPU source so that non_blocking is
+                # not silently degraded.
+                src = self._cpu[dirty_rows].pin_memory()
+                self._uva[dirty_rows] = src.to(
+                    device="npu", non_blocking=True
+                )
             self._modified_indices.clear()
         return self._uva
 
