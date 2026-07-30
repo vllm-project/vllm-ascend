@@ -131,7 +131,7 @@ jobs:
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install . \
-            --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/simple/ \
+            --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/ \
             --extra-index-url https://pypi.org/simple
           pip uninstall -y triton
 
