@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
@@ -42,7 +41,7 @@ class IndexerWrapper(nn.Module):
     This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
     It wraps the original Indexer, inherits its module weights
     (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
-    while deletes the unused topk_indices_buffer and k_cache to save memory.
+    while deleting the unused topk_indices_buffer to save memory.
     TODO: Will be removed once original Indexer supports different quantization methods.
     """
 
@@ -57,8 +56,8 @@ class IndexerWrapper(nn.Module):
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
+        self.k_cache = getattr(vllm_indexer, "k_cache", None)
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
-        vllm_indexer.k_cache = None  # delete k_cache
 
     def forward(self):
         return
@@ -92,7 +91,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.prefix = prefix
         self.skip_topk = skip_topk
         hf_config = get_current_vllm_config().model_config.hf_text_config
-        self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:

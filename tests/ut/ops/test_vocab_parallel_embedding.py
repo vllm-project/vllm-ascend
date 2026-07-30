@@ -99,13 +99,13 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
             )
             return layer
 
-    def test_get_masked_input_and_mask(self):
+    def test_mask_input_for_vocab_range(self):
         """Test the mask and offset calculation helper function."""
         layer = self._create_layer()
 
         input_ = torch.tensor([5, 15, 25, 35, 45])
 
-        masked_input, mask = layer._get_masked_input_and_mask(
+        masked_input, mask = layer._mask_input_for_vocab_range(
             input_,
             org_vocab_start_index=10,
             org_vocab_end_index=20,
@@ -206,13 +206,13 @@ class TestAscendLogitsProcessor(unittest.TestCase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.compilation_config.custom_ops = ["all"]
+        self.mock_vllm_config.model_config = None
 
         from vllm.config.vllm import set_current_vllm_config
 
-        set_current_vllm_config(self.mock_vllm_config)
-
-        self.config_patch = patch("vllm.config.vllm.get_current_vllm_config", return_value=self.mock_vllm_config)
-        self.config_patch.start()
+        self.config_context = set_current_vllm_config(self.mock_vllm_config)
+        self.config_context.__enter__()
+        self.addCleanup(self.config_context.__exit__, None, None, None)
         self.vocab_size = 50
         self.num_embeddings = 50
         self.embedding_dim = 10

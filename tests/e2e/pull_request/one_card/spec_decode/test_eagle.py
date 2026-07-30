@@ -103,8 +103,4 @@ def test_qwen_eagle3_acceptance(
     golden = [0.68, 0.40, 0.18]
 
     match = all(abs(a - b) < 0.08 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

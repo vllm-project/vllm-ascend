@@ -357,7 +357,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_producer",
     "kv_port": "23010",
     "kv_connector_extra_config": {
@@ -438,7 +438,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
@@ -520,7 +520,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
@@ -547,7 +547,7 @@ Common Issues Tip: If decode node 1 cannot join decode node 0, check that `--hea
 - `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane. For decode nodes, the address must point to decode node 0.
 - `--max-num-batched-tokens` is larger on the prefill node and smaller on decode nodes because prefill is prompt-token intensive while decode is latency sensitive.
 - `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on decode nodes in PD mode.
-- `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
+- `--kv-transfer-config` sets the Mooncake V1 connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` is the timeout in seconds for automatically releasing the prefiller KV cache for a request.
@@ -561,7 +561,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
 unset ftp_proxy
 unset https_proxy
 unset http_proxy
-python3 load_balance_proxy_layerwise_server_example.py \
+python3 load_balance_proxy_server_example.py \
   --prefiller-hosts 141.xx.xx.1 \
   --prefiller-ports 30060 \
   --decoder-hosts 141.xx.xx.2 141.xx.xx.3 \
