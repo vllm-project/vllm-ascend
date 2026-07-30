@@ -149,7 +149,6 @@ class AscendSFABackend(AttentionBackend):
             return AscendSFADCPImpl
         if get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1:
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
-
             return AscendSFACPImpl
         return AscendSFAImpl
 
@@ -337,7 +336,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_input_tokens = common_attn_metadata.num_input_tokens
+        num_input_tokens = common_attn_metadata.num_input_tokens # pad长度
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -1958,14 +1957,69 @@ class AscendSFAImpl(MLAAttentionImpl):
             kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            k_li, k_li_scale, fused_kv_no_split, kv_ag_handles = self._maybe_gather_kv_for_dsacp(
-                k_pe,
-                k_nope,
-                knope_scale,
-                k_li,
-                k_li_scale,
-                full_gather_o_proj_enabled,
-            )
+            if self.use_sparse_c8_sfa and not self.enable_dsa_cp:
+                logger.info("sparse c8 sfa")
+                assert k_pe is not None
+                assert k_nope is not None
+                assert knope_scale is not None
+                packed_kv = torch.cat(
+                    [
+                        k_nope.view(-1, k_nope.shape[-1]),
+                        k_pe.view(-1, k_pe.shape[-1]),
+                        knope_scale.view(-1, knope_scale.shape[-1]),
+                    ],
+                    dim=-1,
+                )
+                packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
+                assert packed_kv.shape[-1] == packed_head_dim
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[0].view(-1, packed_head_dim),
+                    slot_mapping_sfa.view(-1, 1),
+                    packed_kv.view(-1, packed_head_dim),
+                )
+
+            if self.enable_dsa_cp:
+                assert k_pe is not None
+                assert k_nope is not None
+                async_op = full_gather_o_proj_enabled
+                # support all_gather kv async for communication calculation overlap
+                if self.use_sparse_c8_sfa:
+                    assert knope_scale is not None
+                    fused_kv_parts = [
+                        k_nope.view(-1, k_nope.shape[-1]),
+                        k_pe.view(-1, k_pe.shape[-1]),
+                        knope_scale.view(-1, knope_scale.shape[-1]),
+                    ]
+                else:
+                    fused_kv_parts = [
+                        k_pe.view(-1, k_pe.shape[-1]),
+                        k_nope.view(-1, k_nope.shape[-1]),
+                    ]
+                    if self.has_indexer and not self.use_sparse_c8_indexer:
+                        assert k_li is not None
+                        fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
+
+                fused_kv_input = torch.cat(fused_kv_parts, dim=1)
+                fused_kv_no_split, kv_ag_handle = all_gather_async(
+                    fused_kv_input,
+                    get_tp_group(),
+                    async_op=async_op,
+                )
+
+                if self.has_indexer and self.use_sparse_c8_indexer:
+                    assert k_li is not None
+                    k_li, kv_ag_handle = all_gather_async(
+                        k_li,
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
+                if self.has_indexer and self.use_sparse_c8_indexer:
+                    assert k_li_scale is not None
+                    k_li_scale, kv_ag_handle = all_gather_async(
+                        k_li_scale,
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)

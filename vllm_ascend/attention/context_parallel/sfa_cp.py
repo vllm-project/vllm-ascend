@@ -5,10 +5,8 @@ from typing import Any, NamedTuple, TypeVar
 import torch
 import torch.distributed as dist
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.attention.pcp import (
-    _gather_prefill_cache_inputs,
-    finalize_mla_pcp_decode,
-)
+from vllm.distributed.parallel_state import get_pcp_group
+from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -18,6 +16,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -30,6 +29,30 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def _get_pcp_gathered_slot_mapping(
+    slot_mapping: torch.Tensor,
+    local_num_tokens: int,
+) -> torch.Tensor:
+    """Normalize V2 PCP slot mappings to the layout expected by PCP helpers.
+
+    The generic PCP helper receives one slot entry per rank/token.  Depending
+    on the attention path V2 may provide either that gathered layout or only
+    the local rank's padded slice.  Normalize both forms before cache writes.
+    """
+    pcp_group = get_pcp_group()
+    pcp_size = pcp_group.world_size
+    slot_mapping = slot_mapping.reshape(-1)
+    if slot_mapping.numel() == pcp_size * local_num_tokens:
+        return slot_mapping
+    if slot_mapping.numel() == local_num_tokens:
+        return pcp_group.all_gather(slot_mapping.contiguous(), dim=0)
+    raise RuntimeError(
+        "Unexpected PCP SFA slot_mapping size: "
+        f"slots={tuple(slot_mapping.shape)}, local_num_tokens={local_num_tokens}, "
+        f"pcp_size={pcp_size}."
+    )
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
@@ -60,6 +83,17 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             supports_dcp_with_varlen,
         )
 
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendSFAMetadata:
+        '''Capture PCP FULL-decode graphs with decode-shaped cache inputs.'''
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.num_decodes = common_attn_metadata.num_reqs
+        metadata.num_decode_tokens = common_attn_metadata.num_input_tokens
+        return metadata
+
 
 class AscendSFACPImpl(AscendSFAImpl):
     """SFA impl for MRV2 Prefill Context Parallelism.
@@ -72,10 +106,7 @@ class AscendSFACPImpl(AscendSFAImpl):
     2. exec_kv: gather latent KV + cos/sin + slot_mapping across PCP
        ranks before the fused RMSNorm+RoPE+cache-write op, so every
        rank writes the complete KV into its replicated cache.
-    3. _execute_sparse_flash_attention_process: apply
-       finalize_mla_pcp_decode on the attention output so decode heads
-       split across PCP ranks are recombined (no-op for prefill).
-    4. _write_indexer_cache: gather indexer key (+ optional scale) and
+    3. _write_indexer_cache: gather indexer key (+ optional scale) and
        slot_mapping across PCP ranks before the parent's scatter write,
        so every rank writes the complete set of indexer keys.
     """
@@ -110,6 +141,13 @@ class AscendSFACPImpl(AscendSFAImpl):
         # PCP requires the native forward branch; fused prolog_v3 / mlapo
         # paths bypass the cross-rank KV gather and are incompatible.
         self.preprocess_type = PreprocessType.NATIVE
+        # PCP owns the prefill aggregation in exec_kv/_write_indexer_cache.
+        # The FlashComm SP path would gather hidden states before indexer
+        # RoPE, then PCP would gather those cache inputs a second time while
+        # the metadata remains local.  Keep this implementation on its
+        # native local-token path and perform the single required gather in
+        # the PCP hooks below.
+        self.enable_sp = False
 
     def exec_kv(
         self,
@@ -129,38 +167,12 @@ class AscendSFACPImpl(AscendSFAImpl):
         # they are derived from per-token positions and the gathered half
         # would otherwise be rotated with the wrong positions.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        slots = _get_pcp_gathered_slot_mapping(slots, kv_no_split.shape[0])
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
             (kv_no_split, cos, sin), slots, num_decode_tokens
         )
-        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
-    def _execute_sparse_flash_attention_process(
-        self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        kv_cache: tuple,
-        topk_indices: torch.Tensor,
-        attn_metadata: M,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
-    ) -> torch.Tensor:
-        # PCP: after the per-rank attention compute, recombine heads across
-        # PCP ranks for decode (where all ranks share the same Q and the
-        # upstream PCP metadata builder splits heads to avoid redundant
-        # compute). For prefill, where queries are partitioned across
-        # ranks and each rank already produced its local slice with the
-        # full head count, this call is a no-op (output.shape[1] ==
-        # num_heads).
-        attn_output = super()._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-        )
-        return finalize_mla_pcp_decode(attn_output, self.num_heads)
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
     def _write_indexer_cache(
         self,
@@ -176,6 +188,10 @@ class AscendSFACPImpl(AscendSFAImpl):
         # replicated indexer cache. Same pattern as exec_kv: decode tokens
         # stay local (replicated), only the prefill partition is gathered.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        slot_mapping = _get_pcp_gathered_slot_mapping(
+            slot_mapping,
+            k_li.shape[0],
+        )
         tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
         gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
             tensors, slot_mapping, num_decode_tokens
@@ -289,7 +305,7 @@ class AscendSFADCPMetadataBuilder(
         )
         self.arange_buffer: torch.Tensor = torch.arange(
             max_replicated_block_table_cols,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=device,
         )
         self.slot_mapping_replicated_view_buf: torch.Tensor = torch.empty(
@@ -390,7 +406,7 @@ class AscendSFADCPMetadataBuilder(
             common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
         )
         req_indices = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
+            torch.arange(num_reqs, dtype=torch.int64, device=self.device),
             query_lens.to(device=self.device),
             output_size=num_input_tokens,
         )[:num_actual_tokens]
@@ -401,7 +417,7 @@ class AscendSFADCPMetadataBuilder(
         req_indices = req_indices[:num_actual_tokens]
         positions = common_attn_metadata.positions[:num_actual_tokens].to(
             device=self.device,
-            dtype=torch.int32,
+            dtype=torch.int64,
         )
         logical_block_idx = positions // self.replicated_view_block_size
         block_offsets = positions % self.replicated_view_block_size

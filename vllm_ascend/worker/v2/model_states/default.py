@@ -59,6 +59,11 @@ class AscendModelState(DefaultModelState):
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
+            # SFA derives RoPE inputs from this count. PCP pads every rank
+            # to an equal local token count for collectives, including eager
+            # execution, so it must use the padded count rather than the
+            # scheduler's actual-token count.
+            num_input_tokens=input_batch.num_tokens_after_padding,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
