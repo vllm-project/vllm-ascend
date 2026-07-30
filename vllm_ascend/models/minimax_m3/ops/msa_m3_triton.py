@@ -10,21 +10,30 @@ split cache layout does not need to be materialized into the GPU
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
+from typing import Any
 
 import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 
+get_aicore_num: Callable[[], Any] | None
+init_device_properties_triton: Callable[[], Any] | None
 try:
     from vllm_ascend.ops.triton.triton_utils import (
-        get_aicore_num,
-        init_device_properties_triton,
+        get_aicore_num as _get_aicore_num,
+    )
+    from vllm_ascend.ops.triton.triton_utils import (
+        init_device_properties_triton as _init_device_properties_triton,
     )
 except ImportError:
     get_aicore_num = None
     init_device_properties_triton = None
+else:
+    get_aicore_num = _get_aicore_num
+    init_device_properties_triton = _init_device_properties_triton
 
 # Data-layout constants.
 SPARSE_BLOCK_SIZE = 128
