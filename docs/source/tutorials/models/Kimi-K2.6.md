@@ -160,7 +160,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --data-parallel-size 4 \
     --no-enable-prefix-caching \
     --enable-expert-parallel \
-    --port 8089 \
+    --port 8000 \
     --max-num-seqs 4 \
     --max-model-len 34816 \
     --max-num-batched-tokens 16384 \
@@ -188,7 +188,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](htt
 Service Verification:
 
 ```shell
-curl http://<node_ip>:8088/v1/chat/completions \
+curl http://<node_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi_k26",
