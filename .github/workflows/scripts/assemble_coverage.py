@@ -38,11 +38,7 @@ def expected_coverage_keys(
     to test groups keeps existing file-level coverage packages compatible.
     """
     if coverage_root is not None and coverage_root.exists():
-        case_keys = {
-            path.parent.name
-            for path in coverage_root.rglob(EXPECTED_SENTINEL)
-            if path.is_file()
-        }
+        case_keys = {path.parent.name for path in coverage_root.rglob(EXPECTED_SENTINEL) if path.is_file()}
         if case_keys:
             return case_keys
 
