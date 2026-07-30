@@ -379,7 +379,6 @@ As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, an
 ### Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
-Refer to vllm benchmark for more details.
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:

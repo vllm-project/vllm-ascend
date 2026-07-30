@@ -65,7 +65,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers apply changes immediately without requiring a new installation.
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 

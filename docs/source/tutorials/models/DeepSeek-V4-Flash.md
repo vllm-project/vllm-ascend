@@ -906,7 +906,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
+Here is the accuracy evaluation method using AISBench.
 
 ### Using AISBench
 
