@@ -706,6 +706,35 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.debugger.step.assert_not_called()
         self.assertTrue(runner._debugger_started)
 
+    def test_start_dump_data_forwards_kwargs_to_debugger_start(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+        runner._debugger_started = False
+
+        runner._start_dump_data(scheduled_tokens={"req-0": 42})
+
+        debugger.start.assert_called_once_with(runner.model, scheduled_tokens={"req-0": 42})
+        self.assertTrue(runner._debugger_started)
+
+    def test_start_dump_data_falls_back_when_start_rejects_kwargs(self):
+        debugger = MagicMock(spec=["start", "step"])
+
+        def _start_side_effect(model, **kwargs):
+            if kwargs:
+                raise TypeError("start() got an unexpected keyword argument")
+
+        debugger.start.side_effect = _start_side_effect
+        runner = self._build_runner(debugger)
+        runner._debugger_started = False
+
+        runner._start_dump_data(scheduled_tokens={"req-0": 42})
+
+        # First call with kwargs raises TypeError, second call falls back to
+        # calling start(model) without kwargs.
+        self.assertEqual(debugger.start.call_count, 2)
+        debugger.start.assert_has_calls([call(runner.model, scheduled_tokens={"req-0": 42}), call(runner.model)])
+        self.assertTrue(runner._debugger_started)
+
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
