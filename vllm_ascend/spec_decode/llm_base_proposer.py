@@ -344,10 +344,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
             elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
-            elif self.get_model_name(model) == "Gemma4ForConditionalGeneration":
-                # Gemma4 target has image_token_id but no image_token_index;
-                # the draft (Gemma4MTP) receives hidden states from the target
-                # and does not handle multimodal inputs directly, so skip.
+            elif self._should_skip_image_token_index(self.get_model_name(model)):
                 pass
             else:
                 self.model.config.image_token_index = model.config.image_token_index
@@ -541,7 +538,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return copy.copy(attn_metadata)
 
     def _swap_per_group_block_table(self, gid: int, cm, num_reqs: int):
-        """Return cm unchanged; overridden in AscendGemma4Proposer."""
+        """Return cm unchanged; override to swap per-group block_table."""
         return cm
 
     @torch.inference_mode()
@@ -2173,6 +2170,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
             buf[self._dflash_num_context :].fill_(-1)
+
+    def _should_skip_image_token_index(self, model_name: str) -> bool:
+        """Return True to skip image_token_index assignment for this model."""
+        return False
 
     def _should_advance_positions(self) -> bool:
         """Return True to advance position/seq_len between draft steps."""

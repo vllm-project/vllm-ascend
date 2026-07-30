@@ -133,6 +133,11 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
         # Sync wrapper→impl so the Ascend runtime path can resolve target cache.
         self._sync_kv_sharing_target_to_impl()
 
+    def _should_skip_image_token_index(self, model_name: str) -> bool:
+        """Gemma4 target has image_token_id but no image_token_index;
+        the draft receives hidden states, not multimodal inputs."""
+        return model_name == "Gemma4ForConditionalGeneration"
+
     def _should_advance_positions(self) -> bool:
         """Gemma4 MTP predicts all draft tokens from the same target position."""
         return False
