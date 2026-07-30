@@ -595,20 +595,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         attn_mask,
                         block_size,
                         seq_lens,
-                        query_start_loc,
                         num_kv_heads,
                         num_heads,
                         scale,
+                        sliding_window,
+                        sinks,
                         attn_output,
                         softmax_lse,
-                        sparse_mode,
-                        pre_tokens,
-                        next_tokens,
-                        c8_k_dequant_scale,
-                        c8_k_dequant_offset,
-                        c8_v_dequant_scale,
-                        c8_v_dequant_offset,
-                        use_fia_v2,
                         layer_name,
                     ) = param
 
@@ -622,38 +615,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
 
-                    dequant_args = {}
-                    replay_layout = "TND"
-                    if c8_k_dequant_scale is not None:
-                        replay_layout = "BNSD"
-                        dequant_args = {
-                            "dequant_scale_key": c8_k_dequant_scale,
-                            "dequant_scale_value": c8_v_dequant_scale,
-                            "key_quant_mode": 0,
-                            "value_quant_mode": 0,
-                        }
-
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
                         query=query,
                         key=key_cache,
                         value=value,
                         block_table=block_tables,
-                        atten_mask=attn_mask if replay_layout == "TND" else None,
-                        input_layout=replay_layout,
+                        atten_mask=attn_mask,
+                        input_layout="TND",
                         block_size=block_size,
-                        actual_seq_qlen=actual_seq_lengths_q if replay_layout == "TND" else None,
+                        actual_seq_qlen=actual_seq_lengths_q,
                         actual_seq_kvlen=seq_lens,
                         num_key_value_heads=num_kv_heads,
                         num_query_heads=num_heads,
-                        sparse_mode=sparse_mode,
-                        pre_tokens=pre_tokens,
-                        next_tokens=next_tokens,
+                        sparse_mode=4 if sliding_window is not None else 3,
+                        pre_tokens=sliding_window if sliding_window is not None else SWA_INT_MAX,
+                        next_tokens=0,
                         softmax_scale=scale,
-                        learnable_sink=_EXTRA_CTX.sinks if replay_layout == "TND" else None,
+                        learnable_sink=sinks,
                         workspace=workspace,
                         out=[attn_output, softmax_lse],
-                        **dequant_args,
                     )
                     torch.npu.graph_task_update_end(update_stream)
                     event.record(update_stream)
@@ -796,7 +777,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_k_aq_offset,
                         c8_v_aq_scale,
                         c8_v_aq_offset,
-                        use_fia_v2,
                         layer_name,
                     ) = param
 
@@ -831,70 +811,36 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     input_layout = "TND"
                     extra_args = {}
                     if c8_k_aq_scale is not None:
-                        if use_fia_v2:
-                            extra_args = {
-                                "key_antiquant_scale": c8_k_aq_scale,
-                                "value_antiquant_scale": c8_v_aq_scale,
-                                "key_antiquant_mode": 0,
-                                "value_antiquant_mode": 0,
-                            }
-                        else:
-                            extra_args = {
-                                "key_antiquant_scale": c8_k_aq_scale,
-                                "value_antiquant_scale": c8_v_aq_scale,
-                                "key_antiquant_mode": 0,
-                                "value_antiquant_mode": 0,
-                                "inner_precise": 1,
-                            }
+                        extra_args = {
+                            "dequant_scale_key": c8_k_aq_scale,
+                            "dequant_scale_value": c8_v_aq_scale,
+                            "key_antiquant_mode": 0,
+                            "value_antiquant_mode": 0,
+                            "inner_precise": 1,
+                        }
                         input_layout = "BNSD"
                         sparse_mode = 0
                     is_single_token_decode = attn_state == AscendAttentionState.DecodeOnly and max_query_len == 1
-                    update_attn_mask, update_sparse_mode = (
-                        (None, 0) if is_single_token_decode else (attn_mask, sparse_mode)
+                    torch_npu.npu_fused_infer_attention_score_v2.out(
+                        query=query,
+                        key=key_cache,
+                        value=value,
+                        block_table=block_tables,
+                        atten_mask=None if (input_layout == "BNSD" or is_single_token_decode) else attn_mask,
+                        input_layout=input_layout,
+                        block_size=block_size,
+                        actual_seq_qlen=None if input_layout == "BNSD" else actual_seq_lengths_q,
+                        actual_seq_kvlen=seq_lens,
+                        num_key_value_heads=num_kv_heads,
+                        num_query_heads=num_heads,
+                        sparse_mode=0 if is_single_token_decode else sparse_mode,
+                        pre_tokens=pre_tokens,
+                        next_tokens=next_tokens,
+                        softmax_scale=scale,
+                        workspace=workspace,
+                        out=[attn_output, softmax_lse],
+                        **extra_args,
                     )
-                    replay_actual_seq_lengths = None if input_layout == "BNSD" else actual_seq_lengths_q
-                    if use_fia_v2 and c8_k_aq_scale is not None:
-                        torch_npu.npu_fused_infer_attention_score_v2.out(
-                            query=query,
-                            key=key_cache,
-                            value=value,
-                            block_table=block_tables,
-                            atten_mask=update_attn_mask if input_layout == "TND" else None,
-                            input_layout=input_layout,
-                            block_size=block_size,
-                            actual_seq_qlen=replay_actual_seq_lengths,
-                            actual_seq_kvlen=seq_lens,
-                            num_key_value_heads=num_kv_heads,
-                            num_query_heads=num_heads,
-                            sparse_mode=update_sparse_mode,
-                            pre_tokens=pre_tokens,
-                            next_tokens=next_tokens,
-                            softmax_scale=scale,
-                            workspace=workspace,
-                            out=[attn_output, softmax_lse],
-                            **extra_args,
-                        )
-                    else:
-                        torch_npu.npu_fused_infer_attention_score.out(
-                            query=query,
-                            key=key_cache,
-                            value=value,
-                            block_table=block_tables,
-                            atten_mask=update_attn_mask,
-                            input_layout=input_layout,
-                            block_size=block_size,
-                            actual_seq_lengths=actual_seq_lengths_q,
-                            actual_seq_lengths_kv=seq_lens,
-                            num_key_value_heads=num_kv_heads,
-                            num_heads=num_heads,
-                            scale=scale,
-                            sparse_mode=update_sparse_mode,
-                            pre_tokens=pre_tokens,
-                            next_tokens=next_tokens,
-                            **extra_args,
-                            workspace=workspace,
-                            out=[attn_output, softmax_lse],
-                        )
                     torch.npu.graph_task_update_end(update_stream)
 
                     event.record(update_stream)
@@ -931,24 +877,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         extra_args = {}
         c8_bnsd_mode = False
-        use_fia_v2 = False
         if (self.enable_c8_quant or self.enable_c8_fp8_quant) and layer is not None:
-            if self.enable_c8_fp8_quant:
-                extra_args = {
-                    "dequant_scale_key": layer._c8_k_aq_scale_nz_bnsd,
-                    "dequant_scale_value": layer._c8_v_aq_scale_nz_bnsd,
-                    "key_quant_mode": 0,
-                    "value_quant_mode": 0,
-                }
-                use_fia_v2 = True
-            else:
-                extra_args = {
-                    "key_antiquant_scale": layer._c8_k_aq_scale_nz_bnsd,
-                    "value_antiquant_scale": layer._c8_v_aq_scale_nz_bnsd,
-                    "key_antiquant_mode": 0,
-                    "value_antiquant_mode": 0,
-                    "inner_precise": 1,
-                }
+            extra_args = {
+                "dequant_scale_key": layer._c8_k_aq_scale_nz_bnsd,
+                "dequant_scale_value": layer._c8_v_aq_scale_nz_bnsd,
+                "key_quant_mode": 0,
+                "value_quant_mode": 0,
+            }
+            if not self.enable_c8_fp8_quant:
+                extra_args["inner_precise"] = 1
 
             # change key/value shape
             _, block_size, _, _ = self.key_cache.shape  # type: ignore
@@ -973,44 +910,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if use_max_workspace:
             # Some models mix attention layer shapes under the same graph size.
             # During capture, keep the largest required workspace for that size.
-            if use_fia_v2:
-                candidate_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_mask,
-                    block_table=block_table,
-                    input_layout=input_layout,
-                    block_size=block_size,
-                    actual_seq_qlen=actual_seq_lengths,
-                    actual_seq_kvlen=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_query_heads=self.num_heads,
-                    softmax_scale=self.scale,
-                    sparse_mode=sparse_mode,
-                    pre_tokens=pre_tokens,
-                    next_tokens=next_tokens,
-                    **extra_args,
-                )
-            else:
-                candidate_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_mask,
-                    block_table=block_table,
-                    input_layout=input_layout,
-                    block_size=block_size,
-                    actual_seq_lengths=actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    sparse_mode=sparse_mode,
-                    pre_tokens=pre_tokens,
-                    next_tokens=next_tokens,
-                    scale=self.scale,
-                    **extra_args,
-                )
+            candidate_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_mask,
+                block_table=block_table,
+                input_layout=input_layout,
+                block_size=block_size,
+                actual_seq_qlen=actual_seq_lengths,
+                actual_seq_kvlen=actual_seq_lengths_kv,
+                num_key_value_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
+                softmax_scale=self.scale,
+                sparse_mode=sparse_mode,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
+                **extra_args,
+            )
             workspace = cache_graph_workspace(
                 graph_params,
                 num_tokens,
@@ -1019,44 +936,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             should_update_workspace_cache = True
         elif workspace is None:
-            if use_fia_v2:
-                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_mask,
-                    block_table=block_table,
-                    input_layout=input_layout,
-                    block_size=block_size,
-                    actual_seq_qlen=actual_seq_lengths,
-                    actual_seq_kvlen=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_query_heads=self.num_heads,
-                    softmax_scale=self.scale,
-                    sparse_mode=sparse_mode,
-                    pre_tokens=pre_tokens,
-                    next_tokens=next_tokens,
-                    **extra_args,
-                )
-            else:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_mask,
-                    block_table=block_table,
-                    input_layout=input_layout,
-                    block_size=block_size,
-                    actual_seq_lengths=actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    sparse_mode=sparse_mode,
-                    pre_tokens=pre_tokens,
-                    next_tokens=next_tokens,
-                    scale=self.scale,
-                    **extra_args,
-                )
+            workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_mask,
+                block_table=block_table,
+                input_layout=input_layout,
+                block_size=block_size,
+                actual_seq_qlen=actual_seq_lengths,
+                actual_seq_kvlen=actual_seq_lengths_kv,
+                num_key_value_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
+                softmax_scale=self.scale,
+                sparse_mode=sparse_mode,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
+                **extra_args,
+            )
             should_update_workspace_cache = True
         if should_update_workspace_cache:
             if _EXTRA_CTX.is_draft_model:
@@ -1095,57 +992,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 None,
                 weak_ref_tensors(layer._c8_v_aq_scale_nz_bnsd),
                 None,
-                use_fia_v2,
             )  # type: ignore
         else:
-            attn_params = attn_params + (None, None, None, None, False)  # type: ignore
+            attn_params = attn_params + (None, None, None, None)  # type: ignore
         layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
         attn_params = attn_params + (layer_name,)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
-        if use_fia_v2:
-            torch_npu.npu_fused_infer_attention_score_v2.out(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_mask,
-                block_table=block_table,
-                input_layout=input_layout,
-                block_size=block_size,
-                actual_seq_qlen=actual_seq_lengths,
-                actual_seq_kvlen=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_query_heads=self.num_heads,
-                scale=self.scale,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                workspace=workspace,
-                out=[output, softmax_lse],
-                **extra_args,
-            )
-        else:
-            torch_npu.npu_fused_infer_attention_score.out(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_mask,
-                block_table=block_table,
-                input_layout=input_layout,
-                block_size=block_size,
-                actual_seq_lengths=actual_seq_lengths_q,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale=self.scale,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                workspace=workspace,
-                out=[output, softmax_lse],
-                **extra_args,
-            )
+        torch_npu.npu_fused_infer_attention_score_v2.out(
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=attn_mask,
+            block_table=block_table,
+            input_layout=input_layout,
+            block_size=block_size,
+            actual_seq_qlen=actual_seq_lengths,
+            actual_seq_kvlen=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_query_heads=self.num_heads,
+            softmax_scale=self.scale,
+            sparse_mode=sparse_mode,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
+            workspace=workspace,
+            out=[output, softmax_lse],
+            **extra_args,
+        )
 
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
@@ -1160,7 +1034,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
-        layer=None,
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
         actual_seq_lengths_kv = attn_metadata.seq_lens
@@ -1175,28 +1048,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
         should_update_workspace_cache = False
-
-        dequant_args = {}
-        input_layout = "TND"
-        if self.enable_c8_fp8_quant and layer is not None:
-            key = self.key_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[attr-defined]
-            value = self.value_cache.permute(0, 2, 1, 3).contiguous()  # type: ignore[attr-defined]
-            input_layout = "BNSD"
-            query = query.unsqueeze(2)
-            output = output.unsqueeze(2)
-            dequant_args = {
-                "dequant_scale_key": layer._c8_k_aq_scale_nz_bnsd,
-                "dequant_scale_value": layer._c8_v_aq_scale_nz_bnsd,
-                "key_quant_mode": 0,
-                "value_quant_mode": 0,
-            }
-        if input_layout == "BNSD":
-            sparse_mode = 0
-        else:
-            is_single_token_decode = (
-                attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
-            )
-            sparse_mode = 0 if is_single_token_decode else (4 if self.sliding_window is not None else 3)
         if use_max_workspace:
             # See full_graph_fia: this path needs the max workspace across layer
             # variants sharing the same graph size.
@@ -1206,18 +1057,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
-                input_layout=input_layout,
+                input_layout="TND",
                 block_size=block_size,
-                actual_seq_qlen=actual_seq_lengths_q if input_layout == "TND" else None,
+                actual_seq_qlen=actual_seq_lengths_q,
                 actual_seq_kvlen=actual_seq_lengths_kv,
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
                 num_query_heads=self.num_heads,
-                sparse_mode=sparse_mode,
+                sparse_mode=4 if self.sliding_window is not None else 3,
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                learnable_sink=self.sinks if input_layout == "TND" else None,
-                **dequant_args,
+                learnable_sink=self.sinks,
             )
             workspace = cache_graph_workspace(
                 graph_params,
@@ -1233,9 +1083,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
-                input_layout=input_layout,
+                input_layout="TND",
                 block_size=block_size,
-                actual_seq_qlen=actual_seq_lengths_q if input_layout == "TND" else None,
+                actual_seq_qlen=actual_seq_lengths_q,
                 actual_seq_kvlen=actual_seq_lengths_kv,
                 num_key_value_heads=self.num_kv_heads,
                 softmax_scale=self.scale,
@@ -1243,8 +1093,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=4 if self.sliding_window is not None else 3,
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                learnable_sink=self.sinks if input_layout == "TND" else None,
-                **dequant_args,
+                learnable_sink=self.sinks,
             )
             should_update_workspace_cache = True
         if should_update_workspace_cache:
@@ -1260,65 +1109,48 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
-        pre_tokens = self.sliding_window if self.sliding_window is not None else SWA_INT_MAX
-        next_tokens = 0
-        v2_attn_params = (
-            weak_ref_tensors(query),
-            weak_ref_tensors(key),
-            weak_ref_tensors(value),
-            weak_ref_tensors(block_table),
-            weak_ref_tensors(attn_metadata.attn_mask) if not (self.enable_c8_fp8_quant and layer is not None) else None,
-            block_size,
-            actual_seq_lengths_kv,
-            actual_seq_lengths_q,
-            self.num_kv_heads,
-            self.num_heads,
-            self.scale,
-            weak_ref_tensors(output),
-            weak_ref_tensors(softmax_lse),
-            sparse_mode,
-            pre_tokens,
-            next_tokens,
+        graph_params.attn_params[num_tokens].append(
+            (
+                weak_ref_tensors(query),
+                weak_ref_tensors(key),
+                weak_ref_tensors(value),
+                weak_ref_tensors(block_table),
+                weak_ref_tensors(attn_metadata.attn_mask),
+                block_size,
+                actual_seq_lengths_kv,
+                self.num_kv_heads,
+                self.num_heads,
+                self.scale,
+                self.sliding_window,
+                self.sinks,
+                weak_ref_tensors(output),
+                weak_ref_tensors(softmax_lse),
+                self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
+            )
         )
-        if self.enable_c8_fp8_quant and layer is not None:
-            v2_attn_params = v2_attn_params + (
-                weak_ref_tensors(layer._c8_k_aq_scale_nz_bnsd),
-                None,
-                weak_ref_tensors(layer._c8_v_aq_scale_nz_bnsd),
-                None,
-                True,
-            )  # type: ignore[assignment]
-        else:
-            v2_attn_params = v2_attn_params + (None, None, None, None, False)  # type: ignore[assignment]
-        layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
-        v2_attn_params = v2_attn_params + (layer_name,)  # type: ignore[assignment]
-        graph_params.attn_params[num_tokens].append(v2_attn_params)
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score_v2.out(
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.attn_mask if input_layout == "TND" else None,
+            atten_mask=attn_metadata.attn_mask,
             block_table=block_table,
-            input_layout=input_layout,
+            input_layout="TND",
             block_size=block_size,
-            actual_seq_qlen=actual_seq_lengths_q if input_layout == "TND" else None,
+            actual_seq_qlen=actual_seq_lengths_q,
             actual_seq_kvlen=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
             num_query_heads=self.num_heads,
-            sparse_mode=sparse_mode,
+            sparse_mode=4 if self.sliding_window is not None else 3,
             pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
             next_tokens=0,
             softmax_scale=self.scale,
-            learnable_sink=self.sinks if input_layout == "TND" else None,
+            learnable_sink=self.sinks,
             workspace=workspace,
             out=[output, softmax_lse],
-            **dequant_args,
         )
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
-        if input_layout == "BNSD":
-            output = output.squeeze(2)
         return output, num_tokens
 
     def full_graph_pa(
@@ -1509,22 +1341,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         else:
             if not attn_metadata.causal:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                     query=query,
                     key=key,
                     value=value,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
                     num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
+                    num_query_heads=self.num_heads,
+                    softmax_scale=self.scale,
                     sparse_mode=0,
                 )
             elif self.sliding_window is not None:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                     query=query,
                     key=key,
                     value=value,
@@ -1532,11 +1364,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
                     num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
+                    num_query_heads=self.num_heads,
+                    softmax_scale=self.scale,
                     pre_tokens=self.sliding_window,
                     next_tokens=0,
                     sparse_mode=4,
@@ -1553,7 +1385,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
-                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
+                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score_v2(
                     query=query,
                     key=key,
                     value=value,
@@ -1561,18 +1393,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
                     num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    head_size=self.head_size,
-                    scale=self.scale,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    current_key=key,
-                    current_value=passed_value,
-                    attn_metadata=attn_metadata,
-                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+                    num_query_heads=self.num_heads,
+                    softmax_scale=self.scale,
                     sparse_mode=3,
                 )
 
@@ -1604,7 +1429,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
-            decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+            decode_out, _ = DeviceOperator.npu_fused_infer_attention_score_v2(
                 query=query[:num_decode_tokens],
                 key=key,
                 value=value,
@@ -1613,18 +1438,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 input_layout="TND",
                 block_size=block_size,
                 # cumulative offset from 0; leading num_decodes entries used as-is
-                actual_seq_lengths=actual_seq_qlen[:num_decodes],
-                actual_seq_lengths_kv=seq_lens_list[:num_decodes],
+                actual_seq_qlen=actual_seq_qlen[:num_decodes],
+                actual_seq_kvlen=seq_lens_list[:num_decodes],
                 num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                head_size=self.head_size,
-                scale=self.scale,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                current_key=key,
-                current_value=value,
-                attn_metadata=attn_metadata,
-                is_prefill_no_cache=False,
+                num_query_heads=self.num_heads,
+                softmax_scale=self.scale,
                 sparse_mode=3,
             )
             output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
@@ -1635,7 +1453,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             prefill_seq_qlen = [
                 actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
             ]
-            prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+            prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score_v2(
                 query=query[num_decode_tokens:num_tokens],
                 key=key,
                 value=value,
@@ -1643,18 +1461,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=block_table[num_decodes:],
                 input_layout="TND",
                 block_size=block_size,
-                actual_seq_lengths=prefill_seq_qlen,
-                actual_seq_lengths_kv=seq_lens_list[num_decodes:],
+                actual_seq_qlen=prefill_seq_qlen,
+                actual_seq_kvlen=seq_lens_list[num_decodes:],
                 num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                head_size=self.head_size,
-                scale=self.scale,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                current_key=key,
-                current_value=value,
-                attn_metadata=attn_metadata,
-                is_prefill_no_cache=False,
+                num_query_heads=self.num_heads,
+                softmax_scale=self.scale,
                 sparse_mode=3,
             )
             n_prefill = num_tokens - num_decode_tokens
@@ -2413,11 +2224,6 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                 elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                     return self._forward_c8_fp8_decode(query, attn_metadata, output, layer)
 
-    def _nz_5d_view(self, cache: torch.Tensor, block_size: int) -> torch.Tensor:
-        """View a KV cache tensor in NZ 5D layout: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)."""
-        NZ_FMT_LAST_DIM = 32
-        return cache.view(-1, self.num_kv_heads, self.head_size // NZ_FMT_LAST_DIM, block_size, NZ_FMT_LAST_DIM)
-
     def _prepare_c8_fp8_scales(self, layer: AttentionLayer, device: torch.device) -> None:
         """Shard per-channel C8 FP8 scales to this TP rank."""
         if hasattr(layer, "_c8_fp8_scales_prepared"):
@@ -2618,7 +2424,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
             # block_table is None for prefill; FIA ignores block_size in this case.
             # Use cache block_size for consistency rather than a magic number.
             cache_block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
-            attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+            attn_out, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query=prefill_q,
                 key=prefill_k,
                 value=prefill_v,
@@ -2627,10 +2433,10 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                 input_layout="TND",
                 block_size=cache_block_size,
                 actual_seq_lengths=prefill_seq_qlen,
-                actual_seq_lengths_kv=prefill_seq_kvlen,
+                actual_seq_kvlen=prefill_seq_kvlen,
                 num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale=self.scale,
+                num_query_heads=self.num_heads,
+                softmax_scale=self.scale,
                 sparse_mode=3,
             )
             n_prefill = num_tokens - num_decode_tokens
@@ -2677,7 +2483,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                 key = key.to(query.dtype) * layer._c8_k_scale
                 value = value.to(query.dtype) * layer._c8_v_scale
 
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query=query,
             key=key,
             value=value,
@@ -2685,11 +2491,11 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
-            actual_seq_lengths=actual_seq_qlen,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
+            num_query_heads=self.num_heads,
+            softmax_scale=self.scale,
             sparse_mode=3,
         )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
