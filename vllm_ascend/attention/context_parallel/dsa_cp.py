@@ -238,6 +238,52 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
+    def reset_runtime_cache(self) -> None:
+        """[snapshot] Restore cold-start DSA-CP metadata state after resume.
+
+        DSA-CP keeps per-iteration metadata and reusable device tensors on the
+        builder rather than in ``state_dict``. Clear both the cached references
+        and the complete tensor allocations so graph warmup after snapshot
+        restore cannot consume snapshot-time lengths or sparse metadata.
+        """
+        self.num_decodes = 0
+        self.num_prefills = 0
+        self.num_decode_tokens = 0
+        self.num_prefill_tokens = 0
+        self.num_actual_tokens = None
+        self.block_table = None
+        self.seq_lens = None
+        self.seq_lens_cpu = None
+
+        for tensor in (
+            self.start_pos_prefill,
+            self.req_sas_metadata,
+            self.req_qli_metadata,
+            self.cu_seqlens_ori_kv,
+            self.cu_seqlens_cmp_kv,
+            self.seqused_q,
+            self._zero_i32,
+            self.local_query_start_loc,
+            self.local_seq_lens,
+            self.slot_mapping,
+        ):
+            if tensor is not None:
+                tensor.zero_()
+
+        for attr_name in (
+            "spec_slot_mapping",
+            "spec_local_query_start_loc",
+            "spec_local_seq_lens",
+        ):
+            tensors = getattr(self, attr_name, None)
+            if tensors is not None:
+                for tensor in tensors:
+                    tensor.zero_()
+
+        common_ratio_to_sas_metadata = getattr(self, "common_ratio_to_sas_metadata", None)
+        if common_ratio_to_sas_metadata is not None:
+            common_ratio_to_sas_metadata.clear()
+
     @classmethod
     def build_hadamard(cls, hf_config, device, enable_sleep_mode: bool = False) -> bool:
         """Build the class-level DSA indexer ``hadamard`` rotation matrix. See
