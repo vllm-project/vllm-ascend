@@ -403,6 +403,46 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertTrue(load_spec.can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_running_decode_preserves_partial_block_with_layer_reuse(self, mock_client_cls):
+        config = self._make_config(
+            extra_config={
+                "backend": "memcache",
+                "layerwise_num_shared_buffers": 1,
+            },
+            num_layers=4,
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        request = MagicMock()
+        request.num_computed_tokens = 32
+        request.num_prompt_tokens = 32
+        request.prompt_token_ids = list(range(32))
+        request.all_token_ids = list(range(33))
+        request.block_hashes = [b"h0", b"h1"]
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        scheduler._unfinished_request_ids.add("r1")
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=32,
+            token_ids=list(range(32)),
+            num_prompt_tokens=32,
+        )
+        sched_output = self._make_running_chunk_output([])
+        sched_output.num_scheduled_tokens = {"r1": 1}
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(len(meta.requests), 1)
+        request_meta = meta.requests[0]
+        self.assertTrue(request_meta.can_save)
+        self.assertEqual(request_meta.save_start_token, 32)
+        self.assertEqual(request_meta.save_end_token, 32)
+        self.assertEqual(request_meta.target_token_len, 33)
+        self.assertIsNotNone(request_meta.load_spec)
+        self.assertEqual(request_meta.load_spec.kvpool_cached_tokens, 32)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_keeps_prefix_in_hbm_without_layer_reuse(self, mock_client_cls):
         config = self._make_config(
             extra_config={

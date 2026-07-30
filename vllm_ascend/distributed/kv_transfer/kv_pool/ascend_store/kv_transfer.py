@@ -240,9 +240,17 @@ class LayerBatchBuilder:
                 offset = end
 
             if block_range.partial_block_index is not None:
-                assert request.last_block_gva is not None
+                partial_block_gva = None
+                partial_gvas_by_group = (
+                    request.partial_save_gvas_by_group if is_save else request.partial_load_gvas_by_group
+                )
+                if task.group_id < len(partial_gvas_by_group):
+                    partial_block_gva = partial_gvas_by_group[task.group_id]
+                if partial_block_gva is None:
+                    partial_block_gva = request.last_block_gva
+                assert partial_block_gva is not None
                 block_ids_arr[offset] = block_ids_np[block_range.partial_block_index]
-                block_gvas_arr[offset] = request.last_block_gva
+                block_gvas_arr[offset] = partial_block_gva
                 offset += 1
 
         block_ids_slice = block_ids_arr[:offset]

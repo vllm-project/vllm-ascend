@@ -19,6 +19,7 @@ dynamic_batch
 epd_disaggregation
 kv_pool
 layerwise_kv_pool
+layerwise_prefill_kv_offload
 kv_cache_cpu_offload
 large_scale_ep
 ucm_deployment

@@ -715,6 +715,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
+            save_partial_block=self.layerwise_offload,
         )
 
     def _process_new_request(
@@ -824,11 +825,11 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        # Chunked-prefill increments (prompt not yet fully computed) are always
-        # saved; only decode increments are gated by save_decode_cache.
+        # Reused buffers must save every step; otherwise only explicit
+        # save_decode_cache keeps Decode increments.
         req_tuple = self._unfinished_requests.get(req_id)
         is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens
-        if is_decoding and not self.save_decode_cache:
+        if is_decoding and not self.save_decode_cache and not self.layerwise_offload:
             return None
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
@@ -863,14 +864,13 @@ class KVPoolScheduler:
                 request_tracker.last_block_key = last_block_key
         if new_block_ids is not None:
             request_tracker.update(new_block_ids)
+        load_spec = None
         if self.layerwise_offload and num_current_tokens > 0:
             load_spec = LoadSpec(
                 vllm_cached_tokens=num_current_tokens,
                 kvpool_cached_tokens=num_current_tokens,
                 can_load=True,
             )
-        else:
-            load_spec = None
         return self._build_req_meta(
             request_tracker,
             request.block_hashes,

@@ -91,7 +91,7 @@ def build_layerwise_cache_layout(
 
     independent_value = extra_config.get(_INDEPENDENT_LAYERS) if extra_config else None
     if independent_value is None:
-        layer_indices = [0, num_layers - 1]
+        layer_indices = [0]
     elif isinstance(independent_value, str) and independent_value.strip().lower() == "all":
         layer_indices = list(range(num_layers))
     elif isinstance(independent_value, list):
