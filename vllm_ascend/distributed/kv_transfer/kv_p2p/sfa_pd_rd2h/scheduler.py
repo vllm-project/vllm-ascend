@@ -283,9 +283,7 @@ class SFAPDRD2HScheduler:
         if params is None or not params.get("do_remote_prefill"):
             return
 
-        block_ids_by_group = SFAPDRD2HProducerScheduler._normalize_block_ids(
-            blocks.get_block_ids()
-        )
+        block_ids_by_group = SFAPDRD2HProducerScheduler._normalize_block_ids(blocks.get_block_ids())
         required_group = max(self.main_group_idx, self.indexer_group_idx)
         if len(block_ids_by_group) <= required_group:
             raise RuntimeError(
@@ -342,7 +340,6 @@ class SFAPDRD2HScheduler:
             )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-
         meta = SfaPDConsumerMetadata()
         for req_id in list(self._reqs_need_recv):
             tracker = self._request_trackers.get(req_id)
