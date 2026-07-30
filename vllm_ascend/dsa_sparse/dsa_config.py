@@ -129,6 +129,16 @@ def _normalize_dsa_sparse_config(
             f"Unknown dsa_sparse_config key(s): {', '.join(unknown)}. "
             f"Supported keys: {sorted(_DSA_SPARSE_PUBLIC_KEYS)}")
 
+    for field_name in (
+            "enabled",
+            "split_indexer_cache",
+            _DSA_GRAPH_PUBLIC_CONFIG_KEY):
+        if (field_name in raw_config
+                and not isinstance(raw_config[field_name], bool)):
+            raise TypeError(
+                f"dsa_sparse_config[{field_name!r}] must be a bool, got "
+                f"{type(raw_config[field_name])!r}")
+
     cache_attrs = dict(_DSA_SPARSE_DEFAULT_CACHE_ATTRS)
     for public_name, cache_attr in _DSA_SPARSE_CONFIG_FIELD_MAPPINGS:
         if public_name in raw_config:
@@ -204,6 +214,11 @@ def _normalize_dsa_sparse_config(
                 "dsa_sparse_config['enabled']=True requires "
                 "dsa_sparse_config['split_indexer_cache']=True")
         cache_attrs["enable_dsa_split_indexer_cache"] = True
+    elif cache_attrs["enable_dsa_split_indexer_cache"]:
+        raise ValueError(
+            "dsa_sparse_config['split_indexer_cache']=True is only valid when "
+            "dsa_sparse_config['enabled']=True. Disable both fields for a "
+            "true dense-path A/B run.")
 
     additional_updates: dict[str, Any] = {}
     if _DSA_GRAPH_PUBLIC_CONFIG_KEY in raw_config:
@@ -308,26 +323,30 @@ def is_dsa_sparse_config_enabled(vllm_config: Any) -> bool:
     if vllm_config is None:
         return False
 
-    cache_config = getattr(vllm_config, "cache_config", None)
-    if cache_config is not None and bool(
-            getattr(cache_config, "enable_dsa_sparse_cache", False)):
-        return True
-
     additional_config = getattr(vllm_config, "additional_config", None)
-    if not isinstance(additional_config, dict):
-        return False
-    dsa_config = additional_config.get(DSA_SPARSE_ADDITIONAL_CONFIG_KEY)
-    return isinstance(dsa_config, dict) and bool(dsa_config.get("enabled"))
+    if isinstance(additional_config, dict):
+        dsa_config = additional_config.get(
+            DSA_SPARSE_ADDITIONAL_CONFIG_KEY)
+        if isinstance(dsa_config, dict) and "enabled" in dsa_config:
+            # The public switch is the source of truth. In particular, an
+            # explicit false must override a stale dynamic CacheConfig
+            # attribute after config serialization or an in-process A/B run.
+            return bool(dsa_config["enabled"])
+
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return bool(
+        cache_config is not None
+        and getattr(cache_config, "enable_dsa_sparse_cache", False))
 
 
 def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
     """Validate and normalize the supported v0.23 sparse-offload envelope.
 
     The implementation intentionally has a narrow first-class envelope:
-    GLM-5/5.1, decoder-only eager execution, and DP+TP without speculative
+    GLM-5/5.1, decoder-only eager execution, and TP with DP=1 without speculative
     decoding. Options which change cache ownership (prefix cache, KV
     connectors), add speculative tokens, or shard the token domain
-    (DCP/PCP/PP) are rejected instead of silently producing an invalid
+    (DP/DCP/PCP/PP) are rejected instead of silently producing an invalid
     resident map.
     """
     attach_dsa_sparse_cache_attrs(vllm_config)
@@ -349,6 +368,15 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
             "DSA sparse offload supports Ascend A2, A3 and A5, not 310P")
 
     parallel_config = vllm_config.parallel_config
+    data_parallel_size = int(
+        getattr(parallel_config, "data_parallel_size", 1))
+    if data_parallel_size != 1:
+        raise ValueError(
+            "DSA sparse offload currently supports TP with "
+            "data_parallel_size=1 only. DSA request stages, resident rows, "
+            "and hot-DRAM block tables are worker-local and are not included "
+            "in v0.23 DP metadata synchronization; DP>1 can silently corrupt "
+            "token accuracy.")
     incompatible_parallel = {
         "pipeline_parallel_size":
         int(getattr(parallel_config, "pipeline_parallel_size", 1)),
@@ -363,7 +391,7 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
     }
     if invalid_parallel:
         raise ValueError(
-            "DSA sparse offload currently supports DP+TP but not PP/DCP/PCP; "
+            "DSA sparse offload currently supports TP but not PP/DCP/PCP; "
             f"got {invalid_parallel}")
 
     if getattr(vllm_config, "kv_transfer_config", None) is not None:
@@ -424,6 +452,19 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
             "DSA sparse offload requires synchronous scheduling")
 
     additional_config = vllm_config.additional_config or {}
+    dsa_cp_enabled = additional_config.get("enable_dsa_cp", False)
+    if not isinstance(dsa_cp_enabled, bool):
+        raise TypeError(
+            "additional_config['enable_dsa_cp'] must be a bool when DSA "
+            f"sparse offload is enabled, got {type(dsa_cp_enabled)!r}"
+        )
+    if dsa_cp_enabled:
+        raise ValueError(
+            "DSA sparse offload cannot be combined with SFA DSA-CP "
+            "(additional_config.enable_dsa_cp=true). The two features use "
+            "different token sharding, slot mappings, and Indexer/SFA tensor "
+            "layouts; set enable_dsa_cp=false."
+        )
     incompatible_cache_modes = {
         key: bool(additional_config.get(key, False))
         for key in ("enable_sparse_sfa_c8", "enable_sparse_li_c8")

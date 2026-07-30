@@ -2360,6 +2360,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             dsa_mgr is not None
             and attn_metadata.dsa_row_mode_batch is not None
             and attn_metadata.dsa_row_mode_batch
+            and attn_metadata.dsa_row_mode_batch.uses_sparse_offload
         )
         if dsa_row_mode_active:
             if self.skip_topk:

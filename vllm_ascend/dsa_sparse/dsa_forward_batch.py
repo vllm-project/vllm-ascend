@@ -89,8 +89,9 @@ class DSAForwardRowModeDecodeBatch:
     DRAM logical block tables, and caller-owned per-layer LIDU outputs.
 
     该视图覆盖完整 row-mode decode batch，其中 DENSE、SPARSE 和
-    graph PAD 行由 ``row_modes_tensor`` 逐行区分。LIDU/KSC/SFA-Offload 不在
-    Python 侧按 sparse mask 拆成子 batch。
+    graph PAD 行由 ``row_modes_tensor`` 逐行区分。全 DENSE eager batch 通过
+    ``uses_sparse_offload=False`` 保持原生 Indexer/SFA；只要存在 SPARSE 行，
+    LIDU/KSC/SFA-Offload 就按完整 request-row batch 处理。
 
     当前 row-mode 合约是 decode-only：DSA 行与 request 行一一对齐。eager
     允许每个 request 行携带 1..N 个 request-major MTP token，attention
@@ -105,6 +106,10 @@ class DSAForwardRowModeDecodeBatch:
     # 预留独立 LIDU 原址输出；forward view 只按当前 row prefix 切片。
     layer_lidu_outputs: tuple[DSALightningIndexerUpdateBuffers, ...] | None
     row_modes_tensor: torch.Tensor
+    # Keep dense-only decode on the native Indexer/SFA path. This host scalar
+    # is fixed while the forward view is built, so attention layers do not
+    # inspect a device row-mode tensor or introduce an NPU->host sync.
+    uses_sparse_offload: bool
     # Decode full-block dump remains an independent data-plane contract. Its
     # columns reuse the row-mode buffer owner, but they are not request-row
     # aligned: real physical copies are compacted into a job prefix and graph
@@ -128,6 +133,7 @@ class DSAForwardRowModeDecodeBatch:
             batch_dram_block_table=empty_i32_table,
             layer_lidu_outputs=None,
             row_modes_tensor=torch.empty((0,), dtype=torch.int32, device=device),
+            uses_sparse_offload=False,
             full_block_dump_batch=DSAFullBlockDumpBatch.empty(tensor_device=device),
         )
 

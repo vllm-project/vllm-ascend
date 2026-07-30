@@ -218,6 +218,78 @@ def _load_full_sequence_fit_contract():
     return namespace["_can_fit_full_sequence"], FakeMultiBlockPool
 
 
+def _load_dsa_config_switch_contract():
+    path = REPO_ROOT / "vllm_ascend/dsa_sparse/dsa_config.py"
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    function_names = {
+        "_normalize_positive_int_sequence",
+        "_normalize_dsa_trace_points_config",
+        "_normalize_dsa_sparse_config",
+        "is_dsa_sparse_config_enabled",
+    }
+    selected_nodes = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    contract_module = ast.Module(body=selected_nodes, type_ignores=[])
+    ast.fix_missing_locations(contract_module)
+    mappings = (
+        ("enabled", "enable_dsa_sparse_cache"),
+        ("split_indexer_cache", "enable_dsa_split_indexer_cache"),
+        ("indexer_mla_block_ratio", "dsa_indexer_mla_block_ratio"),
+        ("max_active_reqs", "dsa_max_active_reqs"),
+        ("hot_cpu_block_multiple", "dsa_hot_cpu_block_multiple"),
+    )
+    graph_key = "enable_row_mode_decode_graph"
+    public_keys = frozenset(
+        {public for public, _ in mappings}
+        | {
+            "sparse_activation_tokens",
+            "prompt_budget_thresholds",
+            "resident_budget_tokens",
+            graph_key,
+            "trace_points",
+        }
+    )
+    namespace = {
+        "Any": object,
+        "Sequence": (list, tuple),
+        "DSA_SPARSE_ADDITIONAL_CONFIG_KEY": "dsa_sparse_config",
+        "_DSA_GRAPH_PUBLIC_CONFIG_KEY": graph_key,
+        "_DSA_SPARSE_CONFIG_FIELD_MAPPINGS": mappings,
+        "_DSA_SPARSE_ACTIVATION_CONFIG_KEY": "sparse_activation_tokens",
+        "_DSA_PROMPT_BUDGET_THRESHOLDS_CONFIG_KEY": "prompt_budget_thresholds",
+        "_DSA_RESIDENT_BUDGET_TOKENS_CONFIG_KEY":
+        "resident_budget_tokens",
+        "_DSA_SPARSE_DEFAULT_CACHE_ATTRS": {
+            "enable_dsa_sparse_cache": False,
+            "enable_dsa_split_indexer_cache": False,
+            "dsa_indexer_mla_block_ratio": 3,
+            "dsa_sparse_activation_tokens": 6144,
+            "dsa_prompt_budget_thresholds": (32768, 65536),
+            "dsa_resident_budget_tokens": (6144, 10240, 12288),
+            "dsa_hbm_sparse_budget": 12288,
+            "dsa_max_active_reqs": 256,
+            "dsa_hot_cpu_block_multiple": 3,
+        },
+        "_DSA_SPARSE_PUBLIC_KEYS": public_keys,
+        "DSA_TRACE_PUBLIC_KEYS": frozenset({"enabled", "points", "ranks"}),
+        "DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY":
+        "enable_dsa_row_mode_decode_graph",
+        "DSA_TRACE_CONFIG_KEY": "dsa_sparse_trace_points",
+        "DSA_SFA_COMPUTE_TOPK": 2048,
+        "DSA_LIDU_OUTPUT_CAPACITY": 16384,
+        "DSA_LIDU_SUPPORTED_RESIDENT_BUDGETS":
+        (6144, 8192, 10240, 12288),
+    }
+    exec(compile(contract_module, str(path), "exec"), namespace)
+    return (
+        namespace["_normalize_dsa_sparse_config"],
+        namespace["is_dsa_sparse_config_enabled"],
+    )
+
+
 class TestOperatorABI(unittest.TestCase):
     def test_acl_operator_names_are_unchanged(self):
         ksc = _read(
@@ -823,7 +895,9 @@ class TestV023LifecycleContract(unittest.TestCase):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
         for required_contract in (
             'architecture != "GlmMoeDsaForCausalLM"',
-            "supports DP+TP but not PP/DCP/PCP",
+            "data_parallel_size=1 only",
+            "supports TP but not PP/DCP/PCP",
+            "cannot be combined with SFA DSA-CP",
             "block_size != 128",
             "cannot use sparse C8 cache modes",
             "source FP16/BF16 ABI",
@@ -832,6 +906,105 @@ class TestV023LifecycleContract(unittest.TestCase):
             "enforce_eager = True",
         ):
             self.assertIn(required_contract, source)
+
+    def test_dsa_dp_guard_and_example_default_are_accuracy_safe(self):
+        source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
+        self.assertIn("if data_parallel_size != 1:", source)
+        self.assertIn("DP>1 can silently corrupt ", source)
+        self.assertIn('"token accuracy."', source)
+
+        example = _read("examples/glm51_dsa_sparse_mtp.sh")
+        self.assertIn('DP_SIZE="${DP_SIZE:-1}"', example)
+        self.assertNotIn('DP_SIZE="${DP_SIZE:-2}"', example)
+        self.assertIn('\\"enable_dsa_cp\\":false', example)
+
+    def test_sparse_offload_rejects_independent_dsa_cp_switch(self):
+        source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
+        self.assertIn(
+            'dsa_cp_enabled = additional_config.get("enable_dsa_cp", False)',
+            source,
+        )
+        self.assertIn(
+            "additional_config['enable_dsa_cp'] must be a bool",
+            source,
+        )
+        self.assertIn(
+            "different token sharding, slot mappings, and Indexer/SFA tensor",
+            source,
+        )
+
+    def test_public_enabled_false_is_a_true_off_switch(self):
+        source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
+        enabled = ast.unparse(
+            _function_node(
+                "vllm_ascend/dsa_sparse/dsa_config.py",
+                "is_dsa_sparse_config_enabled",
+            )
+        )
+        self.assertLess(
+            enabled.index("'enabled' in dsa_config"),
+            enabled.index("cache_config = getattr"),
+        )
+        self.assertIn(
+            "split_indexer_cache']=True is only valid when",
+            source,
+        )
+        self.assertIn("must be a bool", source)
+
+        example = _read("examples/glm51_dsa_sparse_mtp.sh")
+        self.assertIn('DSA_ENABLED="${DSA_ENABLED:-true}"', example)
+        self.assertIn('\\"enabled\\":${DSA_ENABLED}', example)
+        self.assertNotIn('\\"split_indexer_cache\\":true', example)
+
+        normalize, is_enabled = _load_dsa_config_switch_contract()
+        enabled_attrs, _ = normalize({"enabled": True})
+        self.assertTrue(enabled_attrs["enable_dsa_sparse_cache"])
+        self.assertTrue(enabled_attrs["enable_dsa_split_indexer_cache"])
+        disabled_attrs, _ = normalize({"enabled": False})
+        self.assertFalse(disabled_attrs["enable_dsa_sparse_cache"])
+        self.assertFalse(disabled_attrs["enable_dsa_split_indexer_cache"])
+        with self.assertRaises(TypeError):
+            normalize({"enabled": "false"})
+        with self.assertRaises(ValueError):
+            normalize({
+                "enabled": False,
+                "split_indexer_cache": True,
+            })
+
+        stale_cache_config = types.SimpleNamespace(
+            enable_dsa_sparse_cache=True)
+        public_off_config = types.SimpleNamespace(
+            additional_config={
+                "dsa_sparse_config": {
+                    "enabled": False,
+                },
+            },
+            cache_config=stale_cache_config,
+        )
+        self.assertFalse(is_enabled(public_off_config))
+
+    def test_dense_decode_keeps_native_attention_until_sparse_activation(self):
+        batch_source = _read(
+            "vllm_ascend/dsa_sparse/dsa_forward_batch.py"
+        )
+        runtime_source = _read(
+            "vllm_ascend/dsa_sparse/dsa_row_mode_runtime.py"
+        )
+        sfa_forward = ast.unparse(
+            _function_node(
+                "vllm_ascend/attention/sfa_v1.py",
+                "forward",
+            )
+        )
+        self.assertIn("uses_sparse_offload: bool", batch_source)
+        self.assertIn(
+            "uses_sparse_offload = bool(np.any(sparse_mask))",
+            runtime_source,
+        )
+        self.assertIn(
+            "attn_metadata.dsa_row_mode_batch.uses_sparse_offload",
+            sfa_forward,
+        )
 
     def test_speculative_decode_is_rejected_and_example_disables_it(self):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")

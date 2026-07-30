@@ -164,7 +164,9 @@ class DSARowModeBufferOwner:
         ] | None = None
         self.dram_signature: tuple | None = None
         self.eager_batches: dict[
-            tuple[int, int, int, int], DSAForwardRowModeDecodeBatch] = {}
+            tuple[int, int, int, int, bool],
+            DSAForwardRowModeDecodeBatch,
+        ] = {}
 
     def ensure_lidu_outputs(
         self,
@@ -445,6 +447,7 @@ class DSARowModeRuntimeMixin:
                 )
                 for outputs in buffers.ensure_lidu_outputs()),
             row_modes_tensor=graph_row_metadata_slab[_ROW_META_MODE],
+            uses_sparse_offload=True,
             full_block_dump_batch=DSAFullBlockDumpBatch(
                 src_hbm_block_ids_tensor=(
                     graph_row_metadata_slab[
@@ -833,6 +836,7 @@ class DSARowModeRuntimeMixin:
                 > int(self._hbm_sparse_budget_tokens)):
             raise RuntimeError(
                 "DSA sparse-row budget exceeds row-mode topK")
+        uses_sparse_offload = bool(np.any(sparse_mask))
 
         block_size = int(self._vllm_blk_size)
         max_budget_slots = int(budget_lens.max())
@@ -886,6 +890,7 @@ class DSARowModeRuntimeMixin:
             required_hbm_blocks,
             max_logical_blocks,
             dump_job_count,
+            uses_sparse_offload,
         )
         eager_batch = buffer_owner.eager_batches.get(batch_key)
         if eager_batch is None:
@@ -912,6 +917,7 @@ class DSARowModeRuntimeMixin:
                     )
                     for outputs in buffer_owner.ensure_lidu_outputs()),
                 row_modes_tensor=row_metadata_device[_ROW_META_MODE],
+                uses_sparse_offload=uses_sparse_offload,
                 full_block_dump_batch=DSAFullBlockDumpBatch(
                     src_hbm_block_ids_tensor=(
                         row_metadata_device[

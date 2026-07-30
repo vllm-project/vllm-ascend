@@ -8,7 +8,7 @@
 | 目标基线提交 | `98c40c6602fa2005f50676451f05f535b7ad142e` |
 | 迁移来源 | `long1016033679/vLLM-ascend-DSA:vllm-ascend-v0.19.1rc1-gs-glm` |
 | 目标模型 | GLM-5/GLM-5.1，架构名 `GlmMoeDsaForCausalLM` |
-| 推理范围 | decode-only sparse KV offload、eager、DP+TP；不含 speculative/MTP |
+| 推理范围 | decode-only sparse KV offload、eager、DP1+TP；不含 speculative/MTP |
 | 目标设备 | 昇腾 A2、A3、A5（Ascend 950） |
 | 文档日期 | 2026-07-29 |
 
@@ -26,7 +26,7 @@
 6. 保留 Indexer 全量 HBM cache；MLA 使用 HBM resident window 和 DRAM full-block arena。
 7. 将调度状态机、KV cache planning、`NPUInputBatch` sidecar、模型输入整理和 attention 接入点适配到 v0.23.0。
 8. 对 speculative/MTP 配置在启动阶段 fail-closed，避免未验收的多 token cache 路径产生错误输出。
-9. DP rank 和 TP worker 各自持有请求状态、resident pool、DRAM arena 和算子 backend，不共享可变 KV ownership。
+9. 每个 TP worker 持有独立 resident pool、DRAM arena 和算子 backend，不共享可变 KV ownership。
 10. 对不在本次支持范围内的组合在启动阶段失败，不进行静默降级。
 
 当前代码已通过无依赖迁移契约测试、Python 编译检查、Shell 语法检查和 `git diff --check`。当前开发环境不包含 CANN、`torch_npu` 和昇腾设备，因此 A2/A3 自定义算子编译、A5 eager 数据面、端到端精度与性能仍必须按第 12 节在目标服务器验收。
@@ -38,7 +38,8 @@
 | GLM-5/GLM-5.1 | 支持 | 仅接受 `GlmMoeDsaForCausalLM` |
 | Decode-only sparse offload | 支持 | Prefill 使用原生 dense 路径；完整 MLA block 在层内写入后 dump |
 | Eager | 支持且强制 | 自动设置 `model_config.enforce_eager=True` |
-| DP+TP | 支持 | DP/TP 大小可以按服务器拓扑配置 |
+| DP1+TP | 支持 | 当前仅支持 `data_parallel_size=1`；TP 大小按服务器拓扑配置 |
+| DP>1 | 不支持 | DSA 请求阶段、resident row 和 DRAM block table 未进入 v0.23 DP 元数据同步，启动时拒绝 |
 | Speculative/MTP | 不支持 | 来源 DSA 分支未集成该 cache 语义；配置后启动失败 |
 | A2/A3 | 支持 | LIDU、KSC、SFA-Offload、full-block dump 使用融合自定义算子 |
 | A5 | 功能适配 | LIDU/KSC 保持同名同参；使用 eager tensor 组合实现，尚需真机性能优化 |
@@ -46,6 +47,7 @@
 | FP8/C8 sparse cache | 不支持 | 启动时拒绝 |
 | ACL Graph/TorchAir graph | 不支持 | 本次范围为 eager |
 | PP、DCP、PCP | 不支持 | token domain/cache ownership 尚未定义 |
+| SFA DSA-CP | 不支持共存 | `additional_config.enable_dsa_cp=true` 会改变 token、slot 和 Indexer/SFA 布局，启动时拒绝 |
 | Prefix caching | 不支持 | 与 DRAM block hash/refcount ownership 冲突 |
 | Chunked prefill | 不支持 | `max_num_batched_tokens` 必须覆盖完整 prompt |
 | Async scheduling | 不支持 | dump 发布和 scheduler commit 需要同步步进 |
@@ -76,6 +78,8 @@
 - Prefill 保留 v0.23.0 原生 dense attention 行为。
 - 最后一个非分块 prefill step 会为 prompt 中的每个完整 MLA block 生成 dump 计划。
 - 在稀疏激活阈值之前，请求处于 `DENSE_DECODE`。
+- 当一个 decode batch 全部处于 `DENSE_DECODE` 时，继续使用原生 Indexer/SFA
+  数值路径；DSA 只维护 resident/DRAM 生命周期，不调用 LIDU/KSC/SFA-Offload。
 - 首次达到稀疏条件时进入 `ENTER_SPARSE_DECODE`，建立 resident row。
 - 后续进入 `SPARSE_DECODE`，执行 LIDU → KSC → SFA-Offload。
 - 当前未完成的 tail 保留在 MLA resident HBM 中；只有完整 block 才发布到 DRAM。
@@ -198,20 +202,23 @@ DRAM full-block dump 尚未完成 accepted/rejected token 的设备侧精度验�
 dense 与 sparse 的逐 token 对比、draft 接受/拒绝和 block 边界回滚验收后，才应
 重新开放该组合。
 
-## 8. DP+TP 资源与一致性
+## 8. TP 资源与 DP 边界
 
 | 资源 | 隔离范围 |
 |---|---|
-| Scheduler request stage/预算 | 每 DP EngineCore 独立 |
+| Scheduler request stage/预算 | 当前单一 EngineCore |
 | Indexer/MLA `BlockPool` | 每 EngineCore/worker cache manager 独立 |
 | Resident row pool | 每 worker 进程、每 NPU 独立 |
 | Hot DRAM arena | 每 TP worker/NPU 独立 |
 | LIDU/KSC output buffer | 每 worker 进程独立 |
 | Stream 顺序 | 当前 worker 的当前 NPU stream |
 
-TP group 中每个 rank处理相同请求顺序，并从 scheduler output 获得相同 logical block/hash delta；物理 HBM/DRAM tensor 仍是 rank-local。DP rank之间不共享请求或 DRAM block table。
+TP group 中每个 rank处理相同请求顺序，并从 scheduler output 获得相同 logical block/hash delta；物理 HBM/DRAM tensor 仍是 rank-local。
 
-容量按每个 DP rank 的 `max_num_seqs` 计算，不额外乘以 `data_parallel_size`。每台机器必须为其本地 DP×TP worker 分别预留 HBM 和 DRAM。
+v0.23 的 DP 同步只覆盖 token 数和图模式，没有同步 DSA 请求阶段、resident
+row、cache slots 或 DRAM logical block table。多 DP rank 可能在不报设备异常的
+情况下读取不同物理 KV，因此本迁移在真机逐 token 验收完成前对
+`data_parallel_size>1` 启动期 fail-closed。
 
 ## 9. 配置
 
@@ -221,9 +228,9 @@ TP group 中每个 rank处理相同请求顺序，并从 scheduler output 获得
 {
   "dsa_sparse_config": {
     "enabled": true,
-    "split_indexer_cache": true,
     "indexer_mla_block_ratio": 3
   },
+  "enable_dsa_cp": false,
   "ascend_compilation_config": {
     "enable_npugraph_ex": false
   }
@@ -235,7 +242,7 @@ TP group 中每个 rank处理相同请求顺序，并从 scheduler output 获得
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
 | `enabled` | `false` | 是否启用 DSA sparse offload |
-| `split_indexer_cache` | 启用 DSA 时强制 `true` | Indexer/MLA 是否拆分 |
+| `split_indexer_cache` | 启用 DSA 时强制 `true` | 内部兼容项；关闭 DSA 时不得单独设为 `true` |
 | `indexer_mla_block_ratio` | `3` | KV planning 的 Indexer:MLA block 容量权重 |
 | `sparse_activation_tokens` | `6144` | 进入 sparse decode 的最小 context |
 | `prompt_budget_thresholds` | `[32768, 65536]` | 按 prompt/context 选择 resident budget 的阈值 |
@@ -254,9 +261,11 @@ TP group 中每个 rank处理相同请求顺序，并从 scheduler output 获得
 - `--no-enable-prefix-caching`
 - `ascend_compilation_config.enable_npugraph_ex=false`
 - 不配置 KV connector/offloading connector
+- `data_parallel_size=1`
 - `pipeline_parallel_size=1`
 - `decode_context_parallel_size=1`
 - `prefill_context_parallel_size=1`
+- `additional_config.enable_dsa_cp=false`
 
 ## 10. 构建与部署
 
@@ -312,6 +321,11 @@ bash -n csrc/build_aclnn.sh examples/glm51_dsa_sparse_mtp.sh
 - Indexer logical BF16/FP16 cache spec。
 - 最后 prefill 的完整 block 全量 dump。
 - speculative/MTP 启动期 fail-closed 和示例禁用约束。
+- DP>1 启动期 fail-closed；示例默认 DP1。
+- SFA DSA-CP 与 sparse offload 启动期互斥；示例显式设置
+  `enable_dsa_cp=false`。
+- DENSE-only decode 保持原生 Indexer/SFA 数值路径。
+- `enabled=false` 优先于动态 cache 属性，且不会留下 split Indexer cache。
 - 多进程 Worker 在模型初始化前安装 Indexer spec patch。
 - scheduler decode barrier 不丢失临时 preempt 请求。
 - 非 DSA EngineCore child 不安装 DSA 数据面补丁。
@@ -325,14 +339,16 @@ bash -n csrc/build_aclnn.sh examples/glm51_dsa_sparse_mtp.sh
 | 维度 | 用例 | 通过标准 |
 |---|---|---|
 | 构建 | A2、A3 分别从干净环境 `pip install -e .` | 四个 DSA ACLNN 算子编译、安装、加载成功 |
-| 启动 | A2/A3/A5，DP1×TP、DP2×TP | 无 cache group、schema、设备映射或 DRAM arena 错误 |
+| 启动 | A2/A3/A5，DP1×TP | 无 cache group、schema、设备映射或 DRAM arena 错误 |
+| DP guard | DSA 开启且 `data_parallel_size=2` | 启动期明确拒绝，不进入推理数据面 |
+| SFA DSA-CP guard | DSA 开启且 `enable_dsa_cp=true` | 启动期明确拒绝，不混用两套 token/slot 布局 |
 | ABI | 直接调用 LIDU/KSC schema | 参数顺序、dtype、shape、原地输出与来源分支一致 |
 | Dense 基线 | 关闭 DSA，固定 prompts/seeds | 与未改 v0.23.0 token 输出一致 |
 | Sparse 精度 | 开启 DSA，6K/10K/12K 或 A5 6K/8K budgets | 逐 token 对比 dense 基线，误差符合 BF16/FP16门限 |
 | 长上下文 | prompt 覆盖 6K、32K、64K 及服务上限 | 无错误 block、越界、提前释放或 DRAM OOM |
 | Speculative guard | 启用 DSA 并传入任意 `--speculative-config` | 启动期明确拒绝，不进入推理数据面 |
 | Continuous batching | 请求加入、完成、preempt、recompute、condense | 无串请求、resident row 泄漏或 block refcount 泄漏 |
-| DP+TP | 多 DP rank并发不同长度请求 | rank资源隔离；TP rank logical mapping 一致 |
+| TP 一致性 | TP rank 并发不同长度请求 | TP rank logical mapping 一致 |
 | A5 稳定性 | 长时间压测和高 miss-rate | 无 Host 同步、OOM、NaN 或地址错误 |
 | 性能 | TTFT、TPOT、吞吐、HBM/DRAM 带宽 | 达到项目验收门限；A5 特别记录组合实现开销 |
 
@@ -343,7 +359,7 @@ bash -n csrc/build_aclnn.sh examples/glm51_dsa_sparse_mtp.sh
 1. A5 当前是接口兼容的 eager 组合实现，不是融合 kernel；功能和性能必须真机确认。
 2. DRAM arena 按 layer、cache type、worker 固定预分配。`hot_cpu_block_multiple`、`max_active_reqs`、模型层数和上下文上限会显著影响内存。
 3. `indexer_mla_block_ratio=3` 是容量规划权重，不代表所有部署都应使用同一值；修改后需要重新测量 HBM/DRAM 和并发上限。
-4. Speculative/MTP、prefix cache、chunked prefill、graph、DCP、PCP、PP 和通用 KV offload 不在本次正确性闭包中。
+4. DP>1、SFA DSA-CP、speculative/MTP、prefix cache、chunked prefill、graph、DCP、PCP、PP 和通用 KV offload 不在本次正确性闭包中。
 5. 当前契约测试是源码级和轻量逻辑测试，不能替代自定义 kernel 编译、设备数值和多机通信验收。
 
 ## 14. 回滚方式
