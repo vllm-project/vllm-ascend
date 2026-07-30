@@ -63,6 +63,7 @@ from vllm_ascend.distributed.parallel_state import (
 from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_sp,
+    enable_sp_by_pass,
     is_vl_model,
     mlp_tp_enable,
     oproj_tp_enable,
@@ -452,6 +453,10 @@ def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
     return any(part in prefix for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
 
 
+def _is_shared_expert_layer(prefix: str) -> bool:
+    return "shared_experts" in prefix or "shared_expert" in prefix or "share_expert" in prefix
+
+
 def _get_column_parallel_op(
     prefix, layer
 ) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | None:
@@ -462,8 +467,7 @@ def _get_column_parallel_op(
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
     if enable_sp() and not _should_skip_sp_for_multimodal_encoder(prefix):
-        # "share_expert" added for Step3p5
-        if "shared_expert" in prefix or "share_expert" in prefix:
+        if _is_shared_expert_layer(prefix):
             return None
         sp_column_prefix = [
             "gate_up_proj",  # first MLP of most LLMs
@@ -491,8 +495,7 @@ def _get_row_parallel_op(
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
     if enable_sp() and not _should_skip_sp_for_multimodal_encoder(prefix):
-        # "share_expert" added for Step3p5
-        if "shared_expert" in prefix or "share_expert" in prefix:
+        if _is_shared_expert_layer(prefix):
             return None
         sp_row_prefixes = [
             "o_proj",  # attn output linear of most LLMs
@@ -509,12 +512,10 @@ def _get_row_parallel_op(
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    if (
-        disable_tp
-        or ("shared_experts" in prefix and shared_expert_dp_enabled())
-        or ("shared_expert" in prefix and shared_expert_dp_enabled())
-        or ("share_expert" in prefix and shared_expert_dp_enabled())  # "share_expert" added for Step3p5
-    ):
+    shared_expert_weights_replicated = _is_shared_expert_layer(prefix) and (
+        shared_expert_dp_enabled() or enable_sp_by_pass()
+    )
+    if disable_tp or shared_expert_weights_replicated:
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp

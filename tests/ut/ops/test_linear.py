@@ -255,9 +255,11 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
     def setUp(self):
         self.mock_layer = MagicMock()
         self.mock_group = MagicMock()
+        self.mock_group.rank_in_group = 1
+        self.mock_group.world_size = 2
         self._patches = [
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
-            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True),
+            patch("vllm_ascend.ops.linear_op.enable_sp_by_pass", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -273,15 +275,27 @@ class TestGetParallelOpShareExpert(unittest.TestCase):
 
     def test_share_expert_disables_tp(self):
         """share_expert / shared_expert / shared_experts → (None, 0, 1)."""
-        for prefix in (
-            "model.layers.0.mlp.share_expert.gate_up_proj",
-            "model.layers.0.mlp.shared_expert.gate_up_proj",
-            "model.layers.0.mlp.shared_experts.gate_up_proj",
+        with patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=True):
+            for prefix in (
+                "model.layers.0.mlp.share_expert.gate_up_proj",
+                "model.layers.0.mlp.shared_expert.gate_up_proj",
+                "model.layers.0.mlp.shared_experts.gate_up_proj",
+            ):
+                custom_op, tp_rank, tp_size = self._call(prefix)
+                self.assertIsNone(custom_op)
+                self.assertEqual(tp_rank, 0)
+                self.assertEqual(tp_size, 1)
+
+    def test_share_expert_keeps_tp_when_only_flashcomm_is_enabled(self):
+        with (
+            patch("vllm_ascend.ops.linear_op.shared_expert_dp_enabled", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_sp", return_value=True),
         ):
-            custom_op, tp_rank, tp_size = self._call(prefix)
-            self.assertIsNone(custom_op)
-            self.assertEqual(tp_rank, 0)
-            self.assertEqual(tp_size, 1)
+            custom_op, tp_rank, tp_size = self._call("model.layers.0.mlp.shared_experts.gate_up_proj")
+
+        self.assertIsNone(custom_op)
+        self.assertEqual(tp_rank, 1)
+        self.assertEqual(tp_size, 2)
 
 
 if __name__ == "__main__":
