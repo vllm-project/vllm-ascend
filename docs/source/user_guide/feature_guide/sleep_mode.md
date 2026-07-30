@@ -53,9 +53,9 @@ When `enable_sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
 
 During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE dispatcher HCCL metadata, restores sleep-mode allocator memory, and recaptures ACL graphs when needed.
 
-:::{note}
-Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory.
-:::
+!!! note
+
+    Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory.
 
 For level 2 sleep, wakeup can be split into two phases:
 
@@ -106,7 +106,6 @@ The following is a simple example of how to use sleep mode.
     from vllm import LLM, SamplingParams
     from vllm.utils.mem_constants import GiB_bytes
 
-
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
@@ -138,9 +137,9 @@ The following is a simple example of how to use sleep mode.
     ```
 
 - Online serving:
-    :::{note}
-    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
-    :::
+    !!! note
+
+            Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
 
     ```bash
     export VLLM_SERVER_DEV_MODE="1"

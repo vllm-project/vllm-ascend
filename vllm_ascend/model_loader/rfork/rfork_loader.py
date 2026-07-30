@@ -107,11 +107,6 @@ def _make_fallback_load_config(load_config: LoadConfig) -> LoadConfig:
     return fallback_load_config
 
 
-def _is_layer_sharding_enabled(vllm_config: VllmConfig) -> bool:
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    return bool(additional_config.get("layer_sharding"))
-
-
 def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
     parallel_config = getattr(vllm_config, "parallel_config", None)
     if bool(getattr(parallel_config, "enable_eplb", False)):
@@ -233,9 +228,7 @@ class RForkModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             need_del = False
             bypass_reason = None
-            if _is_layer_sharding_enabled(vllm_config):
-                bypass_reason = "additional_config.layer_sharding"
-            elif _is_dynamic_eplb_enabled(vllm_config):
+            if _is_dynamic_eplb_enabled(vllm_config):
                 bypass_reason = "dynamic EPLB"
 
             if bypass_reason is not None:

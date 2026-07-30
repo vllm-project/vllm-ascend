@@ -19,8 +19,8 @@ env_common: &env_common
 
 disaggregated_prefill:
   enabled: true
-  prefiller_host_index: [0, 1]
-  decoder_host_index: [2, 3]
+  prefiller_host_index: [0]
+  decoder_host_index: [1]
 
 deployment:
   -
@@ -49,7 +49,6 @@ deployment:
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
-          --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",

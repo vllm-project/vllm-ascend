@@ -26,11 +26,12 @@ from enum import Enum
 class QuantType(Enum):
     """Quantization type enum for MoE schemes."""
 
-    NONE = 0
-    W8A8 = 1
-    W4A8 = 2
-    MXFP8 = 3
-    W4A16 = 4
-    MXFP4 = 5
-    W4A8MXFP = 6
-    W8A8FP8 = 7
+    NONE = 0  # No quantization
+    W8A8 = 1  # W and A are INT8
+    W4A8 = 2  # W is INT4, A is INT8
+    W8A8MXFP = 3  # W and A are MXFP8
+    W4A16 = 4  # W is INT4, A is BF16 or FP16
+    W4A4MXFP = 5  # W and A are MXFP4
+    W4A8MXFP = 6  # W is MXFP4, A is MXFP8
+    W8A8FP = 7  # W and A are FP8
+    W4A16MXFP = 8  # W is MXFP4, A is BF16 or FP16

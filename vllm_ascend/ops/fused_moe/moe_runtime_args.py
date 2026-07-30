@@ -77,7 +77,6 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoERoutingParams,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import vllm_version_is
 
 
 def _build_mxfp_params(
@@ -89,7 +88,7 @@ def _build_mxfp_params(
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
 ) -> _stage_params.MoEMxfpParams | None:
-    if quant_type not in [QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP]:
+    if quant_type not in [QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
         return None
 
     has_explicit_mxfp_args = any(
@@ -147,10 +146,19 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     swiglu_limit: float | None = 0.0,
+    swiglu_alpha: float | None = 1.0,
+    swiglu_beta: float | None = 0.0,
+    lora_context=None,
 ) -> MoEFusedExpertsInput:
-    if not vllm_version_is("0.23.0") and swiglu_limit is None:
+    if swiglu_limit is None:
         swiglu_limit = 0.0
+    if swiglu_alpha is None:
+        swiglu_alpha = 1.0
+    if swiglu_beta is None:
+        swiglu_beta = 0.0
     assert swiglu_limit is not None
+    assert swiglu_alpha is not None
+    assert swiglu_beta is not None
 
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -193,6 +201,9 @@ def build_fused_experts_input(
             is_per_channel_weight=is_per_channel_weight,
         ),
         swiglu_limit=swiglu_limit,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
+        lora_context=lora_context,
     )
 
 
@@ -219,6 +230,8 @@ def build_mlp_compute_input(
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
+    expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
+
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
         group_list=token_dispatch_output.group_list,
@@ -228,12 +241,24 @@ def build_mlp_compute_input(
         weights=fused_experts_input.weights,
         quant=fused_experts_input.quant,
         fusion=fused_experts_input.quant.quant_type
-        in (QuantType.W8A8, QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP, QuantType.W8A8FP8)
+        in (
+            QuantType.W8A8,
+            QuantType.W8A8MXFP,
+            QuantType.W4A4MXFP,
+            QuantType.W4A8MXFP,
+            QuantType.W8A8FP,
+            QuantType.W4A16MXFP,
+        )
         and use_fusion_ops,
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
         swiglu_limit=fused_experts_input.swiglu_limit,
+        swiglu_alpha=fused_experts_input.swiglu_alpha,
+        swiglu_beta=fused_experts_input.swiglu_beta,
+        expanded_row_idx=expanded_row_idx,
+        topk_ids=fused_experts_input.topk_ids,
+        lora_context=fused_experts_input.lora_context,
     )
 
 

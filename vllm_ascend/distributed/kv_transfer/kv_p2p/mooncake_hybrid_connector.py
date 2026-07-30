@@ -408,7 +408,16 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_metadata_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
-        self.executor = ThreadPoolExecutor(max_workers=32)
+        first_kv_cache = next(iter(self.kv_caches.values()))
+        # NPU device selection is thread-local. Executor workers do not inherit
+        # the device selected by the model worker thread and would otherwise
+        # use device 0 on their first NPU operation.
+        kv_cache_device = first_kv_cache[0].device
+        self.executor = ThreadPoolExecutor(
+            max_workers=32,
+            initializer=torch.npu.set_device,
+            initargs=(kv_cache_device,),
+        )
         self.peer_request_queues: defaultdict[tuple[str, int], deque[dict[str, Any]]] = defaultdict(deque)
         self.active_peer_request_handlers: set[tuple[str, int]] = set()
         self.peer_request_queues_lock = threading.Lock()
@@ -889,12 +898,12 @@ class KVCacheRecvingThread(threading.Thread):
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
             # Load cache data into buffers
-            torch_npu.atb.npu_paged_cache_load(
+            torch_npu.npu_gather_pa_kv_cache(
                 k_cache_layer,
                 v_cache_layer,
                 block_table,
                 block_len_tensor,
-                seq_starts=seq_start_tensor,
+                seq_offset=seq_start_tensor,
                 key=k_buffer,
                 value=v_buffer,
             )
@@ -927,8 +936,13 @@ class KVCacheRecvingThread(threading.Thread):
         v_buffer = _transpose_kv_cache_between_head(v_buffer)
 
         # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(
-            key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=k_buffer,
+            value=v_buffer,
+            key_cache=k_cache_layer,
+            value_cache=v_cache_layer,
+            slot_mapping=slot_mapping,
+            cache_mode="Norm",
         )
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):

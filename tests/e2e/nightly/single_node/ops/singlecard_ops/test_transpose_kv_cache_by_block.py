@@ -40,12 +40,12 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
             k_cache_layer = k_caches[layer]
             v_cache_layer = v_caches[layer]
 
-            torch_npu.atb.npu_paged_cache_load(
+            torch_npu.npu_gather_pa_kv_cache(
                 k_cache_layer,
                 v_cache_layer,
                 block_table,
                 block_len_tensor,
-                seq_starts=seq_start_tensor,
+                seq_offset=seq_start_tensor,
                 key=k,
                 value=v,
             )
@@ -58,12 +58,13 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
             v.transpose_(1, 2)
             v = v.contiguous().view(block_len, num_kv_head, -1)
 
-            torch_npu._npu_reshape_and_cache(
+            torch_npu.npu_scatter_pa_kv_cache(
                 key=k,
                 value=v,
                 key_cache=k_cache_layer,
                 value_cache=v_cache_layer,
-                slot_indices=slot_mapping,
+                slot_mapping=slot_mapping,
+                cache_mode="Norm",
             )
         del k, v
 

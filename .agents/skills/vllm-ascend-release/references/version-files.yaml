@@ -27,13 +27,17 @@ files:
       - pattern: "vllm-ascend:vX.X.X"
         replacement: "vllm-ascend:{version}"
 
-  - path: docs/conf.py
-    description: Sphinx documentation configuration
+  - path: mkdocs.yml
+    description: MkDocs configuration; version variables live in the `extra:` block
     updates:
-      - pattern: 'version = "X.X.X"'
-        replacement: 'version = "{version_num}"'
-      - pattern: 'release = "X.X.X"'
-        replacement: 'release = "{version_num}"'
+      - pattern: 'vllm_version: vX.X.X'
+        replacement: 'vllm_version: {version}'
+      - pattern: 'vllm_ascend_version: vX.X.X'
+        replacement: 'vllm_ascend_version: {version}'
+      - pattern: 'pip_vllm_version: X.X.X'
+        replacement: 'pip_vllm_version: {version_num}'
+      - pattern: 'pip_vllm_ascend_version: X.X.X'
+        replacement: 'pip_vllm_ascend_version: {version_num}'
 
   - path: docs/source/faqs.md
     description: FAQs page with feedback issue link
@@ -78,7 +82,7 @@ files:
 # Update order
 # Files should be updated in this order to ensure consistency
 update_order:
-  1: docs/conf.py
+  1: mkdocs.yml
   2: README.md
   3: README.zh.md
   4: docs/source/faqs.md
@@ -92,6 +96,6 @@ update_order:
 # After updates, verify these conditions
 validation:
   - "grep -r 'X.X.X' docs/ README* | grep -v node_modules  # Check for consistent version"
-  - "grep 'version = ' docs/conf.py  # Verify version in docs config"
+  - "grep 'vllm_ascend_version' mkdocs.yml  # Verify version in mkdocs config"
   - "grep 'VLLM_VERSION' .github/workflows/*.yml  # Check CI workflow versions"
   - "head -50 docs/source/user_guide/release_notes.md  # Verify release notes added"

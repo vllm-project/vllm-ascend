@@ -18,9 +18,8 @@ Download to shared directory such as `/mnt/weight/`
 
 ### Run with Docker
 
-```{code-block} bash
-   :substitutions:
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export NAME=vllm-ascend
 
 docker run --rm \
@@ -187,5 +186,4 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long seque
     | ----------------------------- | ------------------------- |
     |  CPP2TP8   | Input throughput: 22424 tps/card |
     |  DP2TP8   | Input throughput: 16150 tps/card |
-    |  PCP2TP8   | Input throughput: 18197 tps/card |
     |  TP16   | Input throughput: 18875 tps/card |

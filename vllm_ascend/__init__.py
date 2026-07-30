@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import vllm_ascend.logger  # noqa: F401
-
 _GLOBAL_PATCH_APPLIED = False
 
 
@@ -72,6 +70,14 @@ def register_service_profiling():
 
 
 def register_model():
+    from vllm_ascend.patch.hunyuan_vl_processor_compat import (
+        install_hunyuan_vl_processor_compat,
+    )
+
+    install_hunyuan_vl_processor_compat()
     from .models import register_model
 
     register_model()
+
+
+import vllm_ascend.logger  # noqa: E402, F401

@@ -32,16 +32,6 @@ def cal_grid_and_block_size(batch_size: int):
 
 
 @triton.jit(do_not_specialize=["max_spec_len"])
-def bonus_renew_1(
-    bonus_token_ids_ptr,
-    position,
-    output_token_ids_ptr,
-):
-    bonus_token_id = tl.load(bonus_token_ids_ptr + position)
-    tl.store(output_token_ids_ptr + position * 2 + 1, bonus_token_id)
-
-
-@triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_spec_len_1_triton(
     output_token_ids_ptr,  # [batch_size, 2]
     draft_token_ids_ptr,  # [num_tokens]
@@ -56,21 +46,12 @@ def rejection_greedy_sample_spec_len_1_triton(
 
     draft_token_id = tl.load(draft_token_ids_ptr + offset, mask)
     target_argmax_id = tl.load(target_argmax_ptr + offset, mask)
+    bonus_token_id = tl.load(bonus_token_ids_ptr + offset, mask)
+
     tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
 
-    # Add validity check for pos within the loop
-    for pos in tl.range(0, BLOCK_SIZE):
-        # Calculate the global position of the current token
-        global_pos = block_idx * BLOCK_SIZE + pos
-        if global_pos < vec_len:
-            draft_token_id1 = get_element(draft_token_id, (pos,))
-            target_argmax1 = get_element(target_argmax_id, (pos,))
-            if draft_token_id1 == target_argmax1:
-                bonus_renew_1(
-                    bonus_token_ids_ptr,
-                    global_pos,
-                    output_token_ids_ptr,
-                )
+    accept_mask = (draft_token_id == target_argmax_id) & mask
+    tl.store(output_token_ids_ptr + offset * 2 + 1, bonus_token_id, accept_mask)
 
 
 @triton.jit(do_not_specialize=["max_spec_len"])

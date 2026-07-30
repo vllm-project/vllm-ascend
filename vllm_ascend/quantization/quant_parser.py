@@ -28,6 +28,12 @@ class QuantTypeMapping:
             "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
             "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
         },
+        "W4A16_MXFP4": {
+            "act_quant_type": None,
+            "weight_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
+            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "per_token_scale_dtype": None,
+        },
     }
 
     @staticmethod
@@ -53,8 +59,8 @@ def parse_mxfp_quant_params(**kwargs):
 
 
 def parse_quant_moe_down_proj_params(rollback_quant_type, parsed_round_mode):
-    if rollback_quant_type == "W4A4_MXFP4":
-        ensure_mxfp4_dtype_available("W4A4_MXFP4 quantization")
+    if rollback_quant_type in ("W4A4_MXFP4", "W4A16_MXFP4"):
+        ensure_mxfp4_dtype_available(f"{rollback_quant_type} quantization")
     elif rollback_quant_type in ("W8A8_MXFP8", "W4A8_MXFP"):
         ensure_mxfp8_scale_dtype_available(f"{rollback_quant_type} quantization")
 

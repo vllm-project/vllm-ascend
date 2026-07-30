@@ -16,6 +16,7 @@
 #
 
 import unittest
+from dataclasses import dataclass, replace
 from unittest.mock import patch
 
 # isort: off
@@ -27,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # isort: on
 
@@ -54,6 +56,48 @@ def _sliding_spec(block_size: int, sliding_window: int) -> SlidingWindowSpec:
     )
 
 
+@dataclass(frozen=True)
+class _FakeCompressedSpec:
+    block_size: int
+    compress_ratio: int
+
+    def copy_with_new_block_size(self, block_size):
+        return replace(self, block_size=block_size)
+
+
+class _FakeCompressedManager:
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        **kwargs,
+    ):
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
+        if not vllm_version_is("0.25.1") and logical_block_size != block_pool.hash_block_size:
+            scale_factor = logical_block_size // block_pool.hash_block_size
+            block_hashes = [
+                block_hashes[index + scale_factor - 1]
+                for index in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+            ]
+        max_blocks = max_length // logical_block_size
+        for block_hash in list(block_hashes)[:max_blocks]:
+            cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
+            if not cached:
+                break
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+        if vllm_version_is("0.25.1"):
+            return computed
+        return computed, len(computed[0]) * logical_block_size
+
+
 class TestAscendStoreCoordinator(unittest.TestCase):
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
@@ -69,9 +113,34 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool({(0, bytes(grouped_hash))}),
+            ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
         )
 
+        self.assertEqual(hit_length, 128 * 128)
+
+    def test_compressed_spec_does_not_apply_ratio_twice(self):
+        block_hashes = _hashes(128)
+        grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            return_value=_FakeCompressedManager,
+        ):
+            coord = AscendStoreCoordinator(
+                [KVCacheGroupSpec(["layer.0"], _FakeCompressedSpec(block_size=128, compress_ratio=128))],
+                scheduler_block_size=128 * 128,
+                hash_block_size=128,
+                group_block_sizes=[128],
+                group_cache_families=["c128"],
+            )
+
+            _, hit_length = coord.find_longest_cache_hit(
+                block_hashes,
+                128 * 128,
+                ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
+            )
+
+        self.assertEqual(coord.group_effective_specs[0].compress_ratio, 1)
         self.assertEqual(hit_length, 128 * 128)
 
     def test_missing_required_group_returns_zero(self):
@@ -91,7 +160,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         _, hit_length = coord.find_longest_cache_hit(
             block_hashes,
             128 * 128,
-            ExternalCachedBlockPool(c1_exists),
+            ExternalCachedBlockPool(128, c1_exists),
         )
 
         self.assertEqual(hit_length, 0)
@@ -112,6 +181,52 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.store_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
+
+    def test_lookup_mask_uses_reachability_without_retention(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            retention_interval=256,
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, False, False, True],
+        ) as reachable:
+            masks = coord.lookup_mask(512)
+
+        self.assertEqual(masks, ([False, False, False, True],))
+        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
+
+    def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
+        calls = []
+
+        def fake_reachable_block_mask(*args, **kwargs):
+            calls.append(kwargs["use_eagle"])
+            return [True, False, True, False]
+
+        shared_spec = _sliding_spec(block_size=128, sliding_window=256)
+        coord = AscendStoreCoordinator(
+            [
+                KVCacheGroupSpec(["layer.0"], shared_spec),
+                KVCacheGroupSpec(["layer.mtp"], shared_spec, is_eagle_group=True),
+            ],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128, 128],
+            group_cache_families=["c1", "c1"],
+        )
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            side_effect=fake_reachable_block_mask,
+        ):
+            masks = coord.store_mask(512)
+
+        self.assertEqual(calls, [True, True])
+        self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
 
     def test_compressed_masks_stay_unmasked(self):
         coord = AscendStoreCoordinator(

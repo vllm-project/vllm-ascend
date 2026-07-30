@@ -21,6 +21,7 @@ import os
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import is_forward_context_available
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -241,8 +242,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        is_draft_model = _EXTRA_CTX.is_draft_model
-        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
+        is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
+        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
             positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
         return torch.ops.vllm.npu_rotary_embedding(
@@ -576,14 +577,22 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
         head_dim = x.shape[-1]
-        # cos, sin: [seq_len, head_dim // 2]
+        rotary_dim = cos.shape[-1] * 2
+        if rotary_dim > head_dim:
+            raise ValueError(f"rotary_dim ({rotary_dim}) must not exceed head_dim ({head_dim})")
+
+        # cos, sin: [seq_len, rotary_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
-        # cos, sin: [1, seq_len, 1, head_dim]
-        cos = cos.reshape(1, -1, 1, head_dim)
-        sin = sin.reshape(1, -1, 1, head_dim)
+        # cos, sin: [1, seq_len, 1, rotary_dim]
+        cos = cos.reshape(1, -1, 1, rotary_dim)
+        sin = sin.reshape(1, -1, 1, rotary_dim)
 
-        output = torch_npu.npu_rotary_mul(x, cos, sin)
+        if rotary_dim == head_dim:
+            output = torch_npu.npu_rotary_mul(x, cos, sin)
+        else:
+            x_rot = torch_npu.npu_rotary_mul(x[..., :rotary_dim], cos, sin)
+            output = torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
 
         output = self._post_process(output, origin_shape, origin_dtype)
 

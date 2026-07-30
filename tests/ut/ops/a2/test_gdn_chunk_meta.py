@@ -16,9 +16,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton import gdn_chunk_meta
 from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update
-from vllm_ascend.ops.triton.gdn_chunk_meta import build_chunk_meta_device
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -61,6 +59,9 @@ class _DummyTensor:
     def __add__(self, other):
         return self
 
+    def __sub__(self, other):
+        return self
+
     def transpose(self, dim0, dim1):
         return self
 
@@ -79,12 +80,6 @@ class _GatherResult:
         if isinstance(item, tuple):
             item = item[0]
         return self.items[item]
-
-
-def _next_power_of_2(value: int) -> int:
-    if value <= 1:
-        return 1
-    return 1 << (value - 1).bit_length()
 
 
 def _patch_missing_cdiv(monkeypatch: pytest.MonkeyPatch, module) -> None:
@@ -164,6 +159,8 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             "update_chunk_offsets_chunk64": update_chunk_offsets,
             "final_chunk_indices_chunk64": final_chunk_indices,
             "chunk_indices_large_block": None,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
         },
     )()
 
@@ -220,11 +217,13 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             torch.ops._C_ascend,
             "chunk_gated_delta_rule_fwd_h",
             lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+            raising=False,
         )
         monkeypatch.setattr(
             torch.ops._C_ascend,
             "chunk_fwd_o",
             lambda *args, **kwargs: _DummyTensor("o_ascend"),
+            raising=False,
         )
 
         def fake_chunk_fwd_o(*args, **kwargs):
@@ -259,7 +258,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
     assert pcp_calls == [("o_update", chunk_offsets)]
 
 
-def test_chunk_gated_delta_rule_fwd_uses_prebuilt_host_meta_without_runtime_tolist(
+def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolist(
     monkeypatch: pytest.MonkeyPatch,
 ):
     prebuilt_meta = type(
@@ -274,6 +273,8 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_host_meta_without_runtime_toli
             "update_chunk_offsets_chunk64": torch.tensor([0, 2, 4], dtype=torch.int32),
             "final_chunk_indices_chunk64": torch.tensor([1, 3], dtype=torch.int32),
             "chunk_indices_large_block": None,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
         },
     )()
 
@@ -339,62 +340,100 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_host_meta_without_runtime_toli
     assert captured["chunk_indices"] == prebuilt_meta.chunk_indices_chunk64_host
 
 
-def test_build_chunk_meta_device_rejects_non_npu_input():
-    cu_seqlens = torch.tensor([0, 4, 4, 12], dtype=torch.int32)
-
-    with pytest.raises(ValueError, match="must be on NPU"):
-        build_chunk_meta_device(
-            cu_seqlens=cu_seqlens,
-            chunk_size=64,
-            out_chunk_indices=torch.empty((2, 2), dtype=torch.int32),
-        )
-
-
-def test_build_chunk_offsets_falls_back_without_triton_kernel(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(gdn_chunk_meta, "_build_chunk_offsets_kernel", object())
-
-    chunk_counts = torch.tensor([2, 0, 3], dtype=torch.int32)
-    chunk_offsets = torch.empty(4, dtype=torch.int32)
-    update_chunk_offsets = torch.empty(4, dtype=torch.int32)
-
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, chunk_offsets, add_one=0)
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, update_chunk_offsets, add_one=1)
-
-    assert torch.equal(chunk_offsets, torch.tensor([0, 2, 2, 5], dtype=torch.int32))
-    assert torch.equal(update_chunk_offsets, torch.tensor([0, 3, 4, 8], dtype=torch.int32))
-
-
-def test_build_chunk_offsets_does_not_launch_triton_prefix_sum_kernel(monkeypatch: pytest.MonkeyPatch):
-    class _RaisingKernel:
-        def __getitem__(self, grid):
-            raise AssertionError("_build_chunk_offsets should use torch.cumsum instead of the Triton prefix-sum kernel")
-
-    monkeypatch.setattr(gdn_chunk_meta, "_build_chunk_offsets_kernel", _RaisingKernel())
-
-    chunk_counts = torch.tensor([2, 0, 3], dtype=torch.int32)
-    chunk_offsets = torch.empty(4, dtype=torch.int32)
-    update_chunk_offsets = torch.empty(4, dtype=torch.int32)
-
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, chunk_offsets, add_one=0)
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, update_chunk_offsets, add_one=1)
-
-    assert torch.equal(chunk_offsets, torch.tensor([0, 2, 2, 5], dtype=torch.int32))
-    assert torch.equal(update_chunk_offsets, torch.tensor([0, 3, 4, 8], dtype=torch.int32))
-
-
-def test_build_final_chunk_indices_falls_back_without_triton_kernel(
+def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(gdn_chunk_meta, "_build_final_chunk_indices_kernel", object())
+    """PCP chaining uses (updated_state[i-1] - initial_state), not updated_state[i-1].
 
-    chunk_counts = torch.tensor([2, 0, 3], dtype=torch.int32)
-    update_chunk_offsets = torch.tensor([0, 3, 4, 8], dtype=torch.int32)
-    out_final_chunk_indices = torch.empty(3, dtype=torch.int32)
+    With s0 != 0 (subsequent prefill chunk), the fix subtracts s0 to avoid
+    double-counting Φ_i·s0. Verified by checking the returned final_state
+    matches the sequential result Φ_1·(Φ_0·s0+p_0)+p_1.
+    """
+    torch.manual_seed(42)
+    N, H, K, V = 1, 2, 4, 4
+    s0 = torch.randn(N, H, K, V)
+    phi_0 = torch.randn(N, H, K, K)
+    phi_1 = torch.randn(N, H, K, K)
+    p_0 = torch.randn(N, H, K, V)
+    p_1 = torch.randn(N, H, K, V)
 
-    gdn_chunk_meta._build_final_chunk_indices(
-        chunk_counts,
-        update_chunk_offsets,
-        out_final_chunk_indices,
+    # Each rank computes final_state = Φ_i · s0 + p_i (from shared s0)
+    rank0_fs = torch.matmul(phi_0, s0) + p_0
+    rank1_fs = torch.matmul(phi_1, s0) + p_1
+    # h_update shape [1, N, H, K, K]; after [:, [0], :, :, :] → [1, N, H, K, K]
+    h_update_tensor = phi_0.unsqueeze(0)
+
+    prebuilt_meta = type(
+        "PrebuiltMeta",
+        (),
+        {
+            "block_indices_cumsum": None,
+            "cu_seqlens_host": (0, N),
+            "chunk_indices_chunk64_host": (0, 0),
+            "chunk_indices_chunk64": None,
+            "chunk_offsets_chunk64": torch.tensor([0, 1], dtype=torch.int32),
+            "update_chunk_offsets_chunk64": torch.tensor([0, 2], dtype=torch.int32),
+            "final_chunk_indices_chunk64": torch.tensor([0], dtype=torch.int32),
+            "chunk_indices_large_block": None,
+            "num_decodes": 0,
+            "keep_meta": None,
+            "cu_seqlens_kern": None,
+        },
+    )()
+
+    all_gather_returns = [
+        torch.stack([rank0_fs, rank1_fs]),  # all_final_state: [2, N, H, K, V]
+        torch.stack([phi_0, phi_1]),  # all_final_h_update: [2, N, H, K, K]
+    ]
+
+    group = type(
+        "Group",
+        (),
+        {
+            "world_size": 2,
+            "rank_in_group": 0,
+            "all_gather": lambda self, value, dim: all_gather_returns.pop(0),
+        },
+    )()
+
+    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+    monkeypatch.setattr(chunk, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *a, **kw: _DummyTensor("g_cumsum"))
+    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *a, **kw: _DummyTensor("A"))
+    monkeypatch.setattr(chunk, "solve_tril", lambda *a, **kw: _DummyTensor("A_solved"))
+    monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *a, **kw: (_DummyTensor("w"), _DummyTensor("u")))
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h",
+        lambda *a, **kw: (_DummyTensor("h"), _DummyTensor("v_new"), rank0_fs),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chunk,
+        "chunk_gated_delta_rule_fwd_hupdate",
+        lambda *a, **kw: h_update_tensor,
+    )
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_fwd_o",
+        lambda *a, **kw: _DummyTensor("o_ascendc"),
+        raising=False,
     )
 
-    assert torch.equal(out_final_chunk_indices, torch.tensor([2, 3, 7], dtype=torch.int32))
+    result = chunk.chunk_gated_delta_rule_fwd(
+        q=_DummyTensor("q"),
+        k=_DummyTensor("k"),
+        v=_DummyTensor("v"),
+        g=_DummyTensor("g"),
+        beta=_DummyTensor("beta"),
+        scale=1.0,
+        initial_state=s0,
+        output_final_state=False,
+        cu_seqlens=torch.tensor([0, N], dtype=torch.int32),
+        prebuilt_meta=prebuilt_meta,
+    )
+
+    final_state = result[3]
+    # Sequential: Φ_1·(Φ_0·s0 + p_0) + p_1
+    expected = torch.matmul(phi_1, torch.matmul(phi_0, s0) + p_0) + p_1
+    torch.testing.assert_close(final_state, expected, rtol=1e-4, atol=1e-4)

@@ -36,13 +36,9 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    # On Ascend/NPU CI runners without physical hardware, torch.zeros(...,
-    # pin_memory=True) triggers aclInit and fails.  Patch
-    # is_pin_memory_available so vllm's ExtractHiddenStatesProposer.__init__
-    # creates CpuGpuBuffer with pin_memory=False.
     with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
-        return_value=False,
+        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
+        False,
     ):
         yield
 
@@ -133,7 +129,6 @@ def test_proposer_initialization():
     device = torch.device("cpu")
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -158,7 +153,6 @@ def test_dummy_run_basic():
     device = torch.device("cpu")
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -192,7 +186,6 @@ def test_dummy_run_syncs_metadata_across_dp_as_draft_model():
     device = torch.device("cpu")
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -236,7 +229,6 @@ def test_prepare_next_token_ids_padded():
 
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
@@ -327,7 +319,6 @@ def _build_proposer_for_padding_test(data_parallel_size: int = 1):
 
     runner = MagicMock()
     runner.pin_memory = False
-    runner.pcp_size = 1
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):

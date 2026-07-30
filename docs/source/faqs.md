@@ -2,6 +2,7 @@
 
 ## Version Specific FAQs
 
+- [[v0.23.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12238)
 - [[v0.22.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/10593)
 - [[v0.21.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9970)
 - [[v0.20.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9586)
@@ -48,10 +49,9 @@ If you want to use container image for offline environments (no internet connect
 
 **Exporting Docker images:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Pull the image on a machine with internet access
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker pull quay.io/ascend/vllm-ascend:$TAG
 
 # Export the image to a tar file and compress to tar.gz
@@ -60,10 +60,9 @@ docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
 
 **Importing Docker images in environment without internet access:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Transfer the tar/tar.gz file to the offline environment and load it
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker load -i vllm-ascend-$TAG.tar.gz
 
 # Verify the image is loaded

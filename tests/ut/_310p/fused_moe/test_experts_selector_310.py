@@ -52,3 +52,34 @@ class TestExpertsSelector310:
 
         assert topk_weights.shape == (8, 2)
         assert topk_ids.shape == (8, 2)
+
+    def test_select_experts_chunks_large_token_batch(self):
+        num_tokens = 2050
+        hidden_states = torch.randn(num_tokens, 16)
+        router_logits = torch.randn(num_tokens, 8)
+
+        def mock_gating(logits, k):
+            return (
+                torch.ones(logits.shape[0], k),
+                torch.zeros(logits.shape[0], k, dtype=torch.int32),
+                None,
+            )
+
+        with patch(
+            "torch_npu.npu_moe_gating_top_k_softmax",
+            side_effect=mock_gating,
+        ) as mock_npu:
+            topk_weights, topk_ids = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=2,
+                use_grouped_topk=False,
+                renormalize=True,
+                custom_routing_function=None,
+                scoring_func="softmax",
+            )
+
+        assert [call.args[0].shape[0] for call in mock_npu.call_args_list] == [1024, 1024, 2]
+        assert topk_weights.shape == (num_tokens, 2)
+        assert topk_ids.shape == (num_tokens, 2)
+        assert torch.all(topk_weights == 0.5)

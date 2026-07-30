@@ -61,8 +61,4 @@ def test_ngram_npu_async_acceptance(
     golden = [0.50, 0.30, 0.20]
 
     match = all(abs(a - b) < 1.0 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

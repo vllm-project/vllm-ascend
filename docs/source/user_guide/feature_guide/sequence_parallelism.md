@@ -41,19 +41,19 @@ FC1 is a unique optimization in vllm-ascend, currently implemented based on Cust
 
 ### Without Quantization
 
-|                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
-| -------------------- | ---------- | -------- | -------------- | ------------ |
-| Sequence Parallelism | graph      | graph    | x              | x            |
-| Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
+|                      |  VL + Dense | VL + MoE    | non-VL + Dense | non-VL + MoE |
+| -------------------- | ----------- | ----------- | -------------- | ------------ |
+| Sequence Parallelism | x           | x           | x              | x            |
+| Flash Comm V1        | eager/graph | eager/graph | eager/graph    | eager/graph  |
 
 ### With Quantization
 
 SP currently does not support quantization and is under adaptation.
 
-|                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
-| -------------------- | ---------- | -------- | -------------- | ------------ |
-| Sequence Parallelism | x          | x        | x              | x            |
-| Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
+|                      |  VL + Dense |   VL + MoE  | non-VL + Dense | non-VL + MoE |
+| -------------------- | ----------- | ----------- | -------------- | ------------ |
+| Sequence Parallelism | x           | x           | x              | x            |
+| Flash Comm V1        | eager/graph | eager/graph | eager/graph    | eager/graph  |
 
 ## Pass Design
 
@@ -82,7 +82,7 @@ After `SequenceParallelismPass` applies, the MoE model computation graph looks l
 
 **Overview**
 
-1. **Postponing allgather**: Under SP, `residual` is chunked by tensor parallelism. This causes a shape mismatch between hidden states and residual in the next layer's layernorm: hidden states are gathered (full sequence) while residual remains chunked. The fix is to move `all_gather` to *after* layernorm so that layernorm operates on consistent shapes per rank. `MiddleLayerAllgatherAddRMSNormPattern`, `LastLayerAllgatherRMSNormPattern`, and `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` are designed for this purpose, each handling different layer and structure variants (see the table below).
+1. **Postponing allgather**: Under SP, `residual` is chunked by tensor parallelism. This causes a shape mismatch between hidden states and residual in the next layer's layernorm: hidden states are gathered (full sequence) while residual remains chunked. The fix is to move `all_gather` to after layernorm so that layernorm operates on consistent shapes per rank. `MiddleLayerAllgatherAddRMSNormPattern`, `LastLayerAllgatherRMSNormPattern`, and `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` are designed for this purpose, each handling different layer and structure variants (see the table below).
 
 2. **AllGatherChunkNoOp cleanup**: When MoE SP is enabled, vllm introduces a `sequence_parallel_chunk` op (corresponding to `sp_chunk` in the diagram). Together with the preceding `all_gather`, the pair forms a redundant no-op (all_gather gathers, then chunk re-splits). `AllGatherChunkNoOpPattern` replaces this pair with identity to eliminate the redundant communication and computation.
 

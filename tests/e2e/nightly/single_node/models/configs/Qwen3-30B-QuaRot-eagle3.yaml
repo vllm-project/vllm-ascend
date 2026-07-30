@@ -8,7 +8,7 @@ test_cases:
     envs:
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       SERVER_PORT: "DEFAULT_PORT"
-      HCCL_BUFFSIZE: "512"
+      HCCL_BUFFSIZE: "768"
     server_cmd:
       - "--enforce-eager"
       - "--no-enable-prefix-caching"
