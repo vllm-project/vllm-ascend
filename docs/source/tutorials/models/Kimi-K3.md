@@ -26,8 +26,6 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 | 16 × Atlas 800 A3 (64G × 16) | Eight Prefill nodes and eight Decode nodes | DP8/TP16/PP1 on each side |
 | 8 × Atlas 800 A2 (64G × 8) | Mixed Prefill/Decode deployment | DP8/TP8/EP64 |
 
-The local implementation supports Kimi K3 ModelSlim quantization through `--quantization ascend`. For a checkpoint that already contains a `compressed-tensors` quantization configuration, omit `--quantization ascend` and let vLLM discover the quantization method from the checkpoint.
-
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -192,7 +190,6 @@ vllm serve $MODEL_PATH \
     --port $PORT \
     --allowed-local-media-path / \
     --trust-remote-code \
-    --quantization ascend \
     --tensor-parallel-size 16 \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
@@ -201,7 +198,7 @@ vllm serve $MODEL_PATH \
     --enable-prefix-caching \
     --enable-expert-parallel \
     --max-num-seqs 16 \
-    --max-model-len 131027 \
+    --max-model-len 131072 \
     --max-num-batched-tokens 24576 \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -247,7 +244,6 @@ vllm serve $MODEL_PATH \
     --port $PORT \
     --allowed-local-media-path / \
     --trust-remote-code \
-    --quantization ascend \
     --tensor-parallel-size 16 \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
@@ -257,7 +253,7 @@ vllm serve $MODEL_PATH \
     --enable-prefix-caching \
     --enable-expert-parallel \
     --max-num-seqs 16 \
-    --max-model-len 131027 \
+    --max-model-len 131072 \
     --max-num-batched-tokens 24576 \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -294,7 +290,7 @@ Key deployment parameters:
 | `--data-parallel-start-rank` | Selects the global starting DP rank for a worker node. |
 | `--data-parallel-rpc-port` | Must be identical and reachable on every node. |
 | `--enable-expert-parallel` | Enables expert parallelism for the MoE layers. |
-| `--max-model-len 131027` | Sets the maximum combined input and output length. |
+| `--max-model-len 131072` | Sets the maximum combined input and output length. |
 | `--max-num-seqs 16` | Sets the maximum active sequences for each DP group. |
 | `--max-num-batched-tokens 24576` | Controls the scheduler token budget. |
 | `--enable-prefix-caching` | Enables automatic prefix caching. |
@@ -305,10 +301,10 @@ Key deployment parameters:
 :::{note}
 Serving a 1M-token context requires at least eight Atlas 800 A3 (64G × 16) nodes. Change the following parameters on every node:
 
-| Parameter | Four-node default | 1M context |
+| Parameter | Four-node default | Eight-node (1M context) |
 | --- | --- | --- |
 | `--data-parallel-size` | `4` | `8` |
-| `--max-model-len` | `131027` | `1048576` |
+| `--max-model-len` | `131072` | `1048576` |
 | `--max-num-batched-tokens` | `24576` | `8192` |
 
 Run the worker command on Nodes 1 through 7 and assign each node a unique `--data-parallel-start-rank` from `1` through `7`.
@@ -414,7 +410,6 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --enforce-eager \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
-    --quantization ascend \
     --mm-encoder-tp-mode data \
     --skip-mm-profiling \
     --safetensors_load_strategy prefetch \
@@ -501,7 +496,6 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --max-num-seqs 16 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
-    --quantization ascend \
     --mm-encoder-tp-mode data \
     --skip-mm-profiling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -625,7 +619,6 @@ vllm serve $MODEL_PATH \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --dtype bfloat16 \
-    --quantization ascend \
     --max-model-len 262144 \
     --gpu-memory-utilization 0.90 \
     --enable-prefix-caching \
@@ -693,7 +686,6 @@ vllm serve $MODEL_PATH \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --dtype bfloat16 \
-    --quantization ascend \
     --max-model-len 262144 \
     --gpu-memory-utilization 0.90 \
     --enable-prefix-caching \
@@ -884,7 +876,7 @@ ToolCall uses the JSONL data in `toolcall_benchmark/`. For the long-context vali
 | Parameter | Standard mixed deployment | ToolCall validation |
 | --- | ---: | ---: |
 | `--max-num-seqs` | 16 | 4 |
-| `--max-model-len` | 131027 | 286720 |
+| `--max-model-len` | 131072 | 286720 |
 | `--max-num-batched-tokens` | 24576 | 8192 |
 | `--gpu-memory-utilization` | 0.9 | 0.97 |
 
@@ -939,7 +931,7 @@ Change these values from the standard Section 5.1.1 deployment on all four nodes
 
 | Parameter | Standard deployment | Performance test |
 | --- | ---: | ---: |
-| `--max-model-len` | 131027 | 250000 |
+| `--max-model-len` | 131072 | 250000 |
 | `--max-num-batched-tokens` | 24576 | 8192 |
 | `--gpu-memory-utilization` | 0.9 | 0.95 |
 
@@ -951,7 +943,6 @@ vllm serve <KIMI_K3_MODEL_PATH> \
     --port <SERVICE_PORT> \
     --allowed-local-media-path / \
     --trust-remote-code \
-    --quantization ascend \
     --tensor-parallel-size 16 \
     --data-parallel-size 4 \
     --data-parallel-size-local 1 \
@@ -1066,10 +1057,6 @@ For common environment, installation, and general parameter issues, refer to the
 - **Q: Which server options are required for Kimi K3 reasoning and tool calling?**
 
   A: Configure `--enable-auto-tool-choice`, `--reasoning-parser kimi_k3`, and `--tool-call-parser kimi_k3` together.
-
-- **Q: When should `--quantization ascend` be used?**
-
-  A: Use it for ModelSlim native quantized weights. If the checkpoint declares a `compressed-tensors` configuration, omit the option and allow vLLM to load the checkpoint configuration.
 
 - **Q: How should TP size be selected?**
 
