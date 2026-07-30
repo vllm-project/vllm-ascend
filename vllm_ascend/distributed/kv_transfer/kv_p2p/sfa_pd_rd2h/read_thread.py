@@ -54,7 +54,7 @@ def _coalesce_desc(
     if contiguous.all():
         return peer[:1], local[:1], np.array([int(length.sum())], dtype=np.int64)
     run_start = np.concatenate(([0], np.nonzero(~contiguous)[0] + 1))
-    run_end = np.append(run_start[1:] - 1, n - 1)
+    run_end: np.ndarray = np.append(run_start[1:] - 1, n - 1)
     cum = np.cumsum(length)
     merged_len = cum[run_end] - cum[run_start] + length[run_start]
     return peer[run_start], local[run_start], merged_len
@@ -124,12 +124,20 @@ class MembPullReadThread(threading.Thread):
         handshake_port = self.side_channel_port + self.tp_rank
         path = make_zmq_path("tcp", self._host, handshake_port)
         logger.info("MembPull read thread listening on: %s", path)
-        ctx = zmq.Context()
+        ctx = zmq.Context()  # type: ignore[attr-defined]
         sock = None
         try:
             try:
-                sock = make_zmq_socket(ctx=ctx, path=path, socket_type=zmq.ROUTER, bind=True)
-                sock.setsockopt(zmq.RCVTIMEO, READ_THREAD_POLL_TIMEOUT_MS)
+                sock = make_zmq_socket(
+                    ctx=ctx,
+                    path=path,
+                    socket_type=zmq.ROUTER,  # type: ignore[attr-defined]
+                    bind=True,
+                )
+                sock.setsockopt(
+                    zmq.RCVTIMEO,  # type: ignore[attr-defined]
+                    READ_THREAD_POLL_TIMEOUT_MS,
+                )
             except BaseException as error:
                 self.startup_error = error
                 logger.error("MembPull read thread failed to start on %s: %s", path, error)
@@ -151,9 +159,12 @@ class MembPullReadThread(threading.Thread):
                     msg_type = msg[0]
 
                     if msg_type == MF_META:
-                        self._p_session = msg[1]
+                        p_session = msg[1]
+                        if not isinstance(p_session, str):
+                            raise ValueError("MF_META session must be a string")
+                        self._p_session = p_session
                         self._p_layer_meta = msgspec.msgpack.decode(msg[2])
-                        self._p_sessions[identity] = self._p_session
+                        self._p_sessions[identity] = p_session
                         self._p_layer_metas[identity] = self._p_layer_meta
                         logger.info(
                             "Received MF_META: P session=%s, %d layers", self._p_session, len(self._p_layer_meta)
@@ -234,8 +245,8 @@ class MembPullReadThread(threading.Thread):
                                 len(read_reqs),
                                 e,
                             )
-                            payload = encoder.encode((READ_FAILED, layer_idx, str(e)))
-                            sock.send_multipart((identity, b"", payload))
+                            failure_payload = encoder.encode((READ_FAILED, layer_idx, str(e)))
+                            sock.send_multipart((identity, b"", failure_payload))
                             failed_ids = {entry[0] for entry in read_reqs}
                             failed_ids.update(done_ext_ids)
                             with self._lock:
@@ -246,7 +257,7 @@ class MembPullReadThread(threading.Thread):
 
                     else:
                         logger.error("MembPull got unexpected message %s", msg)
-                except zmq.Again:
+                except zmq.Again:  # type: ignore[attr-defined]
                     continue
                 except Exception as e:
                     logger.error("MembPull exception: %s: %s", type(e), e)
@@ -322,6 +333,7 @@ class MembPullReadThread(threading.Thread):
             )
         indexer = None
         if p_has_indexer:
+            assert d_indexer is not None
             indexer_pos = main_tensor_count
             if len(p_base_addrs) <= indexer_pos:
                 raise RuntimeError(
@@ -455,8 +467,8 @@ class MembPullReadThread(threading.Thread):
         if n_main:
             p_main = np.array(p_main_block_ids, dtype=np.int64)
             d_main = np.array(d_main_ids, dtype=np.int64)
-            len_k = np.full(n_main, p_k_len, dtype=np.int64)
-            len_v = np.full(n_main, p_v_len, dtype=np.int64)
+            len_k: np.ndarray = np.full(n_main, p_k_len, dtype=np.int64)
+            len_v: np.ndarray = np.full(n_main, p_v_len, dtype=np.int64)
             cp, cl, coalesced_lengths = _coalesce_desc(
                 p_k_base + p_main * p_k_len,
                 layer["k_cpu_ptr"] + d_main * p_k_len,
@@ -670,6 +682,7 @@ class MembPullReadThread(threading.Thread):
             all_peer_ptrs.extend(peer_ptrs)
             all_lengths.extend(lengths)
             if want_info:
+                assert read_info is not None
                 read_infos.append(read_info)
 
         if not all_local_ptrs:

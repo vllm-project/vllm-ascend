@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     READ_READY_BATCH,
     LayerMetadata,
     SendTask,
+    SfaPDProducerReqMeta,
     infer_sfa_component_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
@@ -44,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (  
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (  # noqa: E402
     MembPullSendingThread,
+    ProducerSendState,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # noqa: E402
     SFAPDRD2HConsumerWorker,
@@ -144,6 +146,7 @@ def test_batch_metaserver_dispatches_prompt_list_once():
 
         assert responses == [{"status": "ok"}] * len(request_ids)
         dispatch.assert_awaited_once()
+        assert dispatch.await_args is not None
         dispatched_params = dispatch.await_args.args[-1]
         assert set(dispatched_params) == set(request_ids)
 
@@ -318,7 +321,7 @@ def test_non_tp0_main_only_layer_acknowledges_without_memfabric_read():
     thread = _make_read_thread()
     thread.engine = MagicMock()
     layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False)
-    thread._resolve_read_layer = MagicMock(return_value=layer)
+    thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
 
     thread._do_read_batch(
         layer["layer_name"],
@@ -364,7 +367,7 @@ def test_tp_rank_without_blocks_in_small_chunk_acknowledges_without_read():
     thread._state.tp_size = 2
     thread.engine = MagicMock()
     layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
-    thread._resolve_read_layer = MagicMock(return_value=layer)
+    thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
 
     thread._do_read_batch(
         layer["layer_name"],
@@ -487,8 +490,10 @@ def test_owned_component_without_descriptors_still_fails():
     thread = _make_read_thread()
     thread.engine = MagicMock()
     layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
-    thread._resolve_read_layer = MagicMock(return_value=layer)
-    thread._build_req_descriptors = MagicMock(return_value=([], [], [], None))
+    thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
+    thread._build_req_descriptors = MagicMock(  # type: ignore[method-assign]
+        return_value=([], [], [], None)
+    )
 
     with pytest.raises(RuntimeError, match="built no transfer descriptors"):
         thread._do_read_batch(
@@ -551,7 +556,8 @@ def test_main_only_layer_uses_chunk_destination_slice():
 def test_send_thread_wires_both_cache_group_block_lists():
     layer_name = "model.layers.0.self_attn"
     thread = MembPullSendingThread.__new__(MembPullSendingThread)
-    thread._state = SimpleNamespace(
+    thread._state = ProducerSendState(
+        last_layer_idx=0,
         main_group_idx=1,
         indexer_group_idx=0,
         block_sizes=(32, 16),
@@ -566,6 +572,7 @@ def test_send_thread_wires_both_cache_group_block_lists():
             )
         },
         layer_storage_slots={0: (0, 1)},
+        p_session="p-session",
     )
     thread.last_layer_idx = 0
     thread._p_save_events = {}
@@ -575,15 +582,25 @@ def test_send_thread_wires_both_cache_group_block_lists():
     for event in thread.storage_send_done_events:
         event.set()
     thread._mf_meta_sent_paths = set()
-    thread._send_mf_meta = MagicMock()
+    thread._send_mf_meta = MagicMock()  # type: ignore[method-assign]
     dealer = MagicMock()
-    thread._ensure_dealer = MagicMock(return_value=dealer)
+    thread._ensure_dealer = MagicMock(return_value=dealer)  # type: ignore[method-assign]
     encoder = MagicMock()
     encoder.encode.side_effect = lambda value: value
-    req_meta = SimpleNamespace(
+    req_meta = SfaPDProducerReqMeta(
         local_block_ids=[[7], [3, 4]],
+        token_ids=[],
+        remote_block_ids=[],
+        remote_block_size=[],
+        remote_engine_id=None,
         remote_host="127.0.0.1",
         remote_port=1234,
+        remote_te_rpc_port=None,
+        remote_layer_metadata=None,
+        metaserver=None,
+        remote_tp_size=None,
+        remote_pcp_size=None,
+        remote_dcp_size=None,
         chunk_finish=True,
         local_transed_tokens=0,
         local_computed_tokens=32,
@@ -607,7 +624,8 @@ def test_send_thread_wires_both_cache_group_block_lists():
 def test_send_thread_slices_each_group_at_chunk_boundaries():
     layer_name = "model.layers.0.self_attn"
     thread = MembPullSendingThread.__new__(MembPullSendingThread)
-    thread._state = SimpleNamespace(
+    thread._state = ProducerSendState(
+        last_layer_idx=1,
         main_group_idx=0,
         indexer_group_idx=1,
         block_sizes=(16, 32),
@@ -622,6 +640,7 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
             )
         },
         layer_storage_slots={0: (0, 1)},
+        p_session="p-session",
     )
     thread.last_layer_idx = 1
     thread._p_save_events = {}
@@ -632,13 +651,23 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
         event.set()
     thread._mf_meta_sent_paths = {"tcp://127.0.0.1:1234"}
     dealer = MagicMock()
-    thread._ensure_dealer = MagicMock(return_value=dealer)
+    thread._ensure_dealer = MagicMock(return_value=dealer)  # type: ignore[method-assign]
     encoder = MagicMock()
     encoder.encode.side_effect = lambda value: value
-    req_meta = SimpleNamespace(
+    req_meta = SfaPDProducerReqMeta(
         local_block_ids=[[10, 11, 12], [20, 21]],
+        token_ids=[],
+        remote_block_ids=[],
+        remote_block_size=[],
+        remote_engine_id=None,
         remote_host="127.0.0.1",
         remote_port=1234,
+        remote_te_rpc_port=None,
+        remote_layer_metadata=None,
+        metaserver=None,
+        remote_tp_size=None,
+        remote_pcp_size=None,
+        remote_dcp_size=None,
         chunk_finish=False,
         local_transed_tokens=16,
         local_computed_tokens=40,
@@ -727,7 +756,13 @@ def test_producer_scheduler_rejects_missing_batch_metadata():
 
 def test_storage_slot_gate_is_shared_across_reuse_ring_boundary():
     thread = MembPullSendingThread.__new__(MembPullSendingThread)
-    thread._state = SimpleNamespace(
+    thread._state = ProducerSendState(
+        last_layer_idx=5,
+        layer_metadata={},
+        p_session="p-session",
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(),
         layer_storage_slots={1: (0,), 5: (0,)},
     )
     thread.storage_send_done_events = [threading.Event()]
@@ -736,13 +771,15 @@ def test_storage_slot_gate_is_shared_across_reuse_ring_boundary():
     thread._pending_reads_by_layer = {}
 
     thread.mark_layer_pending(5)
-    assert not thread.get_storage_send_event(0).is_set()
+    storage_event = thread.get_storage_send_event(0)
+    assert storage_event is not None
+    assert not storage_event.is_set()
     # Completing the last occupant opens the same gate observed by the first
     # occupant in the next scheduler step.
     thread._signal_layer_done(5)
-    assert thread.get_storage_send_event(0).is_set()
+    assert storage_event.is_set()
     thread.mark_layer_pending(1)
-    assert not thread.get_storage_send_event(0).is_set()
+    assert not storage_event.is_set()
 
 
 def test_pd_read_wait_continues_after_log_interval_until_read_done():
@@ -859,7 +896,7 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler._reqs_need_recv = set()
     scheduler._metaserver_lock = threading.Lock()
     scheduler._cancelled_metaserver_requests = set()
-    scheduler._submit_metaserver_request = MagicMock()
+    scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
     params = {
         "do_remote_prefill": True,
         "metaserver": "http://metaserver",
@@ -919,7 +956,7 @@ def test_metaserver_callback_retries_without_changing_request_state():
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
     scheduler._cancelled_metaserver_requests = set()
-    failed_future = Future()
+    failed_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": failed_future}
     failed_future.set_exception(RuntimeError("metaserver unavailable"))
 
@@ -946,7 +983,7 @@ def test_metaserver_callback_clears_completed_future():
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
     scheduler._cancelled_metaserver_requests = set()
-    succeeded_future = Future()
+    succeeded_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": succeeded_future}
     succeeded_future.set_result(None)
 
@@ -1029,7 +1066,7 @@ def test_scheduler_shutdown_cancels_rendezvous_and_executor():
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
     scheduler._cancelled_metaserver_requests = set()
-    pending_future = Future()
+    pending_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": pending_future}
     scheduler.executor = MagicMock()
 

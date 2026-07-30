@@ -17,9 +17,9 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 
 def _fake_memfabric(raw_engine: MagicMock) -> ModuleType:
     module = ModuleType("memfabric_hybrid")
-    module.TransferEngine = MagicMock(return_value=raw_engine)
-    module.set_conf_store_tls = MagicMock()
-    module.set_log_level = MagicMock()
+    module.TransferEngine = MagicMock(return_value=raw_engine)  # type: ignore[attr-defined]
+    module.set_conf_store_tls = MagicMock()  # type: ignore[attr-defined]
+    module.set_log_level = MagicMock()  # type: ignore[attr-defined]
     return module
 
 
