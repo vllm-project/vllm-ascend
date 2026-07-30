@@ -156,6 +156,9 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.token_database.process_tokens.assert_not_called()
 
     def test_layerwise_multi_group_layout_includes_mtp(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
         cls = self._make_worker_class()
         worker = object.__new__(cls)
         worker.num_layers = 4
@@ -163,18 +166,32 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
         worker.use_gva_layerwise = True
         worker._extra_config = {"layerwise_num_shared_buffers": 2}
+        main_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        indexer_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+        )
         worker.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
                 SimpleNamespace(
                     layer_names=[
                         *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
                         "model.mtp.0.self_attn.attn",
-                    ]
+                    ],
+                    kv_cache_spec=main_spec,
                 ),
                 SimpleNamespace(
                     layer_names=[
                         *(f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in range(4)),
-                    ]
+                    ],
+                    kv_cache_spec=indexer_spec,
                 ),
             ]
         )
