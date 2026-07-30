@@ -25,18 +25,17 @@ from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata, EncoderCacheManagerConfig
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend import register_ec_manager
-from vllm_ascend.ascend_config import get_score_encoder_cache_config
+from vllm_ascend.ascend_config import get_score_encoder_cache_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
