@@ -24,7 +24,7 @@ from vllm_ascend.ops.linear import (
 )
 
 
-class _PackedLoRAAWeightsMixin:
+class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
     """Keep packed LoRA-A weights in sync for the single-adapter GEMM path."""
 
     def create_lora_weights(
@@ -84,7 +84,7 @@ class _PackedLoRAAWeightsMixin:
         return output
 
 
-class AscendMergedColumnParallelLinearWithLoRA(_PackedLoRAAWeightsMixin, MergedColumnParallelLinearWithLoRA):
+class AscendMergedColumnParallelLinearWithLoRA(_PackedLoRAAWeightsMixin):
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
