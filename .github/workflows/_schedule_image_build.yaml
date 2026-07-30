@@ -348,7 +348,7 @@ jobs:
           MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260725.3' }}
           TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
           TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
-          TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '26.1.0.B120' }}
+          TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '26.1.0.B110' }}
           TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
           ${{ inputs.build_args }}
         provenance: false
