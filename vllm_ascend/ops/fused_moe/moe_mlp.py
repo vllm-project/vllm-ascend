@@ -145,13 +145,17 @@ def quant_apply_mlp(
     if w1_scale_bias is None and w1_offset is None and is_mc2:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=w1,
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
-                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                bias=None,
                 swiglu_limit=swiglu_limit,
+                use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
         elif use_gmm_swiglu_quant_fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
@@ -268,14 +272,17 @@ def quant_apply_mlp(
             )
         elif _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=w1,
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale,
-                group_list=cumsum_group_list(group_list, group_list_type, 0),
                 bias=bias1,
                 swiglu_limit=swiglu_limit,
+                use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
         elif use_gmm_swiglu_quant_fusion:
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
@@ -352,7 +359,6 @@ def unquant_apply_mlp(
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
-    swiglu_limit: int = 0,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -372,12 +378,8 @@ def unquant_apply_mlp(
 
     if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
-        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size), limit=swiglu_limit)
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
-        if swiglu_limit > 0:
-            gate, up = gate_up_out.chunk(2, dim=-1)
-            gate.clamp_(max=swiglu_limit)
-            up.clamp_(min=-swiglu_limit, max=swiglu_limit)
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
@@ -433,7 +435,6 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             group_list_type=group_list_type,
             topk_scales=topk_scales,
             need_trans=need_trans,
-            swiglu_limit=swiglu_limit,
         )
 
     assert w1_scale is not None and w2_scale is not None

@@ -114,6 +114,58 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Experimental DeepSeek V4 DSA-CP compressor SP path. When enabled,
+    # CSA/HCA compressor may run on a per-rank expanded local token shard
+    # and fall back to the original full-hidden compressor for unsafe shapes.
+    "VLLM_ASCEND_ENABLE_COMPRESSOR_SP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_COMPRESSOR_SP", "0"))),
+    # Print aggregated DeepSeek V4 DSA-CP compressor SP hit/fallback counters
+    # every N compressor/indexer update events. 0 disables diagnostics.
+    "VLLM_ASCEND_COMPRESSOR_SP_DEBUG_INTERVAL": lambda: int(
+        os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DEBUG_INTERVAL", "0")
+    ),
+    # Synchronize around compressor SP debug timing sections. This is expensive
+    # and should only be enabled for short profiling/debug runs.
+    "VLLM_ASCEND_COMPRESSOR_SP_DEBUG_SYNC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DEBUG_SYNC", "0"))
+    ),
+    # Allow C4 compressor SP for nonzero request start_pos after NPU
+    # row/state-cache equivalence validation. This remains a kill switch.
+    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONZERO_START": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONZERO_START", "1"))
+    ),
+    # Allow C4 compressor SP when seq_len is not aligned to 4. The local
+    # planner replicates the real tail state and can be disabled as a kill
+    # switch if a serving-only shape exposes a new mismatch.
+    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONALIGNED": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C4_NONALIGNED", "1"))
+    ),
+    # Allow C128 compressor SP when seq_len is not aligned to 128 after
+    # validating row and tail-state equivalence.
+    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C128_NONALIGNED": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_C128_NONALIGNED", "1"))
+    ),
+    # Allow chunked-prefill calls to use the same history-aware local plan.
+    # Keep this disabled by default until row/cache/state continuation checks
+    # have passed for the serving model and CANN package in use.
+    "VLLM_ASCEND_COMPRESSOR_SP_ALLOW_CHUNKED_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_ALLOW_CHUNKED_PREFILL", "0"))
+    ),
+    # Replicate each active request's chunk-end Compressor state block across
+    # TP ranks. Chunked local Compressor is unsafe unless this is enabled.
+    "VLLM_ASCEND_COMPRESSOR_SP_SYNC_CHUNKED_BOUNDARY_STATE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_SYNC_CHUNKED_BOUNDARY_STATE", "0"))
+    ),
+    # Recompute C4 chunk-end state from a bounded hidden-state tail on every
+    # rank. This replaces boundary-state communication after dual-run state
+    # equivalence has been validated for the active CANN package.
+    "VLLM_ASCEND_COMPRESSOR_SP_REPLAY_C4_BOUNDARY_STATE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_REPLAY_C4_BOUNDARY_STATE", "0"))
+    ),
+    # Debug-only full/local dual-run comparison switch. This is expensive and
+    # must stay disabled in release/performance runs.
+    "VLLM_ASCEND_COMPRESSOR_SP_DUAL_RUN": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DUAL_RUN", "0"))
+    ),
 }
 
 # end-env-vars-definition
