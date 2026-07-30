@@ -288,6 +288,34 @@ class TestOperatorABI(unittest.TestCase):
         cmake = _read("CMakeLists.txt")
         self.assertIn("VLLM_ASCEND_DSA_A5_FALLBACK=1", cmake)
 
+    def test_a2_a3_install_verifies_dsa_binary_registry(self):
+        build_script = _read("csrc/build_aclnn.sh")
+        required_op_types = (
+            "LightningIndexerDecodeUpdate",
+            "KvcacheScatterCopy",
+            "SparseFlashAttentionForOffload",
+            "KvCacheFullBlockDump",
+        )
+
+        self.assertIn(
+            'ascend910b|ascend910_93)',
+            build_script,
+        )
+        self.assertIn("binary_info_config.json", build_script)
+        for op_type in required_op_types:
+            self.assertIn(f'"{op_type}"', build_script)
+
+        verification_call = (
+            'verify_installed_dsa_ops '
+            '"${custom_ops_install_dir}" "${SOC_ARG}"'
+        )
+        self.assertIn(verification_call, build_script)
+        self.assertGreater(
+            build_script.index(verification_call),
+            build_script.index('"${installer_candidates[0]}" '
+                               '--install-path="${custom_ops_install_dir}"'),
+        )
+
     def test_a5_data_plane_has_no_host_item_read(self):
         relative_path = (
             "vllm_ascend/dsa_sparse/dsa_ascend_ops_backend.py"

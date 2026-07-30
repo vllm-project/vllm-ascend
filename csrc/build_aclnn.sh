@@ -72,6 +72,51 @@ log_selected_ops() {
     done
 }
 
+verify_installed_dsa_ops() {
+    local install_dir=$1
+    local soc_arg=$2
+    local config_file
+    local required_op_type
+    local -a config_files=()
+    local -a required_op_types=()
+
+    case "${soc_arg}" in
+        ascend910b|ascend910_93)
+            required_op_types=(
+                "LightningIndexerDecodeUpdate"
+                "KvcacheScatterCopy"
+                "SparseFlashAttentionForOffload"
+                "KvCacheFullBlockDump"
+            )
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    while IFS= read -r -d '' config_file; do
+        config_files+=("${config_file}")
+    done < <(
+        find "${install_dir}" -type f \
+            -path "*/${soc_arg}/binary_info_config.json" -print0
+    )
+
+    if (( ${#config_files[@]} == 0 )); then
+        log "ERROR: installed ACLNN package has no ${soc_arg}/binary_info_config.json under ${install_dir}"
+        return 1
+    fi
+
+    for required_op_type in "${required_op_types[@]}"; do
+        if ! grep -Fq "\"${required_op_type}\"" "${config_files[@]}"; then
+            log "ERROR: installed ACLNN package for ${soc_arg} does not register opType ${required_op_type}"
+            log "ERROR: checked binary configs: ${config_files[*]}"
+            return 1
+        fi
+    done
+
+    log "verified installed DSA op registry for ${soc_arg}: ${required_op_types[*]}"
+}
+
 log "start: ROOT_DIR=${ROOT_DIR:-<unset>} SOC_VERSION=${SOC_VERSION:-<unset>} cwd=$(pwd)"
 log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-<unset>}"
 
@@ -303,6 +348,7 @@ log_selected_ops
     chmod u+w "${custom_ops_install_dir}/vendors/custom_transformer/scripts"
   fi
   log "installer finished"
+  verify_installed_dsa_ops "${custom_ops_install_dir}" "${SOC_ARG}"
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
 
