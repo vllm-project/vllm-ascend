@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# num_npu: 2
 
 from tests.e2e.conftest import VllmRunner
 
