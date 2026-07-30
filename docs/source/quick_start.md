@@ -164,7 +164,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use ModelScope mirror to speed up download:
 
-<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+<!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
@@ -188,7 +188,7 @@ There are two ways to start vLLM on Ascend NPU:
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-    # The first run will take about 3-5 mins (10MB/s) to download models
+    # The first run will take about 3-5 mins (10 MB/s) to download models
     llm = LLM(model="Qwen/Qwen3-0.6B")
 
     outputs = llm.generate(prompts, sampling_params)
@@ -249,7 +249,7 @@ There are two ways to start vLLM on Ascend NPU:
     <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
     ```bash
-    # Deploy vLLM server (The first run will take about 3-5 mins (10MB/s) to download models)
+    # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
     vllm serve Qwen/Qwen3-0.6B &
     ```
 
