@@ -545,7 +545,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             load_spec=load_spec,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
@@ -563,7 +563,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0", "h1", "h2", "h3"],
             load_spec=load_spec,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
 
         worker.start_load_kv(meta)
@@ -581,7 +581,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             load_spec=None,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.start_load_kv(meta)
         # No get called since no load_spec
@@ -597,7 +597,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             can_save=True,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_called_with("r1")
@@ -615,7 +615,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0"],
             can_save=False,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_not_called()
@@ -627,14 +627,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         send_thread.get_and_clear_finished_requests.return_value = {"r1"}
         worker.kv_send_thread = send_thread
 
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished({"r1"}, meta)
         self.assertIn("r1", done_s)
         self.assertEqual(done_r, set())
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
 
@@ -714,20 +714,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
     """Test static and standalone helper methods."""
 
-    def test_uses_hybrid_kv_cache_none_config(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        self.assertFalse(KVPoolWorker._uses_hybrid_kv_cache(MagicMock(), None))
-
-    def test_uses_hybrid_kv_cache_disabled(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        vllm_config = MagicMock()
-        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
-        kv_cache_config = MagicMock()
-        kv_cache_config.kv_cache_groups = [MagicMock()]
-        self.assertFalse(KVPoolWorker._uses_hybrid_kv_cache(vllm_config, kv_cache_config))
-
     def test_uses_mamba_kv_cache_false_when_not_hybrid(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
@@ -752,16 +738,6 @@ class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
         t2 = torch.ones(10)
         result = KVPoolWorker._as_cache_tuple([t1, t2])
         self.assertEqual(len(result), 2)
-
-    def test_get_group_family_out_of_range(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        self.assertEqual(KVPoolWorker._get_group_family(["a", "b"], 5), "default")
-
-    def test_get_group_family_valid(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        self.assertEqual(KVPoolWorker._get_group_family(["a", "b"], 1), "b")
 
 
 class TestKVPoolWorkerGetBlockIdsWithLoadErrors(unittest.TestCase):
@@ -1070,7 +1046,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.kv_send_thread = None
 
         loading_req_ids = {"r1"}
-        meta = AscendConnectorMetadata(set(), set(), loading_req_ids=loading_req_ids)
+        meta = AscendConnectorMetadata(set(), loading_req_ids=loading_req_ids)
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, {"r1"})
@@ -1085,7 +1061,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.kv_recv_thread = recv_thread
         worker.kv_send_thread = None
 
-        meta = AscendConnectorMetadata(set(), {"r_preempted"}, loading_req_ids=set())
+        meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
         worker.get_finished(set(), meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
 
@@ -1098,7 +1074,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.kv_send_thread = send_thread
         worker.kv_recv_thread = None
 
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, set())
@@ -1106,7 +1082,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
 
 
 class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
-    """Test _infer_group_uses_align_state and _infer_group_block_sizes."""
+    """Test _infer_group_uses_align_state."""
 
     def test_infer_group_uses_align_state_no_config(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -1155,58 +1131,6 @@ class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
 
         worker = KVPoolWorker(config, use_layerwise=False)
         self.assertEqual(worker.group_uses_align_state, [False])
-
-        for p in patches.values():
-            p.stop()
-
-    def test_get_group_block_size_out_of_range(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        patches = {
-            "tp_rank": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank",
-                return_value=0,
-            ),
-            "tp_size": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size",
-                return_value=1,
-            ),
-            "pcp_group": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"),
-            "dcp_ws": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size",
-                return_value=1,
-            ),
-            "dcp_rank": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank",
-                return_value=0,
-            ),
-            "importlib": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"),
-        }
-        mocks = {}
-        for name, p in patches.items():
-            mocks[name] = p.start()
-        pcp_group = MagicMock()
-        pcp_group.world_size = 1
-        mocks["pcp_group"].return_value = pcp_group
-        mocks["importlib"].import_module.return_value = MagicMock()
-
-        config = MagicMock()
-        config.model_config.model = "org/llama-7b"
-        config.model_config.use_mla = False
-        config.model_config.hf_text_config = MagicMock(spec=[])
-        config.model_config.get_num_layers.return_value = 2
-        config.model_config.get_total_num_kv_heads.return_value = 1
-        config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.rank = 0
-        config.parallel_config.pipeline_parallel_size = 1
-        config.kv_transfer_config.kv_role = "kv_producer"
-        config.kv_transfer_config.kv_connector_extra_config = {"backend": "mooncake"}
-        config.cache_config.block_size = 16
-        config.kv_events_config = None
-
-        worker = KVPoolWorker(config, use_layerwise=False)
-        # group_id out of range returns first element
-        self.assertEqual(worker._get_group_block_size(5), 16)
 
         for p in patches.values():
             p.stop()
@@ -1282,14 +1206,14 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
             block_hashes=["h0"],
             load_spec=load_spec,
         )
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         meta.add_request(req)
         worker.start_load_kv(meta)
         recv_thread.add_request.assert_called_once_with(req)
 
     def test_start_load_kv_empty_requests(self):
         worker = self._make_worker()
-        meta = AscendConnectorMetadata(set(), set())
+        meta = AscendConnectorMetadata(set())
         worker.start_load_kv(meta)
         # No action taken, no error
 

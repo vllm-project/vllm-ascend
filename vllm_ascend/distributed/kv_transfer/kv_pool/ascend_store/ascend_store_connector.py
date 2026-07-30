@@ -88,7 +88,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
-        self.use_gva_layerwise = self.use_layerwise and extra_config.get("backend", "mooncake").lower() == "memcache"
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
@@ -98,17 +97,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
 
-        self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
-            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            self.connector_scheduler = KVPoolScheduler(
-                vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes
-            )
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,

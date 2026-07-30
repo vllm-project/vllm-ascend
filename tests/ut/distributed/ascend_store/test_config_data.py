@@ -16,19 +16,24 @@
 #
 
 import unittest
+from types import SimpleNamespace
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerMultiBlockReqMeta,
     LayerPoolKey,
     LoadSpec,
     PoolKey,
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_group_block_size,
+    get_group_cache_family,
+    infer_cache_transfer_granularity,
+    infer_group_block_sizes,
+    uses_hybrid_kv_cache,
 )
 
 
@@ -46,6 +51,24 @@ class TestKeyMetadata(unittest.TestCase):
         self.assertEqual(meta.pcp_rank, 0)
         self.assertEqual(meta.dcp_rank, 0)
         self.assertEqual(meta.pp_rank, 0)
+
+
+class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_layout_policy(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
+
+        self.assertTrue(uses_hybrid_kv_cache(scheduler_config, groups))
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, None))
+        scheduler_config.disable_hybrid_kv_cache_manager = True
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, groups))
+        self.assertEqual(infer_group_block_sizes(8, groups, use_hybrid=True), [16, 32])
+        self.assertEqual(get_group_block_size([16, 32], 3), 16)
+        self.assertEqual(get_group_cache_family(["c1"], 3), "default")
+        self.assertEqual(infer_cache_transfer_granularity(32, [16, 32], ["c1", "c2"]), 64)
 
 
 class TestPoolKey(unittest.TestCase):
@@ -508,7 +531,7 @@ class TestReqMeta(unittest.TestCase):
 
 class TestAscendConnectorMetadata(unittest.TestCase):
     def test_add_request(self):
-        meta = AscendConnectorMetadata(unfinished_request_ids=set(), preempted_req_ids=set())
+        meta = AscendConnectorMetadata(preempted_req_ids=set())
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
@@ -518,22 +541,6 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         meta.add_request(req)
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests[0].req_id, "r1")
-
-
-class TestLayerMultiBlockReqMeta(unittest.TestCase):
-    def test_fields(self):
-        meta = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[0, 16],
-            ends=[16, 32],
-            block_ids=[0, 1],
-            layer_id=2,
-        )
-        self.assertEqual(meta.req_id, "r1")
-        self.assertEqual(meta.layer_id, 2)
-        self.assertTrue(meta.is_last_chunk)
-        self.assertIsNone(meta.current_event)
 
 
 if __name__ == "__main__":

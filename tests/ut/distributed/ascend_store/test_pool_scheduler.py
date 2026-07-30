@@ -188,7 +188,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request.request_id = "r1"
         blocks = MagicMock()
         scheduler.update_state_after_alloc(request, blocks, 0)
-        self.assertIn("r1", scheduler._unfinished_request_ids)
+        self.assertIn("r1", scheduler._unfinished_requests)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_update_state_after_alloc_with_load(self, mock_client_cls):
@@ -364,7 +364,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
         )
         scheduler._unfinished_requests["r1"] = (MagicMock(), [0, 1])
-        scheduler._unfinished_request_ids.add("r1")
 
         sched_output = MagicMock()
         sched_output.finished_req_ids = {"r1"}
@@ -475,57 +474,6 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.close.assert_called_once_with(linger=0)
 
 
-class TestKVPoolSchedulerGenerateKeys(unittest.TestCase):
-    """Test generate_keys method."""
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
-        config = MagicMock()
-        config.kv_transfer_config.kv_role = "kv_producer"
-        config.kv_transfer_config.kv_connector_extra_config = {}
-        config.kv_transfer_config.get_from_extra_config.return_value = True
-        config.parallel_config.data_parallel_rank = 0
-        config.parallel_config.prefill_context_parallel_size = 1
-        config.parallel_config.decode_context_parallel_size = 1
-        config.parallel_config.tensor_parallel_size = 1
-        config.parallel_config.pipeline_parallel_size = 1
-        config.parallel_config.rank = 0
-        config.parallel_config.world_size = 1
-        config.cache_config.block_size = 16
-        config.cache_config.hash_block_size = 16
-        # Concrete model_config values so KVPoolScheduler.__init__ int math
-        # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
-        config.model_config.model = "org/llama-7b"
-        config.model_config.use_mla = False
-        config.model_config.hf_text_config = MagicMock(spec=[])
-        config.model_config.get_total_num_kv_heads.return_value = 1
-        config.model_config.get_num_layers.return_value = 2
-        return KVPoolScheduler(config, use_layerwise=False)
-
-    def test_generate_keys_basic(self):
-        scheduler = self._make_scheduler()
-        block_hashes = [b"\xaa\xbb", b"\xcc\xdd"]
-        keys, last_key = scheduler.generate_keys(block_hashes)
-        self.assertEqual(len(keys), 2)
-        self.assertIsNone(last_key)
-        self.assertIn("aabb", keys[0])
-        self.assertIn("ccdd", keys[1])
-
-    def test_generate_keys_with_last_block(self):
-        scheduler = self._make_scheduler()
-        block_hashes = [b"\xaa\xbb"]
-        keys, last_key = scheduler.generate_keys(block_hashes, req_id="r1", has_last_block=True)
-        self.assertEqual(len(keys), 1)
-        self.assertIsNotNone(last_key)
-        self.assertIn("r1_lastblock", last_key)
-
-    def test_generate_keys_empty(self):
-        scheduler = self._make_scheduler()
-        keys, last_key = scheduler.generate_keys([])
-        self.assertEqual(keys, [])
-        self.assertIsNone(last_key)
-
-
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
     """Test _generate_store_query_keys method."""
 
@@ -606,7 +554,7 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
 
     def test_all_blocks_hit(self):
         scheduler = self._make_scheduler()
-        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 1]
+        scheduler.store_scheduler.exists.return_value = [1, 1, 1, 1]
         request = MagicMock()
         request.block_hashes = [b"\xaa"] * 4
         result = scheduler._get_store_lookup_hit_tokens(request, 64, 0)
@@ -614,7 +562,7 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
 
     def test_partial_hit(self):
         scheduler = self._make_scheduler()
-        scheduler.store_scheduler.batch_is_exist.return_value = [1, 0, 0, 0]
+        scheduler.store_scheduler.exists.return_value = [1, 0, 0, 0]
         request = MagicMock()
         request.block_hashes = [b"\xaa"] * 4
         result = scheduler._get_store_lookup_hit_tokens(request, 64, 0)
@@ -622,7 +570,7 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
 
     def test_no_hit(self):
         scheduler = self._make_scheduler()
-        scheduler.store_scheduler.batch_is_exist.return_value = [0, 0, 0, 0]
+        scheduler.store_scheduler.exists.return_value = [0, 0, 0, 0]
         request = MagicMock()
         request.block_hashes = [b"\xaa"] * 4
         result = scheduler._get_store_lookup_hit_tokens(request, 64, 0)
@@ -638,44 +586,11 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
     def test_with_computed_tokens(self):
         scheduler = self._make_scheduler()
         # 4 blocks, computed 2 blocks -> query blocks 2,3
-        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1]
+        scheduler.store_scheduler.exists.return_value = [1, 1]
         request = MagicMock()
         request.block_hashes = [b"\xaa"] * 4
         result = scheduler._get_store_lookup_hit_tokens(request, 64, 32)
         self.assertEqual(result, 64)
-
-
-class TestKVPoolSchedulerStaticMethods(unittest.TestCase):
-    """Test static helper methods."""
-
-    def test_uses_hybrid_kv_cache_none(self):
-        self.assertFalse(KVPoolScheduler._uses_hybrid_kv_cache(MagicMock(), None))
-
-    def test_uses_hybrid_kv_cache_disabled(self):
-        vllm_config = MagicMock()
-        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
-        kv_cache_config = MagicMock()
-        kv_cache_config.kv_cache_groups = [MagicMock()]
-        self.assertFalse(KVPoolScheduler._uses_hybrid_kv_cache(vllm_config, kv_cache_config))
-
-    def test_get_group_family_out_of_range(self):
-        self.assertEqual(KVPoolScheduler._get_group_family(None, ["a"], 5), "default")
-
-    def test_get_group_family_valid(self):
-        self.assertEqual(KVPoolScheduler._get_group_family(None, ["a", "b"], 1), "b")
-
-    def test_get_group_block_size_out_of_range(self):
-        scheduler_mock = MagicMock()
-        scheduler_mock.grouped_block_size = [16, 32]
-        # Call unbound
-        result = KVPoolScheduler._get_group_block_size(scheduler_mock, 5)
-        self.assertEqual(result, 16)
-
-    def test_get_group_block_size_valid(self):
-        scheduler_mock = MagicMock()
-        scheduler_mock.grouped_block_size = [16, 32]
-        result = KVPoolScheduler._get_group_block_size(scheduler_mock, 1)
-        self.assertEqual(result, 32)
 
 
 class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):

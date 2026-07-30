@@ -22,20 +22,15 @@ from unittest.mock import MagicMock
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerMultiBlockReqMeta,
-    LayerPoolKey,
     LoadSpec,
     ReqMeta,
 )
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-    KVCacheStoreLayerRecvingThread,
-    KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
@@ -432,186 +427,6 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
-
-
-@unittest.skip("LayerMultiBlockReqMeta API is deprecated, tests need update for LayerTransferTask")
-class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, num_layers=2):
-        store = FakeStore(exists_result or [0, 0])
-        db = FakeTokenDatabase()
-        t = KVCacheStoreLayerSendingThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            put_step=1,
-            my_key_index=0,
-            num_ranks_per_layer=1,
-            page_size_bytes=32,
-            ready_event=threading.Event(),
-            num_layers=num_layers,
-            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
-            sync_save_events=[],
-        )
-        return t, store
-
-    def _make_layer_req(self, layer_id=0, is_last_chunk=False, num_keys=2):
-        meta = KeyMetadata("m", 0, 0, 0, 0)
-        keys = [LayerPoolKey(meta, f"h{i}", layer_id) for i in range(num_keys)]
-        return LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=keys,
-            starts=[i * 16 for i in range(num_keys)],
-            ends=[(i + 1) * 16 for i in range(num_keys)],
-            block_ids=list(range(num_keys)),
-            layer_id=layer_id,
-            is_last_chunk=is_last_chunk,
-            current_event=None,
-            token_ids=list(range(num_keys * 16)),
-            original_block_size=16,
-            block_hashes=[f"h{i}".encode() for i in range(num_keys)],
-        )
-
-    def test_handle_request_puts_missing(self):
-        t, store = self._make_thread([1, 0])
-        req = self._make_layer_req(layer_id=0)
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(len(store.put_calls), 1)
-        keys, _, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 1)
-
-    def test_handle_request_all_exist_not_last(self):
-        t, store = self._make_thread([1, 1])
-        req = self._make_layer_req(layer_id=0, is_last_chunk=False)
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(len(store.put_calls), 0)
-
-    def test_handle_request_all_exist_last_chunk_final_layer(self):
-        t, store = self._make_thread([1, 1], num_layers=2)
-        req = self._make_layer_req(layer_id=1, is_last_chunk=True)
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-    def test_handle_request_empty_keys(self):
-        t, store = self._make_thread()
-        _meta = KeyMetadata("m", 0, 0, 0, 0)
-        req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[],
-            ends=[],
-            block_ids=[],
-            layer_id=0,
-            is_last_chunk=True,
-        )
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        finished = t.get_and_clear_finished_requests()
-        self.assertNotIn("r1", finished)
-
-    def test_handle_request_with_current_event(self):
-        t, store = self._make_thread([0])
-        event = MagicMock()
-        meta = KeyMetadata("m", 0, 0, 0, 0)
-        req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[LayerPoolKey(meta, "h0", 0)],
-            starts=[0],
-            ends=[16],
-            block_ids=[0],
-            layer_id=0,
-            is_last_chunk=False,
-            current_event=event,
-        )
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        event.synchronize.assert_called_once()
-
-    def test_handle_request_last_chunk_final_layer_with_missing(self):
-        t, store = self._make_thread([0], num_layers=2)
-        req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-    def test_layerwise_kv_event_published_on_final_layer(self):
-        t, store = self._make_thread([0], num_layers=2)
-        req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        events = t.get_kv_events()
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
-        self.assertEqual(events[0].token_ids, list(range(16)))
-        self.assertEqual(events[0].block_size, 16)
-
-    def test_layerwise_kv_event_not_published_before_final_layer(self):
-        t, store = self._make_thread([0], num_layers=2)
-        req = self._make_layer_req(layer_id=0, is_last_chunk=False, num_keys=1)
-        t.add_stored_request(req.req_id)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(t.get_kv_events(), [])
-
-    def test_layerwise_kv_event_uses_missing_blocks_from_previous_layers(self):
-        t, store = self._make_thread([0], num_layers=2)
-        first_layer_req = self._make_layer_req(layer_id=0, is_last_chunk=True, num_keys=1)
-        t.add_stored_request(first_layer_req.req_id)
-        t.request_queue.put(first_layer_req)
-        t._handle_request(first_layer_req)
-        t.m_store.exists_result = [1]
-        final_layer_req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
-        t.request_queue.put(final_layer_req)
-        t._handle_request(final_layer_req)
-        events = t.get_kv_events()
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
-
-
-@unittest.skip("LayerMultiBlockReqMeta API is deprecated, tests need update for LayerTransferTask")
-class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
-    def test_handle_request(self):
-        store = FakeStore()
-        db = FakeTokenDatabase()
-        get_event = threading.Event()
-        t = KVCacheStoreLayerRecvingThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            get_event=get_event,
-            invalid_block_ids=set(),
-            invalid_block_ids_lock=threading.Lock(),
-        )
-        meta = KeyMetadata("m", 0, 0, 0, 0)
-        req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[LayerPoolKey(meta, "h0", 0)],
-            starts=[0],
-            ends=[16],
-            block_ids=[0],
-            layer_id=0,
-        )
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(len(store.get_calls), 1)
-        self.assertTrue(get_event.is_set())
 
 
 class TestKVTransferTpMismatchDispatch(unittest.TestCase):
