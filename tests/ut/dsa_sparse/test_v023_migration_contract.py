@@ -316,6 +316,28 @@ class TestOperatorABI(unittest.TestCase):
                                '--install-path="${custom_ops_install_dir}"'),
         )
 
+    def test_a2_a3_build_discards_stale_aclnn_tree(self):
+        build_script = _read("csrc/build_aclnn.sh")
+        build_section = build_script[build_script.index("log_selected_ops"):]
+        clean_case = build_section[
+            build_section.index('case "${SOC_ARG}" in'):
+            build_section.index(
+                'bash build.sh --pkg --ops="${CUSTOM_OPS}" '
+                '--soc="${SOC_ARG}"'
+            )
+        ]
+
+        self.assertIn("ascend910b|ascend910_93)", clean_case)
+        self.assertIn("rm -rf -- build output build_out", clean_case)
+        self.assertIn("rm -rf -- output build_out", clean_case)
+        self.assertLess(
+            build_section.index("rm -rf -- build output build_out"),
+            build_section.index(
+                'bash build.sh --pkg --ops="${CUSTOM_OPS}" '
+                '--soc="${SOC_ARG}"'
+            ),
+        )
+
     def test_a5_data_plane_has_no_host_item_read(self):
         relative_path = (
             "vllm_ascend/dsa_sparse/dsa_ascend_ops_backend.py"

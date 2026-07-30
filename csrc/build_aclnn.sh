@@ -306,8 +306,16 @@ log_selected_ops
   log "subshell cwd before cd=$(pwd)"
   cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "preserving csrc/build and cleaning output dirs"
-  rm -rf -- output build_out
+  case "${SOC_ARG}" in
+    ascend910b|ascend910_93)
+      log "cleaning csrc/build, output, and build_out for a fresh DSA ACLNN package"
+      rm -rf -- build output build_out
+      ;;
+    *)
+      log "preserving csrc/build and cleaning output dirs"
+      rm -rf -- output build_out
+      ;;
+  esac
 
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
