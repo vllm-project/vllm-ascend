@@ -1,9 +1,9 @@
 {
   "cases": [
-    "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py",
-    "tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py",
-    "tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py",
-    "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py",
+    "tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py",
+    "tests/e2e/pull_request/quarter_card/test_qwen3_embedding_0_6b.py",
+    "tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py",
+    "tests/e2e/pull_request/half_card/test_qwen3_8b_w8a8.py",
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
     "tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py",
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py"
