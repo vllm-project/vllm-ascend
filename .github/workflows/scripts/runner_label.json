@@ -1,4 +1,7 @@
 {
+    "a5 x1": ["linux-aarch64-a5-4"],
+    "a5 x2": ["linux-aarch64-a5-4"],
+    "a5 x4": ["linux-aarch64-a5-4"]
     "linux-aarch64-310p-1": {
         "chip": "310p",
         "npu_num": 1,
