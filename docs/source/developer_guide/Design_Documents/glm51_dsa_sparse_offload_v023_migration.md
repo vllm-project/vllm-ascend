@@ -250,7 +250,7 @@ row、cache slots 或 DRAM logical block table。多 DP rank 可能在不报设�
 | `max_active_reqs` | `256` | resident/DRAM request row 预分配上限，必须不小于 `max_num_seqs` |
 | `hot_cpu_block_multiple` | `3` | DRAM block 数相对 Indexer HBM block 数的倍数 |
 | `enable_row_mode_decode_graph` | `false` | 本次 eager 范围必须为 `false` |
-| `trace_points` | 未启用 | 可选调试 trace 配置 |
+| `trace_points` | DSA 开启时为 `first_sample`、TP rank 0 | 可选调试 trace 配置；显式设为 `false` 可关闭 |
 
 ### 9.2 固定要求
 
@@ -286,12 +286,14 @@ row、cache slots 或 DRAM logical block table。多 DP rank 可能在不报设�
 }
 ```
 
-`ranks` 按 TP rank 过滤；省略时所有 TP rank 都输出。启动和首次实际采样时
-应分别看到以下 WARNING：
+`ranks` 按 TP rank 过滤；省略时所有 TP rank 都输出。Worker 在分布式组完成
+初始化后固化 `get_tp_group().rank_in_group`，不会在采样热路径中因临时 rank
+查询失败而静默关闭 trace。启动和首次实际采样时应依次看到以下 WARNING：
 
 ```text
 Configured DSA trace points: DSATraceConfig(...)
-[DSA first-sample boundary] point=first_sample ... rows=[...]
+[DSA trace worker state] global_rank=... tp_rank=0 ... first_sample_active=True
+[DSA first-sample boundary] point=first_sample tp_rank=0 ... rows=[...]
 ```
 
 每个 `req_id` 只打印一次，`rows` 包含 `prompt_tokens`、
@@ -299,6 +301,32 @@ Configured DSA trace points: DSATraceConfig(...)
 `top1_before_processors` 和 `sampled`。`dsa_sparse_config.enabled=false`
 是总开关，即使残留 `trace_points.enabled=true` 也不会发射 trace。
 trace 会增加一次 argmax 和调试用 D2H，性能测试时应关闭。
+
+当 `dsa_sparse_config.enabled=true` 且省略 `trace_points` 时，配置物化层和
+ModelRunner 直读 fallback 都会默认生成以下等价配置，避免多进程边界是否已经
+执行 `attach_dsa_sparse_cache_attrs()` 影响 trace 激活：
+
+```json
+{
+  "enabled": true,
+  "points": ["first_sample"],
+  "ranks": [0]
+}
+```
+
+非示例脚本启动时可通过 `"trace_points": false` 显式关闭。
+
+仓库的 `examples/glm51_dsa_sparse_mtp.sh` 在 DSA 打开时默认启用
+`first_sample`，并只选择 TP rank 0。可显式控制：
+
+```bash
+DSA_TRACE_ENABLED=true DSA_TRACE_RANK=0 \
+MODEL_PATH=/models/GLM-5.1 \
+bash examples/glm51_dsa_sparse_mtp.sh
+```
+
+性能测试使用 `DSA_TRACE_ENABLED=false`。`DSA_ENABLED=false` 时若未显式设置，
+脚本也会自动关闭 trace。
 
 ## 10. 构建与部署
 

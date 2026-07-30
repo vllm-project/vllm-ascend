@@ -23,6 +23,8 @@ from vllm_ascend.dsa_sparse.dsa_graph_gate import (
 )
 from vllm_ascend.dsa_sparse.dsa_trace import (
     DSA_TRACE_CONFIG_KEY,
+    DSA_TRACE_DEFAULT_POINTS,
+    DSA_TRACE_DEFAULT_RANKS,
     DSA_TRACE_PUBLIC_KEYS,
 )
 from vllm_ascend.dsa_sparse.dsa_types import (
@@ -224,9 +226,17 @@ def _normalize_dsa_sparse_config(
     if _DSA_GRAPH_PUBLIC_CONFIG_KEY in raw_config:
         additional_updates[DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY] = (
             raw_config[_DSA_GRAPH_PUBLIC_CONFIG_KEY])
-    if "trace_points" in raw_config:
-        additional_updates[DSA_TRACE_CONFIG_KEY] = (
-            _normalize_dsa_trace_points_config(raw_config["trace_points"]))
+    trace_config = (
+        raw_config["trace_points"]
+        if "trace_points" in raw_config
+        else {
+            "enabled": bool(cache_attrs["enable_dsa_sparse_cache"]),
+            "points": list(DSA_TRACE_DEFAULT_POINTS),
+            "ranks": list(DSA_TRACE_DEFAULT_RANKS),
+        }
+    )
+    additional_updates[DSA_TRACE_CONFIG_KEY] = (
+        _normalize_dsa_trace_points_config(trace_config))
 
     return cache_attrs, additional_updates
 

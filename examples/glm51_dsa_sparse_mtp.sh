@@ -32,7 +32,22 @@ case "${DSA_ENABLED}" in
     exit 2
     ;;
 esac
-DSA_ADDITIONAL_CONFIG="{\"dsa_sparse_config\":{\"enabled\":${DSA_ENABLED},\"indexer_mla_block_ratio\":3},\"enable_dsa_cp\":false,\"ascend_compilation_config\":{\"enable_npugraph_ex\":false}}"
+# This migration/debug example emits the first-sample boundary by default when
+# DSA is enabled. Set DSA_TRACE_ENABLED=false for performance measurements.
+DSA_TRACE_ENABLED="${DSA_TRACE_ENABLED:-${DSA_ENABLED}}"
+case "${DSA_TRACE_ENABLED}" in
+  true|false) ;;
+  *)
+    echo "DSA_TRACE_ENABLED must be true or false, got: ${DSA_TRACE_ENABLED}" >&2
+    exit 2
+    ;;
+esac
+DSA_TRACE_RANK="${DSA_TRACE_RANK:-0}"
+if [[ ! "${DSA_TRACE_RANK}" =~ ^[0-9]+$ ]]; then
+  echo "DSA_TRACE_RANK must be a non-negative TP rank, got: ${DSA_TRACE_RANK}" >&2
+  exit 2
+fi
+DSA_ADDITIONAL_CONFIG="{\"dsa_sparse_config\":{\"enabled\":${DSA_ENABLED},\"indexer_mla_block_ratio\":3,\"trace_points\":{\"enabled\":${DSA_TRACE_ENABLED},\"points\":[\"first_sample\"],\"ranks\":[${DSA_TRACE_RANK}]}},\"enable_dsa_cp\":false,\"ascend_compilation_config\":{\"enable_npugraph_ex\":false}}"
 
 export HCCL_OP_EXPANSION_MODE="${HCCL_OP_EXPANSION_MODE:-AIV}"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"

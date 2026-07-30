@@ -3,7 +3,7 @@
 本文件定义 ``dsa_sparse_config.trace_points`` 的解析和查询逻辑。当前只保留
 图外首 token 边界探针；已退役数据面的 layer-wise tensor 采样和显式 stream
 sync 不再属于公共配置。配置在拉起时解析为不可变结构，推理路径只做只读
-过滤，默认关闭。
+过滤。DSA 开启且省略 trace 配置时默认记录 TP rank 0 的首次采样边界。
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ DSA_TRACE_PUBLIC_KEYS = frozenset({"enabled", "points", "ranks"})
 DSA_TRACE_ALL_POINTS = frozenset({
     DSA_TRACE_POINT_FIRST_SAMPLE,
 })
+DSA_TRACE_DEFAULT_POINTS = (DSA_TRACE_POINT_FIRST_SAMPLE,)
+DSA_TRACE_DEFAULT_RANKS = (0,)
 
 
 @dataclass(frozen=True)
@@ -119,8 +121,8 @@ def configure_dsa_trace(trace_config: Any) -> DSATraceConfig:
         points=_parse_points(config.get("points")),
         ranks=_parse_int_filter(config.get("ranks")),
     )
-    # Trace is an explicit debugging mode. Use WARNING so worker-process log
-    # filtering cannot make an enabled probe silently disappear.
+    # Trace is an explicit debugging mode. Use WARNING so the activation
+    # message remains visible with the default/INFO worker log level.
     logger.warning("Configured DSA trace points: %s", _DSA_TRACE_CONFIG)
     return _DSA_TRACE_CONFIG
 
@@ -144,19 +146,15 @@ def configure_dsa_trace_from_additional_config(
     dsa_config = additional_config.get(DSA_TRACE_PUBLIC_CONTAINER_KEY)
     if isinstance(dsa_config, dict):
         nested = dsa_config.get(DSA_TRACE_PUBLIC_CONFIG_KEY)
+        if flattened is None and nested is None:
+            nested = {
+                "enabled": _as_bool(dsa_config.get("enabled"), default=False),
+                "points": list(DSA_TRACE_DEFAULT_POINTS),
+                "ranks": list(DSA_TRACE_DEFAULT_RANKS),
+            }
 
     return configure_dsa_trace(
         flattened if flattened is not None else nested)
-
-
-def _current_tp_rank() -> int | None:
-    try:
-        from vllm.distributed.parallel_state import (
-            get_tensor_model_parallel_rank,
-        )
-        return int(get_tensor_model_parallel_rank())
-    except Exception:
-        return None
 
 
 def dsa_trace_enabled(
@@ -169,9 +167,11 @@ def dsa_trace_enabled(
         return False
     if config.ranks is not None:
         if tp_rank is None:
-            tp_rank = _current_tp_rank()
-        if tp_rank is None:
-            return False
+            raise RuntimeError(
+                "DSA trace rank filtering requires an explicit TP rank. "
+                "Resolve get_tp_group().rank_in_group after distributed "
+                "initialization instead of silently disabling trace output."
+            )
         if int(tp_rank) not in config.ranks:
             return False
     return True

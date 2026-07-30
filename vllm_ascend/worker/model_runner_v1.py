@@ -343,11 +343,35 @@ class NPUModelRunner(GPUModelRunner):
         self.dsa_worker_mgr = None
         self._dsa_first_sample_traced_req_ids: set[str] = set()
         additional_config = vllm_config.additional_config or {}
-        configure_dsa_trace_from_additional_config(
+        dsa_trace_config = configure_dsa_trace_from_additional_config(
             additional_config
             if is_dsa_sparse_config_enabled(vllm_config)
             else None
         )
+        self._dsa_trace_tp_rank: int | None = None
+        self._dsa_first_sample_trace_enabled = False
+        if dsa_trace_config.enabled:
+            # Worker distributed groups are initialized before ModelRunner.
+            # Resolve the TP rank once here so a failed lazy rank lookup cannot
+            # silently disable every trace point in the sampling hot path.
+            self._dsa_trace_tp_rank = int(get_tp_group().rank_in_group)
+            self._dsa_first_sample_trace_enabled = dsa_trace_enabled(
+                DSA_TRACE_POINT_FIRST_SAMPLE,
+                tp_rank=self._dsa_trace_tp_rank,
+            )
+            logger.warning(
+                "[DSA trace worker state] global_rank=%s tp_rank=%s "
+                "points=%s rank_filter=%s first_sample_active=%s",
+                getattr(vllm_config.parallel_config, "rank", None),
+                self._dsa_trace_tp_rank,
+                sorted(dsa_trace_config.points),
+                (
+                    sorted(dsa_trace_config.ranks)
+                    if dsa_trace_config.ranks is not None
+                    else "all"
+                ),
+                self._dsa_first_sample_trace_enabled,
+            )
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -2551,7 +2575,7 @@ class NPUModelRunner(GPUModelRunner):
         # observes first-token logits without adding work to model forward or
         # a captured graph. The D2H read happens after _bookkeeping_sync below.
         trace_first_sample = (
-            dsa_trace_enabled(DSA_TRACE_POINT_FIRST_SAMPLE)
+            self._dsa_first_sample_trace_enabled
             and any(
                 req_id not in self._dsa_first_sample_traced_req_ids
                 for req_id in self.input_batch.req_ids
@@ -2804,12 +2828,13 @@ class NPUModelRunner(GPUModelRunner):
             )
             traced_req_ids.add(req_id)
 
-        # Trace is an explicit debugging mode. Use WARNING so the worker log
-        # level cannot silently hide the configured trace point.
+        # Trace is an explicit debugging mode. Use WARNING so it remains
+        # visible with the default/INFO worker log level.
         logger.warning(
-            "[DSA first-sample boundary] point=%s "
+            "[DSA first-sample boundary] point=%s tp_rank=%s "
             "batch_num_tokens=%s batch_num_reqs=%s rows=%s",
             DSA_TRACE_POINT_FIRST_SAMPLE,
+            self._dsa_trace_tp_rank,
             getattr(batch_desc, "num_tokens", None),
             getattr(batch_desc, "num_reqs", None),
             trace_rows,

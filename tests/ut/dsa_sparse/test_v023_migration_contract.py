@@ -275,6 +275,8 @@ def _load_dsa_config_switch_contract():
         },
         "_DSA_SPARSE_PUBLIC_KEYS": public_keys,
         "DSA_TRACE_PUBLIC_KEYS": frozenset({"enabled", "points", "ranks"}),
+        "DSA_TRACE_DEFAULT_POINTS": ("first_sample",),
+        "DSA_TRACE_DEFAULT_RANKS": (0,),
         "DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY":
         "enable_dsa_row_mode_decode_graph",
         "DSA_TRACE_CONFIG_KEY": "dsa_sparse_trace_points",
@@ -918,6 +920,20 @@ class TestV023LifecycleContract(unittest.TestCase):
         self.assertNotIn('DP_SIZE="${DP_SIZE:-2}"', example)
         self.assertIn('\\"enable_dsa_cp\\":false', example)
 
+    def test_example_enables_first_sample_trace_with_explicit_tp_rank(self):
+        example = _read("examples/glm51_dsa_sparse_mtp.sh")
+        self.assertIn(
+            'DSA_TRACE_ENABLED="${DSA_TRACE_ENABLED:-${DSA_ENABLED}}"',
+            example,
+        )
+        self.assertIn('DSA_TRACE_RANK="${DSA_TRACE_RANK:-0}"', example)
+        self.assertIn(
+            '\\"trace_points\\":{\\"enabled\\":${DSA_TRACE_ENABLED},'
+            '\\"points\\":[\\"first_sample\\"],'
+            '\\"ranks\\":[${DSA_TRACE_RANK}]}',
+            example,
+        )
+
     def test_sparse_offload_rejects_independent_dsa_cp_switch(self):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
         self.assertIn(
@@ -957,12 +973,38 @@ class TestV023LifecycleContract(unittest.TestCase):
         self.assertNotIn('\\"split_indexer_cache\\":true', example)
 
         normalize, is_enabled = _load_dsa_config_switch_contract()
-        enabled_attrs, _ = normalize({"enabled": True})
+        enabled_attrs, enabled_updates = normalize({"enabled": True})
         self.assertTrue(enabled_attrs["enable_dsa_sparse_cache"])
         self.assertTrue(enabled_attrs["enable_dsa_split_indexer_cache"])
-        disabled_attrs, _ = normalize({"enabled": False})
+        self.assertEqual(
+            enabled_updates["dsa_sparse_trace_points"],
+            {
+                "enabled": True,
+                "points": ["first_sample"],
+                "ranks": [0],
+            },
+        )
+        disabled_attrs, disabled_updates = normalize({"enabled": False})
         self.assertFalse(disabled_attrs["enable_dsa_sparse_cache"])
         self.assertFalse(disabled_attrs["enable_dsa_split_indexer_cache"])
+        self.assertEqual(
+            disabled_updates["dsa_sparse_trace_points"],
+            {
+                "enabled": False,
+                "points": ["first_sample"],
+                "ranks": [0],
+            },
+        )
+        _, explicit_trace_updates = normalize(
+            {
+                "enabled": True,
+                "trace_points": False,
+            }
+        )
+        self.assertEqual(
+            explicit_trace_updates["dsa_sparse_trace_points"],
+            {"enabled": False},
+        )
         with self.assertRaises(TypeError):
             normalize({"enabled": "false"})
         with self.assertRaises(ValueError):
@@ -1158,8 +1200,23 @@ class TestDSATraceContract(unittest.TestCase):
             init_source,
         )
         self.assertIn(
-            "trace_first_sample = dsa_trace_enabled("
-            "DSA_TRACE_POINT_FIRST_SAMPLE)",
+            "self._dsa_trace_tp_rank = "
+            "int(get_tp_group().rank_in_group)",
+            init_source,
+        )
+        self.assertIn(
+            "self._dsa_first_sample_trace_enabled = dsa_trace_enabled("
+            "DSA_TRACE_POINT_FIRST_SAMPLE, "
+            "tp_rank=self._dsa_trace_tp_rank)",
+            init_source,
+        )
+        self.assertIn(
+            "[DSA trace worker state] global_rank=%s tp_rank=%s",
+            init_source,
+        )
+        self.assertIn(
+            "trace_first_sample = "
+            "self._dsa_first_sample_trace_enabled and any(",
             sample_source,
         )
         self.assertIn(
@@ -1172,7 +1229,9 @@ class TestDSATraceContract(unittest.TestCase):
             update_source,
         )
         self.assertLess(
-            sample_source.index("dsa_trace_enabled("),
+            sample_source.index(
+                "self._dsa_first_sample_trace_enabled"
+            ),
             sample_source.index(
                 "sampler_output = self._sample("
             ),
@@ -1186,7 +1245,7 @@ class TestDSATraceContract(unittest.TestCase):
         self.assertIn("logger.warning(", trace_source)
         self.assertNotIn("logger.info(", trace_source)
         self.assertIn(
-            "[DSA first-sample boundary] point=%s",
+            "[DSA first-sample boundary] point=%s tp_rank=%s",
             trace_source,
         )
 
@@ -1237,6 +1296,7 @@ class TestDSATraceContract(unittest.TestCase):
         trace = namespace["_trace_dsa_first_sample_boundary"]
         runner = types.SimpleNamespace(
             _dsa_first_sample_traced_req_ids=set(),
+            _dsa_trace_tp_rank=0,
             input_batch=types.SimpleNamespace(
                 req_id_to_index={"request-0": 0},
                 num_prompt_tokens=[16],
@@ -1312,6 +1372,23 @@ class TestDSATraceContract(unittest.TestCase):
             },
         ):
             spec.loader.exec_module(module)
+            default_config = (
+                module.configure_dsa_trace_from_additional_config(
+                    {
+                        "dsa_sparse_config": {
+                            "enabled": True,
+                        }
+                    }
+                )
+            )
+            self.assertTrue(default_config.enabled)
+            self.assertEqual(
+                default_config.points,
+                frozenset({"first_sample"}),
+            )
+            self.assertEqual(default_config.ranks, frozenset({0}))
+            module.configure_dsa_trace(None)
+
             config = (
                 module.configure_dsa_trace_from_additional_config(
                     {
@@ -1339,7 +1416,12 @@ class TestDSATraceContract(unittest.TestCase):
                     tp_rank=1,
                 )
             )
-            self.assertEqual(len(warning_calls), 1)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "requires an explicit TP rank",
+            ):
+                module.dsa_trace_enabled("first_sample")
+            self.assertEqual(len(warning_calls), 2)
             module.configure_dsa_trace(None)
             self.assertFalse(
                 module.dsa_trace_enabled(
@@ -1347,6 +1429,16 @@ class TestDSATraceContract(unittest.TestCase):
                     tp_rank=0,
                 )
             )
+            disabled_config = (
+                module.configure_dsa_trace_from_additional_config(
+                    {
+                        "dsa_sparse_config": {
+                            "enabled": False,
+                        }
+                    }
+                )
+            )
+            self.assertFalse(disabled_config.enabled)
 
 
 class TestIndexerRopePrecisionContract(unittest.TestCase):
