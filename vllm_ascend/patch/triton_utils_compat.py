@@ -40,11 +40,11 @@ def install_triton_utils_compat() -> None:
     except ImportError:
         gluon_language = _UnavailableGluonModule(_GLUON_LANGUAGE_MODULE_NAME)
         gluon = _UnavailableGluonModule(_GLUON_MODULE_NAME)
-        gluon.language = gluon_language
+        vars(gluon)["language"] = gluon_language
 
         sys.modules[_GLUON_MODULE_NAME] = gluon
         sys.modules[_GLUON_LANGUAGE_MODULE_NAME] = gluon_language
-        triton_experimental.gluon = gluon
+        vars(triton_experimental)["gluon"] = gluon
 
     if not hasattr(triton_core, "_aggregate"):
-        triton_core._aggregate = _unsupported_aggregate
+        vars(triton_core)["_aggregate"] = _unsupported_aggregate
