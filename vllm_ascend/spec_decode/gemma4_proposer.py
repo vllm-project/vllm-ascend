@@ -6,6 +6,7 @@ AscendSpecDecodeBaseProposer (NPU initialization, ACL graph, attention metadata)
 """
 
 from dataclasses import replace
+import copy
 
 import torch
 from vllm.config import get_layers_from_vllm_config
@@ -128,3 +129,16 @@ class AscendGemma4Proposer(_VllmGemma4Proposer, AscendSpecDecodeBaseProposer):
 
         # Sync wrapper→impl so the Ascend runtime path can resolve target cache.
         self._sync_kv_sharing_target_to_impl()
+
+    def _swap_per_group_block_table(self, gid: int, cm, num_reqs: int):
+        """Return cm with block_table_tensor swapped to the per-group one for gid.
+
+        If this proposer tracks per-group block tables (multi-group KV cache),
+        copy cm and replace its block_table_tensor.  Otherwise return cm as-is.
+        """
+        per_group_bt = self._per_group_block_tables.get(gid)
+        if per_group_bt is None:
+            return cm
+        cm = copy.copy(cm)
+        cm.block_table_tensor = per_group_bt[:num_reqs]
+        return cm

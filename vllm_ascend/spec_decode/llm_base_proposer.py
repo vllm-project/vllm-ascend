@@ -540,6 +540,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
 
+    def _swap_per_group_block_table(self, gid: int, cm, num_reqs: int):
+        """Return cm unchanged; overridden in AscendGemma4Proposer."""
+        return cm
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -653,12 +657,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     # Build per-group metadata for multi-group KV cache models.
                     per_layer_attn_metadata = dict()
                     for attn_group in self.draft_attn_groups:
-                        gid = attn_group.kv_cache_group_id
-                        grp_cm = step_metadata
-                        per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
-                        if per_group_bt is not None:
-                            grp_cm = copy.copy(step_metadata)
-                            grp_cm.block_table_tensor = per_group_bt[:num_reqs]
+                        grp_cm = self._swap_per_group_block_table(
+                            attn_group.kv_cache_group_id, step_metadata, num_reqs)
                         grp_builder = attn_group.get_metadata_builder()
                         if not self.use_compress or draft_index == 0:
                             grp_meta = grp_builder.build_for_graph_capture(
@@ -1531,12 +1531,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert draft_index > 0
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
-
-        # Per-group block_table swap for multi-group KV cache models.
-        gid = attn_group.kv_cache_group_id
-        per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
-        if per_group_bt is not None:
-            common_attn_metadata.block_table_tensor = per_group_bt[: common_attn_metadata.num_reqs]
+        common_attn_metadata = self._swap_per_group_block_table(
+            attn_group.kv_cache_group_id, common_attn_metadata, common_attn_metadata.num_reqs)
 
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -2139,13 +2135,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            # Per-group block_table swap for multi-group KV cache models.
-            cm = common_attn_metadata
-            per_group_bt = getattr(self, "_per_group_block_tables", {}).get(gid)
-            if per_group_bt is not None:
-                cm = copy.copy(common_attn_metadata)
-                cm.block_table_tensor = per_group_bt[: common_attn_metadata.num_reqs]
+            cm = self._swap_per_group_block_table(
+                attn_group.kv_cache_group_id, common_attn_metadata, common_attn_metadata.num_reqs)
             builder = attn_group.get_metadata_builder()
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
