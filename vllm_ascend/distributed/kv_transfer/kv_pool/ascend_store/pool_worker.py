@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
+    RequestGroupedBlockHashCache,
     block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
@@ -791,7 +792,15 @@ class KVPoolWorker:
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            load_masks = self.token_database.load_mask(request.block_hashes, token_len)
+            grouped_hash_cache = RequestGroupedBlockHashCache(
+                request.block_hashes,
+                self.token_database.hash_block_size,
+            )
+            load_masks = self.token_database.load_mask(
+                request.block_hashes,
+                token_len,
+                grouped_hash_cache=grouped_hash_cache,
+            )
             for group_id in load_group_ids:
                 if group_id >= len(request.block_ids_by_group):
                     continue
@@ -817,6 +826,7 @@ class KVPoolWorker:
                     kv_cache_group_id=group_id,
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
+                    grouped_hash_cache=grouped_hash_cache,
                 ):
                     addr, size, block_id = self.token_database.prepare_value(
                         start,

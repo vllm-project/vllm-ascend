@@ -75,7 +75,7 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
     def store_mask(self, token_len, num_prompt_tokens=None):
         return self.masks
 
-    def load_mask(self, block_hashes, token_len):
+    def load_mask(self, block_hashes, token_len, grouped_hash_cache=None):
         return self.masks
 
     def mask_allows_chunk(self, masks, kv_cache_group_id, start):
