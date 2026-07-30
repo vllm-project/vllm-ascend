@@ -657,8 +657,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     # Build per-group metadata for multi-group KV cache models.
                     per_layer_attn_metadata = dict()
                     for attn_group in self.draft_attn_groups:
-                        grp_cm = self._swap_per_group_block_table(
-                            attn_group.kv_cache_group_id, step_metadata, num_reqs)
+                        grp_cm = self._swap_per_group_block_table(attn_group.kv_cache_group_id, step_metadata, num_reqs)
                         grp_builder = attn_group.get_metadata_builder()
                         if not self.use_compress or draft_index == 0:
                             grp_meta = grp_builder.build_for_graph_capture(
@@ -1532,7 +1531,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
         common_attn_metadata = self._swap_per_group_block_table(
-            attn_group.kv_cache_group_id, common_attn_metadata, common_attn_metadata.num_reqs)
+            attn_group.kv_cache_group_id, common_attn_metadata, common_attn_metadata.num_reqs
+        )
+        _const_pos = getattr(self, "constant_draft_positions", False)
 
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -1573,7 +1574,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # MTP (constant_draft_positions): all draft tokens share the same
         # target position — skip position and seq_len advancing.
-        if not getattr(self, "constant_draft_positions", False):
+        if not _const_pos:
             used_update_positions += 1
 
         # Clone the data so that when calculating the data at position 2 and position 3
@@ -1610,24 +1611,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # of main model.
         # Increment the sequence lengths.
         # MTP (constant_draft_positions): keep target's last seq_lens.
-        if not getattr(self, "constant_draft_positions", False):
+        if not _const_pos:
             common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
         if common_attn_metadata.seq_lens_cpu is not None:
-            if not getattr(self, "constant_draft_positions", False):
+            if not _const_pos:
                 common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
             exceeds_mask_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_cpu, 1)
         if common_attn_metadata._seq_lens_cpu is not None:
-            if not getattr(self, "constant_draft_positions", False):
+            if not _const_pos:
                 common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
             exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
-            if not getattr(self, "constant_draft_positions", False):
+            if not _const_pos:
                 common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
@@ -2135,8 +2136,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
         for attn_group in self.draft_attn_groups:
-            cm = self._swap_per_group_block_table(
-                attn_group.kv_cache_group_id, common_attn_metadata, common_attn_metadata.num_reqs)
+            gid = attn_group.kv_cache_group_id
+            cm = self._swap_per_group_block_table(gid, common_attn_metadata, common_attn_metadata.num_reqs)
             builder = attn_group.get_metadata_builder()
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
