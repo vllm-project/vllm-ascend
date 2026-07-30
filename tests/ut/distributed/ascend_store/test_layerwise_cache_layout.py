@@ -2,7 +2,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.v1.kv_cache_interface import KVCacheTensor
+import torch
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -46,9 +51,25 @@ def test_no_reuse_skips_topology_validation():
 
 def test_base_layers_are_merged_into_shared_slots():
     original_tensors = [KVCacheTensor(size=16, shared_by=[f"model.layers.{layer}.self_attn"]) for layer in range(6)]
+    layer_names = [tensor.shared_by[0] for tensor in original_tensors]
+    layer_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        head_size_v=4,
+        dtype=torch.int8,
+    )
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=original_tensors,
-        kv_cache_groups=[object()],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs={layer_name: layer_spec for layer_name in layer_names},
+                ),
+            )
+        ],
     )
 
     apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(6, 2))
@@ -58,6 +79,44 @@ def test_base_layers_are_merged_into_shared_slots():
         ["model.layers.1.self_attn", "model.layers.3.self_attn", "model.layers.5.self_attn"],
         ["model.layers.2.self_attn", "model.layers.4.self_attn"],
     ]
+
+
+def test_equal_tensor_sizes_reject_incompatible_cache_specs():
+    layer_names = [f"model.layers.{layer}.self_attn" for layer in range(4)]
+    first_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=8,
+        dtype=torch.int8,
+    )
+    incompatible_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=4,
+        head_size_v=4,
+        dtype=torch.int8,
+    )
+    layer_specs = {layer_name: first_spec for layer_name in layer_names}
+    layer_specs[layer_names[2]] = incompatible_spec
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=[KVCacheTensor(size=32, shared_by=[layer_name]) for layer_name in layer_names],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=layer_specs,
+                ),
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="identical cache specs"):
+        apply_layerwise_kv_cache_plan(
+            kv_cache_config,
+            _make_vllm_config(4, 1),
+        )
 
 
 def test_default_layout_keeps_one_buffer_per_layer():
