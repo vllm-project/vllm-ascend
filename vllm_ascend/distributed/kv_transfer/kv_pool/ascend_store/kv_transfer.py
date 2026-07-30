@@ -684,6 +684,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         def should_skip(start: int, end: int) -> bool:
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
+        grouped_hash_cache = RequestGroupedBlockHashCache(
+            req_meta.block_hashes,
+            self.token_database.hash_block_size,
+        )
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
             cache_family = self.token_database.group_cache_families["kv"].get(group_id)
@@ -740,6 +744,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_filter=chunk_filter,
                 shard_rank=self.tp_rank % self.put_step if pre_shard else None,
                 shard_size=self.put_step if pre_shard else None,
+                grouped_hash_cache=grouped_hash_cache,
             )
             for start, end, key, _block_hash, block_id in iterator:
                 starts.append(start)
@@ -784,6 +789,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         token_len,
                         req_meta.block_hashes,
                         kv_cache_group_id=group_id,
+                        grouped_hash_cache=grouped_hash_cache,
                     )
                 ]
                 if self.enable_kv_event
