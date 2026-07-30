@@ -4247,20 +4247,22 @@ class NPUModelRunner(GPUModelRunner):
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"{name}:{type(exc).__name__}:{exc}")
                 continue
-            # A zero in any of these tensors collapses the decode query/output.
-            for attr in (
-                "W_UV",
-                "W_UK_T",
-                "wd_qkv",
-                "deq_scale_qkv",
-                "wu_q",
-                "qb_deq_scl",
-                "ctkv_scale",
-                "q_nope_scale",
-            ):
-                tensor = getattr(target, attr, None)
-                if tensor is None:
-                    continue
+            get_sanity_tensors = getattr(
+                target,
+                "get_derived_weight_sanity_tensors",
+                None,
+            )
+            if not callable(get_sanity_tensors):
+                continue
+            try:
+                sanity_tensors = get_sanity_tensors()
+            except Exception as exc:  # noqa: BLE001
+                failed.append(
+                    "%s.get_derived_weight_sanity_tensors:%s:%s"
+                    % (name, type(exc).__name__, exc)
+                )
+                continue
+            for attr, tensor in sanity_tensors.items():
                 try:
                     norm = float(tensor.detach().float().norm().item())
                 except Exception:  # noqa: BLE001
@@ -4279,14 +4281,14 @@ class NPUModelRunner(GPUModelRunner):
         if reloaded == 0:
             logger.warning(
                 "[restore model] [%s] no non-persistent derived-weight reload targets found; "
-                "MLA decode may still use stale absorbed weights",
+                "attention decode may still use stale derived weights",
                 label,
             )
         if reloaded and min_norm != float("inf"):
             if zero_norm_modules:
                 logger.error(
                     "[restore model] REGRESSION: %d derived weight tensors are still "
-                    "zero after restore, MLA decode will be broken. preview=%s",
+                    "zero after restore, attention decode will be broken. preview=%s",
                     len(zero_norm_modules),
                     zero_norm_modules[: min(8, len(zero_norm_modules))],
                 )

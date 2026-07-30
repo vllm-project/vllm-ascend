@@ -1054,6 +1054,38 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
+    def get_derived_weight_sanity_tensors(self) -> dict[str, torch.Tensor]:
+        """Return derived tensors that must be non-zero after restore."""
+        attrs = (
+            # Common MLA absorbed weights.
+            "W_UV",
+            "W_UK_T",
+            # A2/A3 MLAPO and FA-quant weights/scales.
+            "wd_qkv",
+            "deq_scale_qkv",
+            "wu_q",
+            "qb_deq_scl",
+            "wd_q",
+            "wd_kv",
+            "dequant_scale_w_uq_qr",
+            "dequant_scale_w_dq",
+            "dequant_scale_w_dkv_kr",
+            "ctkv_scale",
+            "q_nope_scale",
+            # A5 MLAPO weights/scales.
+            "weight_dq",
+            "weight_uq_qr",
+            "weight_uq_qr_scale",
+            "weight_dkv_kr",
+            "weight_dq_scale",
+            "weight_dkv_kr_scale",
+        )
+        return {
+            attr: tensor
+            for attr in attrs
+            if isinstance((tensor := getattr(self, attr, None)), torch.Tensor)
+        }
+
     def _process_weights_for_fused_fa_quant(self):
         if get_ascend_device_type() == AscendDeviceType.A5:
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]

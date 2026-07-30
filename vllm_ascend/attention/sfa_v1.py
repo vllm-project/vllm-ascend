@@ -996,6 +996,36 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Non-mlapo path may have NZ-transformed W_UK_T; buffer already holds the
         # post-transform value from cold start, so nothing else to rebuild here.
 
+    def get_derived_weight_sanity_tensors(self) -> dict[str, torch.Tensor]:
+        """Return SFA-derived tensors that must be non-zero after restore."""
+        attrs = (
+            # Absorbed weights restored from persistent buffers.
+            "W_UV",
+            "W_UK_T",
+            # A2/A3 MLAPO weights/scales.
+            "wd_qkv",
+            "deq_scale_qkv",
+            "wu_q",
+            "qb_deq_scl",
+            "ctkv_scale",
+            "q_nope_scale",
+            # A5 MLAPO/prolog weights/scales.
+            "weight_dq",
+            "weight_uq_qr",
+            "weight_uq_qr_scale",
+            "weight_dkv_kr",
+            "weight_dq_scale",
+            "weight_dkv_kr_scale",
+            "dequant_scale_w_uq_qr",
+            "dequant_scale_w_dq",
+            "dequant_scale_w_dkv_kr",
+        )
+        return {
+            attr: tensor
+            for attr in attrs
+            if isinstance((tensor := getattr(self, attr, None)), torch.Tensor)
+        }
+
     @classmethod
     def reload_hadamard_after_restore(cls, device) -> bool:
         """[snapshot] Rebuild class-level SFA C8 indexer hadamards (zeroed by NPU restore).
