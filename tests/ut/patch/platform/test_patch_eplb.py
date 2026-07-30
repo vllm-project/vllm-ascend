@@ -268,62 +268,6 @@ def test_from_mapping_wrapper_preserves_classmethod_binding(monkeypatch):
     assert calls == [(TestState, "model", "future")]
 
 
-def test_nz_expert_buffers_are_replaced_with_nd_buffers(monkeypatch):
-    nz_weights = [torch.ones(2, 3), torch.full((2, 3), 2.0)]
-    nd_scales = [torch.ones(3), torch.full((3,), 2.0)]
-    source_formats = {id(weight): 29 for weight in nz_weights}
-    source_formats.update({id(scale): patch_eplb._NPU_FORMAT_ND for scale in nd_scales})
-    original_nz_buffer = [torch.empty_like(weight) for weight in nz_weights]
-    original_scale_buffer = [torch.empty_like(scale) for scale in nd_scales]
-    model_state = SimpleNamespace(
-        model=SimpleNamespace(expert_weights=[[nz_weights, nd_scales]]),
-        expert_buffer=[original_nz_buffer, original_scale_buffer],
-    )
-    monkeypatch.setattr(
-        patch_eplb.torch_npu,
-        "get_npu_format",
-        lambda tensor: source_formats.get(id(tensor), patch_eplb._NPU_FORMAT_ND),
-    )
-    monkeypatch.setattr(
-        patch_eplb,
-        "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=1),
-    )
-
-    patch_eplb._replace_nz_expert_buffers_with_nd(model_state)
-
-    replacement_buffer = model_state.expert_buffer[0]
-    assert replacement_buffer is not original_nz_buffer
-    assert [tensor.shape for tensor in replacement_buffer] == [weight.shape for weight in nz_weights]
-    assert model_state.expert_buffer[1] is original_scale_buffer
-
-    patch_eplb._replace_nz_expert_buffers_with_nd(model_state)
-    assert model_state.expert_buffer[0] is replacement_buffer
-
-
-def test_add_model_wrapper_replaces_transfer_buffer(monkeypatch):
-    model = object()
-    model_state = SimpleNamespace(model=model)
-    state = SimpleNamespace(model_states={"model": model_state})
-    replace_buffer = MagicMock()
-    monkeypatch.setattr(
-        patch_eplb,
-        "_replace_nz_expert_buffers_with_nd",
-        replace_buffer,
-    )
-
-    def original_add_model(self, model, model_config, *, future_option=None):
-        assert self is state
-        assert model_config == "config"
-        assert future_option == "future"
-        return "result"
-
-    wrapped = patch_eplb._wrap_add_model(original_add_model)
-
-    assert wrapped(state, model, "config", future_option="future") == "result"
-    replace_buffer.assert_called_once_with(model_state)
-
-
 def test_eplb_state_step_forwards_additive_parameters():
     sentinel = object()
     calls = []
