@@ -1572,7 +1572,18 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
             k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
+            if self.is_rope_neox_style:
+                k_li_pe = torch_npu.npu_rotary_mul(
+                    k_li_pe,
+                    cos,
+                    sin,
+                )
+            else:
+                k_li_pe = torch_npu.npu_interleave_rope(
+                    k_li_pe,
+                    cos,
+                    sin,
+                )
             k_li_pe = k_li_pe.squeeze(2)
 
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
@@ -1659,8 +1670,18 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dim=-1,
             )
             q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(
-                q_li_pe, cos, sin)
+            if self.is_rope_neox_style:
+                q_li_pe = torch_npu.npu_rotary_mul(
+                    q_li_pe,
+                    cos,
+                    sin,
+                )
+            else:
+                q_li_pe = torch_npu.npu_interleave_rope(
+                    q_li_pe,
+                    cos,
+                    sin,
+                )
             q_li = torch.cat(
                 [q_li_pe.squeeze(2), q_li_nope], dim=-1)
 

@@ -227,15 +227,19 @@ def _deepseek_v2_mla_attention_init(
 
     skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
     if self.is_v32 and not skip_indexer_init:
+        indexer_is_neox_style = (
+            config.model_type != "glm_moe_dsa"
+            and not getattr(
+                config,
+                "indexer_rope_interleave",
+                False,
+            )
+        )
         self.indexer_rope_emb = get_rope(
             qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            is_neox_style=not getattr(
-                config,
-                "indexer_rope_interleave",
-                False,
-            ),
+            is_neox_style=indexer_is_neox_style,
         )
 
         self.indexer = Indexer(

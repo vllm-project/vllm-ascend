@@ -938,5 +938,57 @@ class TestV023LifecycleContract(unittest.TestCase):
         self.assertIn("self.freeze_capacity()", source)
 
 
+class TestIndexerRopePrecisionContract(unittest.TestCase):
+    def test_non_triton_indexer_rope_honors_model_style(self):
+        style_dispatch = re.compile(
+            r"if self\.is_rope_neox_style:\n"
+            r"\s+\w+ = torch_npu\.npu_rotary_mul\(.*?\)\n"
+            r"\s+else:\n"
+            r"\s+\w+ = torch_npu\.npu_interleave_rope\(.*?\)",
+            re.DOTALL,
+        )
+        for function_name in (
+            "indexer_select_pre_process",
+            "_prepare_indexer_query_and_weights",
+        ):
+            function = ast.unparse(
+                _function_node(
+                    "vllm_ascend/attention/sfa_v1.py",
+                    function_name,
+                )
+            )
+            with self.subTest(function_name=function_name):
+                self.assertRegex(function, style_dispatch)
+
+    def test_glm_indexer_rope_matches_sfa_interleave_style(self):
+        function = ast.unparse(
+            _function_node(
+                "vllm_ascend/patch/worker/patch_deepseek_v2.py",
+                "_deepseek_v2_mla_attention_init",
+            )
+        )
+        self.assertIn(
+            "indexer_is_neox_style = config.model_type != "
+            "'glm_moe_dsa' and (not getattr(config, "
+            "'indexer_rope_interleave', False))",
+            function,
+        )
+        self.assertIn(
+            "is_neox_style=indexer_is_neox_style",
+            function,
+        )
+
+        sfa_source = _read("vllm_ascend/attention/sfa_v1.py")
+        self.assertIn(
+            'if self.vllm_config.model_config.hf_config.model_type '
+            'in ["glm_moe_dsa"]:',
+            sfa_source,
+        )
+        self.assertIn(
+            "self.is_rope_neox_style = False",
+            sfa_source,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
