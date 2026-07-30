@@ -5,20 +5,31 @@
 | Name | GitHub ID | Date |
 |:-----------:|:-----:|:-----:|
 | Xiyuan Wang | [@wangxiyuan](https://github.com/wangxiyuan) | 2025/01 |
-| Yikun Jiang| [@Yikun](https://github.com/Yikun) | 2025/02 |
-| Yi Gan| [@ganyi1996ppo](https://github.com/ganyi1996ppo) | 2025/02 |
-| Shoujian Zheng| [@jianzs](https://github.com/jianzs) | 2025/06 |
+| Yikun Jiang | [@Yikun](https://github.com/Yikun) | 2025/02 |
+| Shoujian Zheng | [@jianzs](https://github.com/jianzs) | 2025/06 |
 | Wengang Chen | [@ApsarasX](https://github.com/ApsarasX) | 2025/08 |
-| Mengqing Cao | [@MengqingCao](https://github.com/MengqingCao) | 2025/08 |
-| Peng Yu| [@paulyu12](https://github.com/paulyu12) | 2025/10 |
-| Yizhou Liu| [@yiz-liu](https://github.com/yiz-liu) | 2025/10 |
+| Peng Yu | [@paulyu12](https://github.com/paulyu12) | 2025/10 |
+| Yizhou Liu | [@yiz-liu](https://github.com/yiz-liu) | 2025/10 |
 | Jinqian Wei | [@weijinqian0](https://github.com/weijinqian0) | 2025/10 |
 | Chuanyu Qin | [@nalinaly](https://github.com/nalinaly) | 2025/10 |
-| Jie Wen| [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
-| Chao Lei| [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
-| JiaXu Liu| [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
-| HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
-| LinFeng Yuan| [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
+| Jie Wen | [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
+| Chao Lei | [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
+| JiaXu Liu | [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
+| LinFeng Yuan | [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
+| Jun Han | [@ningjingbengxiaohai](https://github.com/ningjingbengxiaohai) | 2026/06 |
+| Shaoxu Cheng | [@Tflowers-0129](https://github.com/Tflowers-0129) | 2026/07 |
+| Kunpeng Wang | [@kunpengW-code](https://github.com/kunpengW-code) | 2026/07 |
+| Tian Zeng | [@ZT-AIA](https://github.com/ZT-AIA) | 2026/07 |
+| Guihua Wei | [@weiguihua2](https://github.com/weiguihua2) | 2026/07 |
+| Kai Xiong | [@HF-001](https://github.com/HF-001) | 2026/07 |
+
+## Emeritus Committers
+
+| Name | GitHub ID | Date |
+|:-----------:|:-----:|:-----:|
+| Yi Gan | [@ganyi1996ppo](https://github.com/ganyi1996ppo) | 2026/07 |
+| HeXiang Wang | [@whx-sjtu](https://github.com/whx-sjtu) | 2026/07 |
+| Mengqing Cao | [@MengqingCao](https://github.com/MengqingCao) | 2026/07 |
 
 ## Contributors
 <!-- last_commit: edcae83da32af8e1f1b7b97c7e19e8114e0535a5 -->
