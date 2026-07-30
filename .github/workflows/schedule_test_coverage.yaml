@@ -100,10 +100,8 @@ jobs:
           pip install regex pyyaml
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/select_tests.py \
-            --explicit-e2e-tests \
-            tests/e2e/pull_request/one_card/test_sampler.py \
-            tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py \
-            tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py
+            --changed-files vllm_ascend/dummy.py \
+            --run-all-modules
 
   ensure-csrc-cache:
     needs: select-full-tests
