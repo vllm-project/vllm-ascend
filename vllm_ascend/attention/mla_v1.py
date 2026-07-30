@@ -534,33 +534,19 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             * self.max_context_chunk
         )
         chunk_ends = torch.min(self.context_lens_cpu.unsqueeze(0), chunk_starts + self.max_context_chunk)
-        self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0).to(torch.int32)
+        self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
         self.cu_seq_lens_cpu = torch.zeros(self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True)
         torch.cumsum(self.chunk_seq_lens, dim=1, out=self.cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
-        # Blocking host->device copy. A ``.pin_memory().to(non_blocking=True)``
-        # here copies from a TEMPORARY pinned tensor (``self.chunk_seq_lens`` is
-        # not pinned, so ``.pin_memory()`` allocates a throw-away buffer with no
-        # surviving reference). With an async copy that temporary can be freed
-        # before the DMA finishes, so the device tensor ends up with garbage seq
-        # lens -> chunked-prefill reads the KV cache out of range -> MTE "DDR
-        # address out of range". The corruption only reproduces WITHOUT
-        # ASCEND_LAUNCH_BLOCKING (a real async use-after-free race). ``.npu()``
-        # blocks until the copy completes, so the source stays valid.
-        chunk_seq_lens_npu = self.chunk_seq_lens.npu()
         chunk_actual_seq_lengths_kv_list = [
             torch.cumsum(self.chunk_seq_lens[i], dim=0).tolist() for i in range(self.num_chunks)
         ]
         return ChunkedContextMetadata(
             cu_seq_lens=self.cu_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True),
-            # ``chunk_starts`` is a local temporary; ``.pin_memory()`` makes an
-            # unreferenced throw-away buffer, so an async copy risks the same
-            # use-after-free race as ``chunk_seq_lens`` above. Use a blocking
-            # copy so the source stays alive until the DMA completes.
-            starts=chunk_starts.npu(),
+            starts=chunk_starts.pin_memory().to(self.device, non_blocking=True),
             seq_tot=self.chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=self.chunk_seq_lens.max(dim=1).values.tolist(),
             chunk_seq_lens=self.chunk_seq_lens,
-            chunk_seq_lens_npu=chunk_seq_lens_npu,
+            chunk_seq_lens_npu=self.chunk_seq_lens.npu(),
             workspace=self.chunked_prefill_workspace,
             chunk_actual_seq_lengths_kv_list=chunk_actual_seq_lengths_kv_list,
         )
