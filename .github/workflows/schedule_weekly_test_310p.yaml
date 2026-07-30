@@ -70,6 +70,60 @@ on:
         description: 'CANN version for base image tag'
         required: false
         default: '2026.08.03'
+      bisect_good_commit:
+        description: 'explicit good commit for bisect (overrides good_table lookup)'
+        required: false
+        default: ''
+        type: string
+      bisect_bad_commit:
+        description: 'bad commit to bisect from (default HEAD)'
+        required: false
+        default: 'HEAD'
+        type: string
+      bisect_fail_confirm_retries:
+        description: 'flaky guard retry count for bisect (default 1)'
+        required: false
+        default: ''
+        type: string
+      bisect_trial_timeout:
+        description: 'per-trial pytest timeout in seconds for bisect (default 7200)'
+        required: false
+        default: ''
+        type: string
+      bisect_barrier_timeout:
+        description: 'multi-node barrier timeout in seconds for bisect (default 3600)'
+        required: false
+        default: ''
+        type: string
+      bisect_no_verify_good:
+        description: 'skip good endpoint verification in bisect'
+        required: false
+        default: false
+        type: boolean
+      bisect_no_verify_bad:
+        description: 'skip bad endpoint verification in bisect'
+        required: false
+        default: false
+        type: boolean
+      bisect_force_initial_build:
+        description: 'clean-rebuild on the first bisect trial'
+        required: false
+        default: false
+        type: boolean
+      bisect_no_assume_built_head:
+        description: 'do not treat container HEAD as already built'
+        required: false
+        default: false
+        type: boolean
+      bisect_native_check:
+        description: 'rebuild detection strategy (per-commit or since-build)'
+        required: false
+        default: ''
+        type: string
+      bisect_config_base_path:
+        description: 'override CONFIG_BASE_PATH for bisect'
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -230,6 +284,17 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ inputs.bisect_good_commit }}
+      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
+      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
+      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
+      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
+      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
+      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
+      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
+      bisect_native_check: ${{ inputs.bisect_native_check }}
+      bisect_config_base_path: ${{ inputs.bisect_config_base_path || 'tests/e2e/weekly/single_node/configs/' }}
     secrets:
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 

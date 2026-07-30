@@ -46,6 +46,16 @@ case "$SCENE" in
     exit 1
     ;;
 esac
+BISECT_GOOD_COMMIT="${14:-}"
+BISECT_FAIL_CONFIRM_RETRIES="${15:-}"
+BISECT_TRIAL_TIMEOUT="${16:-}"
+BISECT_BARRIER_TIMEOUT="${17:-}"
+BISECT_NO_VERIFY_GOOD="${18:-}"
+BISECT_NO_VERIFY_BAD="${19:-}"
+BISECT_FORCE_INITIAL_BUILD="${20:-}"
+BISECT_NO_ASSUME_BUILT_HEAD="${21:-}"
+BISECT_NATIVE_CHECK="${22:-}"
+BISECT_CONFIG_BASE_PATH="${23:-}"
 
 echo "================================================"
 echo " PROCESS - needs attention"
@@ -61,7 +71,7 @@ echo "   YAML         : ${YAML_SUMMARY:-N/A}"
 echo "================================================"
 
 echo "::group::Failed test details"
-for f in /tmp/test-logs/pytest-driven.log /tmp/test-logs/yaml-test.log /tmp/test-logs/multi-node.log; do
+for f in /tmp/test-logs/pytest-driven.log /tmp/test-logs/yaml-test.log /tmp/test-logs/multi-node.log /tmp/test-logs/model-accuracy-*.log; do
   if [ -f "$f" ]; then
     grep -A 10 'FAILED' "$f" || true
   fi
@@ -103,6 +113,16 @@ BISECT_CMD=(
 [ -n "$SOC" ] && BISECT_CMD+=(--soc "$SOC")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
 [ -n "$COORD_DIR" ] && BISECT_CMD+=(--coord-dir "$COORD_DIR")
+[ -n "$BISECT_GOOD_COMMIT" ] && BISECT_CMD+=(--good-commit "$BISECT_GOOD_COMMIT")
+[ -n "$BISECT_FAIL_CONFIRM_RETRIES" ] && BISECT_CMD+=(--fail-confirm-retries "$BISECT_FAIL_CONFIRM_RETRIES")
+[ -n "$BISECT_TRIAL_TIMEOUT" ] && BISECT_CMD+=(--trial-timeout-s "$BISECT_TRIAL_TIMEOUT")
+[ -n "$BISECT_BARRIER_TIMEOUT" ] && BISECT_CMD+=(--barrier-timeout-s "$BISECT_BARRIER_TIMEOUT")
+[ "$BISECT_NO_VERIFY_GOOD" = "true" ] && BISECT_CMD+=(--no-verify-good)
+[ "$BISECT_NO_VERIFY_BAD" = "true" ] && BISECT_CMD+=(--no-verify-bad)
+[ "$BISECT_FORCE_INITIAL_BUILD" = "true" ] && BISECT_CMD+=(--force-initial-build)
+[ "$BISECT_NO_ASSUME_BUILT_HEAD" = "true" ] && BISECT_CMD+=(--no-assume-built-head)
+[ -n "$BISECT_NATIVE_CHECK" ] && BISECT_CMD+=(--native-check "$BISECT_NATIVE_CHECK")
+[ -n "$BISECT_CONFIG_BASE_PATH" ] && BISECT_CMD+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
 
 echo ""
 echo "=== Running auto bisect ==="

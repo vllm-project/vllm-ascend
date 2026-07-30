@@ -25,6 +25,24 @@ def test_base_env_includes_case_and_config_base(tmp_path: Path):
     assert env["CONFIG_BASE_PATH"] == "configs"
 
 
+def test_single_node_runner_selects_accuracy_test_from_model_type(tmp_path: Path):
+    config_dir = tmp_path / "tests/e2e/models/configs"
+    config_dir.mkdir(parents=True)
+    (config_dir / "model.yaml").write_text("model_type: vllm-asr\n", encoding="utf-8")
+    inp = BisectInput(
+        scene="single_node",
+        config_yaml="model.yaml",
+        bad_commit="bad",
+        config_base_path="tests/e2e/models/configs",
+    )
+    runner = SingleNodeRunner(inp, BisectOptions(repo_dir=tmp_path), builder=None)  # type: ignore[arg-type]
+
+    command = runner._test_command()
+
+    assert "tests/e2e/models/test_asr_eval_correctness.py" in command
+    assert command[-2:] == ["--config", str(config_dir / "model.yaml")]
+
+
 def test_multi_node_runner_selects_external_dp_test_path(tmp_path: Path):
     inp = BisectInput(
         scene="multi_node",

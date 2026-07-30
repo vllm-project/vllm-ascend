@@ -34,6 +34,7 @@ import subprocess
 from pathlib import Path
 
 import psutil  # type: ignore[import-untyped]
+import yaml
 
 from tools.bisect import git_ops
 from tools.bisect.build_manager import BuildError, BuildManager
@@ -136,6 +137,28 @@ class BaseRunner:
 
 
 class SingleNodeRunner(BaseRunner):
+    def _test_command(self) -> list[str]:
+        """Return the pytest command matching the original failing workflow."""
+        config_base = self.inp.config_base_path
+        if config_base and Path(config_base).as_posix().rstrip("/").endswith("tests/e2e/models/configs"):
+            config_path = self.repo / config_base / self.inp.config_yaml
+            with config_path.open(encoding="utf-8") as config_file:
+                model_type = (yaml.safe_load(config_file) or {}).get("model_type", "vllm")
+            test_name = {
+                "vllm-asr": "test_asr_eval_correctness.py",
+                "vllm-rm": "test_rm_eval_correctness.py",
+            }.get(model_type, "test_lm_eval_correctness.py")
+            return [
+                "python",
+                "-m",
+                "pytest",
+                "-sv",
+                f"tests/e2e/models/{test_name}",
+                "--config",
+                str(config_path),
+            ]
+        return ["python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH]
+
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
@@ -152,7 +175,7 @@ class SingleNodeRunner(BaseRunner):
         # this trial's files.
         results_dir = self._reset_dir(self.repo / "benchmark_results")
         env = self._base_env()
-        cmd = ["python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH]
+        cmd = self._test_command()
 
         rc = self._run_pytest(cmd, env, log_path)
         outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)

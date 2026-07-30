@@ -67,6 +67,51 @@ on:
         description: 'CANN version for base image tag'
         required: false
         default: '2026.08.03'
+      bisect_good_commit:
+        description: 'Known good vLLM-Ascend commit SHA'
+        required: false
+        default: ''
+        type: string
+      bisect_bad_commit:
+        description: 'Known bad vLLM-Ascend commit SHA'
+        required: false
+        default: 'HEAD'
+        type: string
+      bisect_fail_confirm_retries:
+        required: false
+        default: ''
+        type: string
+      bisect_trial_timeout:
+        required: false
+        default: ''
+        type: string
+      bisect_barrier_timeout:
+        required: false
+        default: ''
+        type: string
+      bisect_no_verify_good:
+        required: false
+        default: false
+        type: boolean
+      bisect_no_verify_bad:
+        required: false
+        default: false
+        type: boolean
+      bisect_force_initial_build:
+        required: false
+        default: false
+        type: boolean
+      bisect_no_assume_built_head:
+        required: false
+        default: false
+        type: boolean
+      bisect_native_check:
+        required: false
+        default: ''
+        type: string
+      bisect_config_base_path:
+        required: false
+        default: 'tests/e2e/models/configs'
         type: string
 
 permissions:
@@ -224,6 +269,18 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
+      aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ inputs.bisect_good_commit }}
+      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
+      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
+      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
+      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
+      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
+      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
+      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
+      bisect_native_check: ${{ inputs.bisect_native_check }}
+      bisect_config_base_path: ${{ inputs.bisect_config_base_path }}
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image]
@@ -253,6 +310,18 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
+      aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ inputs.bisect_good_commit }}
+      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
+      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
+      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
+      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
+      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
+      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
+      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
+      bisect_native_check: ${{ inputs.bisect_native_check }}
+      bisect_config_base_path: ${{ inputs.bisect_config_base_path }}
 
   clear-pre-logs:
     needs: [parse-trigger]

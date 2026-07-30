@@ -55,6 +55,54 @@ on:
         default: 120
         type: string
         description: test case execution timeout period,default:120 minutes
+      aop_single_enabled:
+        required: false
+        type: boolean
+        default: false
+      bisect_good_commit:
+        required: false
+        type: string
+        default: ''
+      bisect_bad_commit:
+        required: false
+        type: string
+        default: 'HEAD'
+      bisect_fail_confirm_retries:
+        required: false
+        type: string
+        default: ''
+      bisect_trial_timeout:
+        required: false
+        type: string
+        default: ''
+      bisect_barrier_timeout:
+        required: false
+        type: string
+        default: ''
+      bisect_no_verify_good:
+        required: false
+        type: boolean
+        default: false
+      bisect_no_verify_bad:
+        required: false
+        type: boolean
+        default: false
+      bisect_force_initial_build:
+        required: false
+        type: boolean
+        default: false
+      bisect_no_assume_built_head:
+        required: false
+        type: boolean
+        default: false
+      bisect_native_check:
+        required: false
+        type: string
+        default: ''
+      bisect_config_base_path:
+        required: false
+        type: string
+        default: 'tests/e2e/models/configs'
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false
@@ -214,6 +262,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run vllm-project/vllm-ascend accuracy test
+        continue-on-error: ${{ inputs.aop_single_enabled }}
         id: report
         working-directory: /vllm-workspace/vllm-ascend
         env:
@@ -231,6 +280,8 @@ jobs:
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
           mkdir -p benchmarks/accuracy
+          mkdir -p /tmp/test-logs
+          : > /tmp/test-logs/failed-models.txt
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
           models="$EFFECTIVE_MODELS"
@@ -247,16 +298,60 @@ jobs:
               test_script="./tests/e2e/models/test_lm_eval_correctness.py"
             fi
             echo "  model_type=${model_type} → ${test_script}"
-            pytest -sv "${test_script}" \
-              --config "${config_path}" || {
+            set +e
+            pytest -sv "${test_script}" --config "${config_path}" 2>&1 | tee "/tmp/test-logs/model-accuracy-${model//\//_}.log"
+            pytest_rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$pytest_rc" -ne 0 ]; then
               echo "Test failed for model: $model"
+              echo "$model" >> /tmp/test-logs/failed-models.txt
               any_failure=1
-            }
+            fi
           done
 
           if [ $any_failure -ne 0 ]; then
             exit 1
           fi
+
+      - name: Run AOP bisect for failed accuracy model
+        if: ${{ always() && inputs.aop_single_enabled && steps.report.outcome == 'failure' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          GOOD_TABLE: /root/.cache/vllm-ascend/nightly/good_table.csv
+          BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
+          BISECT_BAD_COMMIT: ${{ inputs.bisect_bad_commit }}
+          BISECT_FAIL_CONFIRM_RETRIES: ${{ inputs.bisect_fail_confirm_retries }}
+          BISECT_TRIAL_TIMEOUT: ${{ inputs.bisect_trial_timeout }}
+          BISECT_BARRIER_TIMEOUT: ${{ inputs.bisect_barrier_timeout }}
+          BISECT_NO_VERIFY_GOOD: ${{ inputs.bisect_no_verify_good }}
+          BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
+          BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
+          BISECT_NO_ASSUME_BUILT_HEAD: ${{ inputs.bisect_no_assume_built_head }}
+          BISECT_NATIVE_CHECK: ${{ inputs.bisect_native_check }}
+          BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
+        run: |
+          model=$(head -n 1 /tmp/test-logs/failed-models.txt)
+          if [ -z "$model" ]; then
+            echo "No failed model was recorded; skipping bisect"
+            exit 1
+          fi
+          model_log="/tmp/test-logs/model-accuracy-${model//\//_}.log"
+          rules="tests/e2e/nightly/scripts/rules-env.txt"
+          if [ -f "$rules" ] && grep -vE '^[[:space:]]*(#|$)' "$rules" | grep -qiEf - "$model_log"; then
+            echo "Environment failure pattern detected; skipping bisect"
+            exit 1
+          fi
+          bash tests/e2e/nightly/scripts/aop_process.sh \
+            "not_env_failure" "0" "${{ inputs.runner }}" "" "${model}.yaml" \
+            "accuracy test failed" "" "single_node" "$BISECT_BAD_COMMIT" \
+            "" "" "$model" "" "$BISECT_GOOD_COMMIT" "$BISECT_FAIL_CONFIRM_RETRIES" \
+            "$BISECT_TRIAL_TIMEOUT" "$BISECT_BARRIER_TIMEOUT" "$BISECT_NO_VERIFY_GOOD" \
+            "$BISECT_NO_VERIFY_BAD" "$BISECT_FORCE_INITIAL_BUILD" \
+            "$BISECT_NO_ASSUME_BUILT_HEAD" "$BISECT_NATIVE_CHECK" "$BISECT_CONFIG_BASE_PATH"
+
+      - name: Preserve accuracy test failure after AOP
+        if: ${{ always() && inputs.aop_single_enabled && steps.report.outcome == 'failure' }}
+        run: exit 1
 
       - name: Generate step summary
         if: ${{ always() }}
