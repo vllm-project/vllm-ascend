@@ -47,6 +47,7 @@ jobs:
       dispatch_310p: ${{ steps.resolve.outputs.dispatch_310p }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
       aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
+      bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
       bisect_good_commit: ${{ steps.resolve.outputs.bisect_good_commit }}
       bisect_bad_commit: ${{ steps.resolve.outputs.bisect_bad_commit }}
       bisect_fail_confirm_retries: ${{ steps.resolve.outputs.bisect_fail_confirm_retries }}
@@ -311,6 +312,19 @@ jobs:
             exit 1
           fi
 
+          printf -v BISECT_ARGS_JSON \
+            '{"good_commit":"%s","bad_commit":"%s","fail_confirm_retries":"%s","trial_timeout":"%s","barrier_timeout":"%s","no_verify_good":%s,"no_verify_bad":%s,"force_initial_build":%s,"no_assume_built_head":%s,"native_check":"%s","config_base_path":"%s"}' \
+            "$BISECT_GOOD_COMMIT" \
+            "$BISECT_BAD_COMMIT" \
+            "$BISECT_FAIL_CONFIRM_RETRIES" \
+            "$BISECT_TRIAL_TIMEOUT" \
+            "$BISECT_BARRIER_TIMEOUT" \
+            "$BISECT_NO_VERIFY_GOOD" \
+            "$BISECT_NO_VERIFY_BAD" \
+            "$BISECT_FORCE_INITIAL_BUILD" \
+            "$BISECT_NO_ASSUME_BUILT_HEAD" \
+            "$BISECT_NATIVE_CHECK" \
+            "$BISECT_CONFIG_BASE_PATH"
 
           {
             echo "test_cases=$TEST_CASES"
@@ -327,6 +341,7 @@ jobs:
             echo "bisect_no_assume_built_head=$BISECT_NO_ASSUME_BUILT_HEAD"
             echo "bisect_native_check=$BISECT_NATIVE_CHECK"
             echo "bisect_config_base_path=$BISECT_CONFIG_BASE_PATH"
+            echo "bisect_args_json=$BISECT_ARGS_JSON"
           } >> "$GITHUB_OUTPUT"
 
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
@@ -391,17 +406,7 @@ jobs:
         id: dispatch_a2
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_GOOD_COMMIT: ${{ needs.authorize.outputs.bisect_good_commit }}
-          BISECT_BAD_COMMIT: ${{ needs.authorize.outputs.bisect_bad_commit }}
-          BISECT_FAIL_CONFIRM_RETRIES: ${{ needs.authorize.outputs.bisect_fail_confirm_retries }}
-          BISECT_TRIAL_TIMEOUT: ${{ needs.authorize.outputs.bisect_trial_timeout }}
-          BISECT_BARRIER_TIMEOUT: ${{ needs.authorize.outputs.bisect_barrier_timeout }}
-          BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
-          BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
-          BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -414,17 +419,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f bisect_good_commit="$BISECT_GOOD_COMMIT" \
-            -f bisect_bad_commit="$BISECT_BAD_COMMIT" \
-            -f bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
-            -f bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
-            -f bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
-            -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
-            -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
-            -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -454,17 +449,7 @@ jobs:
         id: dispatch_a3
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_GOOD_COMMIT: ${{ needs.authorize.outputs.bisect_good_commit }}
-          BISECT_BAD_COMMIT: ${{ needs.authorize.outputs.bisect_bad_commit }}
-          BISECT_FAIL_CONFIRM_RETRIES: ${{ needs.authorize.outputs.bisect_fail_confirm_retries }}
-          BISECT_TRIAL_TIMEOUT: ${{ needs.authorize.outputs.bisect_trial_timeout }}
-          BISECT_BARRIER_TIMEOUT: ${{ needs.authorize.outputs.bisect_barrier_timeout }}
-          BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
-          BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
-          BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -477,17 +462,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f bisect_good_commit="$BISECT_GOOD_COMMIT" \
-            -f bisect_bad_commit="$BISECT_BAD_COMMIT" \
-            -f bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
-            -f bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
-            -f bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
-            -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
-            -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
-            -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -517,17 +492,7 @@ jobs:
         id: dispatch_a3_560t
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_GOOD_COMMIT: ${{ needs.authorize.outputs.bisect_good_commit }}
-          BISECT_BAD_COMMIT: ${{ needs.authorize.outputs.bisect_bad_commit }}
-          BISECT_FAIL_CONFIRM_RETRIES: ${{ needs.authorize.outputs.bisect_fail_confirm_retries }}
-          BISECT_TRIAL_TIMEOUT: ${{ needs.authorize.outputs.bisect_trial_timeout }}
-          BISECT_BARRIER_TIMEOUT: ${{ needs.authorize.outputs.bisect_barrier_timeout }}
-          BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
-          BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
-          BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -540,17 +505,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f bisect_good_commit="$BISECT_GOOD_COMMIT" \
-            -f bisect_bad_commit="$BISECT_BAD_COMMIT" \
-            -f bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
-            -f bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
-            -f bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
-            -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
-            -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
-            -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -580,17 +535,7 @@ jobs:
         id: dispatch_weekly_a2
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_GOOD_COMMIT: ${{ needs.authorize.outputs.bisect_good_commit }}
-          BISECT_BAD_COMMIT: ${{ needs.authorize.outputs.bisect_bad_commit }}
-          BISECT_FAIL_CONFIRM_RETRIES: ${{ needs.authorize.outputs.bisect_fail_confirm_retries }}
-          BISECT_TRIAL_TIMEOUT: ${{ needs.authorize.outputs.bisect_trial_timeout }}
-          BISECT_BARRIER_TIMEOUT: ${{ needs.authorize.outputs.bisect_barrier_timeout }}
-          BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
-          BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
-          BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -603,17 +548,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f bisect_good_commit="$BISECT_GOOD_COMMIT" \
-            -f bisect_bad_commit="$BISECT_BAD_COMMIT" \
-            -f bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
-            -f bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
-            -f bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
-            -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
-            -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
-            -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="${BISECT_CONFIG_BASE_PATH:-tests/e2e/models/configs}"
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -643,17 +578,7 @@ jobs:
         id: dispatch_weekly_a3
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_GOOD_COMMIT: ${{ needs.authorize.outputs.bisect_good_commit }}
-          BISECT_BAD_COMMIT: ${{ needs.authorize.outputs.bisect_bad_commit }}
-          BISECT_FAIL_CONFIRM_RETRIES: ${{ needs.authorize.outputs.bisect_fail_confirm_retries }}
-          BISECT_TRIAL_TIMEOUT: ${{ needs.authorize.outputs.bisect_trial_timeout }}
-          BISECT_BARRIER_TIMEOUT: ${{ needs.authorize.outputs.bisect_barrier_timeout }}
-          BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
-          BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
-          BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -666,17 +591,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f bisect_good_commit="$BISECT_GOOD_COMMIT" \
-            -f bisect_bad_commit="$BISECT_BAD_COMMIT" \
-            -f bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
-            -f bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
-            -f bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
-            -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
-            -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
-            -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -706,17 +621,7 @@ jobs:
         id: dispatch_weekly_310p
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_GOOD_COMMIT: ${{ needs.authorize.outputs.bisect_good_commit }}
-          BISECT_BAD_COMMIT: ${{ needs.authorize.outputs.bisect_bad_commit }}
-          BISECT_FAIL_CONFIRM_RETRIES: ${{ needs.authorize.outputs.bisect_fail_confirm_retries }}
-          BISECT_TRIAL_TIMEOUT: ${{ needs.authorize.outputs.bisect_trial_timeout }}
-          BISECT_BARRIER_TIMEOUT: ${{ needs.authorize.outputs.bisect_barrier_timeout }}
-          BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
-          BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
-          BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -729,17 +634,7 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f bisect_good_commit="$BISECT_GOOD_COMMIT" \
-            -f bisect_bad_commit="$BISECT_BAD_COMMIT" \
-            -f bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
-            -f bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
-            -f bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
-            -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
-            -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
-            -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')

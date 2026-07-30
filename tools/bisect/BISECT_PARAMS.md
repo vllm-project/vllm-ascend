@@ -8,7 +8,7 @@
 
 ## 一、使用方式
 
-```
+```text
 /nightly <用例名> --aop_enabled [bisect 可选参数...]
 ```
 
@@ -109,12 +109,12 @@
 
 ## 二、参数传递链路
 
-```
+```text
 PR 评论: /nightly <cases> --aop_enabled --trial-timeout 3600 ...
   │
-  ├─ pr_nightly_command.yml    解析 --flags → outputs → gh workflow run -f <params>
+  ├─ pr_nightly_command.yml    解析 --flags → 打包 JSON → gh workflow run
   │
-  ├─ schedule_*_test_*.yaml    workflow_dispatch inputs → 转发到 E2E template
+  ├─ schedule_*_test_*.yaml    解包 bisect_args_json → 转发到 E2E template
   │
   ├─ [单机] _e2e_nightly_single_node*.yaml
   │         workflow_call inputs → aop_process.sh 位置参数
@@ -131,21 +131,24 @@ PR 评论: /nightly <cases> --aop_enabled --trial-timeout 3600 ...
 ## 三、修改文件清单（19 个，含本文档）
 
 ### 1. PR 命令解析
-| 文件 | 改动 |
-|---|---|
-| `.github/workflows/pr_nightly_command.yml` | 按严格顺序解析 11 个新 `--flags`；校验缺值和参数格式；job outputs + dispatch `-f` 转发（5 个 dispatch job） |
 
-### 2. 调度流程（5 个）
 | 文件 | 改动 |
 |---|---|
-| `.github/workflows/schedule_nightly_test_a2.yaml` | 新增 `bisect_*` inputs；multi_node 和 single_node 转发 |
-| `.github/workflows/schedule_nightly_test_a3.yaml` | 同上；multi/double/single/multi-card 四处转发 |
+| `.github/workflows/pr_nightly_command.yml` | 按严格顺序解析 11 个新 `--flags`；校验缺值和参数格式；打包为 `bisect_args_json` 后 dispatch 转发 |
+
+### 2. 调度流程（6 个）
+
+| 文件 | 改动 |
+|---|---|
+| `.github/workflows/schedule_nightly_test_a2.yaml` | 接收单个 `bisect_args_json` input；解包后向 multi_node 和 single_node 转发 |
+| `.github/workflows/schedule_nightly_test_a3.yaml` | 同上；向 multi/double/single/multi-card 四处转发 |
 | `.github/workflows/schedule_nightly_test_a3_560t.yaml` | 同上 |
-| `.github/workflows/schedule_weekly_test_a3.yaml` | 新增 inputs + 转发 |
-| `.github/workflows/schedule_weekly_test_310p.yaml` | 新增 inputs，并转发到单机 AOP 模板 |
-| `.github/workflows/schedule_weekly_test_a2.yaml` | 新增 inputs，并转发到 accuracy AOP 模板 |
+| `.github/workflows/schedule_weekly_test_a3.yaml` | 接收 JSON input，解包后转发 |
+| `.github/workflows/schedule_weekly_test_310p.yaml` | 接收 JSON input，解包后转发到单机 AOP 模板 |
+| `.github/workflows/schedule_weekly_test_a2.yaml` | 接收 JSON input，解包后转发到 accuracy AOP 模板 |
 
-### 3. E2E 模板（4 个）
+### 3. E2E 模板（5 个）
+
 | 文件 | 改动 |
 |---|---|
 | `.github/workflows/_e2e_nightly_single_node.yaml` | 新增 11 个 inputs；`aop_process.sh` 调用传参替换硬编码 `HEAD` |
@@ -155,6 +158,7 @@ PR 评论: /nightly <cases> --aop_enabled --trial-timeout 3600 ...
 | `.github/workflows/_e2e_nightly_single_node_models.yaml` | Weekly A2 accuracy 失败时记录模型并触发对应测试入口的二分 |
 
 ### 4. K8s 模板与 Shell（4 个）
+
 | 文件 | 改动 |
 |---|---|
 | `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` | leader + worker pod 各新增 11 个 `BISECT_*` 环境变量，并安全转义 YAML 字符串 |
@@ -163,12 +167,14 @@ PR 评论: /nightly <cases> --aop_enabled --trial-timeout 3600 ...
 | `tests/e2e/nightly/multi_node/scripts/run.sh` | 新增 `build_bisect_extra_args()` 数组构造函数；leader + worker 两条路径复用；`bad_commit` 替换硬编码 `HEAD` |
 
 ### 5. 二分执行与测试（2 个）
+
 | 文件 | 改动 |
 |---|---|
 | `tools/bisect/runner.py` | 根据 Weekly A2 模型配置选择 LM/ASR/RM accuracy pytest 入口 |
 | `tests/ut/tools/bisect/test_runner.py` | 覆盖 accuracy 测试入口选择逻辑 |
 
 ### 6. 说明文档（1 个）
+
 | 文件 | 改动 |
 |---|---|
 | `tools/bisect/BISECT_PARAMS.md` | 记录命令结构、参数约束、传递链路和修改范围 |
