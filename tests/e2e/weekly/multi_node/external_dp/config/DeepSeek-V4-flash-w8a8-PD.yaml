@@ -76,7 +76,7 @@ templates:
       - "16"
       - --no-disable-hybrid-kv-cache-manager
       - --model-loader-extra-config
-      - '{"enable_multithread_load": "true", "num_threads": 128}'
+      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --safetensors-load-strategy
       - "prefetch"
       - --speculative-config
@@ -97,7 +97,7 @@ templates:
       - "ascend"
       - --enforce-eager
       - --additional-config
-      - '{"enable_cpu_binding": "True", "enable_shared_expert_dp": true, "enable_dsa_cp": true}'
+      - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector",
         "kv_role": "kv_producer",
@@ -151,7 +151,7 @@ templates:
       - --safetensors-load-strategy
       - "prefetch"
       - --model-loader-extra-config
-      - '{"enable_multithread_load": "true", "num_threads": 128}'
+      - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --tokenizer-mode
       - "deepseek_v4"
@@ -169,7 +169,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex": true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector",
         "kv_role": "kv_consumer",

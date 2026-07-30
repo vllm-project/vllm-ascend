@@ -174,7 +174,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --block-size 128 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --async-scheduling \
         --additional-config '
         {"ascend_compilation_config":{
             "enable_npugraph_ex":true,
@@ -255,7 +254,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --block-size 128 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --async-scheduling \
         --additional-config '
         {"ascend_compilation_config":{
             "enable_npugraph_ex":true,
@@ -271,7 +269,6 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
@@ -541,7 +538,6 @@ Before you start, please:
             --max-model-len 1048576 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
-            --async-scheduling \
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
@@ -725,7 +721,6 @@ Before you start, please:
             --max-num-seqs 16 \
             --block-size 128 \
             --enforce-eager \
-            --async-scheduling \
             --no-disable-hybrid-kv-cache-manager \
             --enable-prefix-caching \
             --trust-remote-code \
@@ -801,7 +796,6 @@ Before you start, please:
             --max-model-len 135000 \
             --max-num-batched-tokens 60 \
             --max-num-seqs 30 \
-            --async-scheduling \
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \

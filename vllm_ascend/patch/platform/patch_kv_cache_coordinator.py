@@ -17,7 +17,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -32,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
-from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -44,7 +42,7 @@ def _select_kv_token_budget(
     max_in_flight_tokens: int | None,
     max_num_batched_tokens: int | None,
 ) -> int:
-    token_budget = max_num_batched_tokens if vllm_version_is("0.25.1") else max_in_flight_tokens
+    token_budget = max_in_flight_tokens
     return token_budget if token_budget is not None else max_model_len
 
 
@@ -134,8 +132,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
-        if not vllm_version_is("0.25.1"):
-            extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
+        extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -162,14 +159,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = not vllm_version_is("0.25.1") and (
-            dcp_world_size == 1
-            and any(
-                isinstance(g.kv_cache_spec, MambaSpec)
-                and g.kv_cache_spec.mamba_cache_mode == "align"
-                and g.kv_cache_spec.block_size > hash_block_size
-                for g in kv_cache_config.kv_cache_groups
-            )
+        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+            and g.kv_cache_spec.block_size > hash_block_size
+            for g in kv_cache_config.kv_cache_groups
         )
         self.verify_and_split_kv_cache_groups()
 
@@ -186,8 +180,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
-        if vllm_version_is("0.25.1"):
-            return self.lcm_block_size
         if self.enable_partial_hash_hits:
             return self.hash_block_size
         return self.scheduler_block_size or self.lcm_block_size
@@ -296,14 +288,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            if not vllm_version_is("0.25.1"):
-                return block_hashes
-            target_block_size = kv_cache_spec.block_size
-            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size > 1:
-                target_block_size *= self.dcp_world_size
-            if target_block_size == self.hash_block_size:
-                return block_hashes
-            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
+            return block_hashes
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
@@ -360,16 +345,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=1,
                 )
-                if vllm_version_is("0.25.1"):
-                    hit_blocks = hit_result
-                    # hit_blocks[0] holds physical blocks; effective_block_size
-                    # includes compress_ratio and over-counts for compressed specs.
-                    block_size = spec.block_size
-                    if self.dcp_world_size > 1:
-                        block_size *= self.dcp_world_size
-                    _new_hit_length = len(hit_blocks[0]) * block_size
-                else:
-                    hit_blocks, _new_hit_length = hit_result
+                hit_blocks, _new_hit_length = hit_result
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -404,8 +380,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     hit_length_by_group[group_id] = hit_length
 
         cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
-        if vllm_version_is("0.25.1"):
-            return cache_hit_blocks, hit_length
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
 
     def find_longest_cache_hit_per_group(
@@ -414,14 +388,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            if not vllm_version_is("0.25.1"):
-                return block_hashes
-            target_block_size = kv_cache_spec.block_size
-            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size > 1:
-                target_block_size *= self.dcp_world_size
-            if target_block_size == self.hash_block_size:
-                return block_hashes
-            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
+            return block_hashes
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
@@ -444,16 +411,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 dcp_world_size=self.dcp_world_size,
                 pcp_world_size=1,
             )
-            if vllm_version_is("0.25.1"):
-                hit_blocks = hit_result
-                # hit_blocks[0] holds physical blocks; _get_effective_block_size
-                # includes compress_ratio and over-counts for compressed specs.
-                block_size = spec.block_size
-                if self.dcp_world_size > 1:
-                    block_size *= self.dcp_world_size
-                group_hit_length = len(hit_blocks[0]) * block_size
-            else:
-                hit_blocks, group_hit_length = hit_result
+            hit_blocks, group_hit_length = hit_result
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
                 hit_blocks_by_group[group_id] = blocks
                 hit_length_by_group[group_id] = group_hit_length
@@ -512,10 +470,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
-        if vllm_version_is("0.25.1"):
-            orig_kwargs["max_num_batched_tokens"] = token_budget
-        else:
-            orig_kwargs["max_in_flight_tokens"] = token_budget
+        orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 

@@ -156,6 +156,14 @@ class AscendConfig:
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        assert not (
+            self.enable_fused_mc2 == 1
+            and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
+        ), (
+            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
+            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
+        )
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
@@ -238,13 +246,17 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        self.enable_sparse_c8 = additional_config.get("enable_sparse_c8", False) and use_sparse
-        self.c8_enable_reshape_optim = self.enable_sparse_c8 and additional_config.get("c8_enable_reshape_optim", False)
-        quant_config = getattr(vllm_config, "quant_config", None)
-        self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
-            quant_config
+        self.enable_sparse_sfa_c8 = additional_config.get("enable_sparse_sfa_c8", False) and use_sparse
+        self.enable_sparse_li_c8 = additional_config.get("enable_sparse_li_c8", False) and use_sparse
+        self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and additional_config.get(
+            "c8_enable_reshape_optim", False
         )
-        self._sparse_c8_layer_filter_enabled = self._has_sparse_c8_layer_config(quant_config)
+        quant_config = getattr(vllm_config, "quant_config", None)
+        (
+            self._sparse_li_c8_layer_ids,
+            self._sparse_li_c8_layer_names,
+        ) = self._parse_sparse_li_c8_layers_from_quant_config(quant_config)
+        self._sparse_li_c8_layer_filter_enabled = self._has_sparse_li_c8_layer_config(quant_config)
         self.enable_sp_by_pass = (
             vllm_config.model_config is not None
             and not vllm_config.model_config.enforce_eager
@@ -353,14 +365,15 @@ class AscendConfig:
         return dump_config_path
 
     @staticmethod
-    def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
+    def _has_sparse_li_c8_layer_config(quant_config: Any) -> bool:
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return False
-        return any(isinstance(key, str) and key.endswith(".indexer.quant_type") for key in quant_description)
+        quant_suffixes = (".indexer.quant_type", ".indexer.wq_b_weight")
+        return any(isinstance(key, str) and key.endswith(quant_suffixes) for key in quant_description)
 
     @classmethod
-    def _parse_sparse_c8_layers_from_quant_config(cls, quant_config: Any) -> tuple[set[int], set[str]]:
+    def _parse_sparse_li_c8_layers_from_quant_config(cls, quant_config: Any) -> tuple[set[int], set[str]]:
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return set(), set()
@@ -385,10 +398,10 @@ class AscendConfig:
             layer_ids.add(extract_layer_index(layer_name))
         return layer_ids, layer_names
 
-    def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
-        if not self.enable_sparse_c8:
+    def is_sparse_li_c8_layer(self, layer_name: str | None) -> bool:
+        if not self.enable_sparse_li_c8:
             return False
-        if not self._sparse_c8_layer_filter_enabled:
+        if not self._sparse_li_c8_layer_filter_enabled:
             return True
         if layer_name is None:
             return False
@@ -396,13 +409,13 @@ class AscendConfig:
         normalized_layer_name = layer_name.rstrip(".")
         if any(
             normalized_layer_name == candidate or normalized_layer_name.startswith(f"{candidate}.")
-            for candidate in self._sparse_c8_layer_names
+            for candidate in self._sparse_li_c8_layer_names
         ):
             return True
         from vllm.model_executor.models.utils import extract_layer_index
 
         layer_ids = {extract_layer_index(normalized_layer_name)}
-        return any(layer_id in self._sparse_c8_layer_ids for layer_id in layer_ids)
+        return any(layer_id in self._sparse_li_c8_layer_ids for layer_id in layer_ids)
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
@@ -488,15 +501,6 @@ class FinegrainedTPConfig:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
-
-    def get_max_finegrained_tp_size(self) -> int:
-        max_finegrained_tp_size = 1
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.oproj_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.lmhead_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.embedding_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.mlp_tensor_parallel_size)
-        max_finegrained_tp_size = max(max_finegrained_tp_size, self.olora_tensor_parallel_size)
-        return max_finegrained_tp_size
 
 
 class AscendCompilationConfig:
