@@ -908,7 +908,16 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
             start = dp_rank * chunk
             os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
         else:
-            llm_kwargs["device_ids"] = full_device_ids
+            tp_size = int(llm_kwargs.get("tensor_parallel_size", 1))
+            required_device_count = dp_size * tp_size
+            if len(full_device_ids) < required_device_count:
+                raise ValueError(
+                    f"DP={dp_size} and TP={tp_size} require {required_device_count} "
+                    f"devices, but only {full_device_ids} are visible"
+                )
+            start = dp_rank * tp_size
+            rank_device_ids = full_device_ids[start : start + tp_size]
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(rank_device_ids)
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})

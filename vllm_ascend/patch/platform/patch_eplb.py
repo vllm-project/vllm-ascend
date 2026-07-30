@@ -7,18 +7,53 @@ from functools import wraps
 from inspect import signature
 
 import torch
+import torch_npu
 from pydantic.dataclasses import rebuild_dataclass
 from vllm.config import ParallelConfig
 from vllm.config import parallel as _parallel_config
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 from vllm_ascend.distributed.eplb_communicator import HcclEplbCommunicator
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
+_NPU_FORMAT_ND = 2
+logger = init_logger(__name__)
+
+
+def _replace_nz_expert_buffers_with_nd(model_state) -> None:
+    """Use logical ND tensors as the transfer workspace for NZ expert weights."""
+    if getattr(model_state, "_ascend_uses_nd_expert_buffers", False):
+        return
+    replacement_formats = []
+    for weight_idx, weight_view in enumerate(model_state.model.expert_weights[0]):
+        if not isinstance(weight_view, list):
+            continue
+        formats = [int(torch_npu.get_npu_format(weight)) for weight in weight_view]
+        if not any(weight_format != _NPU_FORMAT_ND for weight_format in formats):
+            continue
+        buffer_type = type(weight_view)
+        model_state.expert_buffer[weight_idx] = buffer_type(
+            torch.empty(weight.shape, dtype=weight.dtype, device=weight.device)
+            for weight in weight_view
+        )
+        replacement_formats.append(
+            (
+                weight_idx,
+                formats[0],
+                int(torch_npu.get_npu_format(model_state.expert_buffer[weight_idx][0])),
+            )
+        )
+    model_state._ascend_uses_nd_expert_buffers = True
+    if replacement_formats and get_ep_group().rank_in_group == 0:
+        logger.info(
+            "Ascend EPLB uses ND transfer buffers for NZ expert weights: %s",
+            replacement_formats,
+        )
 
 
 class _CudaAlikeEplbPlatformProxy:
@@ -214,11 +249,33 @@ def _wrap_from_mapping(original_from_mapping):
     def _from_mapping(*args, **kwargs):
         state = original_from_mapping(*args, **kwargs)
         for model_state in state.model_states.values():
+            _replace_nz_expert_buffers_with_nd(model_state)
             _refresh_model_lookups(model_state)
         return state
 
     setattr(_from_mapping, _PATCH_MARKER, True)
     return _from_mapping
+
+
+def _wrap_add_model(original_add_model):
+    add_model_signature = signature(original_add_model)
+    required_parameters = {"self", "model", "model_config"}
+    if not required_parameters.issubset(add_model_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: EplbState.add_model signature changed.")
+
+    @wraps(original_add_model)
+    def _add_model(*args, **kwargs):
+        bound = add_model_signature.bind(*args, **kwargs)
+        result = original_add_model(*bound.args, **bound.kwargs)
+        model = bound.arguments["model"]
+        for model_state in bound.arguments["self"].model_states.values():
+            if model_state.model is model:
+                _replace_nz_expert_buffers_with_nd(model_state)
+                break
+        return result
+
+    setattr(_add_model, _PATCH_MARKER, True)
+    return _add_model
 
 
 def _wrap_eplb_state_step(original_step):
@@ -255,6 +312,10 @@ def _wrap_eplb_state_step(original_step):
 
 
 def _patch_eplb_state() -> None:
+    original_add_model = _eplb_state.EplbState.add_model
+    if not getattr(original_add_model, _PATCH_MARKER, False):
+        _eplb_state.EplbState.add_model = _wrap_add_model(original_add_model)
+
     original_step = _eplb_state.EplbState.step
     if not getattr(original_step, _PATCH_MARKER, False):
         _eplb_state.EplbState.step = _wrap_eplb_state_step(original_step)
