@@ -275,9 +275,9 @@ class CircuitBreaker:
                 self._on_outcome(self.name, "failure")
             self._consecutive_successes = 0
             self._consecutive_failures += 1
-            if self._state == CBState.HALF_OPEN:
-                self._transition(CBState.OPEN)
-            elif self._state == CBState.CLOSED and self._consecutive_failures >= self.failure_threshold:
+            if self._state == CBState.HALF_OPEN or (
+                self._state == CBState.CLOSED and self._consecutive_failures >= self.failure_threshold
+            ):
                 self._transition(CBState.OPEN)
 
     @property
@@ -428,6 +428,10 @@ class MetricsCollector:
 
     def __init__(self, scheduler=None):
         self.scheduler = scheduler
+        # Guards all counter dicts: MetricsCollector is mutated by background
+        # health probes and per-request RPC handlers, and read by /metrics
+        # scrapes — all from different threads in the scheduler process.
+        self._lock = threading.Lock()
         self._cb_transitions: dict[tuple, int] = {}
         self._cb_outcomes: dict[tuple, int] = {}
         self._prefill_errors: dict[tuple, int] = {}
@@ -437,11 +441,13 @@ class MetricsCollector:
 
     def record_cb_transition(self, role: str, instance: str, old_state, new_state) -> None:
         key = (role, instance, _cb_name(old_state), _cb_name(new_state))
-        self._cb_transitions[key] = self._cb_transitions.get(key, 0) + 1
+        with self._lock:
+            self._cb_transitions[key] = self._cb_transitions.get(key, 0) + 1
 
     def record_cb_outcome(self, role: str, instance: str, outcome: str) -> None:
         key = (role, instance, outcome)
-        self._cb_outcomes[key] = self._cb_outcomes.get(key, 0) + 1
+        with self._lock:
+            self._cb_outcomes[key] = self._cb_outcomes.get(key, 0) + 1
 
     def record_health_transition(self, role: str, instance: str, healthy: bool) -> None:
         # health is a live gauge rendered from ServerState; nothing to accumulate
@@ -449,75 +455,75 @@ class MetricsCollector:
 
     def record_prefill_error(self, instance: str, reason: str) -> None:
         key = (instance, reason or "unknown")
-        self._prefill_errors[key] = self._prefill_errors.get(key, 0) + 1
+        with self._lock:
+            self._prefill_errors[key] = self._prefill_errors.get(key, 0) + 1
 
     def record_decode_error(self, instance: str, reason: str) -> None:
         key = (instance, reason or "unknown")
-        self._decode_errors[key] = self._decode_errors.get(key, 0) + 1
+        with self._lock:
+            self._decode_errors[key] = self._decode_errors.get(key, 0) + 1
 
     def record_failover(self, role: str) -> None:
-        self._failovers[role] = self._failovers.get(role, 0) + 1
+        with self._lock:
+            self._failovers[role] = self._failovers.get(role, 0) + 1
 
     def record_request(self) -> None:
-        self._requests += 1
+        with self._lock:
+            self._requests += 1
 
     def render(self) -> str:
-        lines: list[str] = []
-        if self.scheduler is not None:
-            snapshot = self.scheduler.get_health_snapshot()
-            lines.append("# HELP pd_proxy_worker_health 1 if node passed /health probe, else 0")
-            lines.append("# TYPE pd_proxy_worker_health gauge")
-            lines.append("# HELP pd_proxy_cb_state Circuit breaker state: 0=closed,1=open,2=half_open")
-            lines.append("# TYPE pd_proxy_cb_state gauge")
-            lines.append("# HELP pd_proxy_worker_available 1 if node is selectable, else 0")
-            lines.append("# TYPE pd_proxy_worker_available gauge")
-            for role, inst, healthy, cb_state, available in snapshot:
-                lines.append(
-                    f'pd_proxy_worker_health{{role="{role}",instance="{inst}"}} {1 if healthy else 0}'
-                )
-                lines.append(
-                    f'pd_proxy_cb_state{{role="{role}",instance="{inst}"}} {int(cb_state)}'
-                )
-                lines.append(
-                    f'pd_proxy_worker_available{{role="{role}",instance="{inst}"}} {1 if available else 0}'
-                )
-        if self._cb_transitions:
-            lines.append("# HELP pd_proxy_cb_state_transitions_total Circuit breaker state transitions")
-            lines.append("# TYPE pd_proxy_cb_state_transitions_total counter")
-            for (role, inst, frm, to), cnt in sorted(self._cb_transitions.items()):
-                lines.append(
-                    f'pd_proxy_cb_state_transitions_total{{role="{role}",instance="{inst}",from="{frm}",to="{to}"}} {cnt}'
-                )
-        if self._cb_outcomes:
-            lines.append("# HELP pd_proxy_cb_outcomes_total Circuit breaker outcomes")
-            lines.append("# TYPE pd_proxy_cb_outcomes_total counter")
-            for (role, inst, outcome), cnt in sorted(self._cb_outcomes.items()):
-                lines.append(
-                    f'pd_proxy_cb_outcomes_total{{role="{role}",instance="{inst}",outcome="{outcome}"}} {cnt}'
-                )
-        if self._prefill_errors:
-            lines.append("# HELP pd_proxy_prefill_errors_total Prefill failures")
-            lines.append("# TYPE pd_proxy_prefill_errors_total counter")
-            for (inst, reason), cnt in sorted(self._prefill_errors.items()):
-                lines.append(
-                    f'pd_proxy_prefill_errors_total{{prefiller="{inst}",reason="{reason}"}} {cnt}'
-                )
-        if self._decode_errors:
-            lines.append("# HELP pd_proxy_decode_errors_total Decode failures")
-            lines.append("# TYPE pd_proxy_decode_errors_total counter")
-            for (inst, reason), cnt in sorted(self._decode_errors.items()):
-                lines.append(
-                    f'pd_proxy_decode_errors_total{{decoder="{inst}",reason="{reason}"}} {cnt}'
-                )
-        if self._failovers:
-            lines.append("# HELP pd_proxy_failover_attempts_total Node-level failover attempts")
-            lines.append("# TYPE pd_proxy_failover_attempts_total counter")
-            for role, cnt in sorted(self._failovers.items()):
-                lines.append(f'pd_proxy_failover_attempts_total{{role="{role}"}} {cnt}')
-        lines.append("# HELP pd_proxy_requests_total Total requests handled")
-        lines.append("# TYPE pd_proxy_requests_total counter")
-        lines.append(f"pd_proxy_requests_total {self._requests}")
-        return "\n".join(lines) + "\n"
+        # Take the scheduler snapshot OUTSIDE the metrics lock to avoid a
+        # lock-order inversion (scheduler.RLock -> metrics._lock elsewhere).
+        snapshot = self.scheduler.get_health_snapshot() if self.scheduler is not None else []
+        with self._lock:
+            lines: list[str] = []
+            if snapshot:
+                lines.append("# HELP pd_proxy_worker_health 1 if node passed /health probe, else 0")
+                lines.append("# TYPE pd_proxy_worker_health gauge")
+                lines.append("# HELP pd_proxy_cb_state Circuit breaker state: 0=closed,1=open,2=half_open")
+                lines.append("# TYPE pd_proxy_cb_state gauge")
+                lines.append("# HELP pd_proxy_worker_available 1 if node is selectable, else 0")
+                lines.append("# TYPE pd_proxy_worker_available gauge")
+                for role, inst, healthy, cb_state, available in snapshot:
+                    lines.append(f'pd_proxy_worker_health{{role="{role}",instance="{inst}"}} {1 if healthy else 0}')
+                    lines.append(f'pd_proxy_cb_state{{role="{role}",instance="{inst}"}} {int(cb_state)}')
+                    lines.append(
+                        f'pd_proxy_worker_available{{role="{role}",instance="{inst}"}} {1 if available else 0}'
+                    )
+            if self._cb_transitions:
+                lines.append("# HELP pd_proxy_cb_state_transitions_total Circuit breaker state transitions")
+                lines.append("# TYPE pd_proxy_cb_state_transitions_total counter")
+                for (role, inst, frm, to), cnt in sorted(self._cb_transitions.items()):
+                    lines.append(
+                        f'pd_proxy_cb_state_transitions_total{{role="{role}",instance="{inst}",'
+                        f'from="{frm}",to="{to}"}} {cnt}'
+                    )
+            if self._cb_outcomes:
+                lines.append("# HELP pd_proxy_cb_outcomes_total Circuit breaker outcomes")
+                lines.append("# TYPE pd_proxy_cb_outcomes_total counter")
+                for (role, inst, outcome), cnt in sorted(self._cb_outcomes.items()):
+                    lines.append(
+                        f'pd_proxy_cb_outcomes_total{{role="{role}",instance="{inst}",outcome="{outcome}"}} {cnt}'
+                    )
+            if self._prefill_errors:
+                lines.append("# HELP pd_proxy_prefill_errors_total Prefill failures")
+                lines.append("# TYPE pd_proxy_prefill_errors_total counter")
+                for (inst, reason), cnt in sorted(self._prefill_errors.items()):
+                    lines.append(f'pd_proxy_prefill_errors_total{{prefiller="{inst}",reason="{reason}"}} {cnt}')
+            if self._decode_errors:
+                lines.append("# HELP pd_proxy_decode_errors_total Decode failures")
+                lines.append("# TYPE pd_proxy_decode_errors_total counter")
+                for (inst, reason), cnt in sorted(self._decode_errors.items()):
+                    lines.append(f'pd_proxy_decode_errors_total{{decoder="{inst}",reason="{reason}"}} {cnt}')
+            if self._failovers:
+                lines.append("# HELP pd_proxy_failover_attempts_total Node-level failover attempts")
+                lines.append("# TYPE pd_proxy_failover_attempts_total counter")
+                for role, cnt in sorted(self._failovers.items()):
+                    lines.append(f'pd_proxy_failover_attempts_total{{role="{role}"}} {cnt}')
+            lines.append("# HELP pd_proxy_requests_total Total requests handled")
+            lines.append("# TYPE pd_proxy_requests_total counter")
+            lines.append(f"pd_proxy_requests_total {self._requests}")
+            return "\n".join(lines) + "\n"
 
 
 class SharedProxyScheduler:
@@ -777,16 +783,12 @@ class SharedProxyScheduler:
     def pick_prefiller_excluding(self, load: float, exclude_keys: list[str]) -> dict[str, Any]:
         """Pick an available prefiller for recompute/failover, excluding given keys."""
         with self._lock:
-            return self._pick_server(
-                ServerRole.PREFILL, load, kv_cache=True, exclude=set(exclude_keys)
-            )
+            return self._pick_server(ServerRole.PREFILL, load, kv_cache=True, exclude=set(exclude_keys))
 
     def pick_decoder_excluding(self, load: float, exclude_keys: list[str]) -> dict[str, Any]:
         """Pick an available decoder, excluding given (failed) keys for failover."""
         with self._lock:
-            return self._pick_server(
-                ServerRole.DECODE, load, active_tokens=True, exclude=set(exclude_keys)
-            )
+            return self._pick_server(ServerRole.DECODE, load, active_tokens=True, exclude=set(exclude_keys))
 
     def is_node_available(self, role: ServerRole, key: str) -> bool:
         with self._lock:
@@ -795,9 +797,7 @@ class SharedProxyScheduler:
                 return False
             return entry.is_available()
 
-    def record_outcome(
-        self, role: ServerRole, key: str, success: bool, status_code: int = 0
-    ) -> None:
+    def record_outcome(self, role: ServerRole, key: str, success: bool, status_code: int = 0) -> None:
         """Feed a real request outcome into a node's circuit breaker.
 
         Called by workers via runtime.schedule (RPC in multi-process mode).
@@ -825,20 +825,14 @@ class SharedProxyScheduler:
             if healthy:
                 entry.consecutive_health_failures = 0
                 entry.consecutive_health_successes += 1
-                if (
-                    not entry.healthy
-                    and entry.consecutive_health_successes >= args.health_success_threshold
-                ):
+                if not entry.healthy and entry.consecutive_health_successes >= args.health_success_threshold:
                     entry.healthy = True
                     logger.info("[health] %s %s recovered (healthy=True)", role.value, key)
                     self.metrics.record_health_transition(role.value, key, True)
             else:
                 entry.consecutive_health_successes = 0
                 entry.consecutive_health_failures += 1
-                if (
-                    entry.healthy
-                    and entry.consecutive_health_failures >= args.health_failure_threshold
-                ):
+                if entry.healthy and entry.consecutive_health_failures >= args.health_failure_threshold:
                     entry.healthy = False
                     logger.warning("[health] %s %s marked unhealthy (healthy=False)", role.value, key)
                     self.metrics.record_health_transition(role.value, key, False)
@@ -1058,11 +1052,7 @@ class NodeListener:
                     self.scheduler.mark_waiting_retry(key, retries)
 
             self.scheduler.finalize_tainted_instances()
-            interval = (
-                args.health_check_interval
-                if not args.disable_health_check
-                else args.waiting_retry_interval
-            )
+            interval = args.health_check_interval if not args.disable_health_check else args.waiting_retry_interval
             time.sleep(interval)
 
     async def _probe_all(self) -> None:
@@ -1496,17 +1486,11 @@ class DeferredStreamingResponse(StreamingResponse):
                 first = await aiter.__anext__()
             except StopAsyncIteration:
                 # Empty stream -> treat as error to avoid 200 + empty body.
-                await send(
-                    {"type": "http.response.start", "status": self._error_status, "headers": []}
-                )
-                await send(
-                    {"type": "http.response.body", "body": self._error_body, "more_body": False}
-                )
+                await send({"type": "http.response.start", "status": self._error_status, "headers": []})
+                await send({"type": "http.response.body", "body": self._error_body, "more_body": False})
                 return
             # First chunk produced OK -> now commit the real status + headers.
-            await send(
-                {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
-            )
+            await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
             sent_start = True
             if not isinstance(first, (bytes, memoryview)):
                 first = first.encode(self.charset)
@@ -1519,12 +1503,8 @@ class DeferredStreamingResponse(StreamingResponse):
         except Exception:
             if not sent_start:
                 # Generator failed before first chunk -> return an explicit error.
-                await send(
-                    {"type": "http.response.start", "status": self._error_status, "headers": []}
-                )
-                await send(
-                    {"type": "http.response.body", "body": self._error_body, "more_body": False}
-                )
+                await send({"type": "http.response.start", "status": self._error_status, "headers": []})
+                await send({"type": "http.response.body", "body": self._error_body, "more_body": False})
             else:
                 # Headers already committed -> can only end the stream.
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
@@ -1559,7 +1539,7 @@ async def assign_instances(
     began = False  # did begin_request bump request_num?
 
     response = None
-    prefiller_key: str | None = None
+    prefiller_key: str = ""
     for attempt in range(max_nodes + 1):
         # --- pick a prefiller (with exclusion on failover attempts) ---
         try:
@@ -1570,9 +1550,7 @@ async def assign_instances(
                 else:
                     prefiller = await runtime.schedule("reserve_prefill_kv", prefiller_score)
             else:
-                prefiller = await runtime.schedule(
-                    "pick_prefiller_excluding", prefiller_score, list(excluded)
-                )
+                prefiller = await runtime.schedule("pick_prefiller_excluding", prefiller_score, list(excluded))
         except RuntimeError:
             # No available prefiller in the pool (all unhealthy / circuit open).
             break
@@ -1596,7 +1574,7 @@ async def assign_instances(
             await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
             response = None
             if not failover_enabled:
-                prefiller_key = None
+                prefiller_key = ""
                 break
             excluded.add(prefiller_key)
             await runtime.schedule("record_failover", "prefill")
@@ -1604,23 +1582,24 @@ async def assign_instances(
                 "record_prefill_error", prefiller_key, f"http{status_code}" if status_code else "network"
             )
             logger.warning(
-                "[failover] prefiller %s failed (%s); trying another", prefiller_key,
+                "[failover] prefiller %s failed (%s); trying another",
+                prefiller_key,
                 f"http{status_code}" if status_code else "network",
             )
-            prefiller_key = None
+            prefiller_key = ""
             continue
         except Exception as exc:
             await runtime.schedule("record_outcome", ServerRole.PREFILL, prefiller_key, False, 0)
             await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
             response = None
             if not failover_enabled:
-                prefiller_key = None
+                prefiller_key = ""
                 break
             excluded.add(prefiller_key)
             await runtime.schedule("record_failover", "prefill")
             await runtime.schedule("record_prefill_error", prefiller_key, str(exc)[:40])
             logger.warning("[failover] prefiller %s failed (%s); trying another", prefiller_key, str(exc)[:40])
-            prefiller_key = None
+            prefiller_key = ""
             continue
 
     if response is None:
@@ -1659,18 +1638,6 @@ async def assign_instances(
         decoder_port=decoder["port"],
         prefiller_cached_tokens=prefiller_cached_tokens,
     )
-
-
-async def reassign_instances(
-    api: str,
-    req_data: Any,
-    request_length: int,
-    previous_instance: InstanceInfo,
-) -> InstanceInfo:
-    runtime = get_runtime()
-    await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
-    return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -1724,9 +1691,7 @@ async def handle_completions_impl(api: str, request: Request):
                     try:
                         while retry:
                             retry = False
-                            decoder_client = await runtime.get_client(
-                                ServerRole.DECODE, instance_info.decoder_key
-                            )
+                            decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
                             async for chunk in stream_service_response_with_retry(
                                 decoder_client,
                                 api,
@@ -1756,9 +1721,7 @@ async def handle_completions_impl(api: str, request: Request):
                                     continue
                                 choices = chunk_json.get("choices", [])
                                 if not choices:
-                                    if update_cached_tokens_in_chunk(
-                                        chunk_json, reported_prefiller_cached_tokens
-                                    ):
+                                    if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                         chunk = encode_response_chunk(chunk_json, is_sse)
                                     yield chunk
                                     continue
@@ -1766,12 +1729,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 choice = choices[0]
                                 delta = choice.get("delta") or {}
                                 message = choice.get("message") or {}
-                                content = (
-                                    delta.get("content")
-                                    or message.get("content")
-                                    or choice.get("text")
-                                    or ""
-                                )
+                                content = delta.get("content") or message.get("content") or choice.get("text") or ""
                                 generated_token += content
 
                                 stop_reason = choice.get("stop_reason")
@@ -1788,12 +1746,20 @@ async def handle_completions_impl(api: str, request: Request):
                                         messages[0]["content"] = origin_prompt + generated_token
                                     else:
                                         req_data["prompt"] = origin_prompt + generated_token
-                                    req_data["max_tokens"] = (
-                                        origin_max_tokens - completion_tokens + retry_count
+                                    req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                    await release_prefill_kv_once()
+                                    await runtime.schedule(
+                                        "release_decoder",
+                                        instance_info.decoder_key,
+                                        instance_info.decoder_score,
                                     )
+                                    instance_info.decoder_key = ""
                                     tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                                    instance_info = await reassign_instances(
-                                        api, req_data, tmp_request_length, instance_info
+                                    instance_info = await assign_instances(
+                                        api,
+                                        req_data,
+                                        tmp_request_length,
+                                        is_initial_request=False,
                                     )
                                     released_kv = False
                                     break
@@ -1818,9 +1784,7 @@ async def handle_completions_impl(api: str, request: Request):
                             False,
                             exc.status_code or 0,
                         )
-                        await runtime.schedule(
-                            "record_decode_error", instance_info.decoder_key, "late"
-                        )
+                        await runtime.schedule("record_decode_error", instance_info.decoder_key, "late")
                         logger.error(
                             "[decode] late failure from %s:%s: %s; stream truncated",
                             instance_info.decoder_host,
@@ -1841,9 +1805,7 @@ async def handle_completions_impl(api: str, request: Request):
                             "release_decoder", instance_info.decoder_key, instance_info.decoder_score
                         )
                         if not failover_enabled:
-                            await runtime.schedule(
-                                "record_decode_error", instance_info.decoder_key, "early"
-                            )
+                            await runtime.schedule("record_decode_error", instance_info.decoder_key, "early")
                             logger.error(
                                 "[decode] early failure from %s:%s: %s; failover disabled",
                                 instance_info.decoder_host,
@@ -1852,10 +1814,11 @@ async def handle_completions_impl(api: str, request: Request):
                             )
                             raise
                         excluded_decoders.add(instance_info.decoder_key)
-                        await runtime.schedule(
-                            "record_decode_error", instance_info.decoder_key, "early"
-                        )
+                        await runtime.schedule("record_decode_error", instance_info.decoder_key, "early")
                         await runtime.schedule("record_failover", "decode")
+                        # Null the decoder key so any later release (reassign/finally)
+                        # is a safe no-op — prevents double-release of decoder load.
+                        instance_info.decoder_key = ""
                         if len(excluded_decoders) > args.failover_max_decoders:
                             logger.error(
                                 "[decode] failover exhausted, excluded=%s",
@@ -1891,9 +1854,22 @@ async def handle_completions_impl(api: str, request: Request):
                             )
                             # released_kv stays as-is: KV release is per-prefiller.
                         else:
+                            # Prefiller gone -> KV lost -> release its KV directly,
+                            # null the keys to make later releases no-ops, then
+                            # re-assign a fresh pair (avoids reassign_instances,
+                            # which would double-release the decoder load).
+                            await runtime.schedule(
+                                "release_prefill_kv",
+                                instance_info.prefiller_key,
+                                instance_info.prefiller_score,
+                            )
+                            instance_info.prefiller_key = ""
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(
-                                api, req_data, tmp_request_length, instance_info
+                            instance_info = await assign_instances(
+                                api,
+                                req_data,
+                                tmp_request_length,
+                                is_initial_request=False,
                             )
                             released_kv = False
                         continue
@@ -1910,8 +1886,7 @@ async def handle_completions_impl(api: str, request: Request):
                 raise
             except Exception as exc:
                 logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; "
-                    "releasing prefiller KV",
+                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
                     instance_info.decoder_host,
                     instance_info.decoder_port,
                     exc,
