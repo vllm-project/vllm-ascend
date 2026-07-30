@@ -1572,15 +1572,17 @@ class KVPoolWorker:
         if self.current_layer >= self.num_layers:
             return
         assert self.layer_load_finished_events is not None
+        assert self.kv_recv_thread is not None
+        self.kv_recv_thread.raise_if_failed()
         reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
         should_wait = bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
         if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
             return
-        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
-        if not is_finish:
-            logger.info("Layerwise %d load wait timed out", self.current_layer)
+        while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
+            self.kv_recv_thread.raise_if_failed()
+            logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
         logger.debug(">>>>>>>>>>>>>>>>>>>> clear load layer %d", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
 
@@ -1597,6 +1599,7 @@ class KVPoolWorker:
         assert self.layer_save_finished_events is not None
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
+        send_thread.raise_if_failed()
         self.sync_save_events[self.current_layer].record()
         if self.layer_save_tasks[self.current_layer]:
             for task in self.layer_save_tasks[self.current_layer]:
@@ -1606,9 +1609,9 @@ class KVPoolWorker:
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
-            is_finish = self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10)
-            if not is_finish:
-                logger.info("Layerwise %d save wait timed out", self.current_layer)
+            while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
+                send_thread.raise_if_failed()
+                logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
             reuse_source_layers = set(self.prefetch_layer_map.values())
             for layer_id in range(self.num_layers):
                 if layer_id in reuse_source_layers:
