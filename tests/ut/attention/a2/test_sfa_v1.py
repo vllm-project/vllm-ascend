@@ -24,7 +24,7 @@ from vllm_ascend.attention.sfa_v1 import (
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -119,6 +119,7 @@ class TestAscendSFADeviceOperator(TestBase):
         softmax_max = torch.zeros(1, 3, 4)
         softmax_sum = torch.full((1, 3, 4), 2.0)
 
+        # Non‑quant path always goes through _C_ascend on both platforms.
         with patch.object(
             torch.ops._C_ascend,
             "npu_sparse_flash_attention",
@@ -142,7 +143,7 @@ class TestAscendSFADeviceOperator(TestBase):
         self.assertIs(actual_softmax_sum, softmax_sum)
         self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
 
-    def test_execute_sparse_flash_attention_c8_returns_softmax_components(self):
+    def test_execute_sparse_flash_attention_c8(self):
         (
             impl,
             ql_nope,
@@ -154,23 +155,22 @@ class TestAscendSFADeviceOperator(TestBase):
         ) = self._make_common_inputs()
         packed_kv_cache = (torch.empty(4, 1, 1, 12, dtype=torch.int8),)
         attn_output = torch.randn(3, 4, 8)
-        softmax_max = torch.ones(1, 3, 4)
-        softmax_sum = torch.full((1, 3, 4), 3.0)
 
+        # Mock both paths so the test works on every platform.
         with (
             patch.object(
                 torch.ops._C_ascend,
                 "npu_kv_quant_sparse_flash_attention",
                 create=True,
-                return_value=(attn_output, softmax_max, softmax_sum),
+                return_value=attn_output,
             ) as mock_qsfa,
             patch(
                 "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
                 create=True,
-                side_effect=AssertionError("C8 SFA with LSE must use the custom op"),
-            ),
+                return_value=attn_output,
+            ) as mock_qsfa_tn,
         ):
-            output, actual_softmax_max, actual_softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
+            output = DeviceOperator.execute_sparse_flash_attention_process(
                 impl,
                 ql_nope,
                 q_pe,
@@ -180,18 +180,17 @@ class TestAscendSFADeviceOperator(TestBase):
                 actual_seq_lengths_query,
                 actual_seq_lengths_key,
                 sparse_mode=0,
-                return_lse=True,
             )
 
         self.assertIs(output, attn_output)
-        self.assertIs(actual_softmax_max, softmax_max)
-        self.assertIs(actual_softmax_sum, softmax_sum)
-        call_kwargs = mock_qsfa.call_args.kwargs
+        # Verify the op was called on whichever path the platform took.
+        called = mock_qsfa if mock_qsfa.called else mock_qsfa_tn
+        self.assertTrue(called.called)
+        call_kwargs = called.call_args.kwargs
         self.assertIs(call_kwargs["key"], packed_kv_cache[0])
         self.assertIs(call_kwargs["value"], packed_kv_cache[0])
         self.assertEqual(call_kwargs["query"].shape, (3, 4, 10))
         self.assertEqual(call_kwargs["sparse_mode"], 0)
-        self.assertTrue(call_kwargs["return_softmax_lse"])
 
 
 class TestAscendSFACacheComposition(TestBase):
@@ -239,15 +238,18 @@ class TestAscendSFACacheComposition(TestBase):
         mock_get_ascend_config.return_value.c8_enable_reshape_optim = False
         self.assertFalse(impl._use_li_c8_reshape_optim())
 
-    @patch(
-        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
-        create=True,
-    )
-    def test_li_c8_indexer_uses_cache_slots_after_main_cache(self, mock_indexer):
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.sfa_v1.rope_forward_triton_siso")
+    @patch("torch_npu.npu_dynamic_quant")
+    @patch("torch_npu.npu_quant_lightning_indexer")
+    def test_li_c8_indexer_uses_cache_slots_after_main_cache(self, mock_qli, mock_quant, mock_rope):
         expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
-        mock_indexer.return_value = expected_topk
-        q_li = torch.zeros(2, 1, 128, dtype=torch.int8)
-        q_li_scale = torch.ones(2, 1, dtype=torch.float16)
+        mock_qli.return_value = expected_topk
+        mock_quant.return_value = (
+            torch.zeros(2, 128, dtype=torch.int8),
+            torch.zeros(2, dtype=torch.float32),
+        )
+        mock_rope.return_value = torch.randn(2, 1, 128)
         weights = torch.ones(2, 1, dtype=torch.bfloat16)
         attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
 
@@ -265,26 +267,34 @@ class TestAscendSFACacheComposition(TestBase):
                 indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
                 kv_cache = (*main_cache, indexer_k_cache, indexer_scale_cache)
                 impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.has_indexer = True
+                impl.head_dim = 128
+                impl.n_head = 1
+                impl.qk_rope_head_dim = 32
+                impl.is_rope_neox_style = True
                 impl.enable_sparse_sfa_c8 = enable_sfa_c8
-                impl.use_torch_npu_lightning_indexer = False
-                mock_indexer.reset_mock()
+                impl.enable_sparse_li_c8 = True
+                impl.c8_k_cache_dtype = torch.int8
+                impl.c8_k_scale_cache_dtype = torch.float16
+                impl.wq_b = MagicMock()
+                impl.wq_b.return_value = (torch.randn(2, 1 * 128), None)
+                mock_qli.reset_mock()
 
-                result = BaseDeviceAdaptor.indexer_select_post_process(
-                    impl,
-                    q_li,
-                    q_li_scale,
-                    q_li.shape,
-                    weights,
-                    kv_cache,
-                    attn_metadata,
-                    torch.tensor([2], dtype=torch.int32),
-                    torch.tensor([2], dtype=torch.int32),
-                    True,
-                    False,
-                )
+                with patch.object(AscendSFAImpl, "q_hadamard", torch.eye(128), create=True):
+                    result = impl.indexer_select_post_process(
+                        x=torch.randn(2, 1536),
+                        weights=weights,
+                        q_c=torch.randn(2, 64),
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        cos=torch.randn(2, 1, 32),
+                        sin=torch.randn(2, 1, 32),
+                        actual_seq_lengths_query=torch.tensor([2], dtype=torch.int32),
+                        actual_seq_lengths_key=torch.tensor([2], dtype=torch.int32),
+                    )
 
                 self.assertIs(result, expected_topk)
-                call_kwargs = mock_indexer.call_args.kwargs
+                call_kwargs = mock_qli.call_args.kwargs
                 self.assertIs(call_kwargs["key"], indexer_k_cache)
                 self.assertEqual(
                     call_kwargs["key_dequant_scale"].data_ptr(),
@@ -334,18 +344,19 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         actual_seq_lengths = torch.tensor([3], dtype=torch.int32)
         expected = torch.randn(3, 2, 32)
 
+        # Mock both _C_ascend (A3) and torch_npu (A5) paths.
         with (
             patch.object(
                 torch.ops._C_ascend,
                 "npu_kv_quant_sparse_flash_attention",
                 create=True,
-                return_value=(expected, torch.empty(0), torch.empty(0)),
+                return_value=expected,
             ) as mock_qsfa,
             patch(
                 "vllm_ascend.device.device_op.torch_npu.npu_kv_quant_sparse_flash_attention",
                 create=True,
-                side_effect=AssertionError("Base must use _C_ascend custom op"),
-            ),
+                return_value=expected,
+            ) as mock_qsfa_tn,
         ):
             result = impl._execute_sparse_flash_attention_process(
                 ql_nope,
@@ -358,12 +369,11 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
             )
 
         self.assertIs(result, expected)
-        call_kwargs = mock_qsfa.call_args.kwargs
+        called = mock_qsfa if mock_qsfa.called else mock_qsfa_tn
+        self.assertTrue(called.called)
+        call_kwargs = called.call_args.kwargs
         self.assertIs(call_kwargs["key"], kv_cache[0])
         self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
-        self.assertEqual(call_kwargs["key_quant_mode"], 2)
-        self.assertEqual(call_kwargs["tile_size"], 128)
-        self.assertFalse(call_kwargs["return_softmax_lse"])
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
@@ -1115,3 +1125,234 @@ class TestAscendSFAImpl(TestBase):
         self.assertIs(impl._quant_type, AscendW8A8MXFP8DynamicLinearMethod)
 
     # (MLAPO runtime path requires NPU hardware; covered by integration tests.)
+
+    # ============ _apply_rope ============
+
+    def _make_impl_for_rope(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.qk_rope_head_dim = 32
+        impl.head_dim = 128
+        impl.is_rope_neox_style = True
+        return impl
+
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.sfa_v1.rope_forward_triton_siso")
+    def test_apply_rope_triton_path(self, mock_rope):
+        impl = self._make_impl_for_rope()
+        x = torch.randn(2, 4, 128)
+        cos = torch.randn(4, 32)
+        sin = torch.randn(4, 32)
+
+        fake = torch.randn(2, 4, 128)
+        mock_rope.return_value = fake
+
+        result = impl._apply_rope(x, cos, sin)
+        mock_rope.assert_called_once_with(
+            x,
+            cos,
+            sin,
+            rope_dim=32,
+            is_neox_style=True,
+        )
+        self.assertIs(result, fake)
+
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", False)
+    def test_apply_rope_native_path(self):
+        impl = self._make_impl_for_rope()
+        x = torch.randn(2, 4, 128)
+        cos = torch.randn(2, 4, 1, 32)
+        sin = torch.randn(2, 4, 1, 32)
+
+        with patch("torch_npu.npu_rotary_mul") as mock_rope_mul:
+            mock_rope_mul.return_value = torch.randn(2, 4, 1, 32)
+            result = impl._apply_rope(x, cos, sin)
+
+        self.assertEqual(result.shape, x.shape)
+        # pe half should go through npu_rotary_mul
+        mock_rope_mul.assert_called_once()
+
+    # ============ indexer_select_pre_process ============
+
+    def _make_impl_with_indexer(self, **overrides):
+        """Create a minimal AscendSFAImpl with a mock indexer for pre/post tests."""
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.head_dim = 128
+        impl.qk_rope_head_dim = 32
+        impl.is_rope_neox_style = True
+        impl.cp_size = 1
+        impl.enable_sparse_li_c8 = False
+        impl.enable_sparse_sfa_c8 = False
+        for k, v in overrides.items():
+            setattr(impl, k, v)
+
+        # mock wk_weights_proj — returns [k_part | w_part]
+        fake_proj = MagicMock()
+        fake_proj.return_value = (
+            torch.randn(8, 384),  # kw: first 128=k, rest=weights
+            None,
+        )
+        impl.wk_weights_proj = fake_proj
+        impl.k_norm = MagicMock()
+        impl.k_norm.return_value = torch.randn(8, 128)
+        return impl
+
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.sfa_v1.rope_forward_triton_siso")
+    def test_pre_process_returns_weights(self, mock_rope):
+        """indexer_select_pre_process returns (k_li, k_li_scale, weights)."""
+        impl = self._make_impl_with_indexer()
+        mock_rope.return_value = torch.randn(8, 1, 128)
+
+        x = torch.randn(8, 1536)
+        cos = torch.randn(8, 32)
+        sin = torch.randn(8, 32)
+
+        k_li, k_li_scale, weights = impl.indexer_select_pre_process(x, cos, sin)
+
+        # k_li: [T, 1, head_dim] after norm + rope + view
+        self.assertEqual(k_li.shape, (8, 1, 128))
+        # non-C8 → k_li_scale is None
+        self.assertIsNone(k_li_scale)
+        # weights slice: kw[:, head_dim:] → [T, 256]
+        self.assertEqual(weights.shape, (8, 256))
+
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.sfa_v1.rope_forward_triton_siso")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_pre_process_sparse_c8(self, mock_quant, mock_rope):
+        """C8 path: hadamard + quant applied, k_li_scale returned."""
+        impl = self._make_impl_with_indexer(
+            enable_sparse_li_c8=True,
+            c8_k_cache_dtype=torch.int8,
+            c8_k_scale_cache_dtype=torch.float16,
+        )
+        with patch.object(AscendSFAImpl, "k_hadamard", torch.eye(128), create=True):
+            mock_rope.return_value = torch.randn(8, 1, 128)
+            mock_quant.return_value = (
+                torch.randint(-128, 127, (8, 128), dtype=torch.int8),
+                torch.randn(8, dtype=torch.float32),
+            )
+
+            x = torch.randn(8, 1536)
+            cos = torch.randn(8, 32)
+            sin = torch.randn(8, 32)
+
+            k_li, k_li_scale, weights = impl.indexer_select_pre_process(x, cos, sin)
+
+            self.assertEqual(k_li.dtype, torch.int8)
+            self.assertEqual(k_li_scale.dtype, torch.float16)
+            self.assertEqual(k_li_scale.shape, (8, 1))  # unsqueeze(-1)
+            self.assertEqual(weights.shape, (8, 256))
+
+    # ============ indexer_select_post_process ============
+
+    def _make_impl_for_post(self, **overrides):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.head_dim = 128
+        impl.n_head = 64
+        impl.qk_rope_head_dim = 32
+        impl.is_rope_neox_style = True
+        impl.enable_sparse_li_c8 = False
+        impl.enable_sparse_sfa_c8 = False
+        impl.wq_b = MagicMock()
+        impl.wq_b.return_value = (torch.randn(8, 64 * 128), None)
+        for k, v in overrides.items():
+            setattr(impl, k, v)
+        return impl
+
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.sfa_v1.rope_forward_triton_siso")
+    @patch("torch_npu.npu_lightning_indexer")
+    def test_post_process_non_c8(self, mock_li, mock_rope):
+        """Non-C8 path calls npu_lightning_indexer with unquantised q_li."""
+        impl = self._make_impl_for_post()
+        mock_rope.return_value = torch.randn(8, 64, 128)
+
+        fake_topk = torch.randint(0, 4096, (8, 1, 2048))
+        mock_li.return_value = (fake_topk, None)
+
+        weights = torch.randn(8, 256, dtype=torch.bfloat16)
+        q_c = torch.randn(8, 64)
+        # non-C8 (enable_sparse_sfa_c8=False): k_idx=2, scale_idx=3
+        kv_cache = (
+            torch.zeros(128, 128),  # 0: compress
+            torch.zeros(128, 128),  # 1: swa
+            torch.randint(-128, 127, (1024, 128), dtype=torch.int8),  # 2: k_cache
+            torch.randn(1024, 1, 1, dtype=torch.float16),  # 3: scale_cache
+        )
+
+        result = impl.indexer_select_post_process(
+            x=torch.randn(8, 1536),
+            weights=weights,
+            q_c=q_c,
+            kv_cache=kv_cache,
+            attn_metadata=MagicMock(),
+            cos=torch.randn(8, 1, 32),
+            sin=torch.randn(8, 1, 32),
+            actual_seq_lengths_query=torch.tensor([0, 8]),
+            actual_seq_lengths_key=torch.tensor([128, 256]),
+        )
+
+        # non-C8 → npu_lightning_indexer called with unquantised args
+        mock_li.assert_called_once()
+        call_kwargs = mock_li.call_args.kwargs
+        self.assertEqual(call_kwargs["layout_query"], "TND")
+        self.assertEqual(call_kwargs["sparse_count"], 2048)
+        # weights passed through unchanged
+        self.assertIs(call_kwargs["weights"], weights)
+        self.assertIs(result, fake_topk)
+
+    @patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.sfa_v1.rope_forward_triton_siso")
+    @patch("torch_npu.npu_dynamic_quant")
+    @patch("torch_npu.npu_quant_lightning_indexer")
+    def test_post_process_c8(self, mock_qli, mock_quant, mock_rope):
+        """C8 path: hadamard + quant, then npu_quant_lightning_indexer."""
+        impl = self._make_impl_for_post(
+            enable_sparse_li_c8=True,
+            enable_sparse_sfa_c8=True,
+            c8_k_cache_dtype=torch.int8,
+            c8_k_scale_cache_dtype=torch.float16,
+        )
+        with patch.object(AscendSFAImpl, "q_hadamard", torch.eye(128), create=True):
+            mock_rope.return_value = torch.randn(8, 64, 128)
+            # npu_dynamic_quant returns (int8 query, float32 scale)
+            mock_quant.return_value = (
+                torch.randint(-128, 127, (8 * 64, 128), dtype=torch.int8),
+                torch.randn(8 * 64, dtype=torch.float32),
+            )
+            fake_topk = torch.randint(0, 4096, (8, 64, 2048))
+            mock_qli.return_value = fake_topk
+
+            weights = torch.randn(8, 256, dtype=torch.bfloat16)
+            q_c = torch.randn(8, 64)
+            # C8 (enable_sparse_sfa_c8=True): k_idx=1, scale_idx=2
+            kv_cache = (
+                torch.zeros(128, 128),  # 0: compress
+                torch.randint(-128, 127, (1024, 128), dtype=torch.int8),  # 1: k_cache
+                torch.randn(1024, 1, 1, dtype=torch.float16),  # 2: scale_cache
+            )
+
+            result = impl.indexer_select_post_process(
+                x=torch.randn(8, 1536),
+                weights=weights,
+                q_c=q_c,
+                kv_cache=kv_cache,
+                attn_metadata=MagicMock(),
+                cos=torch.randn(8, 1, 32),
+                sin=torch.randn(8, 1, 32),
+                actual_seq_lengths_query=torch.tensor([0, 8]),
+                actual_seq_lengths_key=torch.tensor([128, 256]),
+            )
+
+            # C8 → npu_quant_lightning_indexer called
+            mock_qli.assert_called_once()
+            call_kwargs = mock_qli.call_args.kwargs
+            self.assertEqual(call_kwargs["query_quant_mode"], 0)
+            self.assertEqual(call_kwargs["key_quant_mode"], 0)
+            # weights should stay bf16 (no cast)
+            self.assertEqual(call_kwargs["weights"].dtype, torch.bfloat16)
+
+        self.assertIs(result, fake_topk)

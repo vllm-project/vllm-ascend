@@ -589,10 +589,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.k_norm = None
         self.cp_size = 1
         self.is_rope_neox_style = True
-        self.use_torch_npu_lightning_indexer = False
         if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
             self.is_rope_neox_style = False
-            self.use_torch_npu_lightning_indexer = True
 
         # Sparse C8 has two independent meanings in SFA:
         # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention.
@@ -1371,6 +1369,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
+    def _apply_rope(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        if HAS_TRITON:
+            return rope_forward_triton_siso(
+                x, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+            )
+        x_pe, x_nope = torch.split(x, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
+        x_pe = x_pe.unsqueeze(2)
+        x_pe = torch_npu.npu_rotary_mul(x_pe, cos, sin)
+        x_pe = x_pe.squeeze(2)
+        return torch.cat([x_pe, x_nope], dim=-1)
+
     def indexer_select_pre_process(
         self,
         x: torch.Tensor,
@@ -1387,28 +1396,17 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         kw, _ = self.wk_weights_proj(x)
         k_li = kw[:, : self.head_dim]
+        weights = kw[:, self.head_dim :]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
         if HAS_TRITON:
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
         else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
             cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
             sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
-
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+        k_li = self._apply_rope(k_li, cos, sin)
 
         if self.enable_sparse_li_c8:
             k_li = k_li @ AscendSFAImpl.k_hadamard
@@ -1418,11 +1416,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             k_li_scale = None
 
-        return k_li, k_li_scale
+        return k_li, k_li_scale, weights
 
     def indexer_select_post_process(
         self,
         x: torch.Tensor,
+        weights: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
@@ -1431,16 +1430,30 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
+        """Compute top-k indices via the lightning-indexer kernel for sparse attention.
+
+        This is the second half of the indexer pipeline (the first half is
+        ``indexer_select_pre_process``).  It projects the query-compressed
+        representation *q_c* into the indexer query space, applies RoPE,
+        optionally quantises with Hadamard rotation (sparse-C8 path), and
+        invokes the lightning-indexer kernel to select the top-k KV entries
+        per query token.
+
+        *weights* should be the pre-computed indexer weight projection from
+        ``indexer_select_pre_process`` (the ``head_dim:`` half of the
+        ``wk_weights_proj`` output) — this avoids an extra ``wk_weights_proj``
+        matmul inside this method.
+        """
         if not self.has_indexer:
             raise RuntimeError(
                 f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
             )
 
-        assert self.wk_weights_proj is not None
         assert self.wq_b is not None
 
-        kw, _ = self.wk_weights_proj(x)
-        weights = kw[:, self.head_dim :]
+        # ==== query projection: q_c → q_li via wq_b ====================
+        # q_c may be a plain tensor (native path) or a (tensor, scale) tuple
+        # from MLA-prolog fused pre-processing (fp8 quantised path).
         if isinstance(q_c, tuple):
             q_c_tensor, q_c_scale = q_c
             q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
@@ -1468,19 +1481,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
+        q_li = self._apply_rope(q_li, cos, sin)
 
         q_li_scale = None
         q_li_shape_ori = None
@@ -1491,19 +1492,51 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
         record_attention_compute_start()
-        return DeviceOperator.indexer_select_post_process(
-            self,
-            q_li,
-            q_li_scale,
-            q_li_shape_ori,
-            weights,
-            kv_cache,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-            self.enable_sparse_li_c8,
-            self.use_torch_npu_lightning_indexer,
-        )
+
+        # ==== lightning-indexer kernel ===================================
+        # Two code paths:
+        #   sparse-C8  – query & key are pre-quantised → quant_lightning_indexer
+        #   non-sparse – query & key in native dtype   → lightning_indexer
+        indexer_cache_idx = self.kv_cache_indexer_k_idx
+        indexer_scale_cache_idx = self.kv_cache_indexer_scale_idx
+
+        if self.enable_sparse_li_c8:
+            assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
+            assert q_li_scale is not None
+            assert q_li_shape_ori is not None
+
+            key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+
+            topk_indices = torch_npu.npu_quant_lightning_indexer(
+                query=q_li.view(q_li_shape_ori),
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
+                key_dequant_scale=key_dequant_scale,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        return topk_indices
 
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
@@ -1848,9 +1881,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
                 )
             if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+                k_li, k_li_scale, indexer_weights = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
             else:
-                k_li, k_li_scale = None, None
+                k_li, k_li_scale, indexer_weights = None, None, None
             wait_for_kv_layer_from_connector(layer_name)
 
             if fused_type == PreprocessType.PROLOG_V3:
@@ -1886,13 +1919,13 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_c = self.q_a_layernorm(q_c)
 
             if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(
+                k_li, k_li_scale, indexer_weights = self.indexer_select_pre_process(
                     x=hidden_states,
                     cos=cos,
                     sin=sin,
                 )
             else:
-                k_li, k_li_scale = None, None
+                k_li, k_li_scale, indexer_weights = None, None, None
 
             wait_for_kv_layer_from_connector(layer_name)
 
@@ -2000,6 +2033,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert q_c is not None
             topk_indices = self.indexer_select_post_process(
                 x=hidden_states,
+                weights=indexer_weights,
                 q_c=q_c,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,

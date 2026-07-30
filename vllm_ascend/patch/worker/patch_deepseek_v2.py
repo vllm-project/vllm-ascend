@@ -33,6 +33,24 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
 
+def _is_index_cache_skip_layer(config, layer_id: int) -> bool:
+    """True if this layer reuses top-k indices from a previous indexer-bearing
+    layer according to the IndexCache pattern configured in the model config.
+
+    This is a pure function extracted from ``_deepseek_v2_mla_attention_init``
+    so it can be reused both at model-init time and at weight-loading time.
+    """
+    index_topk_freq = getattr(config, "index_topk_freq", 1)
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+
+    if index_topk_pattern is None:
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+    if 0 <= layer_id < len(index_topk_pattern):
+        return index_topk_pattern[layer_id] == "S"
+    return False
+
+
 def _should_skip_indexer_init(
     config: DeepseekV2Config | DeepseekV3Config,
     prefix: str,
@@ -51,7 +69,15 @@ def _should_skip_indexer_init(
     # checkpoint still contains an Indexer for every layer.
     indexer_types = getattr(config, "indexer_types", None)
     indexer_type = indexer_types[layer_id] if indexer_types is not None and layer_id < len(indexer_types) else None
-    return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
+    if isinstance(indexer_type, str) and indexer_type.lower() == "shared":
+        return True
+
+    # GLM-5.1 IndexCache: layers that reuse another layer's top-k indices
+    # can drop the indexer entirely — don't allocate k_cache, don't compute
+    # k_li, don't scatter. The checkpoint still carries Indexer weights for
+    # every layer; those are filtered out by the load_weights patch so the
+    # AutoWeightsLoader never sees them.
+    return bool(getattr(config, "use_index_cache", False))
 
 
 def _deepseek_v2_mla_attention_init(
@@ -195,36 +221,8 @@ def _deepseek_v2_mla_attention_init(
     #
     # skip_topk controls top-k reuse. Indexer initialization is skipped only
     # when the checkpoint marks this layer as sharing another layer's Indexer.
-    _skip_topk = False
-    _index_topk_freq = getattr(
-        config,
-        "index_topk_freq",
-        1,
-    )
-    _index_topk_pattern = getattr(
-        config,
-        "index_topk_pattern",
-        None,
-    )
-    _index_skip_topk_offset = getattr(
-        config,
-        "index_skip_topk_offset",
-        2,
-    )
-
     layer_id = extract_layer_index(prefix)
-
-    if _index_topk_pattern is None:
-        _skip_topk = (
-            max(
-                layer_id - _index_skip_topk_offset + 1,
-                0,
-            )
-            % _index_topk_freq
-            != 0
-        )
-    elif 0 <= layer_id < len(_index_topk_pattern):
-        _skip_topk = _index_topk_pattern[layer_id] == "S"
+    _skip_topk = _is_index_cache_skip_layer(config, layer_id)
 
     skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
     if self.is_v32 and not skip_indexer_init:
@@ -355,3 +353,60 @@ def _patched_forward(
 
 
 DeepseekV2Model.forward = _patched_forward
+
+
+# ============================================================================
+# IndexCache: weight-loading patch for GLM5.1
+# ============================================================================
+#
+# GLM-5.1 checkpoints include Indexer weights for *every* layer, but layers
+# where _should_skip_indexer_init returns True don't create an Indexer module.
+# The AutoWeightsLoader raises ValueError when a checkpoint weight has no
+# matching parameter, so we filter out those weights before they reach the
+# loader.
+#
+# This executes at import time (patch_gqa_c8 runs after us — but patch_gqa_c8
+# *wraps* the current load_weights, so our filter naturally composes inside
+# its chain: patch_gqa_c8 → our filter → original).
+#
+#     _patched_c8_load_weights  (C8 scale interception)
+#       → _patched_glm_load_weights  (IndexCache filtering)
+#         → original Glm4MoeForCausalLM.load_weights
+
+
+def _is_skipped_indexer_weight(name: str, skip_ids: frozenset[int]) -> bool:
+    """Return True if *name* belongs to an Indexer whose layer is in *skip_ids*."""
+    if ".indexer." not in name:
+        return False
+    parts = name.split(".")
+    try:
+        i = parts.index("layers")
+        return int(parts[i + 1]) in skip_ids
+    except (ValueError, IndexError):
+        return False
+
+
+def _apply_index_cache_weight_patch() -> None:
+    """Wrap ``Glm4MoeForCausalLM.load_weights`` to filter unused Indexer
+    weights for GLM-5.1 IndexCache skip layers.
+
+    Safe to call at import time — ``patch_gqa_c8`` wraps the *current*
+    ``load_weights`` afterward, so our filter composes naturally.
+    """
+    from vllm.model_executor.models.glm4_moe import Glm4MoeForCausalLM
+
+    _prev_load_weights = Glm4MoeForCausalLM.load_weights
+
+    def _patched_glm_load_weights(self, weights):
+        config = getattr(self, "config", None)
+        if config is not None and getattr(config, "use_index_cache", False):
+            num_layers = getattr(config, "num_hidden_layers", 0)
+            skip_ids = frozenset(lid for lid in range(num_layers) if _is_index_cache_skip_layer(config, lid))
+            if skip_ids:
+                weights = ((name, w) for name, w in weights if not _is_skipped_indexer_weight(name, skip_ids))
+        return _prev_load_weights(self, weights)
+
+    Glm4MoeForCausalLM.load_weights = _patched_glm_load_weights
+
+
+_apply_index_cache_weight_patch()
