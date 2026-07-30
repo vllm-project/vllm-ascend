@@ -50,8 +50,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
-from vllm_ascend.utils import vllm_version_is
-
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -143,12 +141,7 @@ class RecomputeScheduler(Scheduler):
             request.request_id,
             RequestStatus.FINISHED_ABORTED,
         )
-        if vllm_version_is("0.25.1"):
-            assert finished_reqs == [(request.request_id, request.client_index)]
-        else:
-            assert [(r.request_id, r.client_index) for r in finished_reqs] == [
-                (request.request_id, request.client_index)
-            ]
+        assert [(r.request_id, r.client_index) for r in finished_reqs] == [(request.request_id, request.client_index)]
 
     def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
         self.current_step += 1
@@ -527,16 +520,11 @@ class RecomputeScheduler(Scheduler):
                             )
                     else:
                         computed_result = self.kv_cache_manager.get_computed_blocks(request)
-                        if vllm_version_is("0.25.1"):
-                            new_computed_blocks, num_new_local_computed_tokens = cast(
-                                tuple[KVCacheBlocks, int], computed_result
-                            )
-                        else:
-                            (
-                                new_computed_blocks,
-                                num_new_local_computed_tokens,
-                                request.shared_prefix_boundary,
-                            ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                        ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
 
                     # In case of hybrid models, obtain a hint for the
                     # Marconi-style APC admission logic.
@@ -998,7 +986,7 @@ class RecomputeScheduler(Scheduler):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
-            if not vllm_version_is("0.25.1") and request is not None:
+            if request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure

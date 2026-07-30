@@ -18,9 +18,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     block_hash_to_bytes,
-    get_block_hashes,
 )
-from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -226,12 +224,7 @@ class AscendStoreCoordinator:
         return tuple(None if mask is None or all(mask) else mask for _, mask in masks)
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
-        if not vllm_version_is("0.25.1"):
-            # vLLM #46384 moved hash-size resolution into each manager.
-            return block_hashes
-        if spec.block_size == self.hash_block_size:
-            return block_hashes
-        return cast(BlockHashList, get_block_hashes(block_hashes, spec.block_size, self.hash_block_size))
+        return block_hashes
 
     def _find_hit_blocks(
         self,
@@ -397,10 +390,6 @@ def _find_longest_cache_hit(
     **kwargs: Any,
 ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
     hit_result = manager_cls.find_longest_cache_hit(**kwargs)
-    if vllm_version_is("0.25.1"):
-        hit_blocks = cast(tuple[list[KVCacheBlock], ...], hit_result)
-        hit_length = len(hit_blocks[0]) * kwargs["kv_cache_spec"].block_size
-        return hit_blocks, hit_length
     return cast(tuple[tuple[list[KVCacheBlock], ...], int], hit_result)
 
 
