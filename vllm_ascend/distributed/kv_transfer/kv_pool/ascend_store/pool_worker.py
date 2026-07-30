@@ -810,6 +810,8 @@ class KVPoolWorker:
 
         # Initialize store, register buffers, and start transfer threads
         # directly here (like main) — no separate init_backend handshake.
+        if self.use_gva_layerwise:
+            self.m_store.ensure_initialized()
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
