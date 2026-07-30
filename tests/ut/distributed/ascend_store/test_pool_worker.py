@@ -502,12 +502,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.kv_events_config = None
         return config
 
-    def _make_worker(self, kv_role="kv_producer", extra_config=None):
+    def _make_worker(self, kv_role="kv_producer", extra_config=None, use_layerwise=False):
         self._patch_all()
         config = self._make_config(kv_role=kv_role, extra_config=extra_config)
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwise=False)
+        worker = KVPoolWorker(config, use_layerwise=use_layerwise)
         return worker
 
     def setUp(self):
@@ -529,6 +529,19 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker._transfer_threads_started = True
         worker.register_kv_caches(kv_caches)
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
+        worker.m_store.register_buffer.assert_called_once()
+
+    def test_register_kv_caches_initializes_layerwise_memcache(self):
+        worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
+        fake_cache = MagicMock()
+        fake_cache.shape = [100, 16, 8, 64]
+        fake_cache.element_size.return_value = 2
+        fake_cache.data_ptr.return_value = 10000
+        worker._transfer_threads_started = True
+
+        worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+
+        worker.m_store.ensure_initialized.assert_called_once_with()
         worker.m_store.register_buffer.assert_called_once()
 
     def test_start_load_kv_sync(self):
