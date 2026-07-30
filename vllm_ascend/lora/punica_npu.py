@@ -121,6 +121,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         self._single_lora_mask = None
         if self._single_lora_slot:
+            assert self.lora_config is not None
             lora_dtype = self.lora_config.lora_dtype
             if not isinstance(lora_dtype, torch.dtype):
                 raise ValueError(f"LoRA dtype must be resolved before creating the Punica wrapper, got {lora_dtype!r}")
