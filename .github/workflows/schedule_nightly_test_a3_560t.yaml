@@ -58,6 +58,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  statuses: write
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -177,7 +178,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -202,6 +203,7 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
+      send_ready_signal: false
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -216,7 +218,7 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, single-node-tests, multi-card-tests]
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -241,6 +243,8 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
+      send_ready_signal: true
+      run_id: ${{ github.run_id }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -249,13 +253,28 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       KUBECONFIG_B64_560T: ${{ secrets.KUBECONFIG_B64_560T }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
+  double-node-pods-started:
+    name: Wait for all double-node pods launched
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    uses: ./.github/workflows/_nightly_wait_for_pods_ready.yaml
+    with:
+      matrix_json: ${{ needs.setup-vars.outputs.double_node }}
+      filter: ${{ needs.parse-trigger.outputs.filter }}
+      context_prefix: 'double-node-pods-ready-560t'
+      run_id: ${{ github.run_id }}
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -285,7 +304,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -343,3 +362,23 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
+
+  remove-taints:
+    name: Remove node taints
+    needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
+    if: >-
+      always() &&
+      inputs.request_id == '' &&
+      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+    runs-on: linux-aarch64-a3-0-cn12-001
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+    steps:
+      - name: Decode kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_B64_560T }}" | base64 -d > "$KUBECONFIG"
+
+      - name: Remove dedicated taint from test nodes
+        run: |
+          kubectl taint nodes ${{ vars.A3_560T_TAINT_NODES }} dedicated- || true

@@ -16,9 +16,9 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
-- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
+- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
+- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -194,7 +194,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "A3 series"
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
 
     Run the following scripts on two nodes respectively.
 
@@ -300,7 +300,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "A2 series"
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64G × 32).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 32).
 
     **node 0**
 
@@ -352,7 +352,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --port 7000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
-    --async-scheduling \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
@@ -409,7 +408,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --port 7000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
-    --async-scheduling \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
@@ -417,9 +415,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
-Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64G × 32).
+Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 32).
 
 Before you start, please
 
@@ -712,7 +710,6 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
-            --async-scheduling \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -781,7 +778,6 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
-            --async-scheduling \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -937,7 +933,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --seed 1024 \
     --enable-chunked-prefill \
     --served-model-name glm-5 \
-    --async-scheduling \
     --max-model-len 256000 \
     --max-num-batched-tokens 8192 \
     --trust-remote-code \
@@ -1041,7 +1036,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --enable-prefix-caching \
     --seed 1024 \
     --served-model-name glm-5 \
-    --async-scheduling \
     --max-model-len 256000 \
     --max-num-batched-tokens 256 \
     --trust-remote-code \
@@ -1159,18 +1153,18 @@ python load_balance_proxy_server_example.py \
 Some configurations for optimization are shown below:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
 
 ### 1M Context Configuration
 
-Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64G x 16) and quantized GLM-5.2(W4A8C8) weights:
+Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64GB x 16) and quantized GLM-5.2(W4A8C8) weights:
 
 | Mode | Hardware | Parallelism | Context |
 | ---- | -------- | ----------- | ------- |
-| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
-| Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
+| Single-node co-located | 1 Atlas 800 A3 (64GB x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
+| Dual-node co-located | 2 Atlas 800 A3 (64GB x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 | 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 
 #### Single-Node 1M Deployment

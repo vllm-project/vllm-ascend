@@ -22,9 +22,9 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 
 | Model | Description | Recommended Hardware | Source |
 |-------|-------------|---------------------|--------|
-| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
-| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |
-| `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
+| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
+| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |
+| `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
 | `Eagle3` (M2.7) | M2.7 speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
 | `Eagle3` (M2.5) | M2.5 speculative decoding head model | Matches the base model node count | [MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-model-0318) |
 
@@ -187,7 +187,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --trust-remote-code \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --async-scheduling \
     --additional-config '{"enable_cpu_binding":true,
                           "enable_fused_mc2":true,
                           "enable_flashcomm1":true,
@@ -200,25 +199,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.85 \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}'
-```
-
-Remarks:
-
-- `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
-- If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
-- To achieve better performance on long-context scenarios (e.g., 128k or 64k), we recommend the following adjustments:
-
-```bash
-    --tensor-parallel-size 8 \
-    --data-parallel-size 1 \
-    --decode-context-parallel-size 1 \
-    --prefill-context-parallel-size 2 \
-    --cp-kv-cache-interleave-size 128 \
-    --max-num-seqs 16 \
-    --max-model-len 138000 \
-    --max-num-batched-tokens 65536 \
-    --gpu-memory-utilization 0.85 \
-    --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}'
 ```
 
 > **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
@@ -280,7 +260,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 
 PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following 1P1D configuration is validated for 128k input/output scenarios with `MiniMax-M2.7-W8A8`.
 
-**Hardware**: 2× Atlas 800 A3 (64G × 16), one for Prefill, one for Decode.
+**Hardware**: 2× Atlas 800 A3 (64GB × 16), one for Prefill, one for Decode.
 
 **Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
@@ -438,7 +418,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.75 \
     --quantization ascend \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
     --additional-config '{"enable_cpu_binding":true}' \
@@ -628,14 +607,14 @@ vllm bench serve \
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated on the self-test report (AR20260326132822) and are categorized by use case.
+The following configurations are validated in internal testing and are categorized by use case.
 
 | Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|
-| Short Seq High Throughput | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
-| Short Seq Low Latency | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
-| Long Seq High Throughput | 128K → 1K <br>（90% cache hit） | 1P1D PD separation | 16 (A3) | DP2TP8EP16 | DP2TP8EP16 | 16384 | 64 / 16 | 200k | 3 | On | On | On |
-| Long Seq Low Latency | 128K → 1K <br>（90% cache hit） | 1P2D PD separation | 24 (A3) | DP2TP8EP16 | DP4TP8EP32 | 16384 | 64 / 16 | 200k | 3 | On | On | On |
+| Short Seq High Throughput | 3.5k → 1.5k | 1P2D PD separation | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
+| Short Seq Low Latency | 3.5k → 1.5k | 1P2D PD separation | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
+| Long Seq High Throughput | 128k → 1k <br> (90% cache hit) | 1P1D PD separation | 16 (A3) | DP2TP8EP16 | DP2TP8EP16 | 16384 | 64 / 16 | 200k | 3 | On | On | On |
+| Long Seq Low Latency | 128k → 1k <br> (90% cache hit) | 1P2D PD separation | 24 (A3) | DP2TP8EP16 | DP4TP8EP32 | 16384 | 64 / 16 | 200k | 3 | On | On | On |
 
 > **Note**: The prefix cache hit rate for short-sequence tests is 0%; for long-sequence tests it is 90%. Adjust `max-num-seqs`, `max-model-len`, and `max-num-batched-tokens` based on your actual workload.
 

@@ -88,6 +88,7 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
     scheduler._inflight_prefills = {request}
     scheduler._connector_finished = MagicMock(return_value=(False, None))
     scheduler.encoder_cache_manager = MagicMock()
+    scheduler.ec_connector = None
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler._free_request_blocks = MagicMock()

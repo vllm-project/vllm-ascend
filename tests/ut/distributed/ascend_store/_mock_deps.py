@@ -376,9 +376,14 @@ def _make_pkg(name, path=""):
     return mod
 
 
-for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
+_vllm_ascend_real_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "vllm_ascend"))
+_vllm_ascend_package_paths = {
+    "vllm_ascend": _vllm_ascend_real_path,
+    "vllm_ascend.distributed": os.path.join(_vllm_ascend_real_path, "distributed"),
+}
+for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
-        sys.modules[_pkg] = _make_pkg(_pkg)
+        sys.modules[_pkg] = _make_pkg(_pkg, _path)
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]

@@ -9,7 +9,7 @@ Information required to perform model forward pass:
 
 The following diagram shows what we should prepare for model inference.
 
-```shell
+```text
               +---------------+
   inputs  --> |               |
               |     model     |  --> output
