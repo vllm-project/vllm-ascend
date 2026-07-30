@@ -55,10 +55,14 @@ EPLB has three usage modes:
 ### Dynamic EPLB
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using SwiftBalanceEplb (policy type 2).
 =======
 We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using the following: policy of SwiftBalanceEplb(2).
 >>>>>>> 11972934c... feat: add AIDD related documentation modifications
+=======
+We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using the following policy: SwiftBalanceEplb (2).
+>>>>>>> 2ffc8b499... Update expert_parallelism_load_balancer.md
 
 | Parameter | Description | Default |
 | --- | --- | --- |
