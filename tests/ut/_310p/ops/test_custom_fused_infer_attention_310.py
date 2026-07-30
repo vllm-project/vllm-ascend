@@ -26,10 +26,7 @@ def _generate_random_block_table(kv_seq_lens, block_size, total_physical_blocks)
         needed_blocks = (cur_kv_len + block_size - 1) // block_size
 
         if needed_blocks > len(available_blocks):
-            raise ValueError(
-                f"Not enough physical blocks: need {needed_blocks}, "
-                f"available {len(available_blocks)}"
-            )
+            raise ValueError(f"Not enough physical blocks: need {needed_blocks}, available {len(available_blocks)}")
 
         chosen_blocks = random.sample(available_blocks, needed_blocks)
         for cb in chosen_blocks:
@@ -40,8 +37,18 @@ def _generate_random_block_table(kv_seq_lens, block_size, total_physical_blocks)
 
 
 def _compute_golden_output_cpu(
-    query, key_cache, value_cache, num_heads, num_key_value_heads,
-    head_dim, block_size, block_table, query_lens_abs, kv_seq_lens, scale, layout,
+    query,
+    key_cache,
+    value_cache,
+    num_heads,
+    num_key_value_heads,
+    head_dim,
+    block_size,
+    block_table,
+    query_lens_abs,
+    kv_seq_lens,
+    scale,
+    layout,
 ):
     B = len(query_lens_abs)
     out_list = []
@@ -100,10 +107,13 @@ def _compute_golden_output_cpu(
         return padded_out.to(query.dtype)
 
 
-@pytest.mark.parametrize("layout,head_dim,block_size", [
-    ("TND", 128, 128),
-    ("BSND", 128, 128),
-])
+@pytest.mark.parametrize(
+    "layout,head_dim,block_size",
+    [
+        ("TND", 128, 128),
+        ("BSND", 128, 128),
+    ],
+)
 def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
     """Smoke test: one MHA case per layout+head_dim combo, eager mode."""
     random.seed(42)
@@ -111,32 +121,21 @@ def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
 
     dtype = torch.float16
     atol = 1e-4
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
     num_heads = 4
     num_kv_heads = 4
     B = 2
 
-    query_lens_cpu_abs = torch.tensor(
-        [random.randint(1, 128) for _ in range(B)], dtype=torch.int64
-    )
-    kv_seq_lens_cpu = torch.tensor(
-        [random.randint(1, 256) for _ in range(B)], dtype=torch.int64
-    )
+    query_lens_cpu_abs = torch.tensor([random.randint(1, 128) for _ in range(B)], dtype=torch.int64)
+    kv_seq_lens_cpu = torch.tensor([random.randint(1, 256) for _ in range(B)], dtype=torch.int64)
 
-    total_needed_blocks = sum(
-        (seq_len.item() + block_size - 1) // block_size
-        for seq_len in kv_seq_lens_cpu
-    )
+    total_needed_blocks = sum((seq_len.item() + block_size - 1) // block_size for seq_len in kv_seq_lens_cpu)
     block_num = total_needed_blocks + 20
     block_table_cpu = _generate_random_block_table(kv_seq_lens_cpu, block_size, block_num)
     block_table = block_table_cpu.npu()
 
-    key_cache = torch.randn(
-        [block_num, block_size, num_kv_heads * head_dim], dtype=dtype
-    ).npu()
-    value_cache = torch.randn(
-        [block_num, block_size, num_kv_heads * head_dim], dtype=dtype
-    ).npu()
+    key_cache = torch.randn([block_num, block_size, num_kv_heads * head_dim], dtype=dtype).npu()
+    value_cache = torch.randn([block_num, block_size, num_kv_heads * head_dim], dtype=dtype).npu()
     kv_seq_lens_npu = kv_seq_lens_cpu.npu()
 
     if layout == "TND":
@@ -208,7 +207,4 @@ def test_custom_fused_infer_attention_v310(layout, head_dim, block_size):
     else:
         diff_mean = (npu_out - cpu_out).abs().mean()
 
-    assert diff_mean <= atol, (
-        f"layout={layout} hd={head_dim} bs={block_size}: "
-        f"mean_diff={diff_mean:.6f} > atol={atol}"
-    )
+    assert diff_mean <= atol, f"layout={layout} hd={head_dim} bs={block_size}: mean_diff={diff_mean:.6f} > atol={atol}"

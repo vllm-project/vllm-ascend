@@ -33,9 +33,7 @@ def gen_custom_fia_compress_mask(head_dim: int) -> torch.Tensor:
         block_size)``.
     """
     if head_dim not in _FIA_COMPRESS_MASK_CFG:
-        raise ValueError(
-            f"Unsupported head_dim: {head_dim}. Only 128 or 256 are supported."
-        )
+        raise ValueError(f"Unsupported head_dim: {head_dim}. Only 128 or 256 are supported.")
     block_size, q_step = _FIA_COMPRESS_MASK_CFG[head_dim]
 
     block_b_rows = block_size - 1
