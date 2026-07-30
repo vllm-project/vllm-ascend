@@ -793,6 +793,11 @@ class ScoreEncoderCacheConfig:
                 A dictionary containing configuration parameters
                 for the encoder cache scoring policy.
         """
+        if not isinstance(score_encoder_cache_config, dict):
+            raise ValueError(
+                "score_encoder_cache_config must be a dict, "
+                f"got {type(score_encoder_cache_config).__name__}"
+            )
 
         # Whether to enable the score-based encoder cache management policy
         self.enabled = score_encoder_cache_config.get("enabled", False)
@@ -809,15 +814,70 @@ class ScoreEncoderCacheConfig:
         # that have not been accessed for a long time.
         self.clock_decay_every = score_encoder_cache_config.get("clock_decay_every", 64)
 
-        # Cache watermark threshold. When eviction is triggered,
-        # cache entries will be continuously removed until the cache
-        # usage ratio drops below this threshold.
+        # Target ratio of NPU cache slots to keep free after eviction.
+        # Eviction first ensures that the new embedding fits and, when
+        # possible, continues until free slots reach this ratio. If the target
+        # cannot be reached, only the currently reclaimable entries are evicted.
         self.watermark = score_encoder_cache_config.get("watermark", 0.2)
 
         # Promotion percentile threshold.
         # If the score of a cache entry exceeds this percentile
         # in the overall score distribution, the entry can be promoted.
         self.promote_percentile = score_encoder_cache_config.get("promote_percentile", 0.2)
+
+        self._validate()
+
+    def _validate(self):
+        if not isinstance(self.enabled, bool):
+            raise ValueError(
+                "score_encoder_cache_config.enabled must be a bool, "
+                f"got {type(self.enabled).__name__}"
+            )
+        if (
+            isinstance(self.cpu_cache_slots, bool)
+            or not isinstance(self.cpu_cache_slots, int)
+            or self.cpu_cache_slots <= 0
+        ):
+            raise ValueError(
+                "score_encoder_cache_config.cpu_cache_slots must be a positive integer, "
+                f"got {self.cpu_cache_slots}"
+            )
+        if (
+            isinstance(self.max_clock, bool)
+            or not isinstance(self.max_clock, int)
+            or self.max_clock < 0
+        ):
+            raise ValueError(
+                "score_encoder_cache_config.max_clock must be a non-negative integer, "
+                f"got {self.max_clock}"
+            )
+        if (
+            isinstance(self.clock_decay_every, bool)
+            or not isinstance(self.clock_decay_every, int)
+            or self.clock_decay_every <= 0
+        ):
+            raise ValueError(
+                "score_encoder_cache_config.clock_decay_every must be a positive integer, "
+                f"got {self.clock_decay_every}"
+            )
+        if (
+            isinstance(self.watermark, bool)
+            or not isinstance(self.watermark, (int, float))
+            or not 0 <= self.watermark <= 1
+        ):
+            raise ValueError(
+                "score_encoder_cache_config.watermark must be a number in [0, 1], "
+                f"got {self.watermark}"
+            )
+        if (
+            isinstance(self.promote_percentile, bool)
+            or not isinstance(self.promote_percentile, (int, float))
+            or not 0 <= self.promote_percentile <= 1
+        ):
+            raise ValueError(
+                "score_encoder_cache_config.promote_percentile must be a number in [0, 1], "
+                f"got {self.promote_percentile}"
+            )
 
 
 class EplbConfig:

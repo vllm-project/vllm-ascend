@@ -589,6 +589,21 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.npu.synchronize()
 
+    def reset_encoder_cache(self) -> None:
+        """Clear device and score-based encoder cache state."""
+        if (
+            self.tmp_encoder_cache
+            or self.cpu_encoder_cache
+            or self._pending_encoder_cache_copies
+        ):
+            self._sync_device()
+
+        super().reset_encoder_cache()
+        self.tmp_encoder_cache.clear()
+        self.cpu_encoder_cache.clear()
+        self.cached.clear()
+        self._pending_encoder_cache_copies.clear()
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
@@ -912,10 +927,11 @@ class NPUModelRunner(GPUModelRunner):
         promoting_mm_hashes = ec_manager_metadata.promoting_mm_hashes
         cpu_get_encoder_mm_hashes = ec_manager_metadata.cpu_get_encoder_mm_hashes
 
-        for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            value = self.encoder_cache.pop(mm_hash, None)
-            if value is None and mm_hash not in promoting_mm_hashes:
-                self.cpu_encoder_cache.pop(mm_hash, None)
+        for mm_hash in ec_manager_metadata.npu_freed:
+            self.encoder_cache.pop(mm_hash, None)
+
+        for mm_hash in ec_manager_metadata.cpu_freed:
+            self.cpu_encoder_cache.pop(mm_hash, None)
 
         for mm_hash in promoting_mm_hashes:
             cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
@@ -1015,6 +1031,11 @@ class NPUModelRunner(GPUModelRunner):
             if ec_manager_metadata is not None
             else []
         )
+        npu_freed = (
+            ec_manager_metadata.npu_freed
+            if ec_manager_metadata is not None
+            else []
+        )
 
         if not get_ascend_config().score_encoder_cache_config.enabled:
             self.encoder_cache[mm_hash] = output
@@ -1027,7 +1048,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if (
             mm_hash in promoting_mm_hashes
-            and mm_hash not in free_encoder_mm_hashes
+            and mm_hash not in npu_freed
         ):
             self.encoder_cache[mm_hash] = output
         else:
