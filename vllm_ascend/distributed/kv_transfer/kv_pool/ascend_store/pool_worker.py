@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import math
 import threading
 
 import numpy as np
@@ -155,24 +154,22 @@ class KVPoolWorker:
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.lcm_block_size, self.grouped_block_size, self.kv_cache_group_families
+            self.grouped_block_size, self.kv_cache_group_families
         )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
         self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
 
         logger.info(
-            "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
+            "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s",
             self.use_hybrid,
             self.use_mamba,
             self.num_kv_cache_groups,
             self.hash_block_size,
-            self.lcm_block_size,
         )
 
     def _init_key_head_config(self, model_config, parallel_config) -> None:

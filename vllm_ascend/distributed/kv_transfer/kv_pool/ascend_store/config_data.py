@@ -217,10 +217,6 @@ def infer_group_block_sizes(
     return block_sizes
 
 
-def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
-    return group_block_sizes[group_id] if group_id < len(group_block_sizes) else group_block_sizes[0]
-
-
 def get_group_cache_family(group_cache_families: Sequence[str], group_id: int) -> str:
     return group_cache_families[group_id] if group_id < len(group_cache_families) else "default"
 
@@ -230,19 +226,17 @@ def get_effective_group_block_size(
     group_cache_families: Sequence[str],
     group_id: int,
 ) -> int:
-    return get_group_block_size(group_block_sizes, group_id) * max(
+    return group_block_sizes[group_id] * max(
         infer_cache_family_ratio(get_group_cache_family(group_cache_families, group_id)),
         1,
     )
 
 
 def infer_cache_transfer_granularity(
-    lcm_block_size: int,
     group_block_sizes: Sequence[int],
     group_cache_families: Sequence[str],
 ) -> int:
     return math.lcm(
-        lcm_block_size,
         *(
             get_cache_family_granularity(block_size, get_group_cache_family(group_cache_families, group_id))
             for group_id, block_size in enumerate(group_block_sizes)

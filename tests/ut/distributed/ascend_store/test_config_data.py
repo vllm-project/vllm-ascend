@@ -29,7 +29,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
-    get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
@@ -66,9 +65,8 @@ class TestCacheLayoutHelpers(unittest.TestCase):
         scheduler_config.disable_hybrid_kv_cache_manager = True
         self.assertFalse(uses_hybrid_kv_cache(scheduler_config, groups))
         self.assertEqual(infer_group_block_sizes(8, groups, use_hybrid=True), [16, 32])
-        self.assertEqual(get_group_block_size([16, 32], 3), 16)
         self.assertEqual(get_group_cache_family(["c1"], 3), "default")
-        self.assertEqual(infer_cache_transfer_granularity(32, [16, 32], ["c1", "c2"]), 64)
+        self.assertEqual(infer_cache_transfer_granularity([16, 32], ["c1", "c2"]), 64)
 
 
 class TestPoolKey(unittest.TestCase):
