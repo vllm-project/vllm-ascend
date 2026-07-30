@@ -45,9 +45,7 @@ class TestNPUWorkerV2(TestBase):
 
             result = worker.execute_model(scheduler_output)
 
-            mock_pp_group.irecv_tensor_dict.assert_called_once_with(
-                all_gather_group=mock_get_tp_group.return_value
-            )
+            mock_pp_group.irecv_tensor_dict.assert_called_once_with(all_gather_group=mock_get_tp_group.return_value)
             worker.model_runner.execute_model.assert_called_once()
             mock_pp_group.isend_tensor_dict.assert_called_once_with(
                 intermediate_output.tensors,
