@@ -1638,14 +1638,26 @@ class MooncakeConnectorWorker:
             return
 
         old_engine = getattr(self, "engine", None)
+        old_send = self.kv_send_thread
 
-        # A. Drop references to the old engine first so its destruction is not
-        #    held back by a thread still pointing at it.
+        # Stop the listener before tearing down the transfer engine. Leaving the
+        # pre-snapshot listener alive while a new engine is created can expose
+        # stale endpoint metadata and lets old/new transport lifetimes overlap.
+        if old_send is not None:
+            old_send.stop()
+            old_send.join(timeout=10)
+            if old_send.is_alive():
+                raise RuntimeError(
+                    "[snapshot][rebuild] old KV send thread did not stop"
+                )
+            self.kv_send_thread = None
+
+        # Detach all references to the old TE before resetting the singleton.
         self.engine = None
         if self.kv_recv_thread is not None:
             self.kv_recv_thread.engine = None
 
-        # B. Unregister all known regions on the old engine before destroying it.
+        # Unregister all known regions while the old TE is still valid.
         if old_engine is not None and self._registered_regions is not None:
             ptrs, _lengths = self._registered_regions
             for ptr in dict.fromkeys(ptrs):
@@ -1654,29 +1666,27 @@ class MooncakeConnectorWorker:
                 except Exception as e:
                     logger.warning("[snapshot][rebuild] unregister %s failed: %s", hex(ptr), e)
 
-        # C. Synchronously destroy the old engine (ref drop + gc.collect) so its
-        #    ADXL/RPC endpoint is finalized before a new one is created.
+        # Fully destroy the old TE before creating the replacement. In
+        # particular, the local old_engine reference must be dropped before
+        # gc.collect(); otherwise old and new Ascend transports coexist.
         global_te.reset()
+        del old_engine
         gc.collect()
 
-        # D. Create a fresh engine on the new IP and re-register KV memory.
+        # Create the replacement only after old transport finalization.
         self.engine = global_te.get_transfer_engine(local_ip, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
+
+        # Re-register KV memory with the replacement TE.
         if self._registered_regions is not None:
             ptrs, lengths = self._registered_regions
             global_te.register_buffer(ptrs, lengths)
         else:
             logger.warning("[snapshot][rebuild] no cached register regions; KV memory not re-registered")
 
-        # E. Producer: restart the send thread so its ROUTER rebinds on the new
-        #    IP and advertises the new te_rpc_port.
-        if kv_cfg.is_kv_producer and self.kv_send_thread is not None:
-            old_send = self.kv_send_thread
-            old_send.stop()
-            old_send.join(timeout=10)
-            if old_send.is_alive():
-                logger.warning("[snapshot][rebuild] old send thread did not stop within timeout")
-
+        # Restart the producer listener only after the new TE and registrations
+        # are ready.
+        if kv_cfg.is_kv_producer and old_send is not None:
             metadata = self.xfer_handshake_metadata
             if metadata is not None:
                 metadata.te_rpc_port = self.te_rpc_port
