@@ -481,6 +481,19 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
         connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
         connector.use_gva_layerwise = True
         connector.kv_role = "kv_producer"
+        connector.consumer_is_to_put = False
+        connector.connector_worker = MagicMock()
+        connector.has_connector_metadata = MagicMock(return_value=True)
+
+        connector.on_kv_cache_written("model.layers.0.self_attn")
+
+        connector.connector_worker.on_kv_cache_written.assert_called_once_with("model.layers.0.self_attn")
+
+    def test_on_kv_cache_written_delegates_for_put_enabled_consumer(self):
+        connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
+        connector.use_gva_layerwise = True
+        connector.kv_role = "kv_consumer"
+        connector.consumer_is_to_put = True
         connector.connector_worker = MagicMock()
         connector.has_connector_metadata = MagicMock(return_value=True)
 
@@ -492,6 +505,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
         connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
         connector.use_gva_layerwise = True
         connector.kv_role = "kv_producer"
+        connector.consumer_is_to_put = False
         connector.connector_worker = MagicMock()
         connector.has_connector_metadata = MagicMock(return_value=False)
 

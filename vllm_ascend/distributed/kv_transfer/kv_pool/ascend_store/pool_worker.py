@@ -447,7 +447,8 @@ class KVPoolWorker:
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
             self.sync_attn_events = [torch.npu.Event() for _ in range(self.num_layers)]
             self.layer_attn_recorded_events = [threading.Event() for _ in range(self.num_layers)]
-            if self.use_gva_layerwise and self.kv_role in ["kv_producer", "kv_both"]:
+            can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
+            if self.use_gva_layerwise and can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
@@ -470,7 +471,7 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
-            elif self.kv_role in ["kv_producer", "kv_both"]:
+            elif can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
                     self.m_store,
@@ -1049,8 +1050,7 @@ class KVPoolWorker:
                     save_end_block = request.save_end_token // block_size
                     partial_save_end = (
                         request.target_token_len
-                        if self.layerwise_offload
-                        and request.target_token_len % block_size
+                        if self.layerwise_offload and request.target_token_len % block_size
                         else None
                     )
                     if partial_save_end is not None:
@@ -1084,12 +1084,7 @@ class KVPoolWorker:
                         0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // block_size
                     )
                     cached_full_blocks = cached_tokens // block_size
-                    partial_load_end = (
-                        cached_tokens
-                        if self.layerwise_offload
-                        and cached_tokens % block_size
-                        else None
-                    )
+                    partial_load_end = cached_tokens if self.layerwise_offload and cached_tokens % block_size else None
                     hash_count = group_hash_count if self.use_gva_layerwise else len(request.block_hashes)
                     load_end_block = cached_full_blocks
                     if partial_load_end is not None:

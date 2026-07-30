@@ -244,7 +244,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def on_kv_cache_written(self, layer_name: str = "") -> None:
         """Dispatch a layerwise save as soon as its KV scatter completes."""
-        if not self.use_gva_layerwise or self.kv_role == "kv_consumer":
+        if not self.use_gva_layerwise or (self.kv_role == "kv_consumer" and not self.consumer_is_to_put):
             return
         if not self.has_connector_metadata():
             return
