@@ -599,6 +599,31 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         # No get called since no load_spec
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    def test_async_recv_thread_shares_invalid_block_state(self, mock_recv_thread_cls):
+        worker = self._make_worker(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "load_async": True},
+        )
+        recv_thread = MagicMock()
+
+        def create_recv_thread(*args, **kwargs):
+            args[6].set()
+            return recv_thread
+
+        mock_recv_thread_cls.side_effect = create_recv_thread
+
+        worker._start_kv_transfer_threads()
+
+        kwargs = mock_recv_thread_cls.call_args.kwargs
+        self.assertIs(kwargs["invalid_block_ids"], worker._invalid_block_ids)
+        self.assertIs(
+            kwargs["invalid_block_ids_lock"],
+            worker._invalid_block_ids_lock,
+        )
+        kwargs["invalid_block_ids"].add(7)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+
     def test_wait_for_save_enqueues_async(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
