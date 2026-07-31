@@ -1,6 +1,14 @@
+import os
+
+import pytest
 import vllm
 from transformers import AutoTokenizer
 from vllm.lora.request import LoRARequest
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
 MODEL_PATH = "Qwen/Qwen3.5-4B"
 TEXT_LORA_ID = 1
@@ -72,19 +80,23 @@ def _assert_qwen35_text_lora(
     _assert_exact_outputs(generated_texts, TEXT_EXPECTED_LORA_OUTPUT)
 
 
-def test_qwen35_text_lora(qwen35_text_lora_files):
-    llm = vllm.LLM(
-        model=MODEL_PATH,
+@wait_until_npu_memory_free(target_free_percentage=0.7)
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
+def test_qwen35_text_lora(qwen35_text_lora_files, tensor_parallel_size, enforce_eager, fully_sharded_loras):
+    with VllmRunner(
+        model_name=MODEL_PATH,
         max_model_len=4096,
         enable_lora=True,
         max_loras=2,
         max_num_seqs=4,
         max_lora_rank=8,
-        enforce_eager=True,
-        trust_remote_code=True,
-    )
-
-    _assert_qwen35_text_lora(
-        llm,
-        qwen35_text_lora_files,
-    )
+        enforce_eager=enforce_eager,
+        fully_sharded_loras=fully_sharded_loras,
+        tensor_parallel_size=tensor_parallel_size,
+    ) as vllm_runner:
+        _assert_qwen35_text_lora(
+            vllm_runner.model,
+            qwen35_text_lora_files,
+        )
