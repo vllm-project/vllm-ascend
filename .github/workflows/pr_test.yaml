@@ -43,7 +43,7 @@ concurrency:
 jobs:
   pre-commit:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-aarch64-a3-2-
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
