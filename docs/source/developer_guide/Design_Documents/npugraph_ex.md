@@ -44,7 +44,7 @@ register_replacement(search_fn, replace_fn, example_inputs, trace_fn=fwd_only, e
 |extra_check|Input|Find the extra verification function after operator fusion. The function's input parameter must be a Match object from torch._inductor.pattern_matcher, and it is used for further custom checks on the matching result, such as checking whether the fused operators are on the same stream, checking the device type, checking the input shapes, and so on.|No|
 |search_fn_pattern|Input|A custom pattern object is generally unnecessary to provide. Its definition follows the rules of the native PyTorch MultiOutputPattern object. After passing this parameter, search_fn will no longer be used to match operator combinations; instead, this parameter will be used directly as the matching rule.|No|
 
-Usage Example
+### Usage Example
 
 ```python
 import functools

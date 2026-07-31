@@ -22,7 +22,7 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -69,6 +69,12 @@ class NPUModelRunner(GPUModelRunner):
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        self.use_aclgraph = (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not self.model_config.enforce_eager
+        )
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.

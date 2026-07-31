@@ -14,8 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-FROM quay.io/ascend/cann:9.0.1-910b-ubuntu22.04-py3.12
+ARG CANN_QUAY_URL="quay.io/ascend/cann"
+ARG CANN_VERSION="9.0.1"
+ARG BASE_OS="ubuntu22.04"
+FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-${BASE_OS}-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
@@ -49,7 +51,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -66,7 +68,7 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip cache purge
@@ -74,5 +76,26 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+
+# ===== Conditional installation based on BUILD_TYPE =====
+# All ARG definitions are in the same stage for better maintainability
+ARG BUILD_TYPE="release"
+ARG MEMCACHE_VERSION
+ARG MEMCACHE_DATE
+ARG MEMFABRIC_VERSION
+ARG MEMFABRIC_DATE
+ARG TORCH_NPU_VERSION
+ARG TORCH_NPU_DATE
+ARG TRITON_ASCEND_VERSION
+ARG TRITON_ASCEND_PACKAGE_VERSION
+ARG DAILY_DEPS_MODE="full"
+
+# Install daily packages via shared script
+COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
+RUN if [ "$BUILD_TYPE" = "daily" ]; then \
+        bash /tmp/install_daily_deps.sh; \
+    else \
+        echo "Building release version without daily packages"; \
+    fi && rm -f /tmp/install_daily_deps.sh
 
 CMD ["/bin/bash"]

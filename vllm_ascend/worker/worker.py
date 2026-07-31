@@ -272,6 +272,10 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+        if tags is None or "kv_cache" in tags:
+            self.model_runner.post_kv_cache_wake_up()
+
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
