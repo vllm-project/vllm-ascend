@@ -5,6 +5,38 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3Model,
 )
 
+from vllm_ascend.utils import is_310p
+
+
+def apply_context_rope(*, layers, all_k_normed, context_positions, num_layers, num_ctx, kv_size):
+    """Rotate the fused context K and return it as [num_layers * num_ctx, kv_size].
+
+    The return value must be used on every device. On A2/A3 the rotary op reshapes
+    with .contiguous() and mutates that storage, so the result aliases the input
+    and taking it is a no-op; on 310P npu_apply_rotary_pos_emb allocates new
+    tensors, so ignoring the result silently feeds unrotated K into the cache.
+
+    310P additionally rotates one layer at a time. The fused [L * num_ctx] form
+    cannot be used there because the drafting-time rotary path fills a module
+    global cos/sin buffer sized max_num_batched_tokens, which L * num_ctx
+    overflows for any realistic context with a multi-layer drafter.
+    """
+    if not is_310p():
+        all_k_flat = all_k_normed.view(num_layers * num_ctx, kv_size)
+        positions_repeated = context_positions.repeat(num_layers)
+        rotated, _ = layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, all_k_flat.clone())
+        return rotated
+
+    per_layer = all_k_normed.view(num_layers, num_ctx, kv_size)
+    for i in range(num_layers):
+        layer_k = per_layer[i]
+        # Each layer gets its own rotary module rather than layers[0]'s. They are
+        # required to agree (_build_fused_kv_buffers asserts it), so this matches
+        # the fused path while not depending on that assertion holding.
+        rotated, _ = layers[i].self_attn.rotary_emb(context_positions, layer_k, layer_k.clone())
+        per_layer[i] = rotated
+    return all_k_normed.view(num_layers * num_ctx, kv_size)
+
 
 def precompute_and_store_context_kv(
     self,
@@ -37,13 +69,16 @@ def precompute_and_store_context_kv(
         k_norm_layer = self.layers[i].self_attn.k_norm
         all_k_normed[i] = k_norm_layer(all_k[i])
 
-    # --- Fused RoPE across all layers ---
-    # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # In-place RoPE: pass K as the "query" arg with key=None.
-    all_k_flat = all_k_normed.view(L * num_ctx, kv)
-    positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    # --- Context RoPE (fused across layers off 310P, per layer on it) ---
+    # K is passed in the "query" argument slot with a throwaway tensor as "key".
+    all_k_flat = apply_context_rope(
+        layers=self.layers,
+        all_k_normed=all_k_normed,
+        context_positions=context_positions,
+        num_layers=L,
+        num_ctx=num_ctx,
+        kv_size=kv,
+    )
 
     if context_slot_mapping is None:
         return

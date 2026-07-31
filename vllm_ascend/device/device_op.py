@@ -29,9 +29,6 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
-from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -39,6 +36,9 @@ DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
 if HAS_TRITON:
+    from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+    from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+    from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
