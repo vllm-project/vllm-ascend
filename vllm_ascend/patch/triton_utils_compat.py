@@ -14,14 +14,11 @@ _GLUON_LANGUAGE_MODULE_NAME = f"{_GLUON_MODULE_NAME}.language"
 
 class _UnavailableGluonModule(ModuleType):
     def __getattr__(self, name: str) -> Any:
-        if name.startswith("__") and name.endswith("__"):
-            # Module introspection relies on missing dunder attributes raising
-            # AttributeError (for example, inspect probes ``__file__``).
-            raise AttributeError(name)
-        raise RuntimeError(
-            f"Triton Gluon attribute {name!r} is unavailable on Ascend. "
-            "Gluon is only imported by vLLM for ROCm Inkling kernels."
-        )
+        # Introspection can probe arbitrary attributes on every loaded module.
+        # For example, pickle.whichmodule probes ``torch`` while Inductor builds
+        # a graph cache key. Missing module attributes must raise AttributeError
+        # so these probes can continue.
+        raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
 
 
 def _unsupported_aggregate(*args: Any, **kwargs: Any) -> Any:

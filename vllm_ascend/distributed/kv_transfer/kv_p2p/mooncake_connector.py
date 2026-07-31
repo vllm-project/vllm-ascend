@@ -70,6 +70,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_world_size,
 )
 from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
+from vllm_ascend.version import vllm_version_is
 
 # isort: off
 if TYPE_CHECKING:
@@ -1452,6 +1453,9 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
+        if not vllm_version_is("0.26.0"):
+            assert kv_cache_config is not None
+            super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()

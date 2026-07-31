@@ -284,29 +284,17 @@ class AscendParallelLMHead(ParallelLMHead):
         *,
         disable_tp: bool = False,
     ):
-        if vllm_version_is("0.26.0"):
-            AscendVocabParallelEmbedding.__init__(
-                self,
-                num_embeddings,
-                embedding_dim,
-                params_dtype,
-                org_num_embeddings,
-                padding_size,
-                quant_config,
-                prefix,
-            )
-        else:
-            AscendVocabParallelEmbedding.__init__(
-                self,
-                num_embeddings,
-                embedding_dim,
-                params_dtype,
-                org_num_embeddings,
-                padding_size,
-                quant_config,
-                prefix,
-                disable_tp=disable_tp,
-            )
+        AscendVocabParallelEmbedding.__init__(
+            self,
+            num_embeddings,
+            embedding_dim,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
+            **({"disable_tp": disable_tp} if not vllm_version_is("0.26.0") else {}),
+        )
 
         self.quant_config = quant_config
         if bias:

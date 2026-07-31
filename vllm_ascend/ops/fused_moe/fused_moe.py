@@ -597,55 +597,38 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Return an expert parameter from the refactored weight owner."""
         return getattr(self.routed_experts, name)
 
-    if vllm_version_is("0.26.0"):
+    def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
+    ) -> torch.Tensor | None:
+        # vLLM PR #50089 passes the routed-output reduction state explicitly.
+        # If an output transform forced an early routed-output reduction, the
+        # shared output must be reduced separately to match it.
+        if (
+            not vllm_version_is("0.26.0")
+            and shared_output is not None
+            and fused_output_is_reduced
+            and not self._fused_output_is_reduced
+        ):
+            return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(shared_output)
+        # _forward_shared_experts already handles shared expert TP all-reduce
+        # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
+        # via _maybe_reduce_final_output on the combined (shared + routed)
+        # output. Skip any additional reduction here.
+        return shared_output
 
-        def _maybe_reduce_shared_expert_output(
-            self,
-            shared_output: torch.Tensor | None,
-        ) -> torch.Tensor | None:
-            # _forward_shared_experts already handles shared expert TP all-reduce
-            # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
-            # via _maybe_reduce_final_output on the combined (shared + routed)
-            # output. Skip any additional reduction here.
-            return shared_output
-
-        def _maybe_reduce_final_output(
-            self,
-            states: torch.Tensor,
-            trunc_size: int,
-        ) -> torch.Tensor:
+    def _maybe_reduce_final_output(  # type: ignore[misc]
+        self,
+        states: torch.Tensor,
+        trunc_size: int | None,
+        output_is_reduced: bool | None = None,
+    ) -> torch.Tensor:
+        # vLLM PR #50089 passes the reduction state after applying an
+        # optional routed-output transform.
+        if vllm_version_is("0.26.0") or not output_is_reduced:
             states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
-            return states[..., :trunc_size]
-
-    else:
-
-        def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
-            self,
-            shared_output: torch.Tensor | None,
-            fused_output_is_reduced: bool | None = None,
-        ) -> torch.Tensor | None:
-            # vLLM PR #50089 passes the routed-output reduction state explicitly.
-            # If an output transform forced an early routed-output reduction, the
-            # shared output must be reduced separately to match it.
-            if shared_output is not None and fused_output_is_reduced and not self._fused_output_is_reduced:
-                return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(shared_output)
-            # _forward_shared_experts already handles shared expert TP all-reduce
-            # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
-            # via _maybe_reduce_final_output on the combined (shared + routed)
-            # output. Skip any additional reduction here.
-            return shared_output
-
-        def _maybe_reduce_final_output(  # type: ignore[misc]
-            self,
-            states: torch.Tensor,
-            trunc_size: int | None,
-            output_is_reduced: bool | None = None,
-        ) -> torch.Tensor:
-            # vLLM PR #50089 passes the reduction state after applying an
-            # optional routed-output transform.
-            if not output_is_reduced:
-                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
-            return states[..., :trunc_size]
+        return states[..., :trunc_size]
 
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context

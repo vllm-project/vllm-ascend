@@ -57,21 +57,16 @@ class AscendVocabParallelEmbedding310(AscendVocabParallelEmbedding):
         *,
         disable_tp: bool = False,
     ):
-        if vllm_version_is("0.26.0"):
-            super().__init__(
-                num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
-            )
-        else:
-            super().__init__(
-                num_embeddings,
-                embedding_dim,
-                params_dtype,
-                org_num_embeddings,
-                padding_size,
-                quant_config,
-                prefix,
-                disable_tp=disable_tp,
-            )
+        super().__init__(
+            num_embeddings,
+            embedding_dim,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
+            **({"disable_tp": disable_tp} if not vllm_version_is("0.26.0") else {}),
+        )
         if quant_config is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()
 
@@ -94,29 +89,17 @@ class AscendParallelLMHead310(AscendParallelLMHead):
         *,
         disable_tp: bool = False,
     ):
-        if vllm_version_is("0.26.0"):
-            super().__init__(
-                num_embeddings,
-                embedding_dim,
-                bias,
-                params_dtype,
-                org_num_embeddings,
-                padding_size,
-                quant_config,
-                prefix,
-            )
-        else:
-            super().__init__(
-                num_embeddings,
-                embedding_dim,
-                bias,
-                params_dtype,
-                org_num_embeddings,
-                padding_size,
-                quant_config,
-                prefix,
-                disable_tp=disable_tp,
-            )
+        super().__init__(
+            num_embeddings,
+            embedding_dim,
+            bias,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
+            **({"disable_tp": disable_tp} if not vllm_version_is("0.26.0") else {}),
+        )
 
         if quant_config is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()

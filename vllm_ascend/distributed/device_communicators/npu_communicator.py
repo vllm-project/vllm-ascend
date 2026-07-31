@@ -50,16 +50,13 @@ class NPUCommunicator(DeviceCommunicatorBase):
     ):
         # vLLM PR #47288 moves the all-to-all enablement decision from the
         # communicator base to GroupCoordinator and threads it through here.
-        if vllm_version_is("0.26.0"):
-            super().__init__(cpu_group, device, device_group, unique_name)
-        else:
-            super().__init__(
-                cpu_group,
-                device,
-                device_group,
-                unique_name,
-                use_all2all=use_all2all,
-            )
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            **({"use_all2all": use_all2all} if not vllm_version_is("0.26.0") else {}),
+        )
         # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
         # init device according to rank
         self.device = torch.npu.current_device()
