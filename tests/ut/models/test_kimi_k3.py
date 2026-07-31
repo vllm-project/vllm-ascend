@@ -15,6 +15,8 @@ from vllm_ascend.models.kimi_k3 import (
     KimiK3MoE,
     KimiK3TextModel,
     KimiK3VisionEncoderLayer,
+    _get_decoder_layer_idx_from_weight_name,
+    _get_kimi_k3_num_loaded_layers,
     _move_module_to_device,
     _resolve_packed_expert_weight_name,
     _routed_latent_quant_config,
@@ -60,6 +62,123 @@ def test_kimi_k3_quantizes_latent_projections_only_for_modelslim(
 
 def test_kimi_k3_unquantized_model_keeps_latent_projections_unquantized():
     assert _routed_latent_quant_config(None) is None
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("0", 4),
+        ("3", 3),
+    ],
+)
+def test_kimi_k3_layer_reduction_config(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str,
+    expected: int,
+):
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", env_value)
+
+    assert _get_kimi_k3_num_loaded_layers(4) == expected
+
+
+@pytest.mark.parametrize("env_value", ["-1", "5", "True", "3.0"])
+def test_kimi_k3_layer_reduction_config_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str,
+):
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", env_value)
+
+    with pytest.raises(ValueError, match="VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS"):
+        _get_kimi_k3_num_loaded_layers(4)
+
+
+def test_kimi_k3_text_model_instantiates_only_requested_decoder_layers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class StubModule(nn.Module):
+        pass
+
+    captured: dict[str, int] = {}
+
+    def fake_make_layers(num_hidden_layers, layer_fn, prefix):
+        del layer_fn, prefix
+        captured["num_hidden_layers"] = num_hidden_layers
+        return 0, num_hidden_layers, nn.ModuleList(
+            [StubModule() for _ in range(num_hidden_layers)]
+        )
+
+    monkeypatch.setattr(
+        kimi_k3,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        kimi_k3,
+        "VocabParallelEmbedding",
+        lambda *args, **kwargs: StubModule(),
+    )
+    monkeypatch.setattr(kimi_k3, "RMSNorm", lambda *args, **kwargs: StubModule())
+    monkeypatch.setattr(
+        kimi_k3,
+        "ReplicatedLinear",
+        lambda *args, **kwargs: StubModule(),
+    )
+    monkeypatch.setattr(kimi_k3, "make_layers", fake_make_layers)
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", "2")
+
+    config = SimpleNamespace(
+        vocab_size=16,
+        hidden_size=8,
+        num_hidden_layers=4,
+        rms_norm_eps=1e-6,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=config),
+    )
+
+    model = KimiK3TextModel(vllm_config=vllm_config, prefix="model")
+
+    assert model.num_loaded_layers == 2
+    assert captured["num_hidden_layers"] == 2
+    assert len(model.layers) == 2
+
+
+@pytest.mark.parametrize(
+    ("weight_name", "expected_layer"),
+    [
+        ("model.layers.2.mlp.gate_proj.weight", 2),
+        ("layers.3.self_attn.q_proj.weight", 3),
+        ("language_model.model.layers.4.mlp.up_proj.weight", 4),
+        ("model.layers.invalid.mlp.gate_proj.weight", None),
+        ("model.embed_tokens.weight", None),
+    ],
+)
+def test_kimi_k3_layer_reduction_parses_loader_prefixes(
+    weight_name: str,
+    expected_layer: int | None,
+):
+    assert _get_decoder_layer_idx_from_weight_name(weight_name) == expected_layer
+
+
+def test_kimi_k3_layer_reduction_skips_weights_for_omitted_layers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    model = KimiK3TextModel.__new__(KimiK3TextModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(num_experts=0)
+    model.num_loaded_layers = 2
+    model.named_parameters = lambda: iter(())
+    monkeypatch.setattr(
+        kimi_k3,
+        "fused_moe_make_expert_params_mapping",
+        lambda *args, **kwargs: [],
+    )
+
+    loaded = model.load_weights(
+        [("model.layers.2.mlp.gate_proj.weight", torch.tensor([1.0]))]
+    )
+
+    assert loaded == set()
 
 
 @pytest.mark.parametrize(
