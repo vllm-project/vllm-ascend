@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.17.0"
+GENERATOR_VERSION = "0.18.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -135,11 +135,18 @@ def _possible_method_nodes(
     tag_guard_names: set[str],
 ) -> dict[str, ast.AST]:
     """Index methods that can exist on the active main-version path."""
-    return {
-        child.name: child
-        for child in _main_module_statements(node.body, tag_guard_names)
-        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
-    }
+    return {name: candidates[0] for name, candidates in _possible_method_variants(node, tag_guard_names).items()}
+
+
+def _possible_method_variants(
+    node: ast.ClassDef,
+    tag_guard_names: set[str],
+) -> dict[str, tuple[ast.AST, ...]]:
+    variants: dict[str, list[ast.AST]] = defaultdict(list)
+    for child in _main_module_statements(node.body, tag_guard_names):
+        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            variants[child.name].append(child)
+    return {name: tuple(candidates) for name, candidates in variants.items()}
 
 
 def _function_scope_nodes(
@@ -437,6 +444,8 @@ def _main_module_statements(
             )
             continue
         yield node
+        if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+            return
 
 
 def _bound_target_names(node: ast.AST) -> set[str]:
@@ -458,38 +467,76 @@ def _direct_bound_names(node: ast.stmt) -> set[str]:
     return set()
 
 
-def _scope_must_bound_names(
+def _scope_must_bound_state(
     statements: Sequence[ast.stmt],
     tag_guard_names: set[str],
     incoming: set[str] | None = None,
-) -> set[str]:
-    """Return names present after every normally completing active-main path."""
+) -> set[str] | None:
+    """Return MUST names, or ``None`` when no path completes normally."""
     state = set(incoming or ())
     for node in statements:
         if isinstance(node, ast.If):
             condition = _main_condition_value(node.test, tag_guard_names)
             if condition is True:
-                state = _scope_must_bound_names(node.body, tag_guard_names, state)
+                selected = _scope_must_bound_state(node.body, tag_guard_names, state)
             elif condition is False:
-                state = _scope_must_bound_names(node.orelse, tag_guard_names, state)
+                selected = _scope_must_bound_state(node.orelse, tag_guard_names, state)
             else:
-                body = _scope_must_bound_names(node.body, tag_guard_names, state)
-                otherwise = _scope_must_bound_names(node.orelse, tag_guard_names, state)
-                state = body & otherwise
+                alternatives = [
+                    branch
+                    for branch in (
+                        _scope_must_bound_state(node.body, tag_guard_names, state),
+                        _scope_must_bound_state(node.orelse, tag_guard_names, state),
+                    )
+                    if branch is not None
+                ]
+                selected = set.intersection(*alternatives) if alternatives else None
+            if selected is None:
+                return None
+            state = selected
             continue
         if isinstance(node, ast.Try):
-            normal = _scope_must_bound_names(node.body, tag_guard_names, state)
-            normal = _scope_must_bound_names(node.orelse, tag_guard_names, normal)
-            paths = [normal]
-            paths.extend(_scope_must_bound_names(handler.body, tag_guard_names, state) for handler in node.handlers)
+            normal = _scope_must_bound_state(node.body, tag_guard_names, state)
+            if normal is not None:
+                normal = _scope_must_bound_state(node.orelse, tag_guard_names, normal)
+            paths = [normal] if normal is not None else []
+            paths.extend(
+                handler_state
+                for handler in node.handlers
+                if (
+                    handler_state := _scope_must_bound_state(
+                        handler.body,
+                        tag_guard_names,
+                        state,
+                    )
+                )
+                is not None
+            )
+            if node.finalbody:
+                paths = [
+                    final_state
+                    for path in paths
+                    if (
+                        final_state := _scope_must_bound_state(
+                            node.finalbody,
+                            tag_guard_names,
+                            path,
+                        )
+                    )
+                    is not None
+                ]
+            if not paths:
+                return None
             state = set.intersection(*paths)
-            state = _scope_must_bound_names(node.finalbody, tag_guard_names, state)
             continue
         if isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 if item.optional_vars is not None:
                     state.update(_bound_target_names(item.optional_vars))
-            state = _scope_must_bound_names(node.body, tag_guard_names, state)
+            selected = _scope_must_bound_state(node.body, tag_guard_names, state)
+            if selected is None:
+                return None
+            state = selected
             continue
         if isinstance(node, ast.Delete):
             state.difference_update(
@@ -499,8 +546,19 @@ def _scope_must_bound_names(
         # Loop bodies may execute zero times, so they cannot add a MUST name.
         if isinstance(node, (ast.AsyncFor, ast.For, ast.While)):
             continue
+        if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+            return None
         state.update(_direct_bound_names(node))
     return state
+
+
+def _scope_must_bound_names(
+    statements: Sequence[ast.stmt],
+    tag_guard_names: set[str],
+    incoming: set[str] | None = None,
+) -> set[str]:
+    """Return names present after every normally completing active-main path."""
+    return _scope_must_bound_state(statements, tag_guard_names, incoming) or set()
 
 
 def _main_module_statement_records(
@@ -639,6 +697,12 @@ class ClassInfo:
     bases: tuple[str, ...]
     resolved_bases: tuple[str, ...]
     methods: dict[str, ast.AST] = field(compare=False, hash=False, repr=False)
+    method_variants: dict[str, tuple[ast.AST, ...]] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -848,6 +912,7 @@ class PatchScanContext:
     binding_alternatives: dict[str, set[str | None]] = field(default_factory=dict)
     unknown_bindings: set[str] = field(default_factory=set)
     upstream_binding_provenance: dict[str, set[str]] = field(default_factory=dict)
+    upstream_binding_history: set[str] = field(default_factory=set)
     strings: dict[str, set[str]] = field(default_factory=dict)
     local_callables: dict[str, list[CallableInfo]] = field(default_factory=dict)
     runtime_modules: dict[str, set[str]] = field(default_factory=dict)
@@ -876,6 +941,7 @@ class PatchScanContext:
             upstream_binding_provenance={
                 name: set(values) for name, values in self.upstream_binding_provenance.items()
             },
+            upstream_binding_history=set(self.upstream_binding_history),
             strings={name: set(values) for name, values in self.strings.items()},
             local_callables={name: list(values) for name, values in self.local_callables.items()},
             runtime_modules={name: set(values) for name, values in self.runtime_modules.items()},
@@ -895,6 +961,7 @@ class PatchScanContext:
         upstream = {reference for reference in exact if reference == "vllm" or reference.startswith("vllm.")}
         if upstream:
             self.upstream_binding_provenance[name] = upstream
+            self.upstream_binding_history.add(name)
         else:
             self.upstream_binding_provenance.pop(name, None)
 
@@ -949,6 +1016,7 @@ class PatchScanContext:
             for name, references in branch.upstream_binding_provenance.items():
                 merged_provenance[name].update(references)
         self.upstream_binding_provenance = dict(merged_provenance)
+        self.upstream_binding_history = {name for branch in contexts for name in branch.upstream_binding_history}
         self.strings = _merge_candidate_maps(context.strings for context in contexts)
         self.runtime_modules = _merge_candidate_maps(context.runtime_modules for context in contexts)
         callable_names = {name for context in contexts for name in context.local_callables}
@@ -1060,6 +1128,7 @@ class RepositoryIndex:
         self.modules: dict[str, ModuleInfo] = {}
         self.classes: dict[str, ClassInfo] = {}
         self.callables: dict[str, CallableInfo] = {}
+        self.callable_variants: dict[str, tuple[CallableInfo, ...]] = {}
         self.values: dict[str, ValueInfo] = {}
         self.aliases: dict[str, str] = {}
         self.unconditional_exports: set[str] = set()
@@ -1184,6 +1253,10 @@ class RepositoryIndex:
                         node.body,
                         tag_guard_names,
                     )
+                    method_variants = _possible_method_variants(
+                        node,
+                        tag_guard_names,
+                    )
                     info = ClassInfo(
                         qualified_name=qualified_name,
                         module=module,
@@ -1191,7 +1264,8 @@ class RepositoryIndex:
                         name=node.name,
                         bases=bases,
                         resolved_bases=resolved_bases,
-                        methods=_possible_method_nodes(node, tag_guard_names),
+                        methods={name: candidates[0] for name, candidates in method_variants.items()},
+                        method_variants=method_variants,
                     )
                     classes[node.name] = info
                     self.classes[qualified_name] = info
@@ -1229,14 +1303,19 @@ class RepositoryIndex:
                             )
                     for method_name, method_node in info.methods.items():
                         method_qualified_name = f"{qualified_name}.{method_name}"
-                        self.callables[method_qualified_name] = CallableInfo(
-                            qualified_name=method_qualified_name,
-                            module=module,
-                            file=relative_file,
-                            owner=node.name,
-                            name=method_name,
-                            node=method_node,
+                        variants = tuple(
+                            CallableInfo(
+                                qualified_name=method_qualified_name,
+                                module=module,
+                                file=relative_file,
+                                owner=node.name,
+                                name=method_name,
+                                node=candidate,
+                            )
+                            for candidate in info.method_variants.get(method_name, (method_node,))
                         )
+                        self.callable_variants[method_qualified_name] = variants
+                        self.callables[method_qualified_name] = variants[0]
                         if class_is_unconditional and method_name in class_must_names:
                             self.unconditional_symbols.add(method_qualified_name)
                     self._collect_class_callable_aliases(
@@ -1383,7 +1462,8 @@ class RepositoryIndex:
                 None,
             ]
             class_info.methods["__init__"] = class_node or ast.Pass()
-            self.callables[f"{class_info.qualified_name}.__init__"] = CallableInfo(
+            qualified_name = f"{class_info.qualified_name}.__init__"
+            generated = CallableInfo(
                 qualified_name=f"{class_info.qualified_name}.__init__",
                 module=class_info.module,
                 file=class_info.file,
@@ -1394,6 +1474,9 @@ class RepositoryIndex:
                 origin_kind="generated_dataclass_method",
                 signature_override=signature,
             )
+            class_info.method_variants["__init__"] = (class_node or ast.Pass(),)
+            self.callables[qualified_name] = generated
+            self.callable_variants[qualified_name] = (generated,)
             if class_info.qualified_name in self.unconditional_symbols:
                 self.unconditional_symbols.add(f"{class_info.qualified_name}.__init__")
 
@@ -1615,7 +1698,9 @@ class RepositoryIndex:
                 origin_kind=kind,
             )
             class_info.methods[member_name] = source.node
+            class_info.method_variants[member_name] = (source.node,)
             self.callables[qualified_name] = alias
+            self.callable_variants[qualified_name] = (alias,)
             if class_name in self.unconditional_symbols and target in self.unconditional_symbols:
                 self.unconditional_symbols.add(qualified_name)
 
@@ -1653,6 +1738,17 @@ class RepositoryIndex:
     def find_callable(self, qualified_name: str) -> CallableInfo | None:
         canonical = self.canonical_name(qualified_name)
         return self.callables.get(canonical)
+
+    def find_callable_variants(
+        self,
+        qualified_name: str,
+    ) -> tuple[CallableInfo, ...]:
+        canonical = self.canonical_name(qualified_name)
+        direct = self.callable_variants.get(canonical)
+        if direct is not None:
+            return direct
+        callable_info = self.callables.get(canonical)
+        return (callable_info,) if callable_info is not None else ()
 
     def find_loose_function(self, module: str, name: str) -> CallableInfo | None:
         candidates = self.modules[module].loose_functions.get(name, [])
@@ -1797,6 +1893,34 @@ class InterfaceBoundaryGenerator:
             if qualified_name == package or qualified_name.startswith(f"{package}."):
                 return index.find_callable(qualified_name)
         return None
+
+    def _callable_variants(
+        self,
+        qualified_name: str,
+    ) -> tuple[CallableInfo, ...]:
+        if qualified_name.startswith("vllm_ascend."):
+            return self.downstream.find_callable_variants(qualified_name)
+        if qualified_name.startswith("vllm."):
+            return self.upstream.find_callable_variants(qualified_name)
+        for package, index in self.externals.items():
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return index.find_callable_variants(qualified_name)
+        return ()
+
+    def _member_is_unconditional(
+        self,
+        owner: str,
+        member: str,
+    ) -> bool:
+        qualified_name = self._canonical_reference(f"{owner}.{member}")
+        if qualified_name.startswith("vllm_ascend."):
+            return qualified_name in self.downstream.unconditional_symbols
+        if qualified_name.startswith("vllm."):
+            return qualified_name in self.upstream.unconditional_symbols
+        for package, index in self.externals.items():
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return qualified_name in index.unconditional_symbols
+        return False
 
     def _source_package(self, qualified_name: str) -> str:
         if qualified_name == "vllm" or qualified_name.startswith("vllm."):
@@ -1968,8 +2092,8 @@ class InterfaceBoundaryGenerator:
             if mro_result.complete and not any(owner.startswith("vllm.") for owner in mro[1:]):
                 continue
             for method_name, method_node in class_info.methods.items():
-                effective_owner = self._effective_method_owner(mro[1:], method_name)
-                if effective_owner is None:
+                effective_owners = self._effective_method_owners(mro[1:], method_name)
+                if not effective_owners:
                     candidates = (
                         self._candidate_upstream_method_owners(
                             class_info.qualified_name,
@@ -2000,91 +2124,111 @@ class InterfaceBoundaryGenerator:
                             )
                         )
                     continue
-                is_external = self._is_external_owner(effective_owner)
-                if not effective_owner.startswith("vllm.") and not is_external:
-                    continue
-                if is_external:
-                    shadowed = next(
-                        (
-                            owner
-                            for owner in mro[1:]
-                            if owner.startswith("vllm.")
-                            and self._class_defines_method(
-                                owner,
-                                method_name,
-                            )
-                        ),
-                        None,
+                for effective_owner in effective_owners:
+                    self._record_verified_override_owner(
+                        class_info,
+                        method_name,
+                        method_node,
+                        effective_owner,
+                        mro,
                     )
-                    target_expression = f"{effective_owner}.{method_name}"
-                    reason = (
-                        "the effective overridden method is owned by external "
-                        f"package class {effective_owner}, not vLLM"
+
+    def _record_verified_override_owner(
+        self,
+        class_info: ClassInfo,
+        method_name: str,
+        method_node: ast.AST,
+        effective_owner: str,
+        mro: Sequence[str],
+    ) -> None:
+        is_external = self._is_external_owner(effective_owner)
+        if not effective_owner.startswith("vllm.") and not is_external:
+            return
+        if is_external:
+            shadowed = next(
+                (
+                    owner
+                    for owner in mro[1:]
+                    if owner.startswith("vllm.")
+                    and self._class_defines_method(
+                        owner,
+                        method_name,
                     )
-                    reason_code = "external_only_override"
-                    if shadowed is not None:
-                        target_expression = f"{shadowed}.{method_name}"
-                        reason = (
-                            f"external owner {effective_owner} defines the effective method before this vLLM candidate"
-                        )
-                        reason_code = "external_override_owner"
-                    self.findings.append(
-                        CandidateFinding(
-                            relation="override",
-                            downstream_file=class_info.file,
-                            downstream_owner=class_info.name,
-                            downstream_name=method_name,
-                            target_expression=target_expression,
-                            evidence_line=getattr(
-                                method_node,
-                                "lineno",
-                                0,
-                            ),
-                            reason=reason,
-                            status="excluded",
-                            reason_code=reason_code,
-                            generator_issue=False,
-                        )
-                    )
-                    continue
-                upstream_callable = self._callable_info(f"{effective_owner}.{method_name}")
-                if upstream_callable is None:
-                    continue
-                downstream_callable = self.downstream.find_callable(f"{class_info.qualified_name}.{method_name}")
-                evidence_line = (
-                    downstream_callable.binding_line
-                    if downstream_callable and downstream_callable.binding_line is not None
-                    else getattr(method_node, "lineno", 0)
+                ),
+                None,
+            )
+            target_expression = f"{effective_owner}.{method_name}"
+            reason = f"the effective overridden method is owned by external package class {effective_owner}, not vLLM"
+            reason_code = "external_only_override"
+            if shadowed is not None:
+                target_expression = f"{shadowed}.{method_name}"
+                reason = f"external owner {effective_owner} defines the effective method before this vLLM candidate"
+                reason_code = "external_override_owner"
+            self.findings.append(
+                CandidateFinding(
+                    relation="override",
+                    downstream_file=class_info.file,
+                    downstream_owner=class_info.name,
+                    downstream_name=method_name,
+                    target_expression=target_expression,
+                    evidence_line=getattr(method_node, "lineno", 0),
+                    reason=reason,
+                    status="excluded",
+                    reason_code=reason_code,
+                    generator_issue=False,
                 )
-                self.relations.append(
-                    Relation(
-                        relation="override",
-                        upstream_file=upstream_callable.file,
-                        upstream_owner=upstream_callable.owner,
-                        upstream_name=upstream_callable.name,
-                        upstream_signature=upstream_callable.signature,
-                        downstream_file=class_info.file,
-                        downstream_owner=class_info.name,
-                        downstream_name=method_name,
-                        downstream_signature=(
-                            downstream_callable.signature if downstream_callable else _jsonable_signature(method_node)
-                        ),
-                        evidence_file=class_info.file,
-                        evidence_line=evidence_line,
-                        upstream_package=self._source_package(upstream_callable.qualified_name),
-                    )
-                )
+            )
+            return
+        upstream_callable = self._callable_info(f"{effective_owner}.{method_name}")
+        if upstream_callable is None:
+            return
+        downstream_callable = self.downstream.find_callable(f"{class_info.qualified_name}.{method_name}")
+        evidence_line = (
+            downstream_callable.binding_line
+            if downstream_callable and downstream_callable.binding_line is not None
+            else getattr(method_node, "lineno", 0)
+        )
+        self.relations.append(
+            Relation(
+                relation="override",
+                upstream_file=upstream_callable.file,
+                upstream_owner=upstream_callable.owner,
+                upstream_name=upstream_callable.name,
+                upstream_signature=upstream_callable.signature,
+                downstream_file=class_info.file,
+                downstream_owner=class_info.name,
+                downstream_name=method_name,
+                downstream_signature=(
+                    downstream_callable.signature if downstream_callable else _jsonable_signature(method_node)
+                ),
+                evidence_file=class_info.file,
+                evidence_line=evidence_line,
+                upstream_package=self._source_package(upstream_callable.qualified_name),
+            )
+        )
+
+    def _effective_method_owners(
+        self,
+        mro: Sequence[str],
+        method_name: str,
+    ) -> tuple[str, ...]:
+        owners: list[str] = []
+        for owner in mro:
+            class_info = self._class_info(owner)
+            if class_info is None or method_name not in class_info.methods:
+                continue
+            owners.append(owner)
+            if self._member_is_unconditional(owner, method_name):
+                break
+        return tuple(owners)
 
     def _effective_method_owner(
         self,
         mro: Sequence[str],
         method_name: str,
     ) -> str | None:
-        for owner in mro:
-            class_info = self._class_info(owner)
-            if class_info and method_name in class_info.methods:
-                return owner
-        return None
+        owners = self._effective_method_owners(mro, method_name)
+        return owners[0] if owners else None
 
     def _is_external_owner(self, qualified_name: str) -> bool:
         return any(qualified_name == package or qualified_name.startswith(f"{package}.") for package in self.externals)
@@ -2347,7 +2491,7 @@ class InterfaceBoundaryGenerator:
     ) -> PatchFlowResult:
         exits: list[PatchFlowExit] = []
         for node in statements:
-            if self._statement_may_raise(node):
+            if self._statement_may_raise(module_info, node, context):
                 exits.append(PatchFlowExit("raise", context.clone()))
             for expression in self._statement_expressions(node):
                 for call in _main_expression_calls(expression, tag_guard_names):
@@ -2401,9 +2545,7 @@ class InterfaceBoundaryGenerator:
                             kind=type(node).__name__.lower(),
                             context=context.clone(),
                             exception_name=(
-                                _expression_name(node.exc.func)
-                                if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
-                                else _expression_name(node.exc)
+                                self._raised_exception_name(module_info, node, context)
                                 if isinstance(node, ast.Raise)
                                 else None
                             ),
@@ -2519,40 +2661,132 @@ class InterfaceBoundaryGenerator:
 
     def _handler_exception_names(
         self,
+        module_info: ModuleInfo,
         handler: ast.ExceptHandler,
+        context: PatchScanContext,
     ) -> tuple[str, ...] | None:
-        """Return caught exception names; ``None`` denotes a bare handler."""
+        """Return canonical caught exceptions; ``None`` denotes a bare handler."""
 
         if handler.type is None:
             return None
         handler_nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
-        return tuple(name for candidate in handler_nodes if (name := _expression_name(candidate)) is not None)
+        names = tuple(
+            name
+            for candidate in handler_nodes
+            if (
+                name := self._canonical_exception_node(
+                    module_info,
+                    candidate,
+                    context,
+                )
+            )
+            is not None
+        )
+        return names
+
+    def _canonical_exception_node(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+    ) -> str | None:
+        expression = _expression_name(node)
+        if expression is None:
+            return None
+        root = expression.split(".", 1)[0]
+        builtin_type = getattr(builtins, expression, None) if "." not in expression else None
+        if (
+            isinstance(builtin_type, type)
+            and issubclass(builtin_type, BaseException)
+            and root not in context.bindings
+            and root not in context.unknown_bindings
+            and root not in context.local_callables
+            and root not in context.parameter_names
+        ):
+            return f"builtins.{expression}"
+        references = self._resolve_patch_references(
+            module_info,
+            expression,
+            context,
+        )
+        if len(references) != 1:
+            return None
+        return self._canonical_reference(next(iter(references)))
+
+    def _raised_exception_name(
+        self,
+        module_info: ModuleInfo,
+        node: ast.Raise,
+        context: PatchScanContext,
+    ) -> str | None:
+        exception_node = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+        return self._canonical_exception_node(
+            module_info,
+            exception_node,
+            context,
+        )
 
     def _exception_name_is_subclass(
         self,
         child_name: str,
         parent_name: str,
     ) -> bool:
-        child_tail = child_name.rsplit(".", 1)[-1]
-        parent_tail = parent_name.rsplit(".", 1)[-1]
-        if child_tail == parent_tail:
+        if child_name == parent_name:
             return True
-        child_type = getattr(builtins, child_tail, None)
-        parent_type = getattr(builtins, parent_tail, None)
-        return (
+        child_type = (
+            getattr(builtins, child_name.removeprefix("builtins."), None)
+            if child_name.startswith("builtins.")
+            else None
+        )
+        parent_type = (
+            getattr(builtins, parent_name.removeprefix("builtins."), None)
+            if parent_name.startswith("builtins.")
+            else None
+        )
+        if (
             isinstance(child_type, type)
             and isinstance(parent_type, type)
             and issubclass(child_type, BaseException)
             and issubclass(parent_type, BaseException)
-            and issubclass(child_type, parent_type)
-        )
+        ):
+            return issubclass(child_type, parent_type)
+
+        pending = [child_name]
+        seen: set[str] = set()
+        while pending:
+            candidate = pending.pop()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            class_info = self._class_info(candidate)
+            if class_info is None:
+                continue
+            for expression, resolved in zip(
+                class_info.bases,
+                class_info.resolved_bases,
+            ):
+                builtin_base = getattr(builtins, expression, None) if "." not in expression else None
+                base = (
+                    f"builtins.{expression}"
+                    if isinstance(builtin_base, type) and issubclass(builtin_base, BaseException)
+                    else self._canonical_reference(resolved)
+                )
+                if base == parent_name:
+                    return True
+                pending.append(base)
+        return False
 
     def _handler_matches_raise(
         self,
+        module_info: ModuleInfo,
         handler: ast.ExceptHandler,
         raised: PatchFlowExit,
     ) -> bool:
-        handler_names = self._handler_exception_names(handler)
+        handler_names = self._handler_exception_names(
+            module_info,
+            handler,
+            raised.context,
+        )
         if handler_names is None or raised.exception_name is None:
             return True
         return any(
@@ -2569,35 +2803,39 @@ class InterfaceBoundaryGenerator:
         node: ast.With | ast.AsyncWith,
         context: PatchScanContext,
     ) -> tuple[str, ...] | None:
-        """Return exact exception names for one known ``contextlib.suppress``."""
+        """Return suppressed exceptions when every manager is statically known."""
 
-        if not isinstance(node, ast.With) or len(node.items) != 1:
+        if not isinstance(node, ast.With):
             return None
-        manager = node.items[0].context_expr
-        if not isinstance(manager, ast.Call) or manager.keywords:
-            return None
-        function = _expression_name(manager.func)
-        if function is None or self._resolve_patch_references(
-            module_info,
-            function,
-            context,
-        ) != {"contextlib.suppress"}:
-            return None
-
         exception_names: list[str] = []
-        for argument in manager.args:
-            expression = _expression_name(argument)
-            if expression is None:
+        for item in node.items:
+            manager = item.context_expr
+            if not isinstance(manager, ast.Call):
                 return None
-            references = self._resolve_patch_references(
-                module_info,
-                expression,
-                context,
+            function = _expression_name(manager.func)
+            functions = (
+                self._resolve_patch_references(
+                    module_info,
+                    function,
+                    context,
+                )
+                if function
+                else set()
             )
-            if len(references) != 1:
+            if functions == {"contextlib.nullcontext"}:
+                continue
+            if functions != {"contextlib.suppress"} or manager.keywords:
                 return None
-            exception_names.append(next(iter(references)))
-        return tuple(exception_names)
+            for argument in manager.args:
+                exception_name = self._canonical_exception_node(
+                    module_info,
+                    argument,
+                    context,
+                )
+                if exception_name is None:
+                    return None
+                exception_names.append(exception_name)
+        return tuple(exception_names) if exception_names else None
 
     def _finish_with_flow(
         self,
@@ -2637,19 +2875,21 @@ class InterfaceBoundaryGenerator:
 
     def _handler_covers_handler(
         self,
+        module_info: ModuleInfo,
         earlier: ast.ExceptHandler,
         later: ast.ExceptHandler,
+        context: PatchScanContext,
     ) -> bool:
         """Whether every exception caught by ``later`` was caught earlier."""
 
-        earlier_names = self._handler_exception_names(earlier)
+        earlier_names = self._handler_exception_names(module_info, earlier, context)
         if earlier_names is None:
             return True
-        later_names = self._handler_exception_names(later)
+        later_names = self._handler_exception_names(module_info, later, context)
         if later_names is None:
             return any(
                 self._exception_name_is_subclass(
-                    "BaseException",
+                    "builtins.BaseException",
                     earlier_name,
                 )
                 for earlier_name in earlier_names
@@ -2669,14 +2909,16 @@ class InterfaceBoundaryGenerator:
 
     def _handler_catches_all_implicit_exceptions(
         self,
+        module_info: ModuleInfo,
         handler: ast.ExceptHandler,
+        context: PatchScanContext,
     ) -> bool:
-        handler_names = self._handler_exception_names(handler)
+        handler_names = self._handler_exception_names(module_info, handler, context)
         if handler_names is None:
             return True
         return any(
             self._exception_name_is_subclass(
-                "Exception",
+                "builtins.Exception",
                 handler_name,
             )
             for handler_name in handler_names
@@ -2684,6 +2926,8 @@ class InterfaceBoundaryGenerator:
 
     def _route_try_handlers(
         self,
+        module_info: ModuleInfo,
+        context: PatchScanContext,
         handlers: Sequence[ast.ExceptHandler],
         raised_exits: Sequence[PatchFlowExit],
         scan_handler: Any,
@@ -2697,13 +2941,26 @@ class InterfaceBoundaryGenerator:
         implicit_consumed = False
 
         for handler in handlers:
-            exact_sources = [raised for raised in remaining_exact if self._handler_matches_raise(handler, raised)]
-            shadowed = any(self._handler_covers_handler(previous, handler) for previous in previous_handlers)
+            exact_sources = [
+                raised for raised in remaining_exact if self._handler_matches_raise(module_info, handler, raised)
+            ]
+            shadowed = any(
+                self._handler_covers_handler(
+                    module_info,
+                    previous,
+                    handler,
+                    context,
+                )
+                for previous in previous_handlers
+            )
             implicit_sources = [] if implicit_consumed or shadowed else implicit
             for source in (*exact_sources, *implicit_sources):
-                exception_name = _expression_name(handler.type) or "Exception"
+                exception_name = (
+                    " ".join(ast.unparse(handler.type).split()) if handler.type is not None else "Exception"
+                )
+                source_guards = tuple(guard for guard in source.context.guards if guard.text != "try-success")
                 handler_guards = self._merge_guard_paths(
-                    source.context.guards,
+                    source_guards,
                     (f"except {exception_name}",),
                 )
                 if handler_guards is None:
@@ -2716,7 +2973,11 @@ class InterfaceBoundaryGenerator:
 
             remaining_exact = [raised for raised in remaining_exact if raised not in exact_sources]
             previous_handlers.append(handler)
-            if self._handler_catches_all_implicit_exceptions(handler):
+            if self._handler_catches_all_implicit_exceptions(
+                module_info,
+                handler,
+                context,
+            ):
                 implicit_consumed = True
 
         unhandled = list(remaining_exact)
@@ -2765,6 +3026,8 @@ class InterfaceBoundaryGenerator:
                     outcomes.append(PatchFlowExit("live", success))
 
         handler_outcomes, remaining_raises = self._route_try_handlers(
+            module_info,
+            context,
             node.handlers,
             raised_exits,
             lambda handler, branch: self._scan_private_helper_calls(
@@ -3203,9 +3466,11 @@ class InterfaceBoundaryGenerator:
         selected = {target for target in alternatives if (target is not None) == means_non_none}
         if not selected:
             return False
-        context.binding_alternatives[subject.id] = selected
         exact = {target for target in selected if target is not None}
-        context.bindings[subject.id] = exact
+        if exact:
+            context.bind_exact(subject.id, exact)
+        else:
+            context.bind_none(subject.id)
         return True
 
     def _upstream_member_is_proven(
@@ -3506,18 +3771,59 @@ class InterfaceBoundaryGenerator:
             return tuple(item.context_expr for item in node.items)
         return ()
 
-    def _statement_may_raise(self, node: ast.stmt) -> bool:
+    def _proven_safe_literal_call(
+        self,
+        module_info: ModuleInfo,
+        node: ast.Call,
+        context: PatchScanContext,
+    ) -> bool:
+        """Recognize a small builtin call whose literal input cannot raise."""
+        if not (
+            isinstance(node.func, ast.Name) and node.func.id == "len" and len(node.args) == 1 and not node.keywords
+        ):
+            return False
+        name = node.func.id
+        if (
+            name in context.bindings
+            or name in context.unknown_bindings
+            or name in context.local_callables
+            or name in context.parameter_names
+            or name in module_info.imports
+            or name in module_info.classes
+            or name in module_info.functions
+            or self.downstream.find_value(f"{module_info.name}.{name}") is not None
+        ):
+            return False
+        try:
+            value = ast.literal_eval(node.args[0])
+        except (TypeError, ValueError):
+            return False
+        return isinstance(value, (bytes, dict, list, set, str, tuple))
+
+    def _statement_may_raise(
+        self,
+        module_info: ModuleInfo,
+        node: ast.stmt,
+        context: PatchScanContext,
+    ) -> bool:
         """Whether evaluating one statement can implicitly raise before it commits."""
         if isinstance(node, ast.Raise):
             return False
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             return True
-        return any(
-            isinstance(candidate, (ast.Await, ast.Call, ast.Subscript, ast.YieldFrom))
-            for expression in self._statement_expressions(node)
-            if expression is not None
-            for candidate in ast.walk(expression)
-        )
+        for expression in self._statement_expressions(node):
+            if expression is None:
+                continue
+            for candidate in ast.walk(expression):
+                if isinstance(candidate, (ast.Await, ast.Subscript, ast.YieldFrom)):
+                    return True
+                if isinstance(candidate, ast.Call) and not self._proven_safe_literal_call(
+                    module_info,
+                    candidate,
+                    context,
+                ):
+                    return True
+        return False
 
     def _update_with_bindings(
         self,
@@ -3627,7 +3933,7 @@ class InterfaceBoundaryGenerator:
     ) -> PatchFlowResult:
         exits: list[PatchFlowExit] = []
         for node in statements:
-            if self._statement_may_raise(node):
+            if self._statement_may_raise(module_info, node, context):
                 exits.append(PatchFlowExit("raise", context.clone()))
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 self._update_import_bindings(module_info, node, context)
@@ -3666,9 +3972,7 @@ class InterfaceBoundaryGenerator:
                             kind=type(node).__name__.lower(),
                             context=context.clone(),
                             exception_name=(
-                                _expression_name(node.exc.func)
-                                if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
-                                else _expression_name(node.exc)
+                                self._raised_exception_name(module_info, node, context)
                                 if isinstance(node, ast.Raise)
                                 else None
                             ),
@@ -3919,6 +4223,8 @@ class InterfaceBoundaryGenerator:
                     outcomes.append(PatchFlowExit("live", success))
 
         handler_outcomes, remaining_raises = self._route_try_handlers(
+            module_info,
+            context,
             node.handlers,
             raised_exits,
             lambda handler, branch: self._scan_patch_statements(
@@ -4377,6 +4683,19 @@ class InterfaceBoundaryGenerator:
                 if owner == "vllm" or owner.startswith("vllm.")
             }
             if not owners:
+                if root not in context.upstream_binding_history:
+                    return
+                self._append_unresolved_patch(
+                    module_info,
+                    context,
+                    expression,
+                    replacement_node,
+                    line,
+                    "upstream-derived patch owner now has only a dynamic runtime value",
+                    status="review",
+                    reason_code="dynamic_patch_owner",
+                    generator_issue=False,
+                )
                 return
             targets = {self._canonical_reference(".".join((owner, *parts[1:]))) for owner in owners}
             self._append_unresolved_patch(
@@ -4479,6 +4798,34 @@ class InterfaceBoundaryGenerator:
                 replacement_node,
                 line,
                 replacement.reason or "replacement callable was not resolved",
+            )
+            return
+
+        upstream_variants = self._callable_variants(target)
+        variant_signatures = {
+            json.dumps(
+                candidate.signature,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for candidate in upstream_variants
+        }
+        if len(variant_signatures) > 1:
+            self.findings.append(
+                CandidateFinding(
+                    relation="monkey_patch",
+                    downstream_file=replacement.info.file,
+                    downstream_owner=replacement.info.owner,
+                    downstream_name=replacement.info.name,
+                    target_expression=target,
+                    evidence_line=line,
+                    reason="conditional upstream callable has incompatible signature variants",
+                    status="review",
+                    reason_code="conditional_callable_variants",
+                    generator_issue=False,
+                    evidence_scope=self._scope_name(context),
+                    evidence_guards=context.guard_texts,
+                )
             )
             return
 

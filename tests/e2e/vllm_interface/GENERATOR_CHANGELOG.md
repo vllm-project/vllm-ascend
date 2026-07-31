@@ -4,6 +4,59 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.18.0 - conditional-callable and exception-flow checkpoint
+
+- Starting commit: `d819fef0ee9cdf8f260ba32ef6700bcd2956901e`.
+- Problem: nine independently reproduced boundaries could invent a handler
+  patch, select one arbitrary conditional signature, miss a fallback override
+  owner, index code after a terminal statement, lose state through multiple
+  context managers, conflate a local exception with a same-named builtin,
+  attach the wrong tuple-handler evidence, or reuse stale upstream provenance
+  after an exact `None` refinement.
+- Change: exclude the exact unshadowed `len(literal)` form from implicit-raise
+  paths; retain callable variants; continue MRO lookup after a conditional
+  owner; compute MUST bindings from normally completing paths; stop indexing
+  after terminal statements; model multiple exact `nullcontext`/`suppress`
+  managers; canonicalize builtin and local exception identities; preserve the
+  real tuple handler as evidence; and clear active upstream provenance when an
+  exact `None` path is selected while retaining enough history to emit an
+  explicit dynamic-owner review.
+- Safety boundary: multiple reachable signatures for one patch endpoint are
+  reported as `review/conditional_callable_variants`; no signature is guessed.
+  A dynamic owner that previously came from upstream remains an explicit
+  `review/dynamic_patch_owner`, not a reconstructed stale target.
+- Regression evidence: nine new fixtures fail on v0.17 and pass here. All 87
+  isolated generator/auditor tests pass; Ruff, Ruff format, and
+  `git diff --check` pass.
+- Fixed-source checkpoint: vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`, vllm-ascend
+  `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0` generated in 164.940 seconds:
+  971 relations and 44 findings (7 risk, 9 expected, 22 excluded, 6 verified),
+  with zero unresolved or generator issues. Coverage audit classified all
+  1,018 known sites in 36.334 seconds and retained the same two known
+  auditor-only orphans.
+- Rejected fixed-source result: this checkpoint is not accurate enough to
+  accept. It changed `torch.nn.modules.module.Module.to` from the real final
+  implementation `(self, *args, **kwargs)` to the first `@overload`
+  declaration. The other 970 relations and all 44 findings are unchanged.
+  This is a generator regression caused by collecting all same-name
+  definitions and then choosing `candidates[0]`; it is not an upstream break.
+- Independent review found three adjacent generator gaps: sequential and
+  conditional definitions must be reduced to the final binding on every
+  normally completing path; override and module-level callable paths must use
+  the same variant check as monkey patches; and the real boundary UT must
+  validate all active-main endpoint variants rather than searching only the
+  first class-body node. These remain visible work for the next Git iteration.
+- Audited rejected-output hashes: relations
+  `7d01fdc746ceda6b0a6dec9a913f379aa220d1d1370f888eb567ae8549e0d7c9`,
+  findings
+  `f83164f52e5319ebb89f4ce5367ce4e511f586ce710cd200056f0f83dba6d6e7`,
+  comparison report
+  `878f3de93bbc66d2116d4511015c7835104daa6a7885860f08fc455722f3e1f6`,
+  and coverage audit
+  `03201511f89065f417dc202052e1e0cb7d65ab2ddfd437e7f3e360367be9fa74`.
+
 ## v0.17.0 - path-state and conditional-presence checkpoint
 
 - Starting commit: `b9e3cb64c2c80d9a7359fd8b2f6574f602aaf175`.
