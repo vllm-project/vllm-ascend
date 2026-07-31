@@ -230,6 +230,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
                 is_last_chunks=[True],
                 save_keys=["k0"],
             ),
+            write_finish_keys=["k0"],
         )
         thread.add_stored_request("r1")
         thread.request_queue.put([task])
@@ -244,6 +245,14 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
         self.assertEqual(thread.get_and_clear_finished_requests(), set())
         self.assertFalse(save_finished.is_set())
+
+    def test_write_finish_uses_last_actual_save_task(self):
+        thread, store, _, task = self._make_sending_thread()
+        thread.final_layer_id = 1
+
+        thread._handle_request([task])
+
+        store.batch_write_finish.assert_called_once_with(["k0"], [0])
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
