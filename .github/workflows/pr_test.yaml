@@ -43,7 +43,7 @@ concurrency:
 jobs:
   pre-commit:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
-    runs-on: linux-aarch64-a3-0-cn12-001
+    runs-on: linux-aarch64-a3-2-
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-ubuntu22.04-py3.12
 
