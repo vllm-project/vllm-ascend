@@ -76,15 +76,13 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
-
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 === "InternVL3_5-38B"
 
-    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) node.
 
     Run the following script to execute online inference.
 
@@ -111,13 +109,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --port 2002 \
         --served-model-name internvl3_5 \
         --trust-remote-code \
-        --async-scheduling \
         --max-model-len 40960 \
         --max-num-batched-tokens 16384 \
         --tensor-parallel-size 4 \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.9 \
-        --async-scheduling \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
         --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
         --mm-processor-cache-gb 0 \
@@ -129,7 +125,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "InternVL3_5-241B-A28B"
 
-    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) node.
 
     Run the following script to execute online inference.
 
@@ -156,14 +152,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --port 2001 \
         --served-model-name internvl3_5 \
         --trust-remote-code \
-        --async-scheduling \
         --max-model-len 40960 \
         --max-num-batched-tokens 4096 \
         --tensor-parallel-size 4 \
         --data-parallel-size 2 \
         --max-num-seqs 70 \
         --gpu-memory-utilization 0.9 \
-        --async-scheduling \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
         --mm-processor-cache-gb 0 \
@@ -227,4 +221,4 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 9 FAQ
 
-- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, refer to [FAQs](../../faqs.md).

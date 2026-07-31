@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
+- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
 - `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Model Weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
@@ -459,7 +459,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, first validate the service without prefix caching before enabling additional cache features.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
-  
+
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
@@ -609,7 +609,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 | FlashComm1 | `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` or `--additional-config '{"enable_flashcomm1":true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Fused MC2 | `VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Validate HBM usage first. For PD, start with prefix caching disabled. |
-| Asynchronous scheduling | `--async-scheduling` | Can improve high-concurrency throughput. | Disable and compare for latency-sensitive workloads. |
 | PD disaggregation | `--kv-transfer-config` | Separates prefill and decode resources. | Ensure producer/consumer DP and TP sizes match the actual topology. |
 
 ## 10 FAQ
