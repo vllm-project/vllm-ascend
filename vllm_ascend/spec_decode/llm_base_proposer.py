@@ -196,6 +196,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             self.use_cuda_graph = False
 
+        # Probabilistic draft sampling (draft_sample_method="probabilistic")
+        # uses Gumbel/exponential noise that is not ACLGraph-safe. Force eager
+        # mode for the draft model when it is enabled, and reject incompatible
+        # option combinations early to avoid silent fallback to greedy.
+        # NOTE: _enable_probabilistic_draft_probs is set by the upstream
+        # SpecDecodeBaseProposer.__init__.
+        if self._enable_probabilistic_draft_probs:
+            if self.use_local_argmax_reduction:
+                raise ValueError(
+                    "use_local_argmax_reduction is not compatible with "
+                    "draft_sample_method='probabilistic'."
+                )
+            if self.use_heterogeneous_vocab:
+                raise ValueError(
+                    "use_heterogeneous_vocab is not compatible with "
+                    "draft_sample_method='probabilistic'."
+                )
+            if self.use_cuda_graph:
+                logger.warning(
+                    "draft_sample_method='probabilistic' is not compatible "
+                    "with ACLGraph. The draft model has been automatically "
+                    "switched to eager mode (enforce_eager=true)."
+                )
+                self.use_cuda_graph = False
+
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
         if not self.use_cuda_graph and enable_sp(vllm_config):
@@ -1007,6 +1032,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
                 "is_prefill": is_prefill_batch,
+                "sampling_metadata": sampling_metadata,
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
@@ -1019,20 +1045,51 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
 
-    def compute_draft_token_ids(self, hidden_states: torch.Tensor):
+    def _sample_draft_from_logits(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Sample draft tokens from logits.
+
+        Thin Ascend wrapper around the upstream ``_sample_from_logits`` that
+        additionally tolerates ``sampling_metadata is None`` (e.g. during
+        ``dummy_run`` / profile run), in which case greedy argmax is used.
+        """
+        if (
+            sampling_metadata is None
+            or not self._enable_probabilistic_draft_probs
+        ):
+            return logits.argmax(dim=-1), None
+        return self._sample_from_logits(logits, sampling_metadata)
+
+    def compute_draft_token_ids(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Compute draft token ids (and optionally draft probs).
+
+        Returns (draft_token_ids, draft_probs) where draft_probs is None when
+        probabilistic sampling is disabled, all-greedy, or vocab remapping
+        prevents lossless probability export.
+        """
         if self.method in ("eagle3", "dflash", "dspark"):
             logits = self.model.logits_processor(self.model.lm_head, hidden_states)
             if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
-                return greedy_sample(logits)
+                return self._sample_draft_from_logits(logits, sampling_metadata)
+            # With vocab remapping, draft probs live in draft-vocab space and
+            # cannot be used directly for target-space rejection sampling.
+            # Fall back to greedy.
             logits = logits.contiguous()
             next_token = greedy_sample(logits)
             bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
                 next_token.shape
             )
-            return next_token + bias
+            return next_token + bias, None
         else:
             logits = self.model.compute_logits(hidden_states)
-            return greedy_sample(logits)
+            return self._sample_draft_from_logits(logits, sampling_metadata)
 
     def _run_merged_draft(
         self,
@@ -1044,7 +1101,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
+        # Reset cached draft probs from the previous propose call.
+        self._last_draft_probs = None
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
         # speculative tokens' proposings. `model_input_ids`, `model_positions` and
         # `model_hidden_states` represent the speculative model inputs.
@@ -1103,9 +1163,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
+        draft_probs_step0: torch.Tensor | None = None
         if get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
-                draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                draft_token_ids, draft_probs_step0 = self.compute_draft_token_ids(
+                    sample_hidden_states, sampling_metadata
+                )
                 if lmhead_tp_enable():
                     draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
                         draft_token_ids,
@@ -1114,6 +1177,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=False,
                     )
+                    if draft_probs_step0 is not None and num_indices < draft_probs_step0.shape[0]:
+                        draft_probs_step0 = draft_probs_step0[:num_indices]
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1128,7 +1193,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(
+                    logits, sampling_metadata
+                )
         else:
             if self.method == "dspark":
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
@@ -1159,13 +1226,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(
+                    logits, sampling_metadata
+                )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             if self.method == "dspark":
+                if draft_probs_step0 is not None:
+                    self._last_draft_probs = draft_probs_step0.view(
+                        -1, self.num_speculative_tokens, draft_probs_step0.shape[-1]
+                    ).contiguous()
                 return draft_token_ids[:, 1:]
             else:
+                if draft_probs_step0 is not None:
+                    self._last_draft_probs = draft_probs_step0.view(
+                        -1, self.num_speculative_tokens, draft_probs_step0.shape[-1]
+                    ).contiguous()
                 # [batch_size, 1]
                 return draft_token_ids.view(-1, self.num_speculative_tokens)
 
@@ -1182,6 +1259,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
         )
         draft_token_ids_tensor[0] = draft_token_ids
+        draft_probs_list = [draft_probs_step0] if draft_probs_step0 is not None else None
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
         else:
@@ -1282,12 +1360,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            draft_probs_step: torch.Tensor | None = None
             if get_ascend_config().enable_reduce_sample:
                 if self.method in ("eagle3", "dflash", "dspark", "mtp"):
-                    draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                    draft_token_ids, draft_probs_step = self.compute_draft_token_ids(
+                        sample_hidden_states, sampling_metadata
+                    )
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                         draft_token_ids = draft_token_ids[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
+                        if draft_probs_step is not None:
+                            draft_probs_step = draft_probs_step[:num_indices]
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
@@ -1297,20 +1380,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
                         logits = logits[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids = logits.argmax(dim=-1)
+                    draft_token_ids, draft_probs_step = self._sample_draft_from_logits(
+                        logits, sampling_metadata
+                    )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids = logits.argmax(dim=-1)
+                draft_token_ids, draft_probs_step = self._sample_draft_from_logits(
+                    logits, sampling_metadata
+                )
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
             draft_token_ids_tensor[draft_index + 1] = draft_token_ids
+            if draft_probs_list is not None:
+                if draft_probs_step is not None:
+                    draft_probs_list.append(draft_probs_step)
+                else:
+                    draft_probs_list = None
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
+        if draft_probs_list is not None:
+            self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
         return draft_token_ids
 
     def set_inputs_first_pass(
