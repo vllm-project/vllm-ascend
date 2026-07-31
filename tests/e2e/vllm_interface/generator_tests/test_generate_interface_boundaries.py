@@ -1620,3 +1620,265 @@ Engine.step = lambda self, value: value
     _write(ascend_root, "vllm_ascend/broken.py", "def broken(:\n")
     with pytest.raises(ValueError, match="Python source parsing failed"):
         generator.InterfaceBoundaryGenerator(vllm_root, ascend_root)
+
+
+def test_upstream_patch_method_deletion_becomes_a_risk(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/api.py",
+        """
+class Target:
+    def hook(self, value):
+        return value
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.api import Target
+
+
+def replacement(self, value):
+    return value
+
+
+Target.hook = replacement
+""",
+    )
+
+    before_relations, before_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+    assert any(
+        relation.relation == "monkey_patch"
+        and relation.upstream_owner == "Target"
+        and relation.upstream_name == "hook"
+        for relation in before_relations
+    )
+    assert not before_findings
+
+    _write(
+        vllm_root,
+        "vllm/api.py",
+        """
+class Target:
+    pass
+""",
+    )
+    after_relations, after_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not any(
+        relation.relation == "monkey_patch"
+        and relation.upstream_name == "hook"
+        for relation in after_relations
+    )
+    risk = next(
+        finding
+        for finding in after_findings
+        if finding.target_expression == "vllm.api.Target.hook"
+    )
+    assert risk.status == "risk"
+    assert risk.reason_code == "possible_stale_patch"
+    assert not risk.generator_issue
+
+
+def test_new_downstream_patch_for_missing_upstream_method_is_a_risk(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/api.py", "class Target:\n    pass\n")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        "from vllm.api import Target\n",
+    )
+
+    before_relations, before_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+    assert not before_relations
+    assert not before_findings
+
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.api import Target
+
+
+def added_patch(self, value):
+    return value
+
+
+Target.new_hook = added_patch
+""",
+    )
+    after_relations, after_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not after_relations
+    risk = next(
+        finding
+        for finding in after_findings
+        if finding.target_expression == "vllm.api.Target.new_hook"
+    )
+    assert risk.downstream_name == "added_patch"
+    assert risk.status == "risk"
+    assert risk.reason_code == "possible_stale_patch"
+    assert not risk.generator_issue
+
+
+def test_upstream_base_deletion_becomes_an_inheritance_risk(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/base.py", "class Base:\n    pass\n")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    pass
+""",
+    )
+
+    before_relations, before_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+    assert any(
+        relation.relation == "inheritance"
+        and relation.upstream_name == "Base"
+        and relation.downstream_owner == "Child"
+        for relation in before_relations
+    )
+    assert not before_findings
+
+    _write(vllm_root, "vllm/base.py", "")
+    after_relations, after_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not any(
+        relation.relation == "inheritance"
+        and relation.downstream_owner == "Child"
+        for relation in after_relations
+    )
+    risk = next(
+        finding
+        for finding in after_findings
+        if finding.relation == "inheritance"
+        and finding.downstream_owner == "Child"
+    )
+    assert risk.target_expression == "vllm.base.Base"
+    assert risk.status == "risk"
+    assert risk.reason_code == "missing_upstream_base"
+    assert not risk.generator_issue
+
+
+def test_upstream_signature_change_updates_the_existing_relation(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/api.py",
+        """
+class Target:
+    def hook(self, value, *, mode=None):
+        return value
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.api import Target
+
+
+def replacement(self, *args, **kwargs):
+    return None
+
+
+Target.hook = replacement
+""",
+    )
+
+    before_relations, before_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+    before = next(
+        relation
+        for relation in before_relations
+        if relation.relation == "monkey_patch"
+        and relation.upstream_name == "hook"
+    )
+    assert before.upstream_signature == [
+        "sync",
+        [],
+        [["self", True], ["value", True]],
+        None,
+        [["mode", False]],
+        None,
+    ]
+    assert not before_findings
+
+    _write(
+        vllm_root,
+        "vllm/api.py",
+        """
+class Target:
+    def hook(self, value, context, *, mode=None):
+        return value
+""",
+    )
+    after_relations, after_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+    after = next(
+        relation
+        for relation in after_relations
+        if relation.relation == "monkey_patch"
+        and relation.upstream_name == "hook"
+    )
+
+    assert after.downstream_key() == before.downstream_key()
+    assert after.upstream_signature == [
+        "sync",
+        [],
+        [["self", True], ["value", True], ["context", True]],
+        None,
+        [["mode", False]],
+        None,
+    ]
+    assert after.upstream_signature != before.upstream_signature
+    assert not after_findings
