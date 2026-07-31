@@ -48,5 +48,5 @@ def _patched_engine_core_init(self, vllm_config, *args, **kwargs):
 
 
 if not getattr(EngineCore.__init__, "_vllm_ascend_config_patched", False):
-    _patched_engine_core_init._vllm_ascend_config_patched = True
+    _patched_engine_core_init._vllm_ascend_config_patched = True  # type: ignore[attr-defined]
     EngineCore.__init__ = _patched_engine_core_init

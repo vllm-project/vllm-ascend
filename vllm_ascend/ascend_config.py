@@ -795,8 +795,7 @@ class ScoreEncoderCacheConfig:
         """
         if not isinstance(score_encoder_cache_config, dict):
             raise ValueError(
-                "score_encoder_cache_config must be a dict, "
-                f"got {type(score_encoder_cache_config).__name__}"
+                f"score_encoder_cache_config must be a dict, got {type(score_encoder_cache_config).__name__}"
             )
 
         # Whether to enable the score-based encoder cache management policy
@@ -829,27 +828,18 @@ class ScoreEncoderCacheConfig:
 
     def _validate(self):
         if not isinstance(self.enabled, bool):
-            raise ValueError(
-                "score_encoder_cache_config.enabled must be a bool, "
-                f"got {type(self.enabled).__name__}"
-            )
+            raise ValueError(f"score_encoder_cache_config.enabled must be a bool, got {type(self.enabled).__name__}")
         if (
             isinstance(self.cpu_cache_slots, bool)
             or not isinstance(self.cpu_cache_slots, int)
             or self.cpu_cache_slots <= 0
         ):
             raise ValueError(
-                "score_encoder_cache_config.cpu_cache_slots must be a positive integer, "
-                f"got {self.cpu_cache_slots}"
+                f"score_encoder_cache_config.cpu_cache_slots must be a positive integer, got {self.cpu_cache_slots}"
             )
-        if (
-            isinstance(self.max_clock, bool)
-            or not isinstance(self.max_clock, int)
-            or self.max_clock < 0
-        ):
+        if isinstance(self.max_clock, bool) or not isinstance(self.max_clock, int) or self.max_clock < 0:
             raise ValueError(
-                "score_encoder_cache_config.max_clock must be a non-negative integer, "
-                f"got {self.max_clock}"
+                f"score_encoder_cache_config.max_clock must be a non-negative integer, got {self.max_clock}"
             )
         if (
             isinstance(self.clock_decay_every, bool)
@@ -857,18 +847,14 @@ class ScoreEncoderCacheConfig:
             or self.clock_decay_every <= 0
         ):
             raise ValueError(
-                "score_encoder_cache_config.clock_decay_every must be a positive integer, "
-                f"got {self.clock_decay_every}"
+                f"score_encoder_cache_config.clock_decay_every must be a positive integer, got {self.clock_decay_every}"
             )
         if (
             isinstance(self.watermark, bool)
             or not isinstance(self.watermark, (int, float))
             or not 0 <= self.watermark <= 1
         ):
-            raise ValueError(
-                "score_encoder_cache_config.watermark must be a number in [0, 1], "
-                f"got {self.watermark}"
-            )
+            raise ValueError(f"score_encoder_cache_config.watermark must be a number in [0, 1], got {self.watermark}")
         if (
             isinstance(self.promote_percentile, bool)
             or not isinstance(self.promote_percentile, (int, float))
@@ -1097,6 +1083,7 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
 
 def get_score_encoder_cache_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}

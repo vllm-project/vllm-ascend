@@ -197,7 +197,6 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         if request.request_id not in self.cached[mm_hash]:
             self.cached[mm_hash].add(request.request_id)
-            ent = None
             if mm_hash in self.npu_cache:
                 ent = self.npu_cache[mm_hash]
             else:

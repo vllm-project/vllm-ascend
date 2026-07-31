@@ -501,7 +501,7 @@ class TestScoreEncoderCacheConfig(TestBase):
         self.assertEqual(config.promote_percentile, 1)
 
     def test_rejects_invalid_values(self):
-        invalid_configs = [
+        invalid_configs: list[tuple[str, dict[str, object]]] = [
             ("enabled", {"enabled": 1}),
             ("cpu_cache_slots", {"cpu_cache_slots": 0}),
             ("cpu_cache_slots", {"cpu_cache_slots": 1.5}),
