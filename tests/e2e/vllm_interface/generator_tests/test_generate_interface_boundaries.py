@@ -6633,3 +6633,41 @@ class Child(Base):
     assert len([relation for relation in relations if relation.relation == "inheritance"]) == 1
     assert not [relation for relation in relations if relation.relation == "override"]
     assert not findings
+
+
+def test_v023_builtin_object_super_methods_are_not_missing_upstream_targets(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    pass
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def __init__(self):
+        super().__init__()
+
+    def __repr__(self):
+        return super().__repr__()
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len([relation for relation in relations if relation.relation == "inheritance"]) == 1
+    assert not [relation for relation in relations if relation.relation == "override"]
+    assert not findings
