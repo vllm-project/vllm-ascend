@@ -471,7 +471,16 @@ class NPUPlatform(Platform):
         # selection.  The full validation runs after refresh_block_size().
         attach_dsa_sparse_cache_attrs(vllm_config)
         if is_dsa_sparse_config_enabled(vllm_config):
-            vllm_config.model_config.enforce_eager = True
+            from vllm_ascend.dsa_sparse.dsa_config import (
+                DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY,
+            )
+            additional_config = getattr(vllm_config, "additional_config", None)
+            graph_enabled = bool(
+                isinstance(additional_config, dict)
+                and additional_config.get(
+                    DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY, False))
+            if not graph_enabled:
+                vllm_config.model_config.enforce_eager = True
 
         maybe_auto_detect_quantization(vllm_config)
 

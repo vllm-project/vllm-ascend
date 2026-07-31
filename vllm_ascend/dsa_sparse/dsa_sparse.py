@@ -724,8 +724,8 @@ class DSASparseV1(DSARowModeRuntimeMixin, DSASparseBase):
             full_blocks_to_release = req_blocks
         full_manager.req_to_blocks[request_id] = []
         if full_blocks_to_release:
-            full_manager._free_blocks_to_pool(
-                reversed(full_blocks_to_release))
+            full_manager.block_pool.free_blocks(
+                list(reversed(full_blocks_to_release)))
         full_manager.num_cached_block.pop(request_id, None)
         return tail_block
 

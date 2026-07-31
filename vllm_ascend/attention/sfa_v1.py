@@ -1917,6 +1917,86 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> None:
         return
 
+    def _execute_dsa_offload_graph(
+        self,
+        *,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+        indexer_k_cache: torch.Tensor,
+        indexer_block_table: torch.Tensor,
+        dsa_mgr,
+    ) -> torch.Tensor:
+        """Graph-capture/replay DSA offload with no Python control flow.
+
+        The graph gate guarantees every row is single-token decode, so the
+        MTP round loop collapses to exactly one round.  All row selection is
+        done with pre-built fixed-address tensors from the row-mode batch,
+        avoiding ``.cpu()`` / ``.item()`` / ``np.flatnonzero`` that would
+        break graph capture/replay.
+        """
+        forward_batch = attn_metadata.dsa_row_mode_batch
+        if forward_batch is None or not forward_batch:
+            raise RuntimeError(
+                "DSA graph offload requires a row-mode batch")
+        if attn_metadata.cum_query_lens_cpu is None:
+            raise RuntimeError(
+                "DSA graph offload requires CPU query boundaries")
+
+        q_li, _, _, weights = self._prepare_indexer_query_and_weights(
+            hidden_states,
+            q_c,
+            attn_metadata.cos,
+            attn_metadata.sin,
+        )
+
+        num_rows = int(forward_batch.row_count)
+        token_indices = torch.arange(
+            num_rows, dtype=torch.int64, device=ql_nope.device)
+        active_rows = token_indices
+
+        final_key_lens = (
+            attn_metadata.indexer_seq_lens
+            if attn_metadata.indexer_seq_lens is not None else
+            attn_metadata.seq_lens)
+        current_key_lens = final_key_lens[:num_rows]
+        round_query_lens = torch.arange(
+            1, num_rows + 1, dtype=torch.int32, device=ql_nope.device)
+
+        full_block_table = (
+            attn_metadata.full_block_tables
+            if attn_metadata.full_block_tables is not None else
+            attn_metadata.block_table)
+
+        selection = dsa_mgr.execute_decode_selection_pipeline(
+            layer_name,
+            forward_batch=forward_batch,
+            query=q_li,
+            key=indexer_k_cache,
+            weights=weights,
+            actual_seq_lengths_key=current_key_lens,
+            block_table=indexer_block_table,
+            row_indices=active_rows,
+        )
+        if selection is None:
+            raise RuntimeError(
+                "DSA LIDU/KSC did not produce SFA-Offload metadata")
+        return dsa_mgr.sparse_attention_for_offload(
+            query=ql_nope,
+            key=kv_cache[0],
+            selection=selection,
+            scale_value=self.scale,
+            block_table=full_block_table,
+            actual_seq_lengths_query=round_query_lens,
+            actual_seq_lengths_kv=current_key_lens,
+            query_rope=q_pe,
+            key_rope=kv_cache[1],
+        )
+
     def _record_dcp_kv_gather_context(
         self,
         kv_cache: tuple[torch.Tensor, ...],
@@ -2377,17 +2457,31 @@ class AscendSFAImpl(MLAAttentionImpl):
                 raise RuntimeError(
                     "DSA sparse offload requires the split Indexer cache."
                 )
-            attn_output = self._execute_dsa_offload_rounds(
-                layer_name=layer_name,
-                hidden_states=hidden_states,
-                q_c=q_c,
-                ql_nope=ql_nope,
-                q_pe=q_pe,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                indexer_k_cache=indexer_k_cache,
-                indexer_block_table=indexer_block_table,
-            )
+            if _EXTRA_CTX.capturing or torch.npu.is_current_stream_capturing():
+                attn_output = self._execute_dsa_offload_graph(
+                    layer_name=layer_name,
+                    hidden_states=hidden_states,
+                    q_c=q_c,
+                    ql_nope=ql_nope,
+                    q_pe=q_pe,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                    indexer_k_cache=indexer_k_cache,
+                    indexer_block_table=indexer_block_table,
+                    dsa_mgr=dsa_mgr,
+                )
+            else:
+                attn_output = self._execute_dsa_offload_rounds(
+                    layer_name=layer_name,
+                    hidden_states=hidden_states,
+                    q_c=q_c,
+                    ql_nope=ql_nope,
+                    q_pe=q_pe,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                    indexer_k_cache=indexer_k_cache,
+                    indexer_block_table=indexer_block_table,
+                )
         else:
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(

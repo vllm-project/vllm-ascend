@@ -839,15 +839,24 @@ class NPUModelRunner(GPUModelRunner):
             dsa_mgr.get_full_attention_group_id(self.kv_cache_config))
         return self.input_batch.block_table[group_id].get_device_tensor()
 
-    def prepare_dsa_forward_metadata(self) -> None:
+    def prepare_dsa_forward_metadata(
+        self,
+        graph_row_count: int | None = None,
+    ) -> None:
         dsa_mgr = self.dsa_worker_mgr
         if dsa_mgr is None:
             return
         if not dsa_mgr.build_dsa_meta(
                 self.input_batch,
-                self._get_dsa_full_block_table_tensor()):
-            raise RuntimeError(
-                "DSA eager forward metadata could not be materialized")
+                self._get_dsa_full_block_table_tensor(),
+                graph_row_count=graph_row_count):
+            if graph_row_count is not None:
+                logger.debug_once(
+                    "DSA graph replay not eligible for row_count=%s, "
+                    "falling back to eager", graph_row_count)
+            else:
+                raise RuntimeError(
+                    "DSA eager forward metadata could not be materialized")
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -2267,6 +2276,28 @@ class NPUModelRunner(GPUModelRunner):
                     self.update_eplb_heat_collection_status(num_tokens_padded)
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                # When the FULL graph path is eligible, re-build DSA metadata
+                # with the captured row count so persistent buffers are used.
+                # If the DSA graph gate rejects this batch (e.g. multi-token
+                # decode, missing resident rows, or budget mismatch), fall back
+                # to eager so the eager row-mode batch is used instead of a
+                # stale graph batch with incompatible tensor addresses.
+                if pad_attn and self.dsa_worker_mgr is not None:
+                    dsa_graph_ok = (
+                        batch_desc.num_reqs is not None
+                        and batch_desc.num_reqs > 0
+                        and batch_desc.num_reqs >= num_reqs
+                        and self.dsa_worker_mgr.build_dsa_meta(
+                            self.input_batch,
+                            self._get_dsa_full_block_table_tensor(),
+                            graph_row_count=batch_desc.num_reqs))
+                    if not dsa_graph_ok:
+                        logger.debug_once(
+                            "DSA graph gate rejected this batch; "
+                            "falling back to eager for this step")
+                        cudagraph_mode = CUDAGraphMode.NONE
+                        pad_attn = False
 
                 # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
                 # there should be a corresponding 'postprocess_mamba'. However, it is called inside

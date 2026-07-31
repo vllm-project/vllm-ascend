@@ -487,15 +487,28 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
             f"{sorted(incompatible_cache_modes)}"
         )
     if bool(additional_config.get(DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY, False)):
-        raise ValueError(
-            "This v0.23 adaptation supports eager DSA sparse offload only; "
-            "disable enable_row_mode_decode_graph")
-    ascend_config = additional_config.get("ascend_compilation_config", {})
-    if isinstance(ascend_config, dict) and bool(
-            ascend_config.get("enable_npugraph_ex", False)):
-        raise ValueError(
-            "DSA sparse offload is eager-only; set "
-            "ascend_compilation_config.enable_npugraph_ex=false")
+        # DSA row-mode decode graph reuses the native FULL graph family.
+        # npugraph_ex also compiles profile/prefill paths and can fail
+        # before KV-cache split metadata is initialized, so keep it off.
+        ascend_config = additional_config.get("ascend_compilation_config", {})
+        if isinstance(ascend_config, dict) and bool(
+                ascend_config.get("enable_npugraph_ex", False)):
+            raise ValueError(
+                "DSA row-mode decode graph does not support "
+                "ascend_compilation_config['enable_npugraph_ex']=True. "
+                "Please set it to False or omit it.")
+        if bool(getattr(vllm_config.model_config, "enforce_eager", False)):
+            raise ValueError(
+                "DSA row-mode decode graph cannot be combined with "
+                "model_config.enforce_eager=True. Remove --enforce-eager "
+                "or set enable_row_mode_decode_graph=false.")
+    else:
+        ascend_config = additional_config.get("ascend_compilation_config", {})
+        if isinstance(ascend_config, dict) and bool(
+                ascend_config.get("enable_npugraph_ex", False)):
+            raise ValueError(
+                "DSA sparse offload in eager mode requires "
+                "ascend_compilation_config.enable_npugraph_ex=false")
 
     # The source DSA implementation does not integrate speculative/MTP cache
     # ownership. Letting a multi-token step enter this migrated sparse path can
@@ -538,5 +551,9 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
             f"DSA resident budgets {unsupported} are unsupported on "
             f"{device_type.name}; supported={sorted(allowed_budgets)}")
 
-    # Apply eager before AscendPlatform snapshots model_config.enforce_eager.
-    vllm_config.model_config.enforce_eager = True
+    # DSA eager mode requires enforce_eager=True.  When the user explicitly
+    # enables row-mode decode graph, allow non-eager execution so the native
+    # FULL graph family can capture/replay eligible single-token decode.
+    if not bool(additional_config.get(
+            DSA_ROW_MODE_DECODE_GRAPH_CONFIG_KEY, False)):
+        vllm_config.model_config.enforce_eager = True
