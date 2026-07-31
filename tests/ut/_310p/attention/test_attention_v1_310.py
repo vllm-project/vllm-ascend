@@ -115,6 +115,133 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.assertIs(kwargs["out"], output)
         self.assertIs(result, output)
 
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu._npu_flash_attention")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_prefill_310_coerces_device_seq_lens_to_host(
+        self, mock_get_forward_context, mock_npu_flash_attention, mock_npu_reshape_and_cache
+    ):
+        """Parallel drafting (DFlash/DSpark) makes the builder hand out a device
+        seq_lens tensor for the A2/A3 FIA path. 310P's prefill feeds seq_len to
+        ATB's SelfAttention encoder, which reads it from host memory and segfaults
+        on a device tensor. The prefill path must coerce it to host."""
+        from types import SimpleNamespace
+
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        output = torch.empty_like(query)
+
+        host_seq_lens = torch.tensor([10])
+        device_seq_lens = MagicMock()
+        device_seq_lens.device = SimpleNamespace(type="npu")
+        device_seq_lens.cpu.return_value = host_seq_lens
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.attn_mask = torch.randn(1, 1, 10, 10)
+        metadata.seq_lens = device_seq_lens
+        metadata.actual_seq_lengths_q = [10]
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+
+        self.impl.support_compressed_mask = False
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_flash_attention.return_value = torch.ones(10, 8, 64)
+
+        self.impl.forward_impl(query, key, value, None, metadata, output)
+
+        device_seq_lens.cpu.assert_called_once()
+        _, kwargs = mock_npu_flash_attention.call_args
+        self.assertIs(kwargs["seq_len"], host_seq_lens, "ATB received a device seq_len; it needs host")
+
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu._npu_flash_attention_v3", create=True)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_prefill_310_v3_also_gets_host_seq_lens(
+        self, mock_get_forward_context, mock_flash_attention_v3, mock_npu_reshape_and_cache
+    ):
+        """Same coercion on the compressed-mask path.
+
+        With a torch_npu/ATB build that supports compressed masks, prefill
+        dispatches to _npu_flash_attention_v3 instead. Every other 310P attention
+        test pins support_compressed_mask to False, so that operator had no
+        coverage at all -- yet it is what production runs once the runtime is
+        upgraded. Host seq_len is the established contract for both: without
+        speculation the builder always handed these ops a CPU tensor.
+        """
+        from types import SimpleNamespace
+
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        output = torch.empty_like(query)
+
+        host_seq_lens = torch.tensor([10])
+        device_seq_lens = MagicMock()
+        device_seq_lens.device = SimpleNamespace(type="npu")
+        device_seq_lens.cpu.return_value = host_seq_lens
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.attn_mask = torch.randn(1, 1, 10, 10)
+        metadata.seq_lens = device_seq_lens
+        metadata.actual_seq_lengths_q = [10]
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+
+        self.impl.support_compressed_mask = True
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_flash_attention_v3.return_value = torch.ones(10, 8, 64)
+
+        self.impl.forward_impl(query, key, value, None, metadata, output)
+
+        mock_flash_attention_v3.assert_called_once()
+        _, kwargs = mock_flash_attention_v3.call_args
+        self.assertIs(kwargs["seq_len"], host_seq_lens, "v3 received a device seq_len; it needs host")
+
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu._npu_paged_attention_splitfuse_v2", create=True)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_splitfuse_v2_uses_the_fixed_compressed_mask(
+        self, mock_get_forward_context, mock_splitfuse_v2, mock_npu_reshape_and_cache
+    ):
+        """The compressed splitfuse path is what makes graph capture possible.
+
+        The legacy get_splitfuse_mask builds its mask from .to("cpu") + .tolist()
+        of live metadata -- a device sync that cannot be captured. The compressed
+        variant uses a cached fixed 2048x2048 mask instead, with no sync, which is
+        why FULL_DECODE_ONLY becomes viable. Pin that it is actually used.
+        """
+        query = torch.randn(4, 8 * 64)
+        output = torch.empty_like(query)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.causal = True
+        metadata.seq_lens = torch.tensor([4])
+        metadata.query_lens_cpu = torch.tensor([4], dtype=torch.int32)
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 4
+        metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
+
+        self.impl.support_compressed_mask = True
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        with patch(
+            "vllm_ascend._310p.attention.attention_mask.AttentionMaskBuilder310.get_splitfuse_mask"
+        ) as legacy_mask:
+            self.impl.forward_impl(query, None, None, None, metadata, output)
+
+        mock_splitfuse_v2.assert_called_once()
+        legacy_mask.assert_not_called()
+        _, kwargs = mock_splitfuse_v2.call_args
+        # Fixed square mask, not one derived per step from live metadata.
+        self.assertEqual(kwargs["mask"].shape[0], kwargs["mask"].shape[1])
+        self.assertIs(kwargs["seq_len"], metadata.query_lens_cpu)
+
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_paged_attention_splitfuse")
