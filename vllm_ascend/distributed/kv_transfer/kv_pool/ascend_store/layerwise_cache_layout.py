@@ -21,12 +21,15 @@ _DEFAULT_MAX_PREFETCH_LAYERS = 8
 
 
 def get_layerwise_physical_layer_index(layer_name: str, base_layers: int) -> int:
+    match = re.search(
+        r"(?:^|\.)mtp(?:\.layers)?\.(\d+)(?:\.|$)",
+        layer_name,
+    )
+    if match:
+        return base_layers + int(match.group(1))
     match = re.search(r"layers\.(\d+)", layer_name)
     if match:
         return int(match.group(1))
-    match = re.search(r"mtp\.(\d+)", layer_name)
-    if match:
-        return base_layers + int(match.group(1))
     match = re.search(r"(\d+)", layer_name)
     return int(match.group(1)) if match else 0
 
