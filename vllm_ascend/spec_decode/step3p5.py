@@ -188,9 +188,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         logits: torch.Tensor | None = None
         if get_ascend_config().enable_reduce_sample and self.method == "mtp":
             if not hasattr(self.model.model, "compute_logits"):
-                draft_token_ids, draft_probs = self.compute_draft_token_ids(
-                    hidden_states, sampling_metadata
-                )
+                draft_token_ids, draft_probs = self.compute_draft_token_ids(hidden_states, sampling_metadata)
                 if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                     draft_token_ids = draft_token_ids[:num_indices]
                     if draft_probs is not None:

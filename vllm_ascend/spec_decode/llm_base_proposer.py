@@ -205,14 +205,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self._enable_probabilistic_draft_probs:
             if self.use_local_argmax_reduction:
                 raise ValueError(
-                    "use_local_argmax_reduction is not compatible with "
-                    "draft_sample_method='probabilistic'."
+                    "use_local_argmax_reduction is not compatible with draft_sample_method='probabilistic'."
                 )
             if self.use_heterogeneous_vocab:
-                raise ValueError(
-                    "use_heterogeneous_vocab is not compatible with "
-                    "draft_sample_method='probabilistic'."
-                )
+                raise ValueError("use_heterogeneous_vocab is not compatible with draft_sample_method='probabilistic'.")
             if self.use_cuda_graph:
                 logger.warning(
                     "draft_sample_method='probabilistic' is not compatible "
@@ -1056,10 +1052,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         additionally tolerates ``sampling_metadata is None`` (e.g. during
         ``dummy_run`` / profile run), in which case greedy argmax is used.
         """
-        if (
-            sampling_metadata is None
-            or not self._enable_probabilistic_draft_probs
-        ):
+        if sampling_metadata is None or not self._enable_probabilistic_draft_probs:
             return logits.argmax(dim=-1), None
         return self._sample_from_logits(logits, sampling_metadata)
 
@@ -1193,9 +1186,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(
-                    logits, sampling_metadata
-                )
+                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(logits, sampling_metadata)
         else:
             if self.method == "dspark":
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
@@ -1226,9 +1217,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(
-                    logits, sampling_metadata
-                )
+                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(logits, sampling_metadata)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1380,17 +1369,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
                         logits = logits[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids, draft_probs_step = self._sample_draft_from_logits(
-                        logits, sampling_metadata
-                    )
+                    draft_token_ids, draft_probs_step = self._sample_draft_from_logits(logits, sampling_metadata)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids, draft_probs_step = self._sample_draft_from_logits(
-                    logits, sampling_metadata
-                )
+                draft_token_ids, draft_probs_step = self._sample_draft_from_logits(logits, sampling_metadata)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
