@@ -24,7 +24,11 @@ from vllm_ascend.ops.triton.layernorm_gated import (
 _ASCEND_910_UB_BYTES = 192 * 1024
 _UB_SAFETY_MARGIN = 0.85
 _BD_MEMORY_MULTIPLIER = 6.0
-_FWD_MEMORY_MULTIPLIER = 3.0
+# The K3 path can gate before normalization, keeping both the gate and
+# normalized-value tiles live. Ascend910 compilation measured just over 6x
+# [block_rows, block_feature] at D=128, so use the same conservative budget as
+# the single-row feature check instead of FLA's post-norm-only 3x budget.
+_FWD_MEMORY_MULTIPLIER = 6.0
 _LARGE_BD = 2048
 _LARGE_BD_MEMORY_MULTIPLIER = 4.0
 _MAX_BT = 128
