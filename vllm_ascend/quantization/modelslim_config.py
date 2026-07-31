@@ -721,6 +721,13 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            if model_type == "kimi_k3" and ".shared_experts." in prefix:
+                # Kimi K3 stores W4A8 shared-expert linears with per-channel
+                # scales, while its routed experts remain per-group.
+                from .methods.w4a8 import AscendW4A8DynamicLinearMethod
+
+                if isinstance(scheme, AscendW4A8DynamicLinearMethod):
+                    scheme.enable_per_channel_for_kimi_shared_expert()
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (

@@ -19,6 +19,7 @@ from vllm_ascend.quantization.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
@@ -191,6 +192,30 @@ class TestAscendModelSlimConfig(TestBase):
             "experts.0.up_proj",
             "experts.0.down_proj",
         ]
+
+    def test_kimi_k3_shared_expert_w4a8_uses_per_channel_scheme(self):
+        prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        config = AscendModelSlimConfig({f"{prefix}.weight": "W4A8_DYNAMIC"})
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_config.model_type = "kimi_k3"
+        vllm_config.model_config.hf_text_config = MagicMock()
+        linear = MagicMock(spec=LinearBase)
+        scheme = MagicMock(spec=AscendW4A8DynamicLinearMethod)
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=scheme,
+            ),
+            patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear, prefix)
+
+        scheme.enable_per_channel_for_kimi_shared_expert.assert_called_once_with()
 
     def test_missing_linear_weight_without_gate_capability_does_not_fall_back(self):
         config = AscendModelSlimConfig({})

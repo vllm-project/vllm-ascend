@@ -500,12 +500,20 @@ def test_per_channel_quantized_shared_situ_uses_dequant_situ_quant(monkeypatch, 
     down_proj.assert_not_called()
     fast_dynamic_quant.assert_called_once_with(hidden_states)
     assert fast_quant_matmul.call_count == 2
+    gate_up_call = fast_quant_matmul.call_args_list[0]
+    assert gate_up_call.args == (quantized_input, gate_up_proj.weight, gate_up_proj.weight_scale)
+    assert gate_up_call.kwargs["pertoken_scale"] is None
+    assert gate_up_call.kwargs["output_dtype"] == torch.int32
     situ_call = custom_ops.dequant_situ_quant.call_args.kwargs
     assert situ_call["x"] is gate_up
     assert situ_call["weight_scale"] is gate_up_proj.weight_scale_fp32
     assert situ_call["activation_scale"] is input_scale
     assert situ_call["beta"] == 4.0
     assert situ_call["linear_beta"] == 25.0
+    down_call = fast_quant_matmul.call_args_list[1]
+    assert down_call.args == (quantized_situ, down_proj.weight, down_proj.weight_scale)
+    assert down_call.kwargs["pertoken_scale"] is situ_scale
+    assert down_call.kwargs["output_dtype"] == hidden_states.dtype
 
 
 def test_per_group_w4a8_shared_experts_use_quantized_linear_path(monkeypatch):

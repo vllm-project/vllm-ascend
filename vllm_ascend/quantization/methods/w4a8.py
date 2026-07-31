@@ -48,7 +48,8 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     The names below use ``linear`` as the checkpoint prefix of a linear layer,
     ``input_size`` as the logical input dimension, ``output_size`` as the
     logical output dimension, and ``group_size`` as the number of input
-    channels per weight quantization group.
+    channels per weight quantization group. A ``group_size`` of ``0`` selects
+    per-channel weight quantization.
 
     For ``quant_version != "1.0.0"``, the original linear weights are:
 
@@ -56,10 +57,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
       Each int8 element stores one 4-bit weight value.
     - ``linear.weight_scale``: ``params_dtype``, ``[output_size, 1]``.
     - ``linear.weight_offset``: ``params_dtype``, ``[output_size, 1]``.
-    - ``linear.weight_scale_second``: ``params_dtype``,
+    - For per-group quantization, ``linear.weight_scale_second`` and
+      ``linear.weight_offset_second`` have shape
       ``[output_size, input_size // group_size]``.
-    - ``linear.weight_offset_second``: ``torch.int64``,
-      ``[output_size, input_size // group_size]``.
+    - For per-channel quantization, ``weight_scale`` and ``weight_offset``
+      are the only scale tensors; no second-level tensors are present.
 
     For ``quant_version == "1.0.0"``, the original linear weights are:
 
@@ -68,10 +70,10 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
       dimension.
     - ``linear.weight_scale``: ``params_dtype``, ``[output_size, 1]``.
     - ``linear.weight_offset``: ``params_dtype``, ``[output_size, 1]``.
-    - ``linear.weight_scale_second``: ``params_dtype``,
-      ``[output_size, input_size // group_size]``.
-    - ``linear.weight_offset_second``: ``torch.int64``,
-      ``[output_size, input_size // group_size]``.
+    - For per-group quantization, ``linear.weight_scale_second`` and
+      ``linear.weight_offset_second`` have shape
+      ``[output_size, input_size // group_size]``. Per-channel quantization
+      does not store second-level scale or offset tensors.
     - ``linear.scale_bias``: ``torch.float32``, ``[output_size, 1]`` for
       column-parallel linear layers and ``[output_size, 16]`` for
       row-parallel linear layers.
@@ -86,13 +88,15 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     After processing, ``torch_npu.npu_weight_quant_batchmatmul`` is called with
     ``weight`` as ``torch.int32`` in the operator-required packed layout
     with shape ``[input_size, output_size // 8]`` and
-    ``antiquant_scale`` as ``weight_scale * weight_scale_second`` converted to
-    ``x.dtype`` with shape ``[input_size // group_size, output_size]``.
+    ``antiquant_scale`` as either the per-channel ``weight_scale`` or the
+    per-group product ``weight_scale * weight_scale_second``, converted to
+    ``x.dtype``.
     """
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
+        self.is_per_channel_weight = self.group_size == 0
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
         self._uses_kimi_k3_shared_expert_per_channel = (
@@ -104,6 +108,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 
     def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
         return self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
+
+    def enable_per_channel_for_kimi_shared_expert(self) -> None:
+        """Select the per-channel layout for a Kimi K3 shared-expert Linear."""
+        self.group_size = 0
+        self.is_per_channel_weight = True
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Create weight parameters.
@@ -134,10 +143,13 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
-        params_dict["weight_scale_second"] = torch.empty(output_size, input_size // self.group_size, dtype=params_dtype)
-        params_dict["weight_offset_second"] = torch.empty(
-            output_size, input_size // self.group_size, dtype=params_dtype
-        )
+        if not self.is_per_channel_weight:
+            params_dict["weight_scale_second"] = torch.empty(
+                output_size, input_size // self.group_size, dtype=params_dtype
+            )
+            params_dict["weight_offset_second"] = torch.empty(
+                output_size, input_size // self.group_size, dtype=params_dtype
+            )
 
         # NOTE: In w4a8 quantization implementation,
         #       for down_proj and o_proj(layer_type == "row") scale_bias shape is [output_size, 16],
@@ -189,7 +201,24 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = None,
     ) -> torch.Tensor:
-        # NOTE: activation `x` is not quantized
+        if self.is_per_channel_weight:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+            need_unsqueeze = pertoken_scale.dim() == 2
+            if need_unsqueeze:
+                quantized_x = quantized_x.squeeze(dim=1)
+                pertoken_scale = pertoken_scale.squeeze(dim=1)
+
+            output = torch_npu.npu_quant_matmul(
+                quantized_x,
+                layer.weight,
+                layer.weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias,
+                output_dtype=x.dtype,
+            )
+            return output.unsqueeze(dim=1) if need_unsqueeze else output
+
+        # Per-group INT4 weights use the weight-only quantized operator.
         return torch_npu.npu_weight_quant_batchmatmul(
             x,
             layer.weight,
@@ -200,33 +229,22 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         uses_per_channel_shared_expert = self._uses_per_channel_shared_expert(layer)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.flatten().to(torch.float32)
-        layer.weight_offset.data = layer.weight_offset.data.flatten()
-
-        if uses_per_channel_shared_expert:
-            # Kimi K3 shared experts use per-channel W4A8. Their overlap path
-            # calls npu_quant_matmul directly, so prepare its packed int4
-            # weight in FRACTAL_NZ once after loading instead of casting on
-            # every forward. The per-group tensors, if allocated by the
-            # generic Linear adapter, are intentionally not consumed here.
-            if self.new_quant_version:
-                assert layer.weight.data.shape[-1] % 4 == 0, (
-                    f"the last dim of weight needs to be divided by 4 but got shape {layer.weight.data.shape}"
-                )
-                layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
-            else:
-                layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
-            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
-            return
-
         layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale_second.data, scale_bias = self.process_scale_second(
-            layer.weight.data,
-            layer.weight_scale.data,
-            layer.weight_scale_second.data.transpose(0, 1).contiguous(),
-            is_new_quant=self.new_quant_version,
-        )
+        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_offset.data = layer.weight_offset.data.flatten()
+        if self.is_per_channel_weight:
+            # QuantMatmul consumes the checkpoint dtype, while the fused SiTU
+            # dequantization step requires an FP32 copy of the same scale.
+            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+        scale_bias = None
+        if not self.is_per_channel_weight:
+            layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
+            layer.weight_scale_second.data, scale_bias = self.process_scale_second(
+                layer.weight.data,
+                layer.weight_scale.data,
+                layer.weight_scale_second.data.transpose(0, 1).contiguous(),
+                is_new_quant=self.new_quant_version,
+            )
 
         if self.new_quant_version:
             # Process the loaded data based on layer type
@@ -235,23 +253,26 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                     layer.scale_bias.data = layer.scale_bias.data.flatten()
                 else:
                     layer.scale_bias.data = layer.scale_bias.data.contiguous()
-        else:
-            if scale_bias is not None:
-                param = torch.nn.Parameter(scale_bias, requires_grad=False)
-                layer.register_parameter("weight_scale_bias", param)
+        elif scale_bias is not None:
+            param = torch.nn.Parameter(scale_bias, requires_grad=False)
+            layer.register_parameter("weight_scale_bias", param)
 
-        # Convert to NPU-specific int4pack format
+        # Convert to NPU-specific int4pack format.
         if self.new_quant_version:
-            # weights on disk are already in packed int4 format
-            # pack 4 int8(int4*2) to int32
+            # Weights on disk are already in packed int4 format; group four
+            # int8 bytes into one int32 storage element.
             assert layer.weight.data.shape[-1] % 4 == 0, (
                 f"the last dim of weight needs to be divided by 4 but got shape {layer.weight.data.shape}"
             )
             layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
         else:
-            # weights are not compressed
-            # need to be packed via npu_convert_weight_to_int4pack
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
+
+        if uses_per_channel_shared_expert:
+            # The shared-expert overlap path uses npu_quant_matmul, which
+            # requires its packed INT4 x2 tensor in FRACTAL_NZ. Cast once at
+            # load time after int4 packing rather than in every forward.
+            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
