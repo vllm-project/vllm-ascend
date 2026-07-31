@@ -65,6 +65,7 @@ from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 FLASHCOMM_DENSE_TOKEN_THRESHOLD = 1000
 
 
+# TODO: remove this wrapper when vllm-ascend supports sequence parallel on model runner v2.
 @contextmanager
 def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
     """Pad batches before v2 selects an eager or graph execution shape.
