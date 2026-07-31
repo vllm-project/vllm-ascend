@@ -4,13 +4,13 @@
 
 vLLM-Ascend now supports long-sequence context parallel. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Using the `Qwen3-235B-A22B-w8a8` (Quantized version) model as an example, use 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
+Using the `Qwen3-235B-A22B-w8a8` (Quantized version) model as an example, use 1 Atlas 800 A3 (64GB × 16) server to deploy the single node "pd co-locate" architecture.
 
 ## Environment Preparation
 
 ### Model Weight
 
-- `Qwen3-235B-A22B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
+- `Qwen3-235B-A22B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -63,7 +63,7 @@ docker run --rm \
 
 ### Single-node Deployment
 
-`Qwen3-235B-A22B-w8a8` can be deployed on 1 Atlas 800 A3（64G*16）.
+`Qwen3-235B-A22B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 Quantized version needs to start with parameter `--quantization ascend`.
 
 Run the following script to execute online 128k inference.

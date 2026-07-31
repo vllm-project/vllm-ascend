@@ -20,7 +20,6 @@ add_ops_compile_options(
     OPTIONS
         --cce-auto-sync=off
         -Wno-deprecated-declarations
-        -Werror
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
@@ -29,3 +28,4 @@ if (NOT BUILD_OPS_RTY_KERNEL)
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 endif()
+

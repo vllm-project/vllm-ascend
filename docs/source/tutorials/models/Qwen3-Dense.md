@@ -24,20 +24,20 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions for Atlas A2/A3 inference products:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 **Quantized Versions for Atlas inference products:**
 
@@ -68,7 +68,7 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 **Docker Run:**
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 === "Atlas A3 inference products"
 
@@ -263,7 +263,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --data-parallel-size 1 \
         --tensor-parallel-size 2 \
         --served-model-name qwen3 \
-        --distributed_executor_backend "mp" \
+        --distributed-executor-backend "mp" \
         --max-model-len 40960 \
         --max-num-batched-tokens 16384 \
         --max-num-seqs 64 \
@@ -415,17 +415,17 @@ models = [
         abbr='vllm-api-general-chat',
         path="your_model_path",
         model="qwen3",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "127.0.0.1",
-        host_port = 2001,
-        max_out_len = 32768,
-        batch_size = 32,
+        request_rate=0,
+        retry=2,
+        host_ip="127.0.0.1",
+        host_port=2001,
+        max_out_len=32768,
+        batch_size=32,
         trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0.6,
-            top_k = 20,
-            top_p = 0.95,
+        generation_kwargs=dict(
+            temperature=0.6,
+            top_k=20,
+            top_p=0.95,
         ),
         pred_postprocessor=dict(type=extract_non_reasoning_content)
     )
@@ -471,7 +471,7 @@ models = [
         trust_remote_code=False,
         generation_kwargs=dict(
             temperature=0,
-            ignore_eos = True
+            ignore_eos=True
         ),
     )
 ]
