@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import threading
+import time
 from collections.abc import Callable, Generator
 from typing import Any
 
@@ -82,6 +83,12 @@ from vllm_ascend.memcache_comm_fence import (
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
 # multi-layer load time.
 LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
+
+# A partial snapshot can be visible to readers before the rank responsible for
+# saving it has published its final layer.
+MEMCACHE_UNMATCHED_STATE = -3101
+PARTIAL_LEASE_RETRY_COUNT = 10
+PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 
 
 class KVPoolWorker:
@@ -1477,6 +1484,22 @@ class KVPoolWorker:
                     leased_keys = []
                     for gva_index, lease_res in zip(valid_gva_indices, lease_results):
                         block_idx = block_indices[gva_index]
+                        if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
+                            partial_key = keys[gva_index]
+                            for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
+                                time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
+                                retry_results = self.m_store.batch_add_lease(
+                                    [partial_key],
+                                    LAYERWISE_READ_LEASE_TTL_MS,
+                                )
+                                if len(retry_results) != 1:
+                                    raise RuntimeError(
+                                        "MemCache partial lease retry returned "
+                                        f"unexpected number of results: {len(retry_results)}"
+                                    )
+                                lease_res = retry_results[0]
+                                if lease_res != MEMCACHE_UNMATCHED_STATE:
+                                    break
                         block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
                         if lease_res == 0:
                             leased_keys.append(keys[gva_index])

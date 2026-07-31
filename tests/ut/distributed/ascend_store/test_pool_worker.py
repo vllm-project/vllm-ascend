@@ -1774,6 +1774,50 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
+    def test_partial_lease_retries_until_snapshot_is_readable(self):
+        worker = self._make_gva_worker()
+        full_info = MagicMock()
+        full_info.size.return_value = 64
+        full_info.gva_list.return_value = [201]
+        partial_info = MagicMock()
+        partial_info.size.return_value = 64
+        partial_info.gva_list.return_value = [202]
+        worker.m_store.batch_get_key_info.return_value = [
+            full_info,
+            partial_info,
+        ]
+        worker.m_store.batch_add_lease.side_effect = [
+            [0, -3101],
+            [0],
+        ]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            target_token_len=24,
+            block_ids=[7, 8],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=20,
+                kvpool_cached_tokens=20,
+                can_load=True,
+            ),
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep") as sleep:
+            worker._prepare_load_gvas([request])
+
+        partial_key = worker._make_layerwise_partial_key(request, 0, 1, 20)
+        self.assertEqual(
+            worker.m_store.batch_add_lease.call_args_list[1].args[0],
+            [partial_key],
+        )
+        sleep.assert_called_once()
+        self.assertEqual(request.load_keys, [worker._make_layerwise_gva_key(0, "h0"), partial_key])
+        self.assertEqual(request.partial_load_gvas_by_group, [202])
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
     def test_multi_group_load_failure_stops_before_forward(self):
         worker = self._make_gva_worker(2)
         valid_info = MagicMock()
