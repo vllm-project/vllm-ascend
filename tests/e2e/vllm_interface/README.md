@@ -16,3 +16,47 @@ The test checks:
 
 For monkey-patched callables, direct calls are checked against the replacement signature. The test parses Python source
 with `ast`; it does not import `torch_npu`, initialize an NPU, download a model, or execute inference.
+
+## Source-based mapping generator (POC)
+
+`generate_interface_boundaries.py` rebuilds the low-noise subset of the mapping directly from a checked-out vLLM and
+vllm-ascend source pair. It currently discovers:
+
+- explicit monkey patches made with assignment or `setattr`;
+- patch targets imported at module or function scope;
+- simple target aliases such as `PATCH_TARGET = ImportedVllmClass`;
+- `setattr` names resolved from string constants, string collections, or one live candidate;
+- lambda and direct `property(...)` replacements, while unresolved wrapper factories are reported for review;
+- direct inheritance from a statically resolved vLLM class;
+- verified overrides whose effective parent implementation is resolved through the combined MRO.
+
+The POC targets vLLM main. Branches guarded by an exact `vllm_version_is("<tag>")` check are treated as release-only;
+the opposite branch is indexed for main. Top-level imports under the selected branch and `try` blocks are included.
+An incomplete or ambiguous vLLM/vllm-ascend MRO is reported as unresolved instead of choosing a likely parent.
+
+The generator is consumer-first. A downstream patch or inheritance declaration whose upstream target cannot be resolved
+is written to the unresolved output instead of being silently dropped. It is AST-only and requires neither an NPU nor
+package imports.
+
+Schema version 2 stores the replacement definition file in each consumer and keeps patch evidence separately under
+`e`. Evidence includes the assignment file and line, lexical scope, guards, patch kind, and every statically discovered
+assignment occurrence. Python parse failures stop generation instead of silently reducing coverage.
+
+Example:
+
+```bash
+python tests/e2e/vllm_interface/generate_interface_boundaries.py \
+  --vllm-root /path/to/vllm \
+  --ascend-root /path/to/vllm-ascend \
+  --expect-vllm-sha <vllm-sha> \
+  --expect-ascend-sha <vllm-ascend-sha> \
+  --output generated_boundaries.jsonl \
+  --unresolved-output unresolved_relations.jsonl \
+  --compare-with tests/e2e/vllm_interface/interface_boundaries.jsonl \
+  --report comparison_report.json
+```
+
+The expected SHA options are recommended for reproducible local generation so that a comparison cannot accidentally use
+a different source pair.
+The comparison report separates exact edge matches from downstream endpoint coverage; this prevents a re-export path
+change from being counted as a missing downstream dependency.
