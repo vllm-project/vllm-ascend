@@ -7107,3 +7107,398 @@ def test_v024_comparison_reports_descriptor_kind_changes_separately() -> None:
             "generated": ["property", "ordinary", "ordinary"],
         }
     ]
+
+
+def test_v024_module_classmethod_replacement_keeps_installed_classmethod(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    @classmethod
+    def run(cls, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+@classmethod
+def replacement(cls, value):
+    return value
+
+
+Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_descriptor_kind,
+        patches[0].downstream_descriptor_kind,
+        patches[0].installed_descriptor_kind,
+    ) == ("classmethod", "classmethod", "classmethod")
+    assert not findings
+
+
+def test_v024_typed_lazy_instance_patch_keeps_upstream_descriptor_for_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/platforms/interface.py",
+        """
+class Platform:
+    @classmethod
+    def verify(cls, value):
+        return value
+""",
+    )
+    _write(
+        vllm_root,
+        "vllm/platforms/__init__.py",
+        """
+from typing import TYPE_CHECKING
+from .interface import Platform
+
+if TYPE_CHECKING:
+    current_platform: Platform
+
+
+def __getattr__(name):
+    if name == "current_platform":
+        return Platform()
+    raise AttributeError(name)
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.platforms import current_platform
+
+
+def replacement(value):
+    return value
+
+
+current_platform.verify = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_descriptor_kind,
+        patches[0].downstream_descriptor_kind,
+        patches[0].installed_descriptor_kind,
+    ) == ("classmethod", "ordinary", None)
+    assert len(findings) == 1
+    assert (
+        findings[0].reason_code,
+        findings[0].supplemental,
+        findings[0].upstream_descriptor_kind,
+        findings[0].downstream_descriptor_kind,
+        findings[0].installed_descriptor_kind,
+    ) == (
+        "descriptor_kind_mismatch",
+        True,
+        "classmethod",
+        "ordinary",
+        None,
+    )
+
+
+def test_v024_module_callable_patch_ignores_descriptor_decorator_uncertainty(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+@runtime_decorator
+def run(value):
+    return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_descriptor_kind,
+        patches[0].downstream_descriptor_kind,
+        patches[0].installed_descriptor_kind,
+    ) == (None, "ordinary", None)
+    assert not [finding for finding in findings if finding.supplemental]
+
+
+def test_v024_staticmethod_lambda_patch_records_wrapper_evidence(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    @staticmethod
+    def run(value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+Target.run = staticmethod(lambda value: value)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_descriptor_kind,
+        patches[0].downstream_descriptor_kind,
+        patches[0].installed_descriptor_kind,
+    ) == ("staticmethod", "ordinary", "staticmethod")
+    assert len(patches[0].evidence) == 1
+    assert (
+        patches[0].evidence[0].patch_kind,
+        patches[0].evidence[0].installed_descriptor_kind,
+    ) == ("staticmethod", "staticmethod")
+    assert not findings
+
+
+def test_v024_pinned_torch_inference_mode_is_an_ordinary_descriptor(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import torch
+
+
+class Base:
+    @torch.inference_mode()
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    pinned_relations, pinned_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={
+            "torch": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+        },
+    ).generate()
+    unregistered_relations, unregistered_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"torch": "unregistered-version"},
+    ).generate()
+
+    pinned = next(relation for relation in pinned_relations if relation.relation == "override")
+    unregistered = next(relation for relation in unregistered_relations if relation.relation == "override")
+    assert pinned.upstream_descriptor_kind == "ordinary"
+    assert not pinned_findings
+    assert unregistered.upstream_descriptor_kind == "unknown"
+    assert len(unregistered_findings) == 1
+    assert unregistered_findings[0].reason_code == "unknown_descriptor_kind"
+
+
+def test_v024_outer_classmethod_determines_kind_after_unknown_inner_decorator(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @classmethod
+    @runtime_descriptor
+    def run(cls, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @classmethod
+    def run(cls, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert (
+        override.upstream_descriptor_kind,
+        override.downstream_descriptor_kind,
+        override.installed_descriptor_kind,
+    ) == ("classmethod", "classmethod", "classmethod")
+    assert not findings
+
+
+def test_v024_outer_unknown_decorator_masks_inner_classmethod(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @runtime_descriptor
+    @classmethod
+    def run(cls, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @classmethod
+    def run(cls, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert (
+        override.upstream_descriptor_kind,
+        override.downstream_descriptor_kind,
+        override.installed_descriptor_kind,
+    ) == ("unknown", "classmethod", "classmethod")
+    assert len(findings) == 1
+    assert findings[0].reason_code == "unknown_descriptor_kind"
+
+
+def test_v024_shadowed_builtin_staticmethod_decorator_is_unknown(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def runtime_descriptor(function):
+    return function
+
+
+staticmethod = runtime_descriptor
+
+
+class Base:
+    @staticmethod
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert (
+        override.upstream_descriptor_kind,
+        override.downstream_descriptor_kind,
+        override.installed_descriptor_kind,
+    ) == ("unknown", "ordinary", "ordinary")
+    assert len(findings) == 1
+    assert findings[0].reason_code == "unknown_descriptor_kind"
