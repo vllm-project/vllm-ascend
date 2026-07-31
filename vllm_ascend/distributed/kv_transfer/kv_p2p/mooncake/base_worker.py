@@ -3,7 +3,7 @@
 """Common worker-side logic for Mooncake KV transfer connectors."""
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 import torch_npu  # noqa: F401
@@ -63,13 +63,7 @@ class MooncakeBaseConnectorWorker:
 
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
-        self._get_prefill_decode_size()
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
-        if self._prefill_tp_size < self._decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be greater than "
-                f"or equal to decode_tp_size: {self._decode_tp_size}"
-            )
 
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -112,28 +106,6 @@ class MooncakeBaseConnectorWorker:
         self.xfer_stats = MooncakeKVConnectorStats()
 
         logger.info("Initializing Mooncake worker %s", engine_id)
-
-    def _get_prefill_decode_size(self) -> None:
-        prefill_config: dict[str, Any] = (
-            self.kv_transfer_config.get_from_extra_config("prefill", {})
-        )
-        decode_config: dict[str, Any] = (
-            self.kv_transfer_config.get_from_extra_config("decode", {})
-        )
-        if "tp_size" not in prefill_config or "dp_size" not in prefill_config:
-            raise ValueError("Mooncake prefill config requires tp_size and dp_size")
-        if "tp_size" not in decode_config or "dp_size" not in decode_config:
-            raise ValueError("Mooncake decode config requires tp_size and dp_size")
-
-        self._prefill_tp_size = prefill_config["tp_size"]
-        self._prefill_dp_size = prefill_config["dp_size"]
-        self._prefill_pp_size = prefill_config.get("pp_size", 1)
-        self._prefill_pp_layer_partition = prefill_config.get("pp_layer_partition")
-        self._decode_tp_size = decode_config["tp_size"]
-        self._decode_dp_size = decode_config["dp_size"]
-        self._decode_pp_size = decode_config.get("pp_size", 1)
-        if self._decode_pp_size != 1:
-            raise ValueError("Decode pipeline parallel size must be 1")
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Register model KV caches for D2D transfer."""
