@@ -252,7 +252,7 @@ The final landing is therefore:
 > gather while another is still blocked in `_process_input_queue` or in
 > `future.result()`. The `all_gather` then deadlocks; the stuck EngineCore can
 > no longer drain its worker shared-memory broadcast channel, the worker's
-> `sample_tokens` response has nowhere to land, and after 60 s the engine dies
+> `sample_tokens` response has nowhere to land, and after 60s the engine dies
 > with `RPC call to sample_tokens timed out` (observed intermittently — "5 GPQA
 > runs OK, 6th hangs" — because the trigger depends on per-run completion
 > timing). This is independent of whether expert-parallel spans DP ranks: the

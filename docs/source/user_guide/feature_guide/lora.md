@@ -6,12 +6,12 @@ Like vLLM, vllm-ascend supports LoRA as well. The usage and more details can be 
 
 You can refer to [Supported Models](https://docs.vllm.ai/en/latest/models/supported_models/) to find which models support LoRA in vLLM.
 
-You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode Guide](./graph_mode.md) for a better LoRA performance.
+You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode Guide](./graph_mode.md) for better LoRA performance.
 
 Address for downloading models:
 
 - base model: <https://www.modelscope.cn/models/vllm-ascend/Llama-2-7b-hf/files>
-- lora model: <https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-test/files>
+- loRA model: <https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-test/files>
 
 ## Example
 
@@ -25,6 +25,6 @@ vllm serve meta-llama/Llama-2-7b \
 
 ## Note
 
-- We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "csrc/kernels" directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).
+- We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the `csrc/kernels` directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).
 
 - You can enable LoRA with dense or mixture-of-experts (MoE) models now ([PR #10977](https://github.com/vllm-project/vllm-ascend/pull/10977)). However, we haven't supported expert-parallel (EP) or quantization yet when you run MoE models with LoRA.

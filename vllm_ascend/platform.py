@@ -336,13 +336,11 @@ class NPUPlatform(Platform):
     @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
+        if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
-                "PCP (Prefill Context Parallelism) and DP (Data Parallelism) "
-                "cannot be enabled simultaneously in the current version of vLLM Ascend. "
-                f"Got data_parallel_size={parallel_config.data_parallel_size} and "
-                f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
-                "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
+                "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
+                "Please set --prefill-context-parallel-size to 1. "
+                f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
             )
 
     @classmethod
@@ -506,6 +504,7 @@ class NPUPlatform(Platform):
         # is supported by vllm-ascend.
         if (
             vllm_config.parallel_config.tensor_parallel_size > 1
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and not vllm_config.model_config.enforce_eager
             and enable_sp(vllm_config)
         ):
@@ -637,13 +636,33 @@ class NPUPlatform(Platform):
 
         short_request_first_config = scheduler_extension_config.short_request_first_config
         enable_short_request_first = short_request_first_config.enabled
-        short_request_first_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
-        if enable_short_request_first and not short_request_first_supported_policy:
-            logger.warning_once(
-                "ShortRequestFirst scheduling currently supports only FCFS scheduler policy; "
-                "current policy=%s. The default waiting queue will be used.",
-                vllm_config.scheduler_config.policy,
-            )
+        if enable_short_request_first:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if vllm_config.scheduler_config.policy != "fcfs":
+                raise ValueError(
+                    "ShortRequestFirst scheduling requires scheduler_config.policy='fcfs', "
+                    f"but got {vllm_config.scheduler_config.policy!r}."
+                )
+            if scheduler_extension_config.batch_job_sched_config.enabled:
+                raise ValueError(
+                    "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
+                    "Please disable one of them."
+                )
+            if scheduler_extension_config.profiling_chunk_config.enabled:
+                raise ValueError(
+                    "ShortRequestFirst scheduling cannot be enabled with profiling_chunk_config. "
+                    "Please disable one of them."
+                )
+            if kv_role == "kv_consumer":
+                raise ValueError(
+                    "ShortRequestFirst scheduling is supported only on prefill or PD-mixed nodes, "
+                    "not PD-disaggregated D nodes (kv_role='kv_consumer')."
+                )
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
+                )
 
         if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
@@ -666,20 +685,6 @@ class NPUPlatform(Platform):
 
                 recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
                 vllm_config.scheduler_config = recompute_scheduler_config
-                if enable_short_request_first:
-                    logger.info(
-                        "Ascend ShortRequestFirst scheduler selected through recompute "
-                        "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, long_max_wait_ms=%.3f",
-                        vllm_config.scheduler_config.scheduler_cls,
-                        vllm_config.scheduler_config.policy,
-                        short_request_first_config.threshold,
-                        short_request_first_config.long_max_wait_ms,
-                    )
-        elif enable_short_request_first:
-            logger.warning_once(
-                "ShortRequestFirst scheduling requires recompute_scheduler_enable=true "
-                "in additional_config. ShortRequestFirst scheduling will not be activated.",
-            )
 
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
         if scheduler_extension_config.profiling_chunk_config.enabled:
@@ -699,7 +704,7 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
                 )
 
-        cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
+        cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
         if sfa_dcp_replicated_indexer:
@@ -708,12 +713,8 @@ class NPUPlatform(Platform):
                     f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                     f"== tp_size({parallel_config.tensor_parallel_size})."
                 )
-            enable_sparse_c8 = vllm_config.additional_config.get("enable_sparse_c8", False) and use_sparse
-            if enable_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
-                raise NotImplementedError(
-                    "SFA DCP with sparse C8 LightningIndexer cache is not supported on A5 yet. "
-                    "A5 uses the fused CKV quant sparse attention path, which needs a separate DCP LSE merge."
-                )
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                raise NotImplementedError("SFA DCP with replicated indexer is not supported on A5 yet.")
 
         if (
             vllm_config.kv_transfer_config is not None
@@ -723,7 +724,7 @@ class NPUPlatform(Platform):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
+                "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
             )
 
         if (
@@ -733,7 +734,7 @@ class NPUPlatform(Platform):
             and not sfa_dcp_replicated_indexer
         ):
             logger.warning_once(
-                "The current SFA's PCP implementation requires "
+                "The current SFA context-parallel implementation requires "
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
                 f" == block_size({cache_config.block_size}). "
                 f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
@@ -957,12 +958,6 @@ class NPUPlatform(Platform):
         is_draft_model_prefill = False
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
-        moe_comm_type = select_moe_comm_method(
-            num_tokens,
-            vllm_config,
-            is_draft_model=is_draft_model,
-        )
-        moe_comm_method = get_moe_comm_method(moe_comm_type)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -999,6 +994,15 @@ class NPUPlatform(Platform):
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
+
+        # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
+        # to ensure consistent communication method across all DP ranks
+        moe_comm_type = select_moe_comm_method(
+            max_tokens_across_dp,
+            vllm_config,
+        )
+        moe_comm_method = get_moe_comm_method(moe_comm_type)
+
         mc2_mask = None
         padded_num_tokens = None
         if num_tokens is not None:
