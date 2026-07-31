@@ -1207,14 +1207,15 @@
 # ** 28.1. File: worker/patch_v2/patch_topk_topp_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p`
-#   2. `vllm.v1.worker.gpu.sample.states.apply_top_k_top_p`
+#   2. `vllm.v1.worker.gpu.sample.sampler.apply_top_k_top_p`
+#   3. `vllm.v1.worker.gpu.sample.states.apply_top_k_top_p`
 #    Why:
 #       V2 nightly validation: force the PyTorch path by disabling upstream
 #       `current_platform.is_cpu()` and `HAS_TRITON and batch>=8` branches.
-#       V2 SamplingStates binds apply_top_k_top_p at import time, so both the
-#       source module and that local name must be rebound.
+#       V2 binds apply_top_k_top_p at import time in sampler (hot path) and
+#       states, so the source module and both local names must be rebound.
 #    How：
-#       Replace both bindings so they always call `apply_top_k_top_p_pytorch`.
+#       Replace all three bindings so they always call `apply_top_k_top_p_pytorch`.
 #       Loaded after `patch_v2/patch_triton.py` under HAS_TRITON.
 #    Related PR (if no, explain why):
 #       Experimental patch for V2 nightly; not intended as a long-term Ascend change.
