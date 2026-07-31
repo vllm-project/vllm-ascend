@@ -46,6 +46,7 @@ jobs:
     runs-on: linux-aarch64-a3-0-cn12-001
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
+
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
