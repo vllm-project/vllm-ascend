@@ -87,9 +87,12 @@ class AscendInputBatch(InputBatch):
             num_tokens,
             input_buffers,
         )
-        # seq_len equals to query_len
-        input_buffers.seq_lens_np[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens_np[num_reqs - 1] += num_tokens % num_reqs
+        # seq_len equals to query_len; distribute remainder evenly so no
+        # dummy request exceeds ceil(num_tokens / num_reqs) tokens.
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens_np[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens_np[num_reqs:] = 0
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
