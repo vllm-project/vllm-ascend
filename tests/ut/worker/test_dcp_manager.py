@@ -231,6 +231,52 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
     )
 
 
+def test_prepare_spec_decode_drafting_metadata_rebuilds_gqa_mask() -> None:
+    """A short extend becomes a decode after the first MTP draft step."""
+    manager = object.__new__(DCPManager)
+    manager.dcp_world_rank = 0
+    manager.speculative_config = SimpleNamespace(num_speculative_tokens=8)
+    manager._get_dcp_local_seq_lens = MagicMock(return_value=torch.tensor([[4, 3], [6, 5]], dtype=torch.int32))
+    rebuilt_mask = torch.ones((2, 1, 16), dtype=torch.bool)
+    manager.generate_mtp_attention_mask_for_decode = MagicMock(return_value=rebuilt_mask)
+    manager.dcp_mtp_attn_mask = MagicMock()
+    manager.dcp_mtp_attn_mask.np = np.zeros((2, 9, 16), dtype=np.bool_)
+    manager.dcp_mtp_attn_mask.gpu = torch.zeros((2, 9, 16), dtype=torch.bool)
+    original_mask = torch.zeros((1, 9, 16), dtype=torch.bool)
+    common_attn_metadata = SimpleNamespace(
+        context_parallel_metadata=AscendDCPMetadata(
+            num_computed_tokens_of_dcp=[[3, 2], [5, 4]],
+            query_lens_cpu=torch.tensor([8, 1], dtype=torch.int32),
+            max_query_len=8,
+            dcp_mtp_attn_mask=original_mask,
+        ),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        is_prefilling=torch.tensor([False, True]),
+    )
+
+    with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False):
+        manager.prepare_spec_decode_drafting_cp_metadata(
+            common_attn_metadata=common_attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([6, 10], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([6, 10], dtype=torch.int32),
+            draft_index=1,
+        )
+
+    draft_metadata = common_attn_metadata.context_parallel_metadata
+    manager.generate_mtp_attention_mask_for_decode.assert_called_once()
+    histories, query_lens = manager.generate_mtp_attention_mask_for_decode.call_args.args
+    assert histories == [7, 11]
+    np.testing.assert_array_equal(
+        query_lens,
+        np.array([1, 1], dtype=np.int32),
+    )
+    assert manager.generate_mtp_attention_mask_for_decode.call_args.kwargs["num_decode_reqs"] == 2
+    manager.dcp_mtp_attn_mask.copy_to_gpu.assert_called_once_with(2)
+    assert draft_metadata.dcp_mtp_attn_mask.shape[0] == 2
+    assert not torch.any(common_attn_metadata.is_prefilling)
+
+
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
     manager = object.__new__(DCPManager)
     attn_metadata = SimpleNamespace(decode=None)

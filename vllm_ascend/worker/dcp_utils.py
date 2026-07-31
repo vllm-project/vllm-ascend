@@ -539,9 +539,11 @@ class DCPManager:
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
-        if is_mla and getattr(self, "speculative_config", None) is not None:
+        if getattr(self, "speculative_config", None) is not None:
             num_draft_reqs = query_lens_cpu.shape[0]
-            draft_histories = (dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
+            draft_base_seq_lens = dcp_metadata.draft_base_seq_lens if is_mla else seq_lens_for_dcp
+            assert draft_base_seq_lens is not None
+            draft_histories = (draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
             mask = self.generate_mtp_attention_mask_for_decode(
                 draft_histories.tolist(),
                 query_lens_cpu[:num_draft_reqs].numpy(),
