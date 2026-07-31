@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import dataclasses
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
@@ -31,6 +32,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
@@ -52,6 +54,7 @@ from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.sample.sampler import random_sample
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _disable_flash_comm_v1_context,
@@ -100,6 +103,58 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
     target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
     return target_argmax
+
+
+def _compute_probs_and_sample_next_token_ascend(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    use_fp64_gumbel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Ascend-compatible replacement for upstream ``compute_probs_and_sample_next_token``.
+
+    Reuses ``vllm_ascend.sample.sampler.random_sample`` which already handles
+    the NPU stream switching required for ``torch.exponential_``. The upstream
+    implementation calls ``torch.exponential_`` directly on the NPU tensor,
+    which is not supported on Ascend NPU.
+
+    Returns ``(next_token_ids, probs)`` where ``probs`` is the full softmax
+    probability distribution used by the rejection sampler.
+    """
+    if use_fp64_gumbel:
+        logger.warning_once(
+            "use_fp64_gumbel is not supported on Ascend NPU, "
+            "falling back to fp32."
+        )
+
+    if sampling_metadata.all_greedy:
+        # For greedy requests, draft_probs is not used in rejection sampling.
+        # Therefore, we can just return the logits.
+        probs = logits
+        next_token_ids = logits.argmax(dim=-1)
+        return next_token_ids, probs
+
+    assert sampling_metadata.temperature is not None
+
+    # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
+    # consistent with sampler.py's _SAMPLING_EPS threshold
+    temperature = sampling_metadata.temperature
+    # Avoid division by zero if there are greedy requests.
+    if not sampling_metadata.all_random:
+        is_greedy = temperature < _SAMPLING_EPS
+        temperature = torch.where(is_greedy, 1.0, temperature)
+    logits.div_(temperature.view(-1, 1))
+    probs = logits.softmax(dim=-1, dtype=torch.float32)
+
+    # Reuse ascend's random_sample which handles npu_stream_switch for
+    # exponential_ on NPU. Pass a clone because random_sample uses in-place
+    # div_ on probs, but we need the original probs for rejection sampling.
+    # NOTE: draft sampling ignores per-request generators (upstream behavior).
+    next_token_ids = random_sample(probs.clone(), generators={})
+
+    if not sampling_metadata.all_random:
+        greedy_token_ids = probs.argmax(dim=-1)
+        next_token_ids = torch.where(is_greedy, greedy_token_ids, next_token_ids)
+    return next_token_ids, probs
 
 
 # TODO(lilinsiman): Remove this code segment after future versions of the GLM
@@ -1048,12 +1103,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sample draft tokens from logits.
 
-        Thin Ascend wrapper around the upstream ``_sample_from_logits`` that
-        additionally tolerates ``sampling_metadata is None`` (e.g. during
-        ``dummy_run`` / profile run), in which case greedy argmax is used.
+        Ascend implementation of probabilistic draft sampling. Unlike the
+        upstream ``_sample_from_logits`` which uses ``torch.exponential_``
+        directly (not NPU-compatible), this method wraps the exponential
+        noise generation in ``npu_stream_switch`` to ensure correctness on
+        Ascend NPU.
+
+        When probabilistic draft sampling is disabled or ``sampling_metadata``
+        is None (e.g. during ``dummy_run`` / profile run), greedy argmax is
+        used and ``draft_probs`` is None.
         """
-        if sampling_metadata is None:
-            if self._enable_probabilistic_draft_probs:
+        if (
+            sampling_metadata is None
+            or not self._enable_probabilistic_draft_probs
+            or sampling_metadata.all_greedy
+        ):
+            if sampling_metadata is None and self._enable_probabilistic_draft_probs:
                 logger.warning(
                     "draft_sample_method='probabilistic' is enabled but "
                     "sampling_metadata is None (expected during dummy_run "
@@ -1061,9 +1126,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     "draft_probs will not be produced."
                 )
             return logits.argmax(dim=-1), None
-        if not self._enable_probabilistic_draft_probs:
-            return logits.argmax(dim=-1), None
-        return self._sample_from_logits(logits, sampling_metadata)
+
+        # Parallel drafting (e.g. DFlash) samples num_speculative_tokens rows
+        # per request in a single pass, so logits has batch_size * K rows while
+        # the sampling metadata is per-request. The rows are request-major
+        # (K consecutive slots per request), so repeat_interleave the
+        # per-request temperature to match before probabilistic sampling.
+        temperature = sampling_metadata.temperature
+        if temperature is not None and temperature.shape[0] != logits.shape[0]:
+            assert logits.shape[0] % temperature.shape[0] == 0
+            factor = logits.shape[0] // temperature.shape[0]
+            sampling_metadata = dataclasses.replace(
+                sampling_metadata,
+                temperature=temperature.repeat_interleave(factor, dim=0),
+            )
+
+        return _compute_probs_and_sample_next_token_ascend(
+            logits, sampling_metadata, self.use_fp64_gumbel
+        )
 
     def compute_draft_token_ids(
         self,
