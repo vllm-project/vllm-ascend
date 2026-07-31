@@ -943,7 +943,50 @@ class NPUModelRunner310(NPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            kv_cache[layer_name_inner] = (k_cache, v_cache)
+                            inner_spec = layer_kv_cache_spec[layer_name_inner]
+                            assert isinstance(inner_spec, AttentionSpec)
+                            assert inner_spec.page_size_bytes == kv_cache_spec.page_size_bytes
+                            assert inner_spec.dtype == dtype
+
+                            inner_supported_sizes = [
+                                support_size
+                                for support_size in self.attn_backend.get_supported_kernel_block_sizes()
+                                if support_size * inner_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
+                            ]
+                            if inner_supported_sizes:
+                                inner_block_size = inner_supported_sizes[0]
+                                inner_block_size_chunk = inner_spec.block_size // inner_block_size
+                                inner_cache_shape = self.attn_backend.get_kv_cache_shape(
+                                    num_blocks * inner_block_size_chunk,
+                                    inner_block_size,
+                                    inner_spec.num_kv_heads,
+                                    inner_spec.head_size,
+                                )
+                            else:
+                                inner_cache_shape = self.attn_backend.get_kv_cache_shape(
+                                    num_blocks,
+                                    inner_spec.block_size,
+                                    inner_spec.num_kv_heads,
+                                    inner_spec.head_size,
+                                )
+                            inner_k_shape = inner_cache_shape[1:]
+                            inner_v_shape = inner_k_shape
+                            assert math.prod(inner_k_shape) == k_cache.numel(), (
+                                f"Cannot alias shared KV cache for {layer_name_inner}: "
+                                f"base_layer={layer_name}, base_spec={kv_cache_spec}, "
+                                f"inner_spec={inner_spec}, base_k_shape={tuple(k_cache.shape)}, "
+                                f"inner_k_shape={inner_k_shape}"
+                            )
+                            assert math.prod(inner_v_shape) == v_cache.numel(), (
+                                f"Cannot alias shared V cache for {layer_name_inner}: "
+                                f"base_layer={layer_name}, base_spec={kv_cache_spec}, "
+                                f"inner_spec={inner_spec}, base_v_shape={tuple(v_cache.shape)}, "
+                                f"inner_v_shape={inner_v_shape}"
+                            )
+                            kv_cache[layer_name_inner] = (
+                                k_cache.view(inner_k_shape),
+                                v_cache.view(inner_v_shape),
+                            )
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:

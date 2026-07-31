@@ -84,6 +84,35 @@ def verify_and_update_config(cls, vllm_config) -> None:
     if cache_config.mamba_cache_mode == "align":
         cache_config.mamba_block_size = cache_config.block_size
     attn_page_size = cache_config.block_size * attn_page_size_1_token
+    speculative_config = vllm_config.speculative_config
+    draft_model_config = (
+        speculative_config.draft_model_config
+        if speculative_config is not None
+        else None
+    )
+    if draft_model_config is not None:
+        draft_parallel_config = (
+            speculative_config.draft_parallel_config or parallel_config
+        )
+        draft_attn_page_size_1_token = FullAttentionSpec(
+            block_size=1,
+            num_kv_heads=draft_model_config.get_num_kv_heads(
+                draft_parallel_config
+            ),
+            head_size=draft_model_config.get_head_size(),
+            dtype=kv_cache_dtype,
+        ).page_size_bytes
+        draft_attn_page_size = (
+            cache_config.block_size * draft_attn_page_size_1_token
+        )
+        if draft_attn_page_size > attn_page_size:
+            logger.info(
+                "Increasing the unified KV cache page size from %d to %d "
+                "bytes to accommodate speculative draft attention.",
+                attn_page_size,
+                draft_attn_page_size,
+            )
+            attn_page_size = draft_attn_page_size
     assert attn_page_size >= mamba_page_size
     if attn_page_size == mamba_page_size:
         # don't need to pad mamba page size

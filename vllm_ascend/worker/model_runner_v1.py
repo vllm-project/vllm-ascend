@@ -262,6 +262,27 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+def _align_attention_spec_page_size(
+    layer_spec: AttentionSpec,
+    aligned_page_size: int,
+    *,
+    prefer_block_size: bool,
+) -> None:
+    """Align an attention page without padding when its block can be scaled."""
+    layer_page_size = layer_spec.page_size_bytes
+    if layer_page_size >= aligned_page_size:
+        return
+    if prefer_block_size and aligned_page_size % layer_page_size == 0:
+        block_size_ratio = aligned_page_size // layer_page_size
+        object.__setattr__(
+            layer_spec,
+            "block_size",
+            layer_spec.block_size * block_size_ratio,
+        )
+        return
+    object.__setattr__(layer_spec, "page_size_padded", aligned_page_size)
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -5020,8 +5041,15 @@ class NPUModelRunner(GPUModelRunner):
                     mamba_page_size_padded = spec.page_size_bytes
             # align attn_page_size to mamba_page_size_padded
             for layer_name in attn_layer_names:
-                if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
-                    object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
+                layer_spec = kv_cache_spec[layer_name]
+                assert isinstance(layer_spec, AttentionSpec)
+                _align_attention_spec_page_size(
+                    layer_spec,
+                    mamba_page_size_padded,
+                    prefer_block_size=(
+                        get_ascend_device_type() == AscendDeviceType._310P
+                    ),
+                )
 
         return kv_cache_spec
 
