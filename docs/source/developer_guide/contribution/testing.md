@@ -57,7 +57,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     python3 -m pip install -r requirements-dev.txt
     ```
 
-=== "Single card"
+=== "Single-card"
 
     ```bash
 
@@ -95,7 +95,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip install -r requirements-dev.txt
     ```
 
-=== "Multi cards"
+=== "Multi-cards"
 
     ```bash
     # Update the vllm-ascend image

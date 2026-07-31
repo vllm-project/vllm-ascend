@@ -70,7 +70,6 @@ from vllm_ascend.memcache_comm_fence import (
     get_attention_compute_start_gate,
     reset_attention_compute_start_gate,
 )
-from vllm_ascend.utils import vllm_version_is
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
@@ -145,11 +144,7 @@ class KVPoolWorker:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = (
-            vllm_config.cache_config.hash_block_size
-            if vllm_version_is("0.25.1")
-            else vllm_config.cache_config.prefix_match_unit
-        )
+        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
@@ -300,19 +295,15 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        if self.backend.lower() == "memcache":
-            self.m_store = real_backend(  # type: ignore[misc]
-                parallel_config,
-                lazy_init=True,
-            )
-        else:
-            backend_kwargs = {}
-            if self.backend.lower() == "mooncake":
-                backend_kwargs["lazy_init"] = self.use_compress
-            self.m_store = real_backend(  # type: ignore[misc]
-                parallel_config,
-                **backend_kwargs,
-            )
+        backend_kwargs = {}
+        # lazy_init is enabled only for DSV4 compress models. The backend further
+        # gates this based on hardware: Mooncake requires ASCEND_ENABLE_FABRIC_MEM=1
+        # (A3 fabric memory), and Memcache requires device_sdma protocol.
+        backend_kwargs["lazy_init"] = self.use_compress
+        self.m_store = real_backend(  # type: ignore[misc]
+            parallel_config,
+            **backend_kwargs,
+        )
 
     def _init_kv_events(self, vllm_config) -> None:
         kv_event_config = vllm_config.kv_events_config
@@ -495,7 +486,7 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
@@ -512,11 +503,13 @@ class KVPoolWorker:
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
                     ready_event,
+                    invalid_block_ids=self._invalid_block_ids,
+                    invalid_block_ids_lock=self._invalid_block_ids_lock,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()

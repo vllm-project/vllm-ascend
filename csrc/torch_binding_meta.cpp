@@ -1417,24 +1417,6 @@ void npu_scatter_nd_update_v2_meta(
     return;
 }
 
-// N-gram spec decode meta
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec_decode_meta(
-    at::Tensor &token_ids,
-    const at::Tensor &num_tokens_no_spec,
-    const at::Tensor &sampled_token_ids,
-    const at::Tensor &discard_request_mask,
-    int64_t vocab_size,
-    int64_t min_n,
-    int64_t max_n,
-    int64_t k)
-{
-    auto batch_size = token_ids.sym_size(0);
-    at::Tensor next_token_ids = at::empty_symint(c10::SymDimVector{batch_size}, token_ids.options());
-    at::Tensor draft_token_ids = at::empty_symint(
-        c10::SymDimVector{batch_size, c10::SymInt(k)}, token_ids.options());
-    at::Tensor num_valid_draft_tokens = at::empty_symint(c10::SymDimVector{batch_size}, token_ids.options());
-    return std::make_tuple(token_ids, next_token_ids, draft_token_ids, num_valid_draft_tokens);
-}
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
     const at::Tensor & k,
@@ -1637,8 +1619,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-    // N-gram spec decode
-    ops.impl("npu_ngram_spec_decode", &vllm_ascend::meta::npu_ngram_spec_decode_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o

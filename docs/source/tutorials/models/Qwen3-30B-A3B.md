@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
 | Eagle3 Draft Model   | NA                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 **Quantized Versions for Atlas inference products:**
@@ -250,7 +250,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --quantization ascend \
         --distributed_executor_backend "mp" \
         --no-enable-prefix-caching \
-        --async-scheduling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
         --gpu-memory-utilization 0.95 \
@@ -542,7 +541,6 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
@@ -578,7 +576,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -615,7 +612,6 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
