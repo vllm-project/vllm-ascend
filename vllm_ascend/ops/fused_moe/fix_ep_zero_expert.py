@@ -82,8 +82,9 @@ from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
 
-from easyinfer.plugins.logging import patch_logger
-from easyinfer.plugins.registry import register_patch
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ===========================================================================
 # Patch 0b: enable vllm-ascend's NATIVE zero-expert handling (>= 0.23)
@@ -100,7 +101,6 @@ from easyinfer.plugins.registry import register_patch
 # patch will be silently skipped.  See the module docstring for details.
 
 
-@register_patch(target="vllm_ascend.ops.fused_moe.fused_moe_0_23_0")
 def patch_enable_native_zero_expert(module: object) -> None:
     # Guard against repeated patching (e.g. module reload or multiple imports).
     if getattr(module.AscendFusedMoE, "_ez_patched", False):
@@ -140,7 +140,7 @@ def patch_enable_native_zero_expert(module: object) -> None:
             return dataclasses.replace(self, routed_out=self.routed_out + other)
 
         FusedExpertsResult.__iadd__ = _fused_experts_result_iadd
-        patch_logger.info(
+        logger.info(
             "[fix_ep_zero_expert] Injected FusedExpertsResult.__iadd__"
         )
 
@@ -166,7 +166,7 @@ def patch_enable_native_zero_expert(module: object) -> None:
                 self.zero_expert_type = router.zero_expert_type
                 # Flag consumed by Patch 3 to decide whether to redirect.
                 router._ez_native_handled = True  # type: ignore[attr-defined]
-                patch_logger.info(
+                logger.info(
                     "[fix_ep_zero_expert] Enabled native zero-expert path: "
                     "num={}, type={}",
                     self.zero_expert_num,
@@ -183,8 +183,8 @@ def patch_enable_native_zero_expert(module: object) -> None:
                     "(bias.shape=%s, global_num_experts=%s).  "
                     "Cannot enable native zero-expert path — the model "
                     "will crash without ID sanitization.  "
-                    "The vllm-ascend version may be incompatible.",
-                    router.zero_expert_type,
+                    "The vllm-ascend version may be incompatible."
+                    % (router.zero_expert_type,
                     tuple(bias.shape) if bias is not None else "N/A",
                     self.global_num_experts,
                 )
@@ -218,7 +218,6 @@ def patch_enable_native_zero_expert(module: object) -> None:
 _pending_zero_expert_output: torch.Tensor | None = None
 
 
-@register_patch(target="vllm_ascend.ops.fused_moe.fused_moe")
 def patch_relocate_zero_expert_add(module: object) -> None:
     # Guard against repeated patching (consistent with the other patches).
     if getattr(module, "_ez_reloc_patched", False):
@@ -237,7 +236,7 @@ def patch_relocate_zero_expert_add(module: object) -> None:
         return expert_indices, expert_scales, torch.zeros_like(result)
 
     module.zero_experts_compute = _zero_experts_compute_stashing
-    patch_logger.info(
+    logger.info(
         "[fix_ep_zero_expert] Wrapped zero_experts_compute: identity "
         "contribution relocated to the runner (post all-reduce)"
     )
@@ -262,7 +261,6 @@ def patch_relocate_zero_expert_add(module: object) -> None:
 # any stale references in already-imported modules.
 
 
-@register_patch(target="vllm_ascend.ascend_forward_context")
 def patch_force_allgather_comm(module: object) -> None:
     if os.environ.get("EASYINFER_MOE_COMM", "").lower() != "allgather":
         return
@@ -281,7 +279,7 @@ def patch_force_allgather_comm(module: object) -> None:
         if selected is not None:
             if not _logged:
                 _logged = True
-                patch_logger.info(
+                logger.info(
                     "[fix_ep_zero_expert] MoE comm method overridden: "
                     "%s -> ALLGATHER",
                     selected,
@@ -307,7 +305,7 @@ def patch_force_allgather_comm(module: object) -> None:
             continue
         if mod_dict.get("select_moe_comm_method") is _orig:
             mod.select_moe_comm_method = _select
-            patch_logger.info(
+            logger.info(
                 "[fix_ep_zero_expert] Rebound select_moe_comm_method in %s",
                 mod.__name__,
             )
@@ -380,7 +378,7 @@ def _slice_zero_expert_output(
     # bounded noise, whereas a wrong slice is arbitrary garbage.
     if not _slice_layout_warned:
         _slice_layout_warned = True
-        patch_logger.warning(
+        logger.warning(
             "[fix_ep_zero_expert] Cannot map gathered zero-expert stash "
             "(rows={}) to local output (rows={}, ep_size={}); adding zeros "
             "for this and later calls",
@@ -391,7 +389,6 @@ def _slice_zero_expert_output(
     return torch.zeros_like(ref)
 
 
-@register_patch(target="vllm.model_executor.layers.fused_moe.runner.moe_runner")
 def patch_moe_runner_zero_expert(module: object) -> None:
     MoERunner = module.MoERunner
 
@@ -444,13 +441,20 @@ def patch_moe_runner_zero_expert(module: object) -> None:
         return _orig_maybe(self, result)
 
     MoERunner._maybe_add_zero_expert_output = _maybe
-    patch_logger.info(
+    logger.info(
         "[fix_ep_zero_expert] Patched MoERunner._maybe_add_zero_expert_output"
     )
 
-__all__ = [
-    "patch_enable_native_zero_expert",
-    "patch_relocate_zero_expert_add",
-    "patch_force_allgather_comm",
-    "patch_moe_runner_zero_expert",
-]
+def patch() -> None:
+    """Apply all 4 EP zero-expert patches (call with explicit module targets)."""
+    import vllm_ascend.ops.fused_moe.fused_moe_0_23_0 as _m0
+    import vllm_ascend.ops.fused_moe.fused_moe as _fm
+    import vllm_ascend.ascend_forward_context as _afc
+    import vllm.model_executor.layers.fused_moe.runner.moe_runner as _mr
+
+    logger.info("[fix_ep_zero_expert] Applying 4 EP patches...")
+    patch_enable_native_zero_expert(_m0)
+    patch_relocate_zero_expert_add(_fm)
+    patch_force_allgather_comm(_afc)
+    patch_moe_runner_zero_expert(_mr)
+    logger.info("[fix_ep_zero_expert] All 4 patches applied")
