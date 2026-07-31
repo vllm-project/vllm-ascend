@@ -103,16 +103,23 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             getattr(getattr(getattr(vllm_config, "model_config", None), "hf_config", None), "model_type", None)
             == "kimi_k3"
         )
+        self._force_weight_nz = False
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
-        return self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
+        return self._force_weight_nz or (
+            self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
+        )
 
     def enable_per_channel_for_kimi_shared_expert(self) -> None:
         """Select the per-channel layout for a Kimi K3 shared-expert Linear."""
         self.group_size = 0
         self.is_per_channel_weight = True
+        # This scheme instance is attached to one shared-expert projection.
+        # Retain that selection through weight loading, where layer.prefix is
+        # not a reliable discriminator for every vLLM Linear wrapper.
+        self._force_weight_nz = True
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Create weight parameters.
@@ -229,7 +236,14 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         uses_per_channel_shared_expert = self._uses_per_channel_shared_expert(layer)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
+        if uses_per_channel_shared_expert:
+            # WeightNZ is a layout of the unpacked INT8 tensor. For a W4
+            # checkpoint its internal format must be established before
+            # reinterpreting every four bytes as INT32; casting the packed
+            # result later leaves x2 as ND for aclnnQuantMatmulWeightNz.
+            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        else:
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()
         if self.is_per_channel_weight:
@@ -267,13 +281,6 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
         else:
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
-
-        if uses_per_channel_shared_expert:
-            # The shared-expert overlap path uses npu_quant_matmul, which
-            # requires its packed INT4 x2 tensor in FRACTAL_NZ. Cast once at
-            # load time after int4 packing rather than in every forward.
-            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-
 
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):

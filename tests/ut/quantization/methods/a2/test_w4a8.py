@@ -185,23 +185,25 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_convert_weight_to_int4pack")
     def test_process_per_channel_kimi_shared_expert_weight_to_nz(self, mock_int4pack, mock_format_cast):
-        self.method._uses_kimi_k3_shared_expert_per_channel = True
         self.method.enable_per_channel_for_kimi_shared_expert()
+        unpacked_nz_weight = torch.zeros((8, 32), dtype=torch.int8)
         packed_weight = torch.zeros((8, 4), dtype=torch.int32)
-        nz_weight = torch.ones((8, 4), dtype=torch.int32)
+        mock_format_cast.return_value = unpacked_nz_weight
         mock_int4pack.return_value = packed_weight
-        mock_format_cast.return_value = nz_weight
         layer = torch.nn.Module()
-        layer.prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
         layer.weight = torch.nn.Parameter(torch.zeros((32, 8), dtype=torch.int8), requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.bfloat16), requires_grad=False)
         layer.weight_offset = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.bfloat16), requires_grad=False)
 
         self.method.process_weights_after_loading(layer)
 
+        mock_format_cast.assert_called_once()
+        self.assertEqual(mock_format_cast.call_args.args[1], ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(mock_format_cast.call_args.args[0].shape, torch.Size([8, 32]))
         mock_int4pack.assert_called_once()
-        mock_format_cast.assert_called_once_with(packed_weight, ACL_FORMAT_FRACTAL_NZ)
-        self.assertEqual(layer.weight.data.data_ptr(), nz_weight.data_ptr())
+        self.assertEqual(mock_int4pack.call_args.args[0].shape, unpacked_nz_weight.shape)
+        self.assertEqual(mock_int4pack.call_args.args[0].dtype, torch.int32)
+        self.assertEqual(layer.weight.data.data_ptr(), packed_weight.data_ptr())
         self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
         self.assertEqual(layer.weight_scale_fp32.shape, torch.Size([32]))
 
