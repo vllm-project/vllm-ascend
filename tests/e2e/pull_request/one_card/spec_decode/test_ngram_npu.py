@@ -25,7 +25,7 @@ def test_ngram_npu_async_acceptance(
 
     speculative_config = {
         "method": "ngram_gpu",
-        "prompt_lookup_max": 2,
+        "prompt_lookup_max": 5,
         "prompt_lookup_min": 2,
         "num_speculative_tokens": num_speculative_tokens,
     }
