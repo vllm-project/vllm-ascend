@@ -4,6 +4,7 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
 _orig_post_init = SpeculativeConfig.__post_init__
+_orig_hf_config_override = SpeculativeConfig.hf_config_override
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
@@ -16,6 +17,8 @@ else:
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
+    if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
+        return _orig_hf_config_override(hf_config)
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type
         hf_config.model_type = "deepseek_mtp"

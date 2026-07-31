@@ -235,7 +235,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
     ):
@@ -246,6 +246,28 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
             positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+        if key is None:
+            # Gemma4 MTP reads K/V from the target cache. Reuse the regular
+            # rotary implementation with a throwaway key buffer.
+            dummy_key = (
+                torch.empty(query.shape[0], 0, self.head_size, dtype=query.dtype, device=query.device)
+                if HAS_TRITON
+                else torch.empty(
+                    (query.shape[0], 1, self.head_size) if query.ndim == 3 else (query.shape[0], self.head_size),
+                    dtype=query.dtype,
+                    device=query.device,
+                )
+            )
+            query, _ = rope_forward_oot(
+                positions,
+                query,
+                dummy_key,
+                self.cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                is_neox_style,
+            )
+            return query, None
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
