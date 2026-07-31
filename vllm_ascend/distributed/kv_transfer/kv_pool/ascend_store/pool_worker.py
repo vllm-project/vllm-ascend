@@ -128,6 +128,21 @@ class KVPoolWorker:
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
 
+        logger.warning(
+            "KVPOOL_RANK global_rank=%d local_rank=%d tp_rank=%d tp_size=%d "
+            "pp_rank=%d pp_size=%d pcp_rank=%d pcp_size=%d dcp_rank=%d dcp_size=%d",
+            parallel_config.rank,
+            self.local_rank,
+            self.tp_rank,
+            self.tp_size,
+            self.pp_rank,
+            self.pp_size,
+            self.pcp_rank,
+            self.pcp_size,
+            self.dcp_rank,
+            self.dcp_size,
+        )
+
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
         self.use_layerwise = use_layerwise
@@ -611,18 +626,52 @@ class KVPoolWorker:
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
         physical_layers = set()
+        hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
+            if phys >= hidden_layers:
+                logger.warning(
+                    "KVREG_LAYER_SKIPPED pp=%d tp=%d group=%d layer=%s "
+                    "physical_layer=%d hidden_layers=%d local_layers=%d",
+                    self.pp_rank,
+                    self.tp_rank,
+                    group_id,
+                    layer_name,
+                    phys,
+                    hidden_layers,
+                    self.num_layers,
+                )
                 continue
             physical_layers.add(phys)
             cache_or_caches = self.kv_caches[layer_name]
-            for cache in self._as_cache_tuple(cache_or_caches):
+            for cache_index, cache in enumerate(self._as_cache_tuple(cache_or_caches)):
                 base_addr = cache.data_ptr()
-                block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+                block_len, block_stride, region_len, block_size_scale = self._get_cache_block_metadata(cache)
                 group_addrs.append(base_addr)
                 group_block_lens.append(block_len)
                 group_block_strides.append(block_stride)
+                logger.warning(
+                    "KVREG_CACHE pp=%d tp=%d group=%d layer=%s physical_layer=%d "
+                    "cache_index=%d shape=%s stride=%s dtype=%s element_size=%s "
+                    "base_addr=%s num_blocks=%s block_size_scale=%s "
+                    "block_len=%s block_stride=%s region_len=%s",
+                    self.pp_rank,
+                    self.tp_rank,
+                    group_id,
+                    layer_name,
+                    phys,
+                    cache_index,
+                    tuple(cache.shape),
+                    tuple(cache.stride()),
+                    cache.dtype,
+                    cache.element_size(),
+                    base_addr,
+                    self.num_blocks,
+                    block_size_scale,
+                    block_len,
+                    block_stride,
+                    region_len,
+                )
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
@@ -709,6 +758,17 @@ class KVPoolWorker:
                 self._infer_cache_group_metadata(group_id, group_spec.layer_names)
         else:
             self._infer_cache_group_metadata(0, list(kv_caches.keys()))
+
+        logger.warning(
+            "KVREG_SUMMARY pp=%d tp=%d hf_layers=%s expected_local_layers=%d "
+            "actual_group_layers=%s group_addr_counts=%s",
+            self.pp_rank,
+            self.tp_rank,
+            getattr(self.hf_config, "num_hidden_layers", None),
+            self.num_layers,
+            self.group_num_layers,
+            {group_id: len(addrs) for group_id, addrs in self.group_kv_caches_base_addr.items()},
+        )
 
         # group_num_layers is computed from the actual kv_caches dict which
         # includes ALL attention layers (main + MTP). For single-group models,
