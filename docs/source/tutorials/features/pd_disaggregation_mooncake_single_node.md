@@ -231,7 +231,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
 
 :::::
 
-If you want to run "2P1D", please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
+If you want to run "2P1D" (two Prefiller and one Decoder), please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
 
 ## Example Proxy for Deployment
 
@@ -249,9 +249,9 @@ python load_balance_proxy_server_example.py \
 
 |Parameter  | Meaning |
 | --- | --- |
-| --port | Port of proxy |
-| --prefiller-port | All ports of prefill |
-| --decoder-ports | All ports of decoder |
+| --port | Proxy port |
+| --prefiller-port | All prefiller ports |
+| --decoder-ports | All decoder ports |
 
 ## Verification
 

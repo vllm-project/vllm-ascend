@@ -262,25 +262,25 @@ Here are two accuracy evaluation methods.
 2. Run follow code to execute the accuracy evaluation.
 
     ```python
-  
+
     import os
-    
+
     from mteb.models.vllm_wrapper import VllmCrossEncoderWrapper
-    
+
     if __name__ == "__main__":
         import mteb
-    
+
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    
+
         model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-Reranker-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     enforce_eager=True,
                                     max_model_len=10240,
                                     hf_overrides={"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": True})
-    
+
         cache = mteb.ResultCache("/home/data/mteb_data")
         tasks = mteb.get_tasks(
             task_types=["Reranking"],

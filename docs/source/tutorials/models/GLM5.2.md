@@ -16,10 +16,10 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
-- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node(If the KV Cache is sufficient, there is no need to enable sfac8 and lic8("enable_sparse_sfa_c8" : true, "enable_sparse_li_c8": true), and Do not enable the two configurations sfac8 and lic8 for other weights.).[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
-- `GLM-5.2-w4a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 (64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8).
+- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
+- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
+- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node(If the KV Cache is sufficient, there is no need to enable sfac8 and lic8("enable_sparse_sfa_c8" : true, "enable_sparse_li_c8": true), and Do not enable the two configurations sfac8 and lic8 for other weights.).[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2-w4a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -131,7 +131,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
 Run the following script to execute online inference.
 
@@ -189,7 +189,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ::::{tab-item} A3 series
 :sync: A3
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64G × 16).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
 
     Run the following scripts on two nodes respectively.
 **node 0**
@@ -298,7 +298,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ::::{tab-item} A2 series
 :sync: A2
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64G × 8).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 8).
 
 **node 0**
 
@@ -418,9 +418,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
-Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64G × 8).
+Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 8).
 
 Before you start, please
 
@@ -971,7 +971,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
                     "lookup_rpc_port":"0",
                     "backend": "mooncake"
                 }
-            }  
+            }
         ]
     }
     }' \
@@ -1150,12 +1150,12 @@ Please refer to the following python file for further explanation and restrictio
 
 ### 5.5 1M Context Configuration
 
-Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64G x 16) and quantized GLM-5.2(W4A8C8) weights:
+Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64GB x 16) and quantized GLM-5.2(W4A8C8) weights:
 
 | Mode | Hardware | Parallelism | Context |
 | ---- | -------- | ----------- | ------- |
-| Single-node co-located | 1 Atlas 800 A3 (64G x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
-| Dual-node co-located | 2 Atlas 800 A3 (64G x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
+| Single-node co-located | 1 Atlas 800 A3 (64GB x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
+| Dual-node co-located | 2 Atlas 800 A3 (64GB x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 | 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 
 #### 5.5.1 Single-Node 1M Deployment

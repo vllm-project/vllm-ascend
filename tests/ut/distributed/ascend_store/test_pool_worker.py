@@ -18,12 +18,23 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+)
+# isort: on
 
 
 class TestKVPoolWorkerHelpers(unittest.TestCase):
@@ -131,6 +142,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             [0],
             use_layerwise=False,
             include_all_ranks=False,
+            grouped_hash_cache={},
         )
 
         self.assertEqual(hit, 128)
@@ -140,6 +152,47 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
         worker.token_database.process_tokens.assert_not_called()
+
+    def test_lookup_reuses_grouped_hashes_for_hit_resolution(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = AscendStoreCoordinator(
+            [
+                KVCacheGroupSpec(
+                    ["layer.0"],
+                    FullAttentionSpec(
+                        block_size=16,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+            scheduler_block_size=16,
+            hash_block_size=8,
+            group_block_sizes=[16],
+            group_cache_families=["c1"],
+        )
+        worker.token_database = ChunkedTokenDatabase(
+            [KeyMetadata("model", 0, 0, 0, 0)],
+            block_size=[16],
+            partitions=None,
+            hash_block_size=8,
+        )
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1, 1]
+        block_hashes = [b"h0", b"h1", b"h2", b"h3"]
+
+        with patch.object(
+            config_data,
+            "_rehash_block_hash_group",
+            wraps=config_data._rehash_block_hash_group,
+        ) as rehash:
+            hit = worker.lookup(32, block_hashes, [0])
+
+        self.assertEqual(hit, 32)
+        self.assertEqual(rehash.call_count, 2)
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
