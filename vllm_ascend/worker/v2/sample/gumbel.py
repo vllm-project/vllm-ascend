@@ -178,6 +178,12 @@ def gumbel_sample(
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
     logits = logits.to(torch.float32)
+    # DSpark passes per-step column views whose strides are not contiguous.
+    # The custom ACLNN op does not perform implicit layout conversion.
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    pos = pos.contiguous()
+    if output_processed_logits_col is not None:
+        output_processed_logits_col = output_processed_logits_col.contiguous()
     sampled = torch.ops._C_ascend.npu_gumbel_sample(
         logits,
         expanded_idx_mapping,

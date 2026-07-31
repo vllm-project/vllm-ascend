@@ -9,6 +9,9 @@
 
 import pytest
 import torch
+from vllm.v1.worker.gpu.sample import gumbel as upstream_gumbel
+from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
+from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
@@ -35,6 +38,12 @@ def _ref_apply_temperature(
 
 
 class TestGumbelSampling:
+    def test_spec_decode_modules_use_ascend_gumbel(self):
+        """All MRV2 probabilistic draft paths must call the Ascend custom op."""
+        assert upstream_gumbel.gumbel_sample is gumbel_sample
+        assert base_speculator.gumbel_sample is gumbel_sample
+        assert dspark_speculator.gumbel_sample is gumbel_sample
+
     @pytest.mark.parametrize(
         "num_tokens,vocab_size",
         [
@@ -473,6 +482,53 @@ class TestGumbelSampling:
             # Column 0 and 2 should be untouched (zeros)
             assert (draft_logits[req, 0, :] == 0).all(), f"Col 0 should be zeros for req {req}"
             assert (draft_logits[req, 2, :] == 0).all(), f"Col 2 should be zeros for req {req}"
+
+    def test_gumbel_sample_noncontiguous_idx_mapping_and_pos(self):
+        """DSpark passes strided per-step column views for mapping and position."""
+        torch.manual_seed(203)
+        num_reqs = 8
+        num_steps = 7
+        vocab_size = 4096
+
+        logits = torch.randn(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
+        idx_mapping_buffer = torch.arange(
+            num_reqs * num_steps,
+            dtype=torch.int32,
+            device=DEVICE,
+        ).view(num_reqs, num_steps)
+        idx_mapping_buffer.remainder_(num_reqs)
+        pos_buffer = torch.arange(
+            num_reqs * num_steps,
+            dtype=torch.int64,
+            device=DEVICE,
+        ).view(num_reqs, num_steps)
+        idx_mapping = idx_mapping_buffer[:, 3]
+        pos = pos_buffer[:, 3]
+        assert not idx_mapping.is_contiguous()
+        assert not pos.is_contiguous()
+
+        temperature = torch.full((num_reqs,), 0.8, dtype=torch.float32, device=DEVICE)
+        seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
+
+        actual = gumbel_sample(
+            logits,
+            idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature=True,
+        )
+        expected = gumbel_sample(
+            logits,
+            idx_mapping.contiguous(),
+            temperature,
+            seed,
+            pos.contiguous(),
+            apply_temperature=True,
+        )
+        torch.npu.synchronize()
+
+        assert torch.equal(actual, expected)
 
     def test_gumbel_sample_skips_padded_requests(self):
         """ACLGraph padding rows with idx_mapping=-1 must not access request state.
