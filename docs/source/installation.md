@@ -10,7 +10,7 @@ This document describes how to install vllm-ascend manually.
 - OS: Linux
 - Python: >= 3.10, < 3.13
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
-- Atlas inference products.
+- Atlas 300I DUO.
 - Software:
 
     | Software      | Supported version                | Note                                      |
@@ -22,11 +22,11 @@ This document describes how to install vllm-ascend manually.
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
-Atlas inference products require CANN 9.1.0 . The Atlas A2/A3 requirements in the table above remain unchanged.
+Atlas 300I DUO require CANN 9.1.0 . The Atlas A2/A3 requirements in the table above remain unchanged.
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
@@ -250,7 +250,7 @@ If you are building custom operators for Atlas A3, you should run `git submodule
 :::
 
 :::{note}
-Atlas inference products do not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas inference products:
+Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installations can pull these packages as dependencies; remove them before running on Atlas 300I DUO:
 
 ```bash
 pip uninstall -y triton-ascend triton
@@ -266,7 +266,7 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 
 - Atlas A2: `export SOC_VERSION=ascend910b1`
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
-- Atlas inference products: `export SOC_VERSION=ascend310p1`
+- Atlas 300I DUO: `export SOC_VERSION=ascend310p1`
 - Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
@@ -287,8 +287,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-openeuler | Atlas A2 | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-a3 | Atlas A3 | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products | Ubuntu |
-| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I DUO | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I DUO | openEuler |
 
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
@@ -338,7 +338,7 @@ docker run --rm \
 
 ::::
 
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 Adjust `/dev/davinci0` to the NPU you want to use.
 

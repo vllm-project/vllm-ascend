@@ -15,7 +15,8 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- Atlas inference products
+- Atlas 300I DUO
+- Atlas 200I Pro
 
 ## Requirements
 
@@ -37,16 +38,16 @@ This section guides you through container-based environment setup and large mode
     | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
-Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
+Atlas 300I DUO uses CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
 
-Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 ```
 
 ::::
 
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
@@ -99,9 +100,9 @@ apt-get update -y && apt-get install -y curl
 
 ::::
 
-::::{tab-item} Ubuntu (Atlas inference products)
+::::{tab-item} Ubuntu (Atlas 300I DUO)
 
-The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -165,9 +166,9 @@ yum update -y && yum install -y curl
 
 ::::
 
-::::{tab-item} openEuler (Atlas inference products)
+::::{tab-item} openEuler (Atlas 300I DUO)
 
-The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:

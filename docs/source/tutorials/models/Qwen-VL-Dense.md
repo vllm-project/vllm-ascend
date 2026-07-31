@@ -9,7 +9,7 @@ This document will show the main verification steps of the model, including supp
 This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example for single NPU and multi-NPU deployment.
 
 :::{note}
-For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later. Do not use the demonstration version above on this hardware.
+For **Atlas 300I DUO**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later. Do not use the demonstration version above on this hardware.
 :::
 
 ## 2 Supported Features
@@ -22,13 +22,13 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
+Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas 300I DUO:
 
 - `Qwen3-VL-2B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
 - `Qwen3-VL-4B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
 - `Qwen3-VL-8B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
-Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
+Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas 300I DUO:
 
 - `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
@@ -72,7 +72,7 @@ docker run --rm \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 :sync: atlas
 
 ```{code-block} bash
@@ -145,7 +145,7 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    ```
 
 :::{note}
-Atlas inference products do not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
+Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
 
 ```bash
 pip uninstall -y triton-ascend triton
@@ -187,7 +187,7 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 :sync: atlas
 
 ```bash
@@ -199,11 +199,11 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ```
 
 :::{note}
-On Atlas inference products:
+On Atlas 300I DUO:
 
 - Only `float16` dtype is supported.
 - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, replace `--compilation-config` with `--enforce-eager`.
-- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
 :::
 
 ::::
@@ -290,7 +290,7 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 | mmmu_val | 0.5389 | 0.0159 |
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 :sync: atlas
 
 **Using AISBench**
