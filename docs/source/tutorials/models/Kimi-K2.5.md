@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
+- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
 - `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -35,7 +35,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -75,7 +75,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -443,344 +443,344 @@ Parameter descriptions:
 
 1. `run_dp_template.sh` script
 
-=== "Node 0(Prefill)"
+    === "Node 0(Prefill)"
 
-    ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="141.xx.xx.1"
+        ```shell
+        # this obtained through ifconfig
+        # nic_name is the network interface name corresponding to local_ip of the current node
+        nic_name="xxx"
+        local_ip="141.xx.xx.1"
 
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xxxx"
+        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+        node0_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
-    export VLLM_RPC_TIMEOUT=3600000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        # [Optional] jemalloc
+        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+        sysctl -w vm.swappiness=0
+        sysctl -w kernel.numa_balancing=0
+        sysctl kernel.sched_migration_cost_ns=50000
+        export VLLM_RPC_TIMEOUT=3600000
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+        export TASK_QUEUE_ENABLE=1
+        export ASCEND_BUFFER_POOL=4:8
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=256
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export HCCL_BUFFSIZE=256
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name kimi_k25 \
-        --trust-remote-code \
-        --max-num-seqs 8 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 16384 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.8 \
-        --enforce-eager \
-        --enable-auto-tool-choice \
-        --tool-call-parser kimi_k2 \
-        --reasoning-parser kimi_k2 \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
-        --additional-config '{"recompute_scheduler_enable":true}' \
-        --mm-encoder-tp-mode data \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                },
-                "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
+        vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name kimi_k25 \
+            --trust-remote-code \
+            --max-num-seqs 8 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 16384 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.8 \
+            --enforce-eager \
+            --enable-auto-tool-choice \
+            --tool-call-parser kimi_k2 \
+            --reasoning-parser kimi_k2 \
+            --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
+            --additional-config '{"recompute_scheduler_enable":true}' \
+            --mm-encoder-tp-mode data \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_producer",
+            "kv_port": "30000",
+            "engine_id": "0",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
                 }
-            }
-        }'
-    ```
+            }'
+        ```
 
-=== "Node 1(Prefill)"
+    === "Node 1(Prefill)"
 
-    ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="141.xx.xx.2"
+        ```shell
+        # this obtained through ifconfig
+        # nic_name is the network interface name corresponding to local_ip of the current node
+        nic_name="xxx"
+        local_ip="141.xx.xx.2"
 
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xxxx"
+        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+        node0_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
-    export VLLM_RPC_TIMEOUT=3600000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        # [Optional] jemalloc
+        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+        sysctl -w vm.swappiness=0
+        sysctl -w kernel.numa_balancing=0
+        sysctl kernel.sched_migration_cost_ns=50000
+        export VLLM_RPC_TIMEOUT=3600000
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+        export TASK_QUEUE_ENABLE=1
+        export ASCEND_BUFFER_POOL=4:8
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=256
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export HCCL_BUFFSIZE=256
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name kimi_k25 \
-        --trust-remote-code \
-        --max-num-seqs 8 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 16384 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.8 \
-        --enforce-eager \
-        --enable-auto-tool-choice \
-        --tool-call-parser kimi_k2 \
-        --reasoning-parser kimi_k2 \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
-        --additional-config '{"recompute_scheduler_enable":true}' \
-        --mm-encoder-tp-mode data \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30100",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                },
-                "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
+        vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name kimi_k25 \
+            --trust-remote-code \
+            --max-num-seqs 8 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 16384 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.8 \
+            --enforce-eager \
+            --enable-auto-tool-choice \
+            --tool-call-parser kimi_k2 \
+            --reasoning-parser kimi_k2 \
+            --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 1}' \
+            --additional-config '{"recompute_scheduler_enable":true}' \
+            --mm-encoder-tp-mode data \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_producer",
+            "kv_port": "30100",
+            "engine_id": "1",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
                 }
-            }
-        }'
-    ```
+            }'
+        ```
 
-=== "Node 0(Decode)"
+    === "Node 0(Decode)"
 
-    ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="141.xx.xx.3"
+        ```shell
+        # this obtained through ifconfig
+        # nic_name is the network interface name corresponding to local_ip of the current node
+        nic_name="xxx"
+        local_ip="141.xx.xx.3"
 
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xxxx"
+        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+        node0_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
-    export VLLM_RPC_TIMEOUT=3600000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        # [Optional] jemalloc
+        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+        sysctl -w vm.swappiness=0
+        sysctl -w kernel.numa_balancing=0
+        sysctl kernel.sched_migration_cost_ns=50000
+        export VLLM_RPC_TIMEOUT=3600000
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+        export TASK_QUEUE_ENABLE=1
+        export ASCEND_BUFFER_POOL=4:8
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=1100
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export HCCL_BUFFSIZE=1100
+        export VLLM_ASCEND_ENABLE_MLAPO=1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name kimi_k25 \
-        --trust-remote-code \
-        --max-num-seqs 48 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 256 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.95 \
-        --enable-auto-tool-choice \
-        --tool-call-parser kimi_k2 \
-        --reasoning-parser kimi_k2 \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "2",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                },
-                "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
+        vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name kimi_k25 \
+            --trust-remote-code \
+            --max-num-seqs 48 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 256 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.95 \
+            --enable-auto-tool-choice \
+            --tool-call-parser kimi_k2 \
+            --reasoning-parser kimi_k2 \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+            --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "30200",
+            "engine_id": "2",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
                 }
-            }
-        }'
-    ```
+            }'
+        ```
 
-=== "Node 1(Decode)"
+    === "Node 1(Decode)"
 
-    ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="141.xx.xx.4"
+        ```shell
+        # this obtained through ifconfig
+        # nic_name is the network interface name corresponding to local_ip of the current node
+        nic_name="xxx"
+        local_ip="141.xx.xx.4"
 
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xxxx"
+        # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+        node0_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
-    export VLLM_RPC_TIMEOUT=3600000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        # [Optional] jemalloc
+        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+        sysctl -w vm.swappiness=0
+        sysctl -w kernel.numa_balancing=0
+        sysctl kernel.sched_migration_cost_ns=50000
+        export VLLM_RPC_TIMEOUT=3600000
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+        export TASK_QUEUE_ENABLE=1
+        export ASCEND_BUFFER_POOL=4:8
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=1100
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export HCCL_BUFFSIZE=1100
+        export VLLM_ASCEND_ENABLE_MLAPO=1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --quantization ascend \
-        --served-model-name kimi_k25 \
-        --trust-remote-code \
-        --max-num-seqs 48 \
-        --max-model-len 32768 \
-        --max-num-batched-tokens 256 \
-        --no-enable-prefix-caching \
-        --gpu-memory-utilization 0.95 \
-        --enable-auto-tool-choice \
-        --tool-call-parser kimi_k2 \
-        --reasoning-parser kimi_k2 \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
-        --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "2",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 8
-                },
-                "decode": {
-                        "dp_size": 32,
-                        "tp_size": 1
+        vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --quantization ascend \
+            --served-model-name kimi_k25 \
+            --trust-remote-code \
+            --max-num-seqs 48 \
+            --max-model-len 32768 \
+            --max-num-batched-tokens 256 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.95 \
+            --enable-auto-tool-choice \
+            --tool-call-parser kimi_k2 \
+            --reasoning-parser kimi_k2 \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+            --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "30200",
+            "engine_id": "2",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
                 }
-            }
-        }'
-    ```
+            }'
+        ```
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
-- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
-The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to receive configuration values from `launch_online_dp.py`:
+    The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to receive configuration values from `launch_online_dp.py`:
 
-- `$1` (`ASCEND_RT_VISIBLE_DEVICES`): the NPU devices assigned to this DP instance, e.g., `0,1,2,3` or `4,5,6,7`.
-- `$2` (`--port`): the vLLM server port for this DP instance, auto-assigned starting from `--vllm-start-port` (e.g., `7100`, `7101`).
-- `$3` (`--data-parallel-size`): total number of DP ranks.
-- `$4` (`--data-parallel-rank`): the rank index of this DP instance.
-- `$5` (`--data-parallel-address`): IP address of the DP master node.
-- `$6` (`--data-parallel-rpc-port`): RPC port for DP master communication.
-- `$7` (`--tensor-parallel-size`): TP size within each DP rank.
+    - `$1` (`ASCEND_RT_VISIBLE_DEVICES`): the NPU devices assigned to this DP instance, e.g., `0,1,2,3` or `4,5,6,7`.
+    - `$2` (`--port`): the vLLM server port for this DP instance, auto-assigned starting from `--vllm-start-port` (e.g., `7100`, `7101`).
+    - `$3` (`--data-parallel-size`): total number of DP ranks.
+    - `$4` (`--data-parallel-rank`): the rank index of this DP instance.
+    - `$5` (`--data-parallel-address`): IP address of the DP master node.
+    - `$6` (`--data-parallel-rpc-port`): RPC port for DP master communication.
+    - `$7` (`--tensor-parallel-size`): TP size within each DP rank.
 
 2. Run server for each node:
 
@@ -1012,7 +1012,7 @@ After about several minutes, you can get the performance evaluation result.
 |--------|---------------|-----------|--------------|------------------|
 |High Throughput / Low Latency<br>(16K context)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|
 |High Throughput / Low Latency<br>(16K context)|2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|
-|High Throughput / Low Latency<br>(16K context)|2P2D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
+|High Throughput / Low Latency<br>(16K context)|2P1D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
 |Long Context<br>(128K, low concurrency ≤4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
 |Long Context<br>(128K, high concurrency >4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|
 
