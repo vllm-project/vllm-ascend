@@ -2110,24 +2110,35 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
 
             forward_context = get_forward_context()
-            indexer_metadata = self._resolve_dsa_indexer_metadata(
-                forward_context)
-            indexer_k_cache = self._resolve_dsa_indexer_k_cache(
-                forward_context)
-            indexer_slot_mapping = indexer_metadata.slot_mapping
-            indexer_block_table = (
-                indexer_metadata.indexer_block_tables
-                if indexer_metadata.indexer_block_tables is not None else
-                indexer_metadata.block_table)
-            indexer_actual_seq_lengths_key = (
-                indexer_metadata.indexer_seq_lens
-                if indexer_metadata.indexer_seq_lens is not None else
-                indexer_actual_seq_lengths_key)
-            dsa_mgr = get_dsa_worker_manager()
-            if dsa_mgr is None:
-                raise RuntimeError(
-                    "DSA split cache is active without a worker manager")
-            dsa_mgr.attention_begin(layer_name, forward_context)
+            # When the MTP draft model is compiled (VLLM_COMPILE), the
+            # compilation decorator creates a fresh forward context that
+            # loses the is_draft_model flag set by set_ascend_forward_context.
+            # The draft model never builds Indexer attention metadata, so
+            # guard against its absence here rather than entering the DSA
+            # indexer resolution path and crashing.
+            all_metadata = forward_context.attn_metadata
+            indexer_layer_name = self.indexer_k_cache_layer_name
+            if (isinstance(all_metadata, dict)
+                    and indexer_layer_name is not None
+                    and indexer_layer_name in all_metadata):
+                indexer_metadata = self._resolve_dsa_indexer_metadata(
+                    forward_context)
+                indexer_k_cache = self._resolve_dsa_indexer_k_cache(
+                    forward_context)
+                indexer_slot_mapping = indexer_metadata.slot_mapping
+                indexer_block_table = (
+                    indexer_metadata.indexer_block_tables
+                    if indexer_metadata.indexer_block_tables is not None else
+                    indexer_metadata.block_table)
+                indexer_actual_seq_lengths_key = (
+                    indexer_metadata.indexer_seq_lens
+                    if indexer_metadata.indexer_seq_lens is not None else
+                    indexer_actual_seq_lengths_key)
+                dsa_mgr = get_dsa_worker_manager()
+                if dsa_mgr is None:
+                    raise RuntimeError(
+                        "DSA split cache is active without a worker manager")
+                dsa_mgr.attention_begin(layer_name, forward_context)
         # DCP replicated indexer stores LI cache with the full/no-CP metadata, while
         # SFA KV remains stored with the DCP-sharded slot mapping.
         slot_mapping_sfa = (
