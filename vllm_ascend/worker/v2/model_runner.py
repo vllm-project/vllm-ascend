@@ -54,7 +54,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import enable_sp
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
-from vllm_ascend.worker.v2.eplb import is_eplb_load_scope_matched
+from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 from vllm_ascend.worker.v2.sp_utils import (
@@ -135,7 +135,11 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
         load_scope = self.ascend_config.eplb_config.load_scope
-        self.eplb_load_scope = load_scope if parallel_config.enable_eplb else "all"
+        self.eplb = AscendEPLBController(
+            parallel_config,
+            device,
+            load_scope=load_scope if parallel_config.enable_eplb else "all",
+        )
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
@@ -369,13 +373,7 @@ class NPUModelRunner(GPUModelRunner):
         num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         batch_has_prefill = bool(np.any(is_prefilling_np))
-        if self.eplb_load_scope != "all":
-            if self.eplb.state is None:
-                raise RuntimeError("EPLB state is not initialized.")
-            self.eplb.state._ascend_scope_matched = is_eplb_load_scope_matched(
-                self.eplb_load_scope,
-                batch_has_prefill,
-            )
+        self.eplb.set_batch_scope(batch_has_prefill)
 
         # Get prefill tokens if any.
         if batch_has_prefill:

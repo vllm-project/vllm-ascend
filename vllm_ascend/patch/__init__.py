@@ -87,21 +87,16 @@
 # ** 5. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
-#   2. `vllm.config.ParallelConfig.__post_init__`
-#   3. `vllm.distributed.eplb.eplb_communicator.create_eplb_communicator`
-#   4. `vllm.model_executor.layers.fused_moe.router.base_router.BaseRouter._apply_eplb_mapping`
-#   5. `vllm.distributed.eplb.eplb_state.EplbState.step`
+#   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
 #    Why:
 #       Upstream EPLB owns the Model Runner V2 control plane, but its platform
-#       capability check, map-and-record kernel, and weight communicator are
-#       CUDA-specific. Ascend also needs batch-scoped load collection without
-#       forking the upstream EPLB state machine.
+#       capability check excludes NPU. Its async workspace move also has no
+#       downstream callback after a per-layer map commit.
 #    How:
-#       Keep upstream validation and lifecycle intact, expose EPLB capability
-#       only inside vllm.config.parallel, select torch.distributed/HCCL for
-#       synchronous weight transfer, route mapping and load recording through
-#       an NPU custom op, and discard non-matching phase loads at the step
-#       boundary.
+#       Expose EPLB capability only inside vllm.config.parallel and refresh the
+#       Ascend lookup after an async layer commit. Router behavior and load
+#       scope are owned by downstream instances rather than patched upstream
+#       classes; upstream torch.distributed communication runs over HCCL.
 #    Related PR (if no, explain why):
 #       No. The current delivery uses a downstream patch so it does not depend
 #       on an upstream interface being accepted within the release window.

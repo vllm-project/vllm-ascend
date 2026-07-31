@@ -885,11 +885,15 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                     "Async EPLB is not supported by Model Runner V2 on Ascend yet; "
                     "set eplb_config.use_async to false."
                 )
-            if upstream_eplb_config.communicator not in (None, "torch_nccl"):
+            if upstream_eplb_config.communicator not in (None, "torch_nccl", "torch_gloo"):
                 raise ValueError(
                     "Do not set eplb_config.communicator on Ascend; "
                     "torch.distributed over HCCL is selected automatically."
                 )
+            # ParallelConfig chooses torch_gloo as its generic synchronous
+            # default before this platform hook runs. Ascend maps torch_nccl
+            # to torch.distributed over the HCCL device process group.
+            upstream_eplb_config.communicator = "torch_nccl"
     elif "load_scope" in eplb_config:
         raise ValueError(
             "additional_config.eplb_config.load_scope is only supported by Model Runner V2; "
