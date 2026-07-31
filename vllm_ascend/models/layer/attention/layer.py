@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import (
@@ -119,7 +118,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         ):
             cache_config.enable_prefix_caching = False
 
-        impl_cls = cast(type[DSAAttentionImpl], self.attn_backend.get_impl_cls())
+        impl_cls = cast(type[Any], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
             dim=self.dim,
             n_heads=self.n_heads,
