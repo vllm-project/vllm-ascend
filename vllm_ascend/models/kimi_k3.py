@@ -590,12 +590,16 @@ class AscendKimiK3ForConditionalGeneration(
         return AscendKimiK3ForCausalLM.get_mamba_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The ModelSlim rotation is only needed for A3 FP4-to-INT4 conversion.
-        # Other SoCs retain the original projector graph and ignore the extra
-        # checkpoint tensor.
+        # ModelSlim checkpoints may include an explicit vision rotation on A3
+        # and A5. Keep it disabled when the checkpoint does not provide it.
         skip_prefixes = [] if self.mm_projector.rot_proj is not None else ["mm_projector.rot_proj."]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        rot_proj_weight_names = {
+            name for name, _ in self.named_parameters() if ".rot_proj." in f".{name}."
+        }
+        self.mm_projector.use_rot_proj = bool(rot_proj_weight_names & loaded_weights)
+        return loaded_weights
 
 
 class KimiK3MLP(nn.Module):
@@ -1655,7 +1659,11 @@ class KimiK3MultiModalProjector(nn.Module):
         # embeddings fold this matrix into their input projection, but the
         # vision path ends in RMSNorm, so the rotation must remain explicit.
         self.rot_proj: ReplicatedLinear | None = None
-        if get_ascend_device_type() == AscendDeviceType.A3:
+        self.use_rot_proj = False
+        if get_ascend_device_type() in {
+            AscendDeviceType.A3,
+            AscendDeviceType.A5,
+        }:
             self.rot_proj = ReplicatedLinear(
                 config.text_hidden_size,
                 config.text_hidden_size,
@@ -1670,7 +1678,8 @@ class KimiK3MultiModalProjector(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)[0]
         hidden_states = self.post_norm(hidden_states)
-        if self.rot_proj is not None:
+        if self.use_rot_proj:
+            assert self.rot_proj is not None
             hidden_states = self.rot_proj(hidden_states)[0]
         return hidden_states
 
