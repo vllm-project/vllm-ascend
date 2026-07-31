@@ -22,6 +22,9 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+    # After patch_v2.patch_triton imports sample.states; rebind its
+    # import-time apply_top_k_top_p for V2 nightly.
+    import vllm_ascend.patch.worker.patch_v2.patch_topk_topp_sampler  # noqa
 
 
 import vllm_ascend.patch.worker.patch_distributed  # noqa
@@ -37,7 +40,6 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
-import vllm_ascend.patch.worker.patch_topk_topp_sampler  # noqa
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
