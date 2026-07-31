@@ -4,6 +4,39 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.14.0 - preserve lexical scope and per-call patch ownership
+
+- Starting commit: `d9a0c7c7e`.
+- Problem: four generic cases could either invent or silently lose a patch
+  edge: a function parameter reused an outer module binding; a release-only
+  helper call in a short-circuited condition was still counted; two exact
+  owners passed to one helper were collapsed into no result; and a direct
+  literal `sys.modules["vllm..."]` target was ignored.
+- Change: clear every positional, keyword-only, variadic, and keyword-variadic
+  parameter when entering a function scope. Evaluate helper-call traversal on
+  the active main path with boolean short-circuit semantics. Store one exact
+  helper invocation context per active direct call and scan the helper once per
+  context. Resolve both direct literal `sys.modules[...]` and
+  `sys.modules.get(...)` patch targets.
+- Safety boundary: a reassigned parameter, non-unique argument, dynamic module
+  key, callback, reflection, or indirect helper transfer is not guessed. Exact
+  multi-owner calls are independent real dependencies, not an ambiguity.
+- Regression evidence: four new failing fixtures first reproduced two false
+  positives and three missing edges; all pass after the change. An older test
+  that treated two exact owners as ambiguous was corrected to require both
+  edges. All 47 isolated generator/auditor tests pass; Ruff and
+  `git diff --check` pass.
+- Fixed-source effect: the exact vLLM, vllm-ascend, and PyTorch inputs still
+  produce 971 relations and the same 44 findings. Relations and findings are
+  byte-identical to v0.13 before the metadata version update, so all seven real
+  upstream risks remain visible and generator issues remain zero. One full run
+  completed in 129.7 seconds.
+- Independent follow-up review found five additional generic cases that do not
+  occur in the fixed source pair: conservative branch joins, helper
+  redefinition identity, conditional owner values, multi-level direct
+  `sys.modules` targets, and helper-to-helper forwarding. They are intentionally
+  left for the next Git iteration instead of being hidden by this result.
+
 ## v0.13.0 - resolve statically exact indirect patch owners
 
 - Starting commit: `0da1dc25c`.

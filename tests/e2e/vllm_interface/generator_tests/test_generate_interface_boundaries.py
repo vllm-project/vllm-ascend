@@ -1235,7 +1235,7 @@ def install_patch():
     assert not unresolved
 
 
-def test_private_helper_owner_requires_one_main_binding_at_every_call(
+def test_private_helper_owner_emits_each_exact_main_call_binding(
     tmp_path: Path,
 ) -> None:
     vllm_root = tmp_path / "vllm-repo"
@@ -1337,11 +1337,30 @@ def install_local_shadow():
         for relation in relations
         if relation.relation == "monkey_patch"
     ]
-    assert len(patches) == 1
-    assert patches[0].upstream_owner == "ProcessingInfo"
-    assert patches[0].upstream_name == "load"
-    assert patches[0].downstream_name == "replacement"
-    assert patches[0].evidence[0].line == 9
+    assert len(patches) == 3
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in patches
+    } == {
+        ("vllm/hunyuan.py", "ProcessingInfo", "load", "replacement"),
+        (
+            "vllm/hunyuan.py",
+            "ProcessingInfo",
+            "load",
+            "ambiguous_replacement",
+        ),
+        (
+            "vllm/other.py",
+            "ProcessingInfo",
+            "load",
+            "ambiguous_replacement",
+        ),
+    }
     assert not findings
 
 
@@ -1401,6 +1420,219 @@ required.build = replacement
         for evidence in patches[0].evidence
     } == {"vllm.consumer.build"}
     assert not findings
+
+
+def test_function_parameters_shadow_outer_module_and_runtime_module_bindings(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/owner_module.py",
+        "class ProcessingInfo:\n    def load(self):\n        pass\n",
+    )
+    _write(
+        vllm_root,
+        "vllm/core.py",
+        "def build(value):\n    return value\n",
+    )
+    _write(
+        vllm_root,
+        "vllm/consumer.py",
+        "from vllm.core import build\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+import vllm.owner_module as owner
+
+
+def replacement_load(self):
+    pass
+
+
+def replacement_build(value):
+    return value
+
+
+cached = sys.modules.get("vllm.consumer")
+
+
+def _patch_owner(target):
+    target.ProcessingInfo.load = replacement_load
+
+
+def install(owner, cached):
+    _patch_owner(owner)
+    cached.build = replacement_build
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert not patches
+
+
+def test_private_helper_call_in_short_circuited_tag_condition_is_inactive(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/owner_module.py",
+        "class ProcessingInfo:\n    def load(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/utils.py",
+        "def vllm_version_is(_version):\n    return False\n",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import owner_module
+from vllm_ascend.utils import vllm_version_is
+
+
+def _patch_owner(owner):
+    def replacement(self):
+        pass
+
+    owner.ProcessingInfo.load = replacement
+
+
+if vllm_version_is("0.25.1") and _patch_owner(owner_module):
+    pass
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert not patches
+
+
+def test_private_helper_called_with_multiple_exact_owners_emits_each_relation(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    for module in ("first", "second"):
+        _write(
+            vllm_root,
+            f"vllm/{module}.py",
+            "class ProcessingInfo:\n    def load(self):\n        pass\n",
+        )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, second
+
+
+def _patch_owner(owner):
+    def replacement(self):
+        pass
+
+    owner.ProcessingInfo.load = replacement
+
+
+def install():
+    _patch_owner(first)
+    _patch_owner(second)
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(patches) == 2
+    assert {relation.upstream_file for relation in patches} == {
+        "vllm/first.py",
+        "vllm/second.py",
+    }
+    assert all(relation.upstream_name == "load" for relation in patches)
+
+
+def test_direct_literal_sys_modules_patch_target_is_resolved(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/core.py",
+        "def build(value):\n    return value\n",
+    )
+    _write(
+        vllm_root,
+        "vllm/consumer.py",
+        "from vllm.core import build\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+
+
+def replacement(value):
+    return value
+
+
+sys.modules["vllm.consumer"].build = replacement
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(patches) == 1
+    assert patches[0].upstream_file == "vllm/core.py"
+    assert patches[0].upstream_name == "build"
+    assert patches[0].evidence[0].target_expression == "vllm.consumer.build"
 
 
 def test_patch_scanner_reports_ambiguous_and_unsupported_patches(

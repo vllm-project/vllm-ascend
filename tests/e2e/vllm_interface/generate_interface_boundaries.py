@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.13.0"
+GENERATOR_VERSION = "0.14.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -152,21 +152,51 @@ def _function_scope_nodes(
         stack.extend(reversed(list(ast.iter_child_nodes(current))))
 
 
-def _expression_calls(node: ast.AST | None) -> Iterable[ast.Call]:
-    """Walk one evaluated expression without entering deferred scopes."""
+def _main_expression_calls(
+    node: ast.AST | None,
+    tag_guard_names: set[str],
+) -> Iterable[ast.Call]:
+    """Walk calls that may be evaluated on the main-version path.
+
+    Function and lambda bodies are deferred scopes. Boolean operands and
+    conditional-expression arms may be skipped at the current call site, so
+    apply an exact release-tag result before attributing a helper call to main.
+    """
     if node is None:
         return
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, ast.Call):
-            yield current
+
+    def walk(current: ast.AST) -> Iterable[ast.Call]:
         if isinstance(
             current,
             (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
         ):
-            continue
-        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+            return
+        if isinstance(current, ast.BoolOp):
+            for value in current.values:
+                yield from walk(value)
+                condition = _main_condition_value(value, tag_guard_names)
+                if isinstance(current.op, ast.And) and condition is False:
+                    break
+                if isinstance(current.op, ast.Or) and condition is True:
+                    break
+            return
+        if isinstance(current, ast.IfExp):
+            yield from walk(current.test)
+            condition = _main_condition_value(current.test, tag_guard_names)
+            if condition is True:
+                yield from walk(current.body)
+            elif condition is False:
+                yield from walk(current.orelse)
+            else:
+                yield from walk(current.body)
+                yield from walk(current.orelse)
+            return
+        if isinstance(current, ast.Call):
+            yield current
+        for child in ast.iter_child_nodes(current):
+            yield from walk(child)
+
+    yield from walk(node)
 
 
 def _lazy_getattr_names(node: ast.AST) -> set[str]:
@@ -644,6 +674,14 @@ class PatchScanContext:
                     candidates[key] = candidate
             merged_callables[name] = list(candidates.values())
         self.local_callables = merged_callables
+
+
+@dataclass(frozen=True)
+class PrivateHelperInvocation:
+    """One statically exact private-helper call on the active main path."""
+
+    bindings: tuple[tuple[str, str], ...]
+    guards: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1299,8 +1337,8 @@ class InterfaceBoundaryGenerator:
         self.relations: list[Relation] = []
         self.findings: list[CandidateFinding] = []
         self._mro_cache: dict[str, MroResult] = {}
-        self._private_helper_parameter_bindings: dict[
-            tuple[str, str], str
+        self._private_helper_invocations: dict[
+            str, tuple[PrivateHelperInvocation, ...]
         ] = {}
 
     def generate(self) -> tuple[list[Relation], list[CandidateFinding]]:
@@ -1770,7 +1808,7 @@ class InterfaceBoundaryGenerator:
         }
         calls: dict[
             str,
-            list[dict[str, set[str] | None]],
+            list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
         ] = defaultdict(list)
         for module_info in self.downstream.modules.values():
             self._scan_private_helper_calls(
@@ -1782,7 +1820,7 @@ class InterfaceBoundaryGenerator:
                 calls,
             )
 
-        bindings: dict[tuple[str, str], str] = {}
+        invocations: dict[str, tuple[PrivateHelperInvocation, ...]] = {}
         for helper_name, helper_calls in calls.items():
             helper = helpers[helper_name]
             if not isinstance(
@@ -1790,23 +1828,41 @@ class InterfaceBoundaryGenerator:
                 (ast.AsyncFunctionDef, ast.FunctionDef),
             ):
                 continue
-            for parameter in self._callable_parameter_names(helper.node):
-                if self._parameter_is_reassigned(helper.node, parameter):
-                    continue
-                values = [call.get(parameter) for call in helper_calls]
-                if not values or any(
-                    value is None or len(value) != 1
-                    for value in values
-                ):
-                    continue
-                targets = {
-                    next(iter(value))
-                    for value in values
-                    if value is not None
-                }
-                if len(targets) == 1:
-                    bindings[(helper_name, parameter)] = next(iter(targets))
-        self._private_helper_parameter_bindings = bindings
+            parameters = self._callable_parameter_names(helper.node)
+            reassigned = {
+                parameter
+                for parameter in parameters
+                if self._parameter_is_reassigned(helper.node, parameter)
+            }
+            exact_calls = set()
+            for arguments, guards in helper_calls:
+                exact_bindings = []
+                for parameter in parameters:
+                    values = arguments.get(parameter)
+                    if (
+                        parameter not in reassigned
+                        and values is not None
+                        and len(values) == 1
+                    ):
+                        exact_bindings.append((parameter, next(iter(values))))
+                if exact_bindings:
+                    exact_calls.add(
+                        PrivateHelperInvocation(
+                            bindings=tuple(sorted(exact_bindings)),
+                            guards=guards,
+                        )
+                    )
+            if exact_calls:
+                invocations[helper_name] = tuple(
+                    sorted(
+                        exact_calls,
+                        key=lambda invocation: (
+                            invocation.bindings,
+                            invocation.guards,
+                        ),
+                    )
+                )
+        self._private_helper_invocations = invocations
 
     def _scan_private_helper_calls(
         self,
@@ -1815,11 +1871,14 @@ class InterfaceBoundaryGenerator:
         context: PatchScanContext,
         tag_guard_names: set[str],
         helpers: dict[str, CallableInfo],
-        calls: dict[str, list[dict[str, set[str] | None]]],
+        calls: dict[
+            str,
+            list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
+        ],
     ) -> None:
         for node in statements:
             for expression in self._statement_expressions(node):
-                for call in _expression_calls(expression):
+                for call in _main_expression_calls(expression, tag_guard_names):
                     self._record_private_helper_call(
                         module_info,
                         call,
@@ -1836,16 +1895,22 @@ class InterfaceBoundaryGenerator:
                     node.test,
                     tag_guard_names,
                 )
-                branches: Sequence[Sequence[ast.stmt]]
+                branches: Sequence[
+                    tuple[Sequence[ast.stmt], tuple[str, ...]]
+                ]
                 if condition is True:
-                    branches = (node.body,)
+                    branches = ((node.body, context.guards),)
                 elif condition is False:
-                    branches = (node.orelse,)
+                    branches = ((node.orelse, context.guards),)
                 else:
-                    branches = (node.body, node.orelse)
+                    guard = self._guard_text(node.test)
+                    branches = (
+                        (node.body, (*context.guards, guard)),
+                        (node.orelse, (*context.guards, f"not ({guard})")),
+                    )
                 scanned = []
-                for branch_statements in branches:
-                    branch = context.clone()
+                for branch_statements, guards in branches:
+                    branch = context.clone(guards=guards)
                     self._scan_private_helper_calls(
                         module_info,
                         branch_statements,
@@ -1897,6 +1962,7 @@ class InterfaceBoundaryGenerator:
                 )
                 context.bindings[node.name] = {qualified_name}
                 child = context.clone(scope=(*context.scope, node.name))
+                self._clear_function_parameter_bindings(node, child)
                 self._scan_private_helper_calls(
                     module_info,
                     node.body,
@@ -1975,7 +2041,10 @@ class InterfaceBoundaryGenerator:
         call: ast.Call,
         context: PatchScanContext,
         helpers: dict[str, CallableInfo],
-        calls: dict[str, list[dict[str, set[str] | None]]],
+        calls: dict[
+            str,
+            list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
+        ],
     ) -> None:
         expression = _expression_name(call.func)
         if expression is None:
@@ -2002,14 +2071,17 @@ class InterfaceBoundaryGenerator:
                 helper.node,
                 (ast.AsyncFunctionDef, ast.FunctionDef),
             ):
-                calls[helper_name].append({})
+                calls[helper_name].append(({}, context.guards))
                 continue
             calls[helper_name].append(
-                self._bound_owner_arguments(
-                    module_info,
-                    helper.node,
-                    call,
-                    context,
+                (
+                    self._bound_owner_arguments(
+                        module_info,
+                        helper.node,
+                        call,
+                        context,
+                    ),
+                    context.guards,
                 )
             )
 
@@ -2130,14 +2202,31 @@ class InterfaceBoundaryGenerator:
         self,
         node: ast.AsyncFunctionDef | ast.FunctionDef,
     ) -> tuple[str, ...]:
-        return tuple(
-            argument.arg
-            for argument in (
-                *node.args.posonlyargs,
-                *node.args.args,
-                *node.args.kwonlyargs,
-            )
-        )
+        parameters = [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ]
+        if node.args.vararg is not None:
+            parameters.append(node.args.vararg)
+        if node.args.kwarg is not None:
+            parameters.append(node.args.kwarg)
+        return tuple(argument.arg for argument in parameters)
+
+    def _clear_function_parameter_bindings(
+        self,
+        node: ast.AsyncFunctionDef | ast.FunctionDef,
+        context: PatchScanContext,
+    ) -> None:
+        """Remove outer values shadowed by parameters in one function scope."""
+        for parameter in self._callable_parameter_names(node):
+            # An empty lexical binding is a tombstone. Without it, resolution
+            # falls back to the module import index and can reuse a shadowed
+            # ``import ... as <parameter>`` value.
+            context.bindings[parameter] = set()
+            context.strings.pop(parameter, None)
+            context.local_callables.pop(parameter, None)
+            context.runtime_modules.pop(parameter, None)
 
     def _parameter_is_reassigned(
         self,
@@ -2206,25 +2295,35 @@ class InterfaceBoundaryGenerator:
                 )
                 context.bindings.pop(node.name, None)
                 context.local_callables[node.name] = [callable_info]
-                child = context.clone(
+                base_child = context.clone(
                     scope=(*context.scope, node.name),
                 )
+                self._clear_function_parameter_bindings(node, base_child)
                 helper_name = (
                     f"{module_info.name}."
                     f"{'.'.join((*context.scope, node.name))}"
                 )
-                for parameter in self._callable_parameter_names(node):
-                    target = self._private_helper_parameter_bindings.get(
-                        (helper_name, parameter)
+                invocations = self._private_helper_invocations.get(helper_name)
+                if invocations:
+                    for invocation in invocations:
+                        child = base_child.clone(
+                            guards=(*base_child.guards, *invocation.guards),
+                        )
+                        for parameter, target in invocation.bindings:
+                            child.bindings[parameter] = {target}
+                        self._scan_patch_statements(
+                            module_info,
+                            node.body,
+                            child,
+                            tag_guard_names,
+                        )
+                else:
+                    self._scan_patch_statements(
+                        module_info,
+                        node.body,
+                        base_child,
+                        tag_guard_names,
                     )
-                    if target is not None:
-                        child.bindings[parameter] = {target}
-                self._scan_patch_statements(
-                    module_info,
-                    node.body,
-                    child,
-                    tag_guard_names,
-                )
                 continue
 
             if isinstance(node, ast.ClassDef):
@@ -2571,7 +2670,9 @@ class InterfaceBoundaryGenerator:
         ):
             owner_node = node.value
             module_name = node.slice.value
-        if owner_node is None or not module_name.startswith("vllm."):
+        if owner_node is None or not (
+            module_name == "vllm" or module_name.startswith("vllm.")
+        ):
             return set()
         owner = _expression_name(owner_node)
         if owner is None:
@@ -2729,17 +2830,44 @@ class InterfaceBoundaryGenerator:
         line: int,
     ) -> None:
         expression = _expression_name(target_node)
-        if not expression:
-            return
-        targets = sorted(
-            target
-            for target in self._resolve_patch_references(
-                module_info,
-                expression,
-                context,
-            )
-            if target.startswith("vllm.")
+        direct_runtime_modules = self._runtime_module_references(
+            module_info,
+            target_node.value,
+            context,
         )
+        if direct_runtime_modules:
+            target_expressions = {
+                f"{module}.{target_node.attr}"
+                for module in direct_runtime_modules
+            }
+            targets = sorted(
+                target
+                for target_expression in target_expressions
+                for target in self._resolve_patch_references(
+                    module_info,
+                    target_expression,
+                    context,
+                )
+                if target.startswith("vllm.")
+            )
+            evidence_target = (
+                next(iter(target_expressions))
+                if len(target_expressions) == 1
+                else None
+            )
+        else:
+            if not expression:
+                return
+            targets = sorted(
+                target
+                for target in self._resolve_patch_references(
+                    module_info,
+                    expression,
+                    context,
+                )
+                if target.startswith("vllm.")
+            )
+            evidence_target = expression
         if not targets:
             return
         if len(targets) != 1:
@@ -2752,13 +2880,13 @@ class InterfaceBoundaryGenerator:
                 "ambiguous patch target alias",
             )
             return
-        evidence_target = expression
-        parts = expression.split(".")
-        runtime_modules = context.runtime_modules.get(parts[0], set())
-        if len(runtime_modules) == 1:
-            evidence_target = ".".join(
-                [next(iter(runtime_modules)), *parts[1:]]
-            )
+        if expression:
+            parts = expression.split(".")
+            runtime_modules = context.runtime_modules.get(parts[0], set())
+            if len(runtime_modules) == 1:
+                evidence_target = ".".join(
+                    [next(iter(runtime_modules)), *parts[1:]]
+                )
         self._record_resolved_patch(
             module_info,
             targets[0],
