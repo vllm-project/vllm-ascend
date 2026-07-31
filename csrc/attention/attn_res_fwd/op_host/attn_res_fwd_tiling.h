@@ -17,7 +17,7 @@
 
 #include <tiling/tiling_api.h>
 #include "register/tilingdata_base.h"
-#include "op_host/tiling_base.h"
+#include "tiling_base/tiling_base.h"
 #include "err/ops_err.h"
 #include "../op_kernel/attn_res_fwd_tiling_data.h"
 #include "../op_kernel/tiling_key_attn_res_fwd.h"
