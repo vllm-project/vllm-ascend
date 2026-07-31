@@ -15,6 +15,7 @@
 
 import torch
 import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_sampler
+import vllm.v1.worker.gpu.sample.states as states
 
 
 def apply_top_k_top_p(
@@ -26,6 +27,10 @@ def apply_top_k_top_p(
       - if current_platform.is_cpu(): ...
       - if HAS_TRITON and logits.shape[0] >= 8: ...
     Always falls through to the PyTorch implementation.
+
+    V2 model runner imports apply_top_k_top_p into
+    ``vllm.v1.worker.gpu.sample.states`` at import time, so both the source
+    module and that local binding must be rebound for nightly to take effect.
     """
     if p is None and k is None:
         return logits
@@ -44,3 +49,5 @@ def apply_top_k_top_p(
 
 
 topk_topp_sampler.apply_top_k_top_p = apply_top_k_top_p
+# V2 SamplingStates.apply_top_k_top_p uses this import-time binding.
+states.apply_top_k_top_p = apply_top_k_top_p
