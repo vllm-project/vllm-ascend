@@ -16,11 +16,10 @@ static constexpr size_t DIM_D = 3;
 
 static constexpr int64_t FIXED_CHUNK = 64;
 static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
-// Per-core GM staging: A_half(64*128) + B_half(64*128) + C_float(64*128)
+// Per-core GM staging for Cube inputs: A_half(64*128) + B_half(64*128).
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
 static constexpr uint32_t STAGING_B_BYTES = FIXED_CHUNK * 128 * sizeof(uint16_t);
-static constexpr uint32_t STAGING_C_BYTES = FIXED_CHUNK * 128 * sizeof(float);
-static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES + STAGING_C_BYTES;
+static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES;
 
 static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, int64_t n, int64_t k, bool bTranspose,
                                       TCubeTiling &out)
@@ -31,7 +30,8 @@ static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, i
                 false);
     mm.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
                 bTranspose);
-    mm.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT);
+    mm.SetCType(matmul_tiling::TPosition::VECCALC, matmul_tiling::CubeFormat::ND,
+                matmul_tiling::DataType::DT_FLOAT);
     mm.SetBias(false);
     mm.SetOrgShape(m, n, k);
     // Cap the tiled block at the 64-wide chunk: on 310P a cube base dim of 128 is
