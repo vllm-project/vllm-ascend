@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import threading
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -78,6 +79,9 @@ from vllm_ascend.memcache_comm_fence import (
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
 # multi-layer load time.
 LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
+MEMCACHE_UNMATCHED_STATE = -3101
+LAYERWISE_LEASE_RETRY_TIMEOUT_S = 30
+LAYERWISE_LEASE_RETRY_INTERVAL_S = 0.05
 
 
 class KVPoolWorker:
@@ -1408,6 +1412,30 @@ class KVPoolWorker:
                             "MemCache lease returned unexpected number of results: "
                             f"expected={len(valid_keys)}, actual={len(lease_results)}"
                         )
+                    retry_indices = [
+                        index for index, result in enumerate(lease_results) if result == MEMCACHE_UNMATCHED_STATE
+                    ]
+                    retry_deadline = time.monotonic() + LAYERWISE_LEASE_RETRY_TIMEOUT_S
+                    while retry_indices and time.monotonic() < retry_deadline:
+                        # batch_is_exist can observe an allocated key before
+                        # batch_write_finish makes its blob readable.
+                        time.sleep(LAYERWISE_LEASE_RETRY_INTERVAL_S)
+                        retry_results = self.m_store.batch_add_lease(
+                            [valid_keys[index] for index in retry_indices],
+                            LAYERWISE_READ_LEASE_TTL_MS,
+                        )
+                        if len(retry_results) != len(retry_indices):
+                            raise RuntimeError(
+                                "MemCache lease retry returned unexpected number of results: "
+                                f"expected={len(retry_indices)}, actual={len(retry_results)}"
+                            )
+                        for index, result in zip(retry_indices, retry_results):
+                            lease_results[index] = result
+                        retry_indices = [
+                            index
+                            for index in retry_indices
+                            if lease_results[index] == MEMCACHE_UNMATCHED_STATE
+                        ]
                     leased_keys = []
                     for gva_index, lease_res in zip(valid_gva_indices, lease_results):
                         block_idx = block_indices[gva_index]

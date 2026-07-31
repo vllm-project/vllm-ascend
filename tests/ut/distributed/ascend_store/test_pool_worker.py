@@ -1635,6 +1635,31 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep",
+    )
+    def test_layerwise_unmatched_state_lease_is_retried(self, sleep):
+        worker = self._make_gva_worker()
+        key_info = MagicMock()
+        key_info.size.return_value = 64
+        key_info.gva_list.return_value = [201]
+        worker.m_store.batch_get_key_info.return_value = [key_info]
+        worker.m_store.batch_add_lease.side_effect = [[-3101], [0]]
+        request = self._make_gva_request(
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+            ),
+        )
+
+        worker._prepare_load_gvas([request])
+
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [201])
+        self.assertNotEqual(request.load_keys, [])
+        self.assertEqual(worker.m_store.batch_add_lease.call_count, 2)
+        sleep.assert_called_once()
+
     def test_evicted_allocated_gva_is_reallocated(self):
         worker = self._make_gva_worker()
         key = worker._make_layerwise_gva_key(0, "h0")
