@@ -108,8 +108,6 @@ templates:
       - --enable-auto-tool-choice
       - --reasoning-parser
       - "deepseek_v4"
-      - --safetensors-load-strategy
-      - "prefetch"
       - --model-loader-extra-config
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
@@ -162,8 +160,6 @@ templates:
       - --enable-auto-tool-choice
       - --reasoning-parser
       - "deepseek_v4"
-      - --safetensors-load-strategy
-      - "prefetch"
       - --model-loader-extra-config
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
@@ -220,8 +216,6 @@ templates:
       - --reasoning-parser
       - "deepseek_v4"
       - --no-disable-hybrid-kv-cache-manager
-      - --safetensors-load-strategy
-      - "prefetch"
       - --model-loader-extra-config
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
@@ -277,8 +271,6 @@ templates:
       - --reasoning-parser
       - "deepseek_v4"
       - --no-disable-hybrid-kv-cache-manager
-      - --safetensors-load-strategy
-      - "prefetch"
       - --model-loader-extra-config
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
