@@ -119,9 +119,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         layer.w13_weight_scale = nn.Parameter(
             torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
         )
-        layer.w2_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False
-        )
+        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
         self.assertEqual(layer.w2_weight.shape, (8, 128, 128))
