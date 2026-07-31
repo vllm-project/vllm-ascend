@@ -1052,7 +1052,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         additionally tolerates ``sampling_metadata is None`` (e.g. during
         ``dummy_run`` / profile run), in which case greedy argmax is used.
         """
-        if sampling_metadata is None or not self._enable_probabilistic_draft_probs:
+        if sampling_metadata is None:
+            if self._enable_probabilistic_draft_probs:
+                logger.warning(
+                    "draft_sample_method='probabilistic' is enabled but "
+                    "sampling_metadata is None (expected during dummy_run "
+                    "or profile run). Falling back to greedy argmax; "
+                    "draft_probs will not be produced."
+                )
+            return logits.argmax(dim=-1), None
+        if not self._enable_probabilistic_draft_probs:
             return logits.argmax(dim=-1), None
         return self._sample_from_logits(logits, sampling_metadata)
 
@@ -1098,6 +1107,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> torch.Tensor:
         # Reset cached draft probs from the previous propose call.
         self._last_draft_probs = None
+        # Fallback for dummy_run / profile run where sampling_metadata is not
+        # passed explicitly. In probabilistic mode this triggers a warning in
+        # _sample_draft_from_logits and falls back to greedy argmax.
+        if sampling_metadata is None and self.runner is not None:
+            sampling_metadata = self.runner.input_batch.sampling_metadata
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
         # speculative tokens' proposings. `model_input_ids`, `model_positions` and
         # `model_hidden_states` represent the speculative model inputs.
