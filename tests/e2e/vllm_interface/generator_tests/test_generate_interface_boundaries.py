@@ -4745,9 +4745,9 @@ DeletedTarget.run = replacement
         for finding in findings
     } == {
         (
-            "NonCallableTarget.run",
-            "verified",
-            "field_mutation",
+            "vllm.base.NonCallableTarget.run",
+            "risk",
+            "possible_stale_patch",
             False,
         ),
         (
@@ -6412,3 +6412,112 @@ class Child(Base):
         "missing_upstream_super_target",
         False,
     )
+
+
+def test_v023_negative_hasattr_excludes_unconditionally_present_callable(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write_run_target(vllm_root, "target")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import target
+
+
+def replacement(self):
+    pass
+
+
+if not hasattr(target.Target, "run"):
+    target.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert not findings
+
+
+def test_v023_negative_hasattr_excludes_present_none_member(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    run = None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self):
+    pass
+
+
+if not hasattr(Target, "run"):
+    Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert not findings
+
+
+def test_v023_negative_hasattr_sees_unconditional_inherited_member(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(self):
+        pass
+
+
+class Target(Base):
+    pass
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self):
+    pass
+
+
+if not hasattr(Target, "run"):
+    Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert not findings
