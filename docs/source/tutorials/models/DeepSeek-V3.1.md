@@ -48,7 +48,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{vllm_ascend_version}}-#TODO
+    export IMAGE=quay.io/ascend/vllm-ascend:{{vllm_ascend_version}}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -69,7 +69,6 @@ Select an image based on your machine type and start the docker image on your no
     --device /dev/uburma \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
     -v /etc/hixlep/:/etc/hixlep/ \
     -v /root/.cache:/root/.cache \
     -v /usr/local/sbin:/usr/local/sbin \
@@ -186,10 +185,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
-    --port 5030 \
+    --port 8015 \
     --max_model_len 135168 \
     --max-num-batched-tokens 16384 \
-    --served-model-name dsv3 \
+    --served-model-name deepseek_v3 \
     --gpu-memory-utilization 0.9 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
@@ -827,7 +826,7 @@ Parameter descriptions:
         --tensor-parallel-size $7 \
         --max_model_len 135168 \
         --max-num-batched-tokens 16384 \
-        --served-model-name dsv3 \
+        --served-model-name deepseek_v3 \
         --gpu-memory-utilization 0.9 \
         --enable-expert-parallel \
         --async-scheduling \
@@ -891,7 +890,7 @@ Parameter descriptions:
         --tensor-parallel-size $7 \
         --max_model_len 135168 \
         --max-num-batched-tokens 256 \
-        --served-model-name dsv3 \
+        --served-model-name deepseek_v3 \
         --gpu-memory-utilization 0.9 \
         --enable-expert-parallel \
         --async-scheduling \
@@ -1152,7 +1151,7 @@ After several minutes, you can get the performance evaluation result.
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
-#### Table 1: Scenario Overview
+#### Table 1: Scenario Overview(A3)
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
@@ -1165,7 +1164,7 @@ After several minutes, you can get the performance evaluation result.
 |High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
 |Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
 
-#### Table 2: Detailed Node Configuration
+#### Table 2: Detailed Node Configuration(A3)
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
@@ -1180,6 +1179,35 @@ After several minutes, you can get the performance evaluation result.
 |Low Latency (16K)|Server-D Node|16|4|8|36K|3|
 |Long Context (64K)|Server-P Node|16|8|1(PCP2DCP8)|36K|3|
 |Long Context (64K)|Server-D Node|16|4|8|36K|3|
+
+#### Table 3: Scenario Overview(Ascend 950DT)
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas Ascend 950DT server (96G × 8 NPUs).
+
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|High Throughput<br>(3.5K/16K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5K/16K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5K input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+
+#### Table 4: Detailed Node Configuration(Ascend 950DT)
+
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
+|--------|-------------|-----|--|--|-------------------|--------------------|
+|High Throughput (3.5K)|Server / Single Machine|8|8|1|39K|3|
+|High Throughput (16K)|Server / Single Machine|8|8|1|36K|3|
+|Low Latency (3.5K)|Server / Single Machine|8|8|1|36K|3|
+|Low Latency (16K)|Server / Single Machine|8|8|1|36K|3|
+|High Throughput / Low Latency (64K)|Server / Single Machine|8|8|1|132K|3|
+|High Throughput (16K)|Server-P Node|16|4|4|36K|1|
+|High Throughput (16K)|Server-D Node|32|1|32|36K|1|
+|Low Latency (16K)|Server-P Node|16|4|4|36K|3|
+|Low Latency (16K)|Server-D Node|32|1|32|36K|3|
+|Long Context (64K)|Server-P Node|16|4|4|132K|3|
+|Long Context (64K)|Server-D Node|32|1|32|132K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
