@@ -4,6 +4,77 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.19.0 - final runtime binding checkpoint
+
+- Starting commit: `4b543aaa64daffa373d9ad02ba2ce89e4227c05d`.
+- Problem: v0.18 retained every same-name `def` that appeared on a possible
+  branch and then selected the first one. That is not Python runtime behavior:
+  a later definition, assignment, deletion, or `finally` binding replaces an
+  earlier value on that path. The bug selected the first PyTorch `@overload`
+  declaration for `Module.to` instead of its final implementation. Adjacent
+  review also reproduced lexical-local leakage, a false safe/unsafe `len`
+  decision, a partially unresolved exception tuple being treated as fully
+  resolved, and known empty `nullcontext`/`suppress` managers being labelled
+  opaque.
+- Final-binding change: add a deterministic module/class namespace flow that
+  follows source order, splits unknown `if` paths, excludes terminal paths,
+  applies `finally` to each live path, and records the final effect of
+  definitions, simple callable aliases, non-callable assignments, and
+  deletion. A later unconditional binding now replaces every older
+  conditional binding; same-signature branches collapse to one contract;
+  incompatible final signatures remain an explicit
+  `review/conditional_callable_variants`.
+- Consumer change: module-level callables now retain all final variants, and
+  verified override collection checks both upstream and downstream signature
+  sets before writing a relation. It no longer picks a conditional signature
+  by branch order. A callable overwritten by a field or `del` is no longer
+  retained as an old method target.
+- Scope and exception change: pre-scan Python function locals without entering
+  nested scopes, clear shadowed outer bindings and provenance on function
+  entry, and judge the literal `len` optimization from the current execution
+  context rather than the repository-wide final symbol table. Exception tuple
+  resolution now records whether any member is unknown instead of silently
+  dropping it. A known manager set with no suppressed exceptions is represented
+  by `()`, distinct from an unanalysable manager.
+- Test evidence: fifteen new fixtures were first observed as 13 failures and
+  two existing correct baselines. After the change, all fifteen pass. Together
+  with the corrected module-scope tombstone fixture, all 102 isolated
+  generator/auditor tests pass; Ruff, Ruff format, and `git diff --check` pass.
+- Fixed-source result: vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`, vllm-ascend
+  `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0` generated in 164.134 seconds:
+  971 relations and 44 findings (7 risk, 9 expected, 22 excluded, 6 verified),
+  with zero unresolved or generator issues. Against the accepted v0.17
+  semantics, all 971 relations and all 44 findings are exact matches. Against
+  rejected v0.18, only `torch.nn.modules.module.Module.to` changes, restoring
+  the real `(self, *args, **kwargs)` implementation. The class-callable alias
+  binding evidence is unchanged.
+- Coverage audit classified all 1,018 known sites in 36.270 seconds with zero
+  missing, conflicting, or generator-issue records. It retains the same two
+  known auditor-only orphans. Audited pre-version-bump hashes: relations
+  `227fd7c38f60325abe1e56ae823d62c5552dfb42c8fe9ce0dd6293a9a077bc4e`,
+  findings
+  `f83164f52e5319ebb89f4ce5367ce4e511f586ce710cd200056f0f83dba6d6e7`,
+  v0.17 comparison
+  `95170c05e3fcb822ab379a40d48cc76a5755a42f26dbf96c5c9d0cd3af9dbfbc`,
+  and coverage
+  `130dfd282df2199e6574aec501ddb2872342b630ade68fca68399f021355a908`.
+- This remains an explicit rollback checkpoint, not final acceptance.
+  Independent generic review reproduced the next real generator boundaries:
+  callable/non-callable conditional presence is currently filtered to the
+  callable path; `try` handlers do not yet consume exact exception outcomes;
+  conditional same-name classes are still chosen by traversal order;
+  properties, unknown decorators, and assignment-form method descriptors need
+  explicit binding kinds; exact `TYPE_CHECKING` paths, annotated callable
+  aliases, loop `break`/`continue` plus `else`, exhaustive `match`, and dynamic
+  namespace writes need modelling or review. The patch scanner also needs
+  three-way handler matching, call-time global/closure state, explicit
+  builtin-identity handling after deletion/rebinding, partial suppress state,
+  correct bare-except evidence, definition-time/comprehension named
+  expressions, and match-case traversal. None of these are hidden as upstream
+  breaks; they remain work for the next Git iteration.
+
 ## v0.18.0 - conditional-callable and exception-flow checkpoint
 
 - Starting commit: `d819fef0ee9cdf8f260ba32ef6700bcd2956901e`.

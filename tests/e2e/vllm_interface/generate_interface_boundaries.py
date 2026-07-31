@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.18.0"
+GENERATOR_VERSION = "0.19.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -130,6 +130,297 @@ def _method_nodes(node: ast.ClassDef) -> dict[str, ast.AST]:
     return {child.name: child for child in node.body if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))}
 
 
+@dataclass(frozen=True, order=True)
+class _ScopeBinding:
+    """One possible final runtime binding for a module/class namespace name."""
+
+    kind: str
+    line: int
+    column: int
+    end_line: int
+    end_column: int
+    node: ast.AST | None = field(default=None, compare=False, hash=False, repr=False)
+
+
+_UNBOUND_SCOPE_BINDING = _ScopeBinding("unbound", -1, -1, -1, -1)
+
+
+def _scope_binding(kind: str, node: ast.AST) -> _ScopeBinding:
+    return _ScopeBinding(
+        kind=kind,
+        line=getattr(node, "lineno", 0),
+        column=getattr(node, "col_offset", 0),
+        end_line=getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+        end_column=getattr(node, "end_col_offset", getattr(node, "col_offset", 0)),
+        node=node,
+    )
+
+
+def _merge_scope_binding_states(
+    states: Sequence[dict[str, tuple[_ScopeBinding, ...]]],
+) -> dict[str, tuple[_ScopeBinding, ...]] | None:
+    live_states = [state for state in states if state is not None]
+    if not live_states:
+        return None
+    names = {name for state in live_states for name in state}
+    merged: dict[str, tuple[_ScopeBinding, ...]] = {}
+    for name in names:
+        alternatives = {
+            alternative for state in live_states for alternative in state.get(name, (_UNBOUND_SCOPE_BINDING,))
+        }
+        merged[name] = tuple(sorted(alternatives))
+    return merged
+
+
+def _bind_scope_names(
+    state: dict[str, tuple[_ScopeBinding, ...]],
+    names: Iterable[str],
+    binding: _ScopeBinding,
+) -> None:
+    for name in names:
+        state[name] = (binding,)
+
+
+def _scope_final_binding_state(
+    statements: Sequence[ast.stmt],
+    tag_guard_names: set[str],
+    incoming: dict[str, tuple[_ScopeBinding, ...]] | None = None,
+    *,
+    loop_body: bool = False,
+) -> dict[str, tuple[_ScopeBinding, ...]] | None:
+    """Interpret namespace writes and retain only normally completing paths."""
+
+    state = {name: tuple(values) for name, values in (incoming or {}).items()}
+    for node in statements:
+        if isinstance(node, ast.If):
+            condition = _main_condition_value(node.test, tag_guard_names)
+            if condition is True:
+                selected = _scope_final_binding_state(
+                    node.body,
+                    tag_guard_names,
+                    state,
+                    loop_body=loop_body,
+                )
+            elif condition is False:
+                selected = _scope_final_binding_state(
+                    node.orelse,
+                    tag_guard_names,
+                    state,
+                    loop_body=loop_body,
+                )
+            else:
+                selected = _merge_scope_binding_states(
+                    [
+                        _scope_final_binding_state(
+                            node.body,
+                            tag_guard_names,
+                            state,
+                            loop_body=loop_body,
+                        ),
+                        _scope_final_binding_state(
+                            node.orelse,
+                            tag_guard_names,
+                            state,
+                            loop_body=loop_body,
+                        ),
+                    ]
+                )
+            if selected is None:
+                return None
+            state = selected
+            continue
+
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            normal = _scope_final_binding_state(
+                node.body,
+                tag_guard_names,
+                state,
+                loop_body=loop_body,
+            )
+            if normal is not None:
+                normal = _scope_final_binding_state(
+                    node.orelse,
+                    tag_guard_names,
+                    normal,
+                    loop_body=loop_body,
+                )
+            paths: list[dict[str, tuple[_ScopeBinding, ...]] | None] = [normal]
+            for handler in node.handlers:
+                handler_state = {name: tuple(values) for name, values in state.items()}
+                if handler.name:
+                    handler_state[handler.name] = (_scope_binding("value", handler),)
+                handled = _scope_final_binding_state(
+                    handler.body,
+                    tag_guard_names,
+                    handler_state,
+                    loop_body=loop_body,
+                )
+                if handled is not None and handler.name:
+                    handled[handler.name] = (_UNBOUND_SCOPE_BINDING,)
+                paths.append(handled)
+            live_paths = [path for path in paths if path is not None]
+            if node.finalbody:
+                live_paths = [
+                    final
+                    for path in live_paths
+                    if (
+                        final := _scope_final_binding_state(
+                            node.finalbody,
+                            tag_guard_names,
+                            path,
+                            loop_body=loop_body,
+                        )
+                    )
+                    is not None
+                ]
+            selected = _merge_scope_binding_states(live_paths)
+            if selected is None:
+                return None
+            state = selected
+            continue
+
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            child = {name: tuple(values) for name, values in state.items()}
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _bind_scope_names(
+                        child,
+                        _bound_target_names(item.optional_vars),
+                        _scope_binding("value", item.optional_vars),
+                    )
+            selected = _scope_final_binding_state(
+                node.body,
+                tag_guard_names,
+                child,
+                loop_body=loop_body,
+            )
+            if selected is None:
+                return None
+            state = selected
+            continue
+
+        if isinstance(node, (ast.AsyncFor, ast.For, ast.While)):
+            body_state = {name: tuple(values) for name, values in state.items()}
+            if isinstance(node, (ast.AsyncFor, ast.For)):
+                _bind_scope_names(
+                    body_state,
+                    _bound_target_names(node.target),
+                    _scope_binding("value", node.target),
+                )
+            body_result = _scope_final_binding_state(
+                node.body,
+                tag_guard_names,
+                body_state,
+                loop_body=True,
+            )
+            loop_result = _merge_scope_binding_states([state, body_result])
+            if loop_result is None:
+                return None
+            if node.orelse:
+                else_result = _scope_final_binding_state(
+                    node.orelse,
+                    tag_guard_names,
+                    loop_result,
+                    loop_body=loop_body,
+                )
+                loop_result = _merge_scope_binding_states([loop_result, else_result])
+                if loop_result is None:
+                    return None
+            state = loop_result
+            continue
+
+        if isinstance(node, ast.Match):
+            paths = [state]
+            paths.extend(
+                _scope_final_binding_state(
+                    case.body,
+                    tag_guard_names,
+                    state,
+                    loop_body=loop_body,
+                )
+                for case in node.cases
+            )
+            selected = _merge_scope_binding_states(paths)
+            if selected is None:
+                return None
+            state = selected
+            continue
+
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            state[node.name] = (_scope_binding("function", node),)
+            continue
+        if isinstance(node, ast.ClassDef):
+            state[node.name] = (_scope_binding("class", node),)
+            continue
+        if isinstance(node, ast.Import):
+            _bind_scope_names(
+                state,
+                (alias.asname or alias.name.split(".", 1)[0] for alias in node.names),
+                _scope_binding("value", node),
+            )
+            continue
+        if isinstance(node, ast.ImportFrom):
+            _bind_scope_names(
+                state,
+                (alias.asname or alias.name for alias in node.names if alias.name != "*"),
+                _scope_binding("value", node),
+            )
+            continue
+        if isinstance(node, ast.Assign):
+            source_binding = state.get(node.value.id) if isinstance(node.value, ast.Name) else None
+            for target in node.targets:
+                names = _bound_target_names(target)
+                if len(names) == 1 and isinstance(target, ast.Name) and source_binding is not None:
+                    state[target.id] = tuple(source_binding)
+                else:
+                    _bind_scope_names(
+                        state,
+                        names,
+                        _scope_binding("value", node),
+                    )
+            continue
+        if isinstance(node, ast.AnnAssign):
+            if node.value is not None:
+                _bind_scope_names(
+                    state,
+                    _bound_target_names(node.target),
+                    _scope_binding("value", node),
+                )
+            continue
+        if isinstance(node, (ast.AugAssign, ast.NamedExpr)):
+            target = node.target
+            _bind_scope_names(
+                state,
+                _bound_target_names(target),
+                _scope_binding("value", node),
+            )
+            continue
+        if isinstance(node, ast.Delete):
+            _bind_scope_names(
+                state,
+                (
+                    child.id
+                    for target in node.targets
+                    for child in ast.walk(target)
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Del)
+                ),
+                _UNBOUND_SCOPE_BINDING,
+            )
+            continue
+        if isinstance(node, (ast.Break, ast.Continue)):
+            return state if loop_body else None
+        if isinstance(node, (ast.Raise, ast.Return)):
+            return None
+    return state
+
+
+def _scope_final_bindings(
+    statements: Sequence[ast.stmt],
+    tag_guard_names: set[str],
+) -> dict[str, tuple[_ScopeBinding, ...]]:
+    return _scope_final_binding_state(statements, tag_guard_names) or {}
+
+
 def _possible_method_nodes(
     node: ast.ClassDef,
     tag_guard_names: set[str],
@@ -142,11 +433,14 @@ def _possible_method_variants(
     node: ast.ClassDef,
     tag_guard_names: set[str],
 ) -> dict[str, tuple[ast.AST, ...]]:
-    variants: dict[str, list[ast.AST]] = defaultdict(list)
-    for child in _main_module_statements(node.body, tag_guard_names):
-        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)):
-            variants[child.name].append(child)
-    return {name: tuple(candidates) for name, candidates in variants.items()}
+    bindings = _scope_final_bindings(node.body, tag_guard_names)
+    return {
+        name: tuple(
+            candidate.node for candidate in candidates if candidate.kind == "function" and candidate.node is not None
+        )
+        for name, candidates in bindings.items()
+        if any(candidate.kind == "function" for candidate in candidates)
+    }
 
 
 def _function_scope_nodes(
@@ -163,6 +457,113 @@ def _function_scope_nodes(
         ):
             continue
         stack.extend(reversed(list(ast.iter_child_nodes(current))))
+
+
+def _function_local_names(
+    node: ast.AsyncFunctionDef | ast.FunctionDef,
+) -> set[str]:
+    """Return names compiled as locals in exactly one function scope."""
+
+    class LocalCollector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.names: set[str] = set()
+            self.globals: set[str] = set()
+            self.nonlocals: set[str] = set()
+
+        def visit_Name(self, child: ast.Name) -> None:  # noqa: N802
+            if isinstance(child.ctx, (ast.Del, ast.Store)):
+                self.names.add(child.id)
+
+        def visit_Global(self, child: ast.Global) -> None:  # noqa: N802
+            self.globals.update(child.names)
+
+        def visit_Nonlocal(self, child: ast.Nonlocal) -> None:  # noqa: N802
+            self.nonlocals.update(child.names)
+
+        def visit_Import(self, child: ast.Import) -> None:  # noqa: N802
+            self.names.update(alias.asname or alias.name.split(".", 1)[0] for alias in child.names)
+
+        def visit_ImportFrom(self, child: ast.ImportFrom) -> None:  # noqa: N802
+            self.names.update(alias.asname or alias.name for alias in child.names if alias.name != "*")
+
+        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:  # noqa: N802
+            self.names.add(child.name)
+
+        def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:  # noqa: N802
+            self.names.add(child.name)
+
+        def visit_ClassDef(self, child: ast.ClassDef) -> None:  # noqa: N802
+            self.names.add(child.name)
+
+        def visit_Lambda(self, child: ast.Lambda) -> None:  # noqa: N802
+            return
+
+        def visit_ExceptHandler(self, child: ast.ExceptHandler) -> None:  # noqa: N802
+            if child.type is not None:
+                self.visit(child.type)
+            if child.name:
+                self.names.add(child.name)
+            for statement in child.body:
+                self.visit(statement)
+
+        def _visit_comprehension_scope(
+            self,
+            generators: Sequence[ast.comprehension],
+            values: Sequence[ast.AST],
+        ) -> None:
+            # Comprehension iteration targets belong to the implicit nested
+            # scope.  Their iterable/filter expressions and assignment
+            # expressions still execute in the surrounding function.
+            for generator in generators:
+                self.visit(generator.iter)
+                for condition in generator.ifs:
+                    self.visit(condition)
+            for value in values:
+                self.visit(value)
+
+        def visit_ListComp(self, child: ast.ListComp) -> None:  # noqa: N802
+            self._visit_comprehension_scope(child.generators, (child.elt,))
+
+        def visit_SetComp(self, child: ast.SetComp) -> None:  # noqa: N802
+            self._visit_comprehension_scope(child.generators, (child.elt,))
+
+        def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:  # noqa: N802
+            self._visit_comprehension_scope(child.generators, (child.elt,))
+
+        def visit_DictComp(self, child: ast.DictComp) -> None:  # noqa: N802
+            self._visit_comprehension_scope(child.generators, (child.key, child.value))
+
+        def visit_MatchAs(self, child: ast.MatchAs) -> None:  # noqa: N802
+            if child.name:
+                self.names.add(child.name)
+            if child.pattern is not None:
+                self.visit(child.pattern)
+
+        def visit_MatchStar(self, child: ast.MatchStar) -> None:  # noqa: N802
+            if child.name:
+                self.names.add(child.name)
+
+        def visit_MatchMapping(self, child: ast.MatchMapping) -> None:  # noqa: N802
+            if child.rest:
+                self.names.add(child.rest)
+            self.generic_visit(child)
+
+    collector = LocalCollector()
+    collector.names.update(
+        argument.arg
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        )
+    )
+    if node.args.vararg is not None:
+        collector.names.add(node.args.vararg.arg)
+    if node.args.kwarg is not None:
+        collector.names.add(node.args.kwarg.arg)
+    for statement in node.body:
+        collector.visit(statement)
+    return collector.names - collector.globals - collector.nonlocals
 
 
 def _statements_must_terminate(statements: Sequence[ast.stmt]) -> bool:
@@ -1161,6 +1562,10 @@ class RepositoryIndex:
             star_imports: list[str] = []
             annotated_exports: list[tuple[str, str]] = []
             tag_guard_names = _tag_guard_names(tree.body)
+            module_final_bindings = _scope_final_bindings(
+                tree.body,
+                tag_guard_names,
+            )
             module_must_names = _scope_must_bound_names(
                 tree.body,
                 tag_guard_names,
@@ -1249,10 +1654,15 @@ class RepositoryIndex:
                     imports.pop(node.name, None)
                     qualified_name = f"{module}.{node.name}"
                     class_is_unconditional = unconditional or node.name in module_must_names
-                    class_must_names = _scope_must_bound_names(
+                    class_final_bindings = _scope_final_bindings(
                         node.body,
                         tag_guard_names,
                     )
+                    class_must_callable_names = {
+                        name
+                        for name, candidates in class_final_bindings.items()
+                        if candidates and all(candidate.kind == "function" for candidate in candidates)
+                    }
                     method_variants = _possible_method_variants(
                         node,
                         tag_guard_names,
@@ -1316,7 +1726,7 @@ class RepositoryIndex:
                         )
                         self.callable_variants[method_qualified_name] = variants
                         self.callables[method_qualified_name] = variants[0]
-                        if class_is_unconditional and method_name in class_must_names:
+                        if class_is_unconditional and method_name in class_must_callable_names:
                             self.unconditional_symbols.add(method_qualified_name)
                     self._collect_class_callable_aliases(
                         node,
@@ -1341,6 +1751,47 @@ class RepositoryIndex:
                     if unconditional or node.name in module_must_names:
                         self.unconditional_exports.add(qualified_name)
                         self.unconditional_symbols.add(qualified_name)
+
+            module_function_names = {
+                *functions,
+                *(
+                    name
+                    for name, candidates in module_final_bindings.items()
+                    if any(candidate.kind == "function" for candidate in candidates)
+                ),
+            }
+            for function_name in module_function_names:
+                qualified_name = f"{module}.{function_name}"
+                candidates = tuple(
+                    candidate.node
+                    for candidate in module_final_bindings.get(function_name, ())
+                    if candidate.kind == "function" and candidate.node is not None
+                )
+                self.unconditional_exports.discard(qualified_name)
+                self.unconditional_symbols.discard(qualified_name)
+                if not candidates:
+                    functions.pop(function_name, None)
+                    self.callables.pop(qualified_name, None)
+                    self.callable_variants.pop(qualified_name, None)
+                    continue
+                variants = tuple(
+                    CallableInfo(
+                        qualified_name=qualified_name,
+                        module=module,
+                        file=relative_file,
+                        owner=None,
+                        name=function_name,
+                        node=candidate,
+                    )
+                    for candidate in candidates
+                )
+                functions[function_name] = variants[0]
+                self.callables[qualified_name] = variants[0]
+                self.callable_variants[qualified_name] = variants
+                final_alternatives = module_final_bindings[function_name]
+                if final_alternatives and all(candidate.kind == "function" for candidate in final_alternatives):
+                    self.unconditional_exports.add(qualified_name)
+                    self.unconditional_symbols.add(qualified_name)
 
             for node in _main_ast_walk(tree):
                 if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
@@ -2179,10 +2630,49 @@ class InterfaceBoundaryGenerator:
                 )
             )
             return
-        upstream_callable = self._callable_info(f"{effective_owner}.{method_name}")
+        upstream_name = f"{effective_owner}.{method_name}"
+        downstream_name = f"{class_info.qualified_name}.{method_name}"
+        upstream_variants = self._callable_variants(upstream_name)
+        downstream_variants = self._callable_variants(downstream_name)
+        upstream_signatures = {
+            json.dumps(
+                candidate.signature,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for candidate in upstream_variants
+        }
+        downstream_signatures = {
+            json.dumps(
+                candidate.signature,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for candidate in downstream_variants
+        }
+        if len(upstream_signatures) > 1 or len(downstream_signatures) > 1:
+            self.findings.append(
+                CandidateFinding(
+                    relation="override",
+                    downstream_file=class_info.file,
+                    downstream_owner=class_info.name,
+                    downstream_name=method_name,
+                    target_expression=upstream_name,
+                    evidence_line=getattr(method_node, "lineno", 0),
+                    reason=("conditional upstream or downstream callable has incompatible signature variants"),
+                    status="review",
+                    reason_code="conditional_callable_variants",
+                    generator_issue=False,
+                )
+            )
+            return
+
+        upstream_callable = upstream_variants[0] if upstream_variants else self._callable_info(upstream_name)
         if upstream_callable is None:
             return
-        downstream_callable = self.downstream.find_callable(f"{class_info.qualified_name}.{method_name}")
+        downstream_callable = (
+            downstream_variants[0] if downstream_variants else self.downstream.find_callable(downstream_name)
+        )
         evidence_line = (
             downstream_callable.binding_line
             if downstream_callable and downstream_callable.binding_line is not None
@@ -2664,25 +3154,21 @@ class InterfaceBoundaryGenerator:
         module_info: ModuleInfo,
         handler: ast.ExceptHandler,
         context: PatchScanContext,
-    ) -> tuple[str, ...] | None:
-        """Return canonical caught exceptions; ``None`` denotes a bare handler."""
+    ) -> tuple[tuple[str, ...], bool] | None:
+        """Return known caught exceptions and whether any member is unknown."""
 
         if handler.type is None:
             return None
         handler_nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
-        names = tuple(
-            name
-            for candidate in handler_nodes
-            if (
-                name := self._canonical_exception_node(
-                    module_info,
-                    candidate,
-                    context,
-                )
+        resolved = tuple(
+            self._canonical_exception_node(
+                module_info,
+                candidate,
+                context,
             )
-            is not None
+            for candidate in handler_nodes
         )
-        return names
+        return tuple(name for name in resolved if name is not None), any(name is None for name in resolved)
 
     def _canonical_exception_node(
         self,
@@ -2782,14 +3268,15 @@ class InterfaceBoundaryGenerator:
         handler: ast.ExceptHandler,
         raised: PatchFlowExit,
     ) -> bool:
-        handler_names = self._handler_exception_names(
+        handler_resolution = self._handler_exception_names(
             module_info,
             handler,
             raised.context,
         )
-        if handler_names is None or raised.exception_name is None:
+        if handler_resolution is None or raised.exception_name is None:
             return True
-        return any(
+        handler_names, has_unknown = handler_resolution
+        return has_unknown or any(
             self._exception_name_is_subclass(
                 raised.exception_name,
                 handler_name,
@@ -2835,7 +3322,7 @@ class InterfaceBoundaryGenerator:
                 if exception_name is None:
                     return None
                 exception_names.append(exception_name)
-        return tuple(exception_names) if exception_names else None
+        return tuple(exception_names)
 
     def _finish_with_flow(
         self,
@@ -2882,11 +3369,12 @@ class InterfaceBoundaryGenerator:
     ) -> bool:
         """Whether every exception caught by ``later`` was caught earlier."""
 
-        earlier_names = self._handler_exception_names(module_info, earlier, context)
-        if earlier_names is None:
+        earlier_resolution = self._handler_exception_names(module_info, earlier, context)
+        if earlier_resolution is None:
             return True
-        later_names = self._handler_exception_names(module_info, later, context)
-        if later_names is None:
+        earlier_names, _ = earlier_resolution
+        later_resolution = self._handler_exception_names(module_info, later, context)
+        if later_resolution is None:
             return any(
                 self._exception_name_is_subclass(
                     "builtins.BaseException",
@@ -2894,6 +3382,9 @@ class InterfaceBoundaryGenerator:
                 )
                 for earlier_name in earlier_names
             )
+        later_names, later_has_unknown = later_resolution
+        if later_has_unknown:
+            return False
         if not earlier_names or not later_names:
             return False
         return all(
@@ -2913,9 +3404,10 @@ class InterfaceBoundaryGenerator:
         handler: ast.ExceptHandler,
         context: PatchScanContext,
     ) -> bool:
-        handler_names = self._handler_exception_names(module_info, handler, context)
-        if handler_names is None:
+        handler_resolution = self._handler_exception_names(module_info, handler, context)
+        if handler_resolution is None:
             return True
+        handler_names, _ = handler_resolution
         return any(
             self._exception_name_is_subclass(
                 "builtins.Exception",
@@ -3788,10 +4280,6 @@ class InterfaceBoundaryGenerator:
             or name in context.unknown_bindings
             or name in context.local_callables
             or name in context.parameter_names
-            or name in module_info.imports
-            or name in module_info.classes
-            or name in module_info.functions
-            or self.downstream.find_value(f"{module_info.name}.{name}") is not None
         ):
             return False
         try:
@@ -3888,8 +4376,8 @@ class InterfaceBoundaryGenerator:
         node: ast.AsyncFunctionDef | ast.FunctionDef,
         context: PatchScanContext,
     ) -> None:
-        """Remove outer values shadowed by parameters in one function scope."""
-        for parameter in self._callable_parameter_names(node):
+        """Remove outer values shadowed by any lexical function local."""
+        for parameter in _function_local_names(node):
             # An empty lexical binding is a tombstone. Without it, resolution
             # falls back to the module import index and can reuse a shadowed
             # ``import ... as <parameter>`` value.
@@ -3898,6 +4386,9 @@ class InterfaceBoundaryGenerator:
             context.strings.pop(parameter, None)
             context.local_callables.pop(parameter, None)
             context.runtime_modules.pop(parameter, None)
+            context.unknown_bindings.discard(parameter)
+            context.upstream_binding_provenance.pop(parameter, None)
+            context.upstream_binding_history.discard(parameter)
             context.parameter_names.add(parameter)
 
     def _parameter_is_reassigned(
