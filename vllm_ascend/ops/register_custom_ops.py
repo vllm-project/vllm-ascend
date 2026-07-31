@@ -58,12 +58,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
                 x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
-            if enable_sp_by_pass():
-                local_sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-                if local_sizes is not None:
-                    ep_size = len(local_sizes)
-                    x = x.view(ep_size, x.shape[0] // ep_size, *x.shape[1:])
-                    x = torch.cat([x[idx, :size] for idx, size in enumerate(local_sizes)], dim=0)
+            if enable_sp_by_pass():  # TODO: do unpad
                 return x
             # unpad
             num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
@@ -101,16 +96,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
         if enable_sp_by_pass():
-            local_sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-            if local_sizes is not None:
-                max_local_size = max(local_sizes)
-                padded_x = x.new_zeros((len(local_sizes), max_local_size, *x.shape[1:]))
-                offset = 0
-                for idx, size in enumerate(local_sizes):
-                    padded_x[idx, :size] = x[offset : offset + size]
-                    offset += size
-                x = padded_x.view(-1, *x.shape[1:])
-            return get_ep_group().reduce_scatter(x, 0)
+            return get_ep_group().reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # padding
         dp_size = get_dp_group().world_size
         num_tokens_across_dp_cpu = get_forward_context().dp_metadata.num_tokens_across_dp_cpu
@@ -125,28 +111,19 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
 
 
 def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_comm: bool = False) -> torch.Tensor:
-    if (_EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm)) and label:
-        try:
-            use_ep_group = is_ep_comm and get_forward_context().dp_metadata is not None
-        except AssertionError:
-            use_ep_group = False
-        group_world_size = get_ep_group().world_size if use_ep_group else get_tensor_model_parallel_world_size()
-        return torch.empty((x.shape[0] * group_world_size, *x.shape[1:]), device=x.device, dtype=x.dtype)
+    if _EXTRA_CTX.flash_comm_v1_enabled and label:
+        return torch.empty(
+            (x.shape[0] * get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
+        )
 
     return x
 
 
 def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
-    # Keep fake shape propagation aligned with _maybe_pad_and_reduce_impl.
-    # Sequence parallelism changes the shape only for the EP communication
-    # path; the regular TP path still performs an all-reduce.
     if _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm):
-        try:
-            use_ep_group = is_ep_comm and get_forward_context().dp_metadata is not None
-        except AssertionError:
-            use_ep_group = False
-        group_world_size = get_ep_group().world_size if use_ep_group else get_tensor_model_parallel_world_size()
-        return torch.empty((x.shape[0] // group_world_size, *x.shape[1:]), device=x.device, dtype=x.dtype)
+        return torch.empty(
+            (x.shape[0] // get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
+        )
 
     return x
 

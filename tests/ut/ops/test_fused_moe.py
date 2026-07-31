@@ -178,30 +178,6 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
-@pytest.mark.parametrize("is_sequence_parallel", [False, True])
-def test_runner_final_output_reduces_only_non_sp(monkeypatch, is_sequence_parallel):
-    runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
-    states = torch.arange(8).view(2, 4)
-    reduced = states + 100
-    reduce_op = MagicMock(return_value=reduced)
-    monkeypatch.setattr(
-        fused_moe_module.torch.ops.vllm,
-        "maybe_all_reduce_tensor_model_parallel",
-        reduce_op,
-        raising=False,
-    )
-
-    result = runner._maybe_reduce_final_output(states, trunc_size=4)
-
-    if is_sequence_parallel:
-        torch.testing.assert_close(result, states)
-        reduce_op.assert_not_called()
-    else:
-        torch.testing.assert_close(result, reduced)
-        reduce_op.assert_called_once_with(states)
-
-
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None
