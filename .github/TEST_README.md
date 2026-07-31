@@ -138,6 +138,7 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
 | `tests/e2e/pull_request/one_card/` | A2 NPU x1 |
 | `tests/e2e/pull_request/two_card/` | A3 NPU x2 |
 | `tests/e2e/pull_request/four_card/` | A3 NPU x4 |
+| `tests/e2e/pull_request/eight_card/` | A3 NPU x8 |
 | `*_310p.py` under one/two-card paths | 310P NPU x1 |
 | `*_310p.py` under four-card paths | 310P NPU x4 |
 
@@ -172,6 +173,7 @@ If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and 
    - 1-card: `tests/e2e/pull_request/one_card/test_new_feature.py`
    - 2-card: `tests/e2e/pull_request/two_card/test_new_feature.py`
    - 4-card: `tests/e2e/pull_request/four_card/test_new_feature.py`
+   - 8-card: `tests/e2e/pull_request/eight_card/test_new_feature.py`
 
 2. Register it in `.github/workflows/scripts/test_config.yaml` for PR selective testing.
 
