@@ -1071,12 +1071,12 @@ class TestCoreFunctionality(unittest.TestCase):
                     [0],
                 ),
             }
-            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
-            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
-            self.thread.block_size_scale = [[1, 2]]
-            self.thread.block_len_per_addr = [[1024, 2048]]
-            self.thread.block_stride_per_addr = [[1024, 2048]]
-            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192]]
+            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000, 0x2800]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000, 0x4800]]}
+            self.thread.block_size_scale = [[1, 2, 2]]
+            self.thread.block_len_per_addr = [[1024, 2048, 256]]
+            self.thread.block_stride_per_addr = [[1024, 2048, 256]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192, 512]]
 
             self.thread._transfer_kv_cache_all_groups(req)
 
@@ -1116,9 +1116,9 @@ class TestCoreFunctionality(unittest.TestCase):
             self.thread._transfer_kv_cache_all_groups(req)
 
         call_args, _ = self.engine.batch_transfer_sync_read.call_args
-        self.assertEqual(call_args[1], [0x1000 + 2 * 1024, 0x2000 + 4 * 2048])
-        self.assertEqual(call_args[2], [0x3000 + 3 * 4096, 0x4000 + 7 * 8192])
-        self.assertEqual(call_args[3], [1024, 2048])
+        self.assertEqual(call_args[1], [0x1000 + 2 * 1024, 0x2000 + 4 * 2048, 0x2800 + 4 * 256])
+        self.assertEqual(call_args[2], [0x3000 + 3 * 4096, 0x4000 + 7 * 8192, 0x4800 + 7 * 512])
+        self.assertEqual(call_args[3], [1024, 2048, 256])
         mock_get_meta.assert_not_called()
 
     def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
@@ -2187,8 +2187,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             ),
         }
         kv_caches = {
+            "model.layers.0.self_attn.indexer": (
+                torch.empty((20, 16, 1, 32), device="cpu"),
+                torch.empty((20, 16, 1, 1), device="cpu"),
+            ),
             "model.layers.0.self_attn": make_cpu_kv_cache(kv_heads=1),
-            "model.layers.0.self_attn.indexer": (torch.empty((20, 16, 1, 32), device="cpu"),),
         }
 
         with (
@@ -2203,8 +2206,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertEqual(list(worker.kv_group2layeridx), [0])
         self.assertEqual(worker.kv_group2layeridx[0][0]["kv_cache_spec_type"], "MLAAttentionSpec")
-        self.assertEqual(len(worker.kv_caches_base_addr[0]), 3)
-        self.assertEqual(worker.block_size_scale[0], [1, 1, 2])
+        self.assertEqual(len(worker.kv_caches_base_addr[0]), 4)
+        self.assertEqual(worker.block_size_scale[0], [1, 1, 2, 2])
 
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set

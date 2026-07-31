@@ -2360,7 +2360,17 @@ class MooncakeConnectorWorker:
 
         # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
         # aggregating layer views that share the same raw KVCacheTensor.
-        for layer_name, kv_cache_tuple in kv_caches.items():
+        registration_groups = list(self.kv_group2layeridx.values())
+        if self.enable_sfa_dcp_replicated_indexer:
+            registration_groups.sort(key=lambda group: group[0]["kv_cache_spec_type"] == "AscendSFAIndexerCacheSpec")
+        registration_layer_names = [
+            layer_name
+            for group_spec, _ in registration_groups
+            for layer_name in group_spec["layer_names"]
+            if layer_name in kv_caches
+        ]
+        for layer_name in registration_layer_names:
+            kv_cache_tuple = kv_caches[layer_name]
             layer_idx = layer_name_to_idx[layer_name]
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
                 tensor_num_blocks = single_kv_cache.shape[0]
