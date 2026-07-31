@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.21.0"
+GENERATOR_VERSION = "0.22.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -1152,6 +1152,15 @@ def _main_condition_value(
     if isinstance(node, ast.Constant) and isinstance(node.value, bool):
         return node.value
     if _is_exact_tag_check(node):
+        return False
+    if (
+        isinstance(node, ast.Call)
+        and not node.args
+        and not node.keywords
+        and _expression_name(node.func) == "current_platform.is_cpu"
+    ):
+        # This mapping is generated for the vllm-ascend/NPU consumer.  A CPU
+        # implementation alias is not a runtime alternative for that target.
         return False
     if isinstance(node, ast.Name) and node.id in tag_guard_names:
         return False

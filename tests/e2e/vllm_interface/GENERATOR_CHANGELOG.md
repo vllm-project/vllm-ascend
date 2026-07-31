@@ -4,6 +4,38 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.22.0 - exact NPU platform path checkpoint
+
+- Starting commit: `f2a2bf13a`; rollback checkpoint: `04e6a5cf8`.
+- Problem: the callable-alias implementation correctly found two different
+  signatures for `causal_conv1d_update`, but it treated
+  `current_platform.is_cpu()` as reachable while generating an NPU consumer
+  map.  That produced one false review and removed one otherwise verified
+  monkey-patch relation.
+- Change: the active-main condition evaluator now selects the exact inactive
+  result for an argument-free `current_platform.is_cpu()` guard in this
+  vllm-ascend/NPU generator.  The alias regression remains independently
+  covered under an unknown runtime condition, so the fix cannot pass merely by
+  suppressing every alias branch.  One new red test uses deliberately
+  incompatible CPU/default signatures and proves that only the NPU-reachable
+  signature is emitted.
+- Test evidence: all 117 isolated generator/auditor tests pass; Ruff, Ruff
+  format, and `git diff --check` pass.
+- Fixed-source result: the pinned sources generated in 250.5 seconds with 971
+  relations and 44 findings (7 risk, 9 expected, 22 excluded, 6 verified), zero
+  review and zero generator issues.  All 971 relations are exact semantic
+  matches to the accepted v0.19 baseline, with no missing or new downstream
+  endpoint.  The independent coverage audit classified all 1,018 candidates
+  with zero missing, conflicting, or generator-issue records and the same two
+  known auditor-only orphans.
+- This is an accepted rollback checkpoint, not final completion.  Independent
+  review has since reproduced unmodelled descriptor kinds, explicit downstream
+  override intent after an upstream deletion, conditional class/downstream
+  method presence, negative `hasattr`, custom exception inheritance, precise
+  expression exceptions, and several lower-frequency namespace flow edges.
+  Those are generator work; none is hidden by relabelling it as an upstream
+  break.
+
 ## v0.21.0 - callable alias checkpoint (rejected)
 
 - Starting commit: `26b471763`; rollback checkpoint: `c78b06086`.
