@@ -39,7 +39,7 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,8,16,24,28,40,52,64,76,88,96,100,112,120,132,144,160,176,184,192,196,200,204,208,212,216,220],"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
