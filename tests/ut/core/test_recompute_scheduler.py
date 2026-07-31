@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
+import inspect
+import textwrap
 from collections import defaultdict
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -110,3 +113,37 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
             client_index=request.client_index,
         )
     ]
+
+
+def test_finished_request_propagates_all_transfer_params():
+    """Guard the vLLM _free_request and EngineCoreOutput protocol."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(RecomputeScheduler.update_from_output)))
+
+    free_request_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_free_request"
+    ]
+    assert len(free_request_assignments) == 1
+    target = free_request_assignments[0].targets[0]
+    assert isinstance(target, ast.Tuple)
+    assert [ast.unparse(element) for element in target.elts] == [
+        "kv_transfer_params",
+        "ec_transfer_params",
+    ]
+
+    output_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "EngineCoreOutput"
+        and any(keyword.arg == "kv_transfer_params" for keyword in node.keywords)
+    ]
+    assert len(output_calls) == 1
+    output_keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in output_calls[0].keywords}
+    assert output_keywords["kv_transfer_params"] == "kv_transfer_params"
+    assert output_keywords["ec_transfer_params"] == "ec_transfer_params"
