@@ -712,6 +712,19 @@ inline uint64_t GetKvCacheBlockSize(const at::Tensor &kv_cache, int32_t cacheMod
     return static_cast<uint64_t>(sizes[1]);
 }
 
+// NZ rope caches are [blockNum, ropeDim/16, blockSize, 16], so their last axis
+// is C0 rather than the rope dim; recover the rope dim from the C1/C0 pair.
+inline uint32_t GetRopeHeadDim(const at::Tensor &kv_cache_rope, int32_t cacheMode)
+{
+    auto sizes = kv_cache_rope.sizes();
+    TORCH_CHECK(!sizes.empty(), "kv_cache_rope must not be a scalar");
+    const bool isNzCache = (cacheMode == 2 || cacheMode == 3);
+    if (isNzCache && sizes.size() == 4) {
+        return static_cast<uint32_t>(sizes[1] * sizes[3]);
+    }
+    return static_cast<uint32_t>(sizes.back());
+}
+
 std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
@@ -749,7 +762,7 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     uint32_t qkNopeHeadDim = wuk.sizes()[1];
     uint32_t kvLoraRank = wuk.sizes()[2];
     uint32_t qLoraRank = gamma1.sizes()[0];
-    uint32_t qkRopeHeadDim = kv_cache_rope.sizes().back();
+    uint32_t qkRopeHeadDim = GetRopeHeadDim(kv_cache_rope, static_cast<int32_t>(cacheMode));
 
     ValidateCacheNonFirstAxisContiguous(kv_cache, "kv_cache");
     ValidateCacheNonFirstAxisContiguous(kv_cache_rope, "kv_cache_rope");
