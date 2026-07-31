@@ -1,6 +1,6 @@
 #长序列只验功能，不做性能要求
 test_name: "Qwen3.5-397B-w4a8_986k-function"
-model: "/mnt/share/weights/Qwen3.5-397B-A17B-w4a8-org"
+model: "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp"
 num_nodes: 2
 npu_per_node: 16
 
