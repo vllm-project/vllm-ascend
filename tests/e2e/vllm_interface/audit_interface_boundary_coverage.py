@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-AUDIT_VERSION = "0.4.0"
+AUDIT_VERSION = "0.5.0"
 RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 STATUSES = frozenset({"verified", "risk", "expected", "excluded", "review"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -1189,6 +1189,8 @@ def _load_dispositions(path: Path) -> tuple[dict[str, Any], list[Disposition]]:
             continue
         if "f" in payload:
             finding = payload["f"]
+            if finding.get("supplemental"):
+                continue
             relation = finding.get("relation")
             status = finding.get("status")
             if relation not in RELATIONS or status not in STATUSES:

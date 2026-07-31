@@ -46,10 +46,47 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.23.0"
+SCHEMA_VERSION = 5
+GENERATOR_VERSION = "0.24.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
+DESCRIPTOR_KINDS = frozenset(
+    {
+        "ordinary",
+        "property",
+        "classmethod",
+        "staticmethod",
+        "unknown",
+    }
+)
+_BUILTIN_DESCRIPTOR_DECORATORS = {
+    "builtins.classmethod": "classmethod",
+    "builtins.property": "property",
+    "builtins.staticmethod": "staticmethod",
+}
+_TRANSPARENT_DESCRIPTOR_DECORATORS = frozenset(
+    {
+        "abc.abstractmethod",
+        "functools.wraps",
+        "typing.final",
+        "typing.override",
+        "typing_extensions.final",
+        "typing_extensions.override",
+    }
+)
+_PINNED_ORDINARY_DESCRIPTOR_DECORATORS: dict[
+    tuple[str, str],
+    frozenset[str],
+] = {
+    (
+        "torch",
+        "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+    ): frozenset({"torch.inference_mode"}),
+    (
+        "vllm",
+        "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
+    ): frozenset({"vllm.tracing.instrument"}),
+}
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
     "abc.ABC": (),
     "typing.Generic": (),
@@ -1265,6 +1302,126 @@ def _direct_bound_names(node: ast.stmt) -> set[str]:
     return set()
 
 
+def _scope_bound_names_before(
+    statements: Sequence[ast.stmt],
+    line: int,
+) -> set[str]:
+    """Return conservative current-scope bindings created before ``line``.
+
+    The helper deliberately does not enter nested function or class scopes.
+    A binding seen on only one control-flow path is still returned: that is
+    enough to prove that a bare builtin decorator is not unconditionally the
+    builtin and must therefore be reported as ``unknown``.
+    """
+
+    names: set[str] = set()
+
+    def visit_statement(node: ast.stmt) -> None:
+        node_line = getattr(node, "lineno", 0)
+        if node_line >= line:
+            return
+        names.update(_direct_bound_names(node))
+        if isinstance(node, (ast.AsyncFor, ast.For)):
+            names.update(_bound_target_names(node.target))
+        elif isinstance(node, (ast.AsyncWith, ast.With)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    names.update(_bound_target_names(item.optional_vars))
+        elif isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            names.add("*")
+
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+            return
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ExceptHandler):
+                if child.name and getattr(child, "lineno", 0) < line:
+                    names.add(child.name)
+                for statement in child.body:
+                    visit_statement(statement)
+            elif isinstance(child, ast.stmt):
+                visit_statement(child)
+
+    for statement in statements:
+        visit_statement(statement)
+    return names
+
+
+def _resolved_decorator_reference(
+    node: ast.AST,
+    imports: dict[str, str],
+    shadowed_names: set[str],
+) -> str | None:
+    """Resolve a decorator name only when its lexical root is provable."""
+
+    expression_node = node.func if isinstance(node, ast.Call) else node
+    expression = _expression_name(expression_node)
+    if expression is None:
+        return None
+    root, separator, remainder = expression.partition(".")
+    if root in imports:
+        imported = imports[root]
+        return f"{imported}.{remainder}" if separator else imported
+    if root in {"classmethod", "property", "staticmethod"}:
+        if root in shadowed_names or "*" in shadowed_names:
+            return None
+        return f"builtins.{root}"
+    if root in shadowed_names:
+        return None
+    return expression
+
+
+def _definition_descriptor_kind(
+    node: ast.AST | None,
+    *,
+    imports: dict[str, str] | None = None,
+    shadowed_names: set[str] | None = None,
+    known_properties: set[str] | None = None,
+    ordinary_decorators: set[str] | frozenset[str] | None = None,
+) -> str | None:
+    """Classify the object produced by a function definition.
+
+    Decorators are applied from bottom to top.  A known outer descriptor
+    wrapper therefore determines the installed kind even when an inner
+    decorator is dynamic.  An unknown outer decorator is never guessed.
+    """
+
+    if isinstance(node, ast.Lambda):
+        return "ordinary"
+    if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        return None
+
+    imports = imports or {}
+    shadowed_names = shadowed_names or set()
+    known_properties = known_properties or set()
+    ordinary_decorators = ordinary_decorators or set()
+    kind = "ordinary"
+    for decorator in reversed(node.decorator_list):
+        reference = _resolved_decorator_reference(
+            decorator,
+            imports,
+            shadowed_names,
+        )
+        descriptor_kind = _BUILTIN_DESCRIPTOR_DECORATORS.get(reference or "")
+        if descriptor_kind is not None and not isinstance(decorator, ast.Call):
+            kind = descriptor_kind
+            continue
+        if reference in _TRANSPARENT_DESCRIPTOR_DECORATORS:
+            continue
+        if reference in ordinary_decorators:
+            kind = "ordinary" if kind == "ordinary" else "unknown"
+            continue
+        expression = _expression_name(decorator)
+        if (
+            expression is not None
+            and expression.rsplit(".", 1)[-1] in {"deleter", "getter", "setter"}
+            and expression.rsplit(".", 1)[0] in known_properties
+        ):
+            kind = "property"
+            continue
+        kind = "unknown"
+    return kind
+
+
 def _scope_must_bound_names(
     statements: Sequence[ast.stmt],
     tag_guard_names: set[str],
@@ -1441,6 +1598,7 @@ class CallableInfo:
     node: ast.AST | None = field(compare=False, hash=False, repr=False)
     binding_line: int | None = None
     origin_kind: str = "definition"
+    descriptor_kind: str | None = "ordinary"
     signature_override: list[object] | None = field(
         default=None,
         compare=False,
@@ -1514,6 +1672,7 @@ class RelationEvidence:
     definition_line: int | None = None
     binding_line: int | None = None
     target_expression: str | None = None
+    installed_descriptor_kind: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1532,6 +1691,8 @@ class RelationEvidence:
             payload["binding_line"] = self.binding_line
         if self.target_expression is not None:
             payload["target_expression"] = self.target_expression
+        if self.installed_descriptor_kind is not None:
+            payload["installed_descriptor_kind"] = self.installed_descriptor_kind
         return payload
 
 
@@ -1554,6 +1715,9 @@ class Relation:
         hash=False,
     )
     upstream_package: str = "vllm"
+    upstream_descriptor_kind: str | None = None
+    downstream_descriptor_kind: str | None = None
+    installed_descriptor_kind: str | None = None
 
     def upstream_key(self) -> tuple[str, str, str, str]:
         return (
@@ -1608,11 +1772,15 @@ class CandidateFinding:
     generator_issue: bool = True
     evidence_scope: str | None = None
     evidence_guards: tuple[str, ...] = ()
+    supplemental: bool = False
+    upstream_descriptor_kind: str | None = None
+    downstream_descriptor_kind: str | None = None
+    installed_descriptor_kind: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         if self.status not in FINDING_STATUSES:
             raise ValueError(f"unsupported finding status: {self.status}")
-        return {
+        payload = {
             "relation": self.relation,
             "downstream": {
                 "file": self.downstream_file,
@@ -1631,6 +1799,15 @@ class CandidateFinding:
             "generator_issue": self.generator_issue,
             "reason": self.reason,
         }
+        if self.supplemental:
+            payload["supplemental"] = True
+        if self.upstream_descriptor_kind is not None:
+            payload["upstream_descriptor_kind"] = self.upstream_descriptor_kind
+        if self.downstream_descriptor_kind is not None:
+            payload["downstream_descriptor_kind"] = self.downstream_descriptor_kind
+        if self.installed_descriptor_kind is not None:
+            payload["installed_descriptor_kind"] = self.installed_descriptor_kind
+        return payload
 
 
 # Kept as a source-compatible alias for callers of the v0.3 POC.
@@ -1827,6 +2004,7 @@ class PatchReplacement:
     is_restore: bool = False
     is_save: bool = False
     lifecycle_source: str | None = None
+    installed_descriptor_kind: str | None = None
 
 
 def _merge_candidate_maps(
@@ -1861,9 +2039,16 @@ def _merge_binding_alternative_maps(
 class RepositoryIndex:
     """AST-only symbol and import index for one Python package."""
 
-    def __init__(self, repo_root: Path, package_name: str):
+    def __init__(
+        self,
+        repo_root: Path,
+        package_name: str,
+        *,
+        ordinary_descriptor_decorators: set[str] | frozenset[str] = frozenset(),
+    ):
         self.repo_root = repo_root.resolve()
         self.package_name = package_name
+        self.ordinary_descriptor_decorators = frozenset(ordinary_descriptor_decorators)
         self.package_root = self.repo_root / package_name
         if not self.package_root.is_dir():
             raise ValueError(f"package directory not found: {self.package_root}")
@@ -1881,10 +2066,12 @@ class RepositoryIndex:
         self.final_bindings: dict[str, tuple[_ScopeBinding, ...]] = {}
         self.values: dict[str, ValueInfo] = {}
         self.aliases: dict[str, str] = {}
+        self.typed_instance_aliases: set[str] = set()
         self.unconditional_exports: set[str] = set()
         self.unconditional_symbols: set[str] = set()
         self._unconditional_star_imports: set[tuple[str, str]] = set()
         self._pending_method_aliases: list[tuple[str, str, str, str, int]] = []
+        self._descriptor_kinds_by_node: dict[int, str | None] = {}
         self.parse_errors: list[dict[str, str]] = []
         self._parse()
 
@@ -2015,6 +2202,50 @@ class RepositoryIndex:
                         node.body,
                         tag_guard_names,
                     )
+                    module_shadowed_names = _scope_bound_names_before(
+                        tree.body,
+                        getattr(node, "lineno", 0),
+                    )
+                    descriptor_kinds: dict[int, str | None] = {}
+                    known_properties: set[str] = set()
+                    class_functions = sorted(
+                        (
+                            statement
+                            for statement in _main_module_statements(
+                                node.body,
+                                tag_guard_names,
+                            )
+                            if isinstance(
+                                statement,
+                                (ast.AsyncFunctionDef, ast.FunctionDef),
+                            )
+                        ),
+                        key=lambda statement: (
+                            getattr(statement, "lineno", 0),
+                            getattr(statement, "col_offset", 0),
+                        ),
+                    )
+                    for function_node in class_functions:
+                        class_shadowed_names = {
+                            *module_shadowed_names,
+                            *_scope_bound_names_before(
+                                node.body,
+                                getattr(function_node, "lineno", 0),
+                            ),
+                        }
+                        descriptor_kind = _definition_descriptor_kind(
+                            function_node,
+                            imports=imports,
+                            shadowed_names=class_shadowed_names,
+                            known_properties=known_properties,
+                            ordinary_decorators=self.ordinary_descriptor_decorators,
+                        )
+                        descriptor_kinds[id(function_node)] = descriptor_kind
+                        self._descriptor_kinds_by_node[id(function_node)] = descriptor_kind
+                        if descriptor_kind == "property":
+                            known_properties.add(function_node.name)
+                        else:
+                            known_properties.discard(function_node.name)
                     self.final_bindings.update(
                         {
                             f"{qualified_name}.{name}": alternatives
@@ -2054,6 +2285,7 @@ class RepositoryIndex:
                         owner=None,
                         name=node.name,
                         node=node,
+                        descriptor_kind=None,
                     )
                     for class_statement in node.body:
                         class_targets: Sequence[ast.AST] = ()
@@ -2086,6 +2318,10 @@ class RepositoryIndex:
                                 owner=node.name,
                                 name=method_name,
                                 node=candidate,
+                                descriptor_kind=descriptor_kinds.get(
+                                    id(candidate),
+                                    "unknown",
+                                ),
                             )
                             for candidate in info.method_variants.get(method_name, (method_node,))
                         )
@@ -2110,8 +2346,18 @@ class RepositoryIndex:
                         owner=None,
                         name=node.name,
                         node=node,
+                        descriptor_kind=_definition_descriptor_kind(
+                            node,
+                            imports=imports,
+                            shadowed_names=_scope_bound_names_before(
+                                tree.body,
+                                getattr(node, "lineno", 0),
+                            ),
+                            ordinary_decorators=self.ordinary_descriptor_decorators,
+                        ),
                     )
                     functions[node.name] = info
+                    self._descriptor_kinds_by_node[id(node)] = info.descriptor_kind
                     self.callables[qualified_name] = info
                     if unconditional or node.name in module_must_names:
                         self.unconditional_exports.add(qualified_name)
@@ -2147,6 +2393,15 @@ class RepositoryIndex:
                         owner=None,
                         name=function_name,
                         node=candidate,
+                        descriptor_kind=_definition_descriptor_kind(
+                            candidate,
+                            imports=imports,
+                            shadowed_names=_scope_bound_names_before(
+                                tree.body,
+                                getattr(candidate, "lineno", 0),
+                            ),
+                            ordinary_decorators=self.ordinary_descriptor_decorators,
+                        ),
                     )
                     for candidate in candidates
                 )
@@ -2170,6 +2425,15 @@ class RepositoryIndex:
                         owner=None,
                         name=node.name,
                         node=node,
+                        descriptor_kind=_definition_descriptor_kind(
+                            node,
+                            imports=imports,
+                            shadowed_names=_scope_bound_names_before(
+                                tree.body,
+                                getattr(node, "lineno", 0),
+                            ),
+                            ordinary_decorators=self.ordinary_descriptor_decorators,
+                        ),
                     )
                 )
 
@@ -2207,6 +2471,7 @@ class RepositoryIndex:
                 self.aliases[f"{module}.{local_name}"] = target
             for export_name, target in typed_lazy_exports.items():
                 self.aliases[f"{module}.{export_name}"] = target
+                self.typed_instance_aliases.add(f"{module}.{export_name}")
 
         self._aggregate_class_variants()
         self._materialize_star_import_aliases()
@@ -2247,6 +2512,10 @@ class RepositoryIndex:
                         owner=representative.name,
                         name=member_name,
                         node=node,
+                        descriptor_kind=self._descriptor_kinds_by_node.get(
+                            id(node),
+                            "unknown",
+                        ),
                     )
                     for node in function_nodes
                 )
@@ -2300,6 +2569,7 @@ class RepositoryIndex:
                     owner=None,
                     name=aggregate.name,
                     node=class_nodes[0],
+                    descriptor_kind=None,
                 )
 
     def _materialize_star_import_aliases(self) -> None:
@@ -2378,6 +2648,7 @@ class RepositoryIndex:
                 node=None,
                 binding_line=getattr(class_node, "lineno", 0),
                 origin_kind="generated_dataclass_method",
+                descriptor_kind="ordinary",
                 signature_override=signature,
             )
             class_info.method_variants["__init__"] = (class_node or ast.Pass(),)
@@ -2602,6 +2873,9 @@ class RepositoryIndex:
                 node=source.node,
                 binding_line=line,
                 origin_kind=kind,
+                descriptor_kind=(
+                    kind if kind in {"classmethod", "property", "staticmethod"} else source.descriptor_kind
+                ),
             )
             class_info.methods[member_name] = source.node
             class_info.method_variants[member_name] = (source.node,)
@@ -2835,7 +3109,7 @@ class RepositoryIndex:
                         )
                     )
 
-        unique: dict[tuple[str, str | None, str, int, int, str], CallableInfo] = {}
+        unique: dict[tuple[str, str | None, str, int, int, str, str], CallableInfo] = {}
         for candidate in variants:
             key = (
                 candidate.file,
@@ -2844,6 +3118,7 @@ class RepositoryIndex:
                 getattr(candidate.node, "lineno", 0),
                 candidate.binding_line if candidate.binding_line is not None else -1,
                 json.dumps(candidate.signature, ensure_ascii=False, separators=(",", ":")),
+                candidate.descriptor_kind or "",
             )
             unique[key] = candidate
         return tuple(unique[key] for key in sorted(unique))
@@ -2865,11 +3140,35 @@ class InterfaceBoundaryGenerator:
         vllm_root: Path,
         ascend_root: Path,
         external_roots: dict[str, Path] | None = None,
+        *,
+        source_versions: dict[str, str] | None = None,
     ):
-        self.upstream = RepositoryIndex(vllm_root, "vllm")
-        self.downstream = RepositoryIndex(ascend_root, "vllm_ascend")
+        source_versions = source_versions or {}
+        ordinary_descriptor_decorators = {
+            decorator
+            for package, version in source_versions.items()
+            for decorator in _PINNED_ORDINARY_DESCRIPTOR_DECORATORS.get(
+                (package, version),
+                (),
+            )
+        }
+        self.upstream = RepositoryIndex(
+            vllm_root,
+            "vllm",
+            ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+        )
+        self.downstream = RepositoryIndex(
+            ascend_root,
+            "vllm_ascend",
+            ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+        )
         self.externals = {
-            package: RepositoryIndex(root, package) for package, root in sorted((external_roots or {}).items())
+            package: RepositoryIndex(
+                root,
+                package,
+                ordinary_descriptor_decorators=ordinary_descriptor_decorators,
+            )
+            for package, root in sorted((external_roots or {}).items())
         }
         parse_errors = (
             [("vLLM", error) for error in self.upstream.parse_errors]
@@ -2917,7 +3216,19 @@ class InterfaceBoundaryGenerator:
                     )
                 )
             }
-            deduplicated[key] = replace(
+            descriptor_sets = {
+                field_name: {getattr(relation, field_name) for relation in occurrences}
+                for field_name in (
+                    "upstream_descriptor_kind",
+                    "downstream_descriptor_kind",
+                    "installed_descriptor_kind",
+                )
+            }
+            merged_descriptor_kinds = {
+                field_name: (next(iter(kinds)) if len(kinds) == 1 else "unknown")
+                for field_name, kinds in descriptor_sets.items()
+            }
+            merged_relation = replace(
                 first,
                 evidence=tuple(
                     sorted(
@@ -2928,11 +3239,28 @@ class InterfaceBoundaryGenerator:
                             item.scope or "",
                             item.guards,
                             item.patch_kind or "",
+                            item.installed_descriptor_kind or "",
                             item.target_expression or "",
                         ),
                     )
                 ),
+                **merged_descriptor_kinds,
             )
+            deduplicated[key] = merged_relation
+            if any(len(kinds) > 1 for kinds in descriptor_sets.values()):
+                first_evidence = merged_relation.evidence[0] if merged_relation.evidence else None
+                self._append_descriptor_finding(
+                    merged_relation,
+                    target_expression=(
+                        first_evidence.target_expression
+                        if first_evidence and first_evidence.target_expression
+                        else f"{merged_relation.upstream_owner or ''}.{merged_relation.upstream_name}".lstrip(".")
+                    ),
+                    evidence_line=merged_relation.evidence_line,
+                    conditional=True,
+                    evidence_scope=(first_evidence.scope if first_evidence else None),
+                    evidence_guards=(first_evidence.guards if first_evidence else ()),
+                )
         self.relations = sorted(
             deduplicated.values(),
             key=lambda relation: (
@@ -3004,6 +3332,102 @@ class InterfaceBoundaryGenerator:
             if qualified_name == package or qualified_name.startswith(f"{package}."):
                 return index.find_final_callable_variants(qualified_name)
         return ()
+
+    def _aggregate_descriptor_kinds(
+        self,
+        candidates: Sequence[CallableInfo],
+    ) -> tuple[str | None, bool]:
+        kinds = {
+            (
+                None
+                if candidate.descriptor_kind is None
+                else (candidate.descriptor_kind if candidate.descriptor_kind in DESCRIPTOR_KINDS else "unknown")
+            )
+            for candidate in candidates
+        }
+        if not kinds:
+            return None, False
+        if len(kinds) == 1:
+            return next(iter(kinds)), False
+        return "unknown", True
+
+    def _append_descriptor_finding(
+        self,
+        relation: Relation,
+        *,
+        target_expression: str,
+        evidence_line: int,
+        conditional: bool,
+        evidence_scope: str | None = None,
+        evidence_guards: tuple[str, ...] = (),
+    ) -> None:
+        kinds = (
+            relation.upstream_descriptor_kind,
+            relation.downstream_descriptor_kind,
+            relation.installed_descriptor_kind,
+        )
+        if kinds == (None, None, None) or (
+            relation.relation == "monkey_patch"
+            and relation.upstream_descriptor_kind is None
+            and relation.installed_descriptor_kind is None
+        ):
+            return
+        if conditional:
+            reason_code = "conditional_descriptor_kind"
+            reason = (
+                "the callable has different descriptor kinds on normally "
+                "completing source paths; no single binding kind was guessed"
+            )
+        elif "unknown" in kinds or None in kinds:
+            reason_code = "unknown_descriptor_kind"
+            reason = "a dynamic decorator or binding prevents an exact descriptor kind from being proven statically"
+        elif relation.upstream_descriptor_kind != relation.installed_descriptor_kind:
+            reason_code = "descriptor_kind_mismatch"
+            reason = "the downstream binding installs a different callable kind from the upstream member"
+        else:
+            return
+        self.findings.append(
+            CandidateFinding(
+                relation=relation.relation,
+                downstream_file=relation.downstream_file,
+                downstream_owner=relation.downstream_owner,
+                downstream_name=relation.downstream_name,
+                target_expression=target_expression,
+                evidence_line=evidence_line,
+                reason=reason,
+                status="review",
+                reason_code=reason_code,
+                generator_issue=False,
+                evidence_scope=evidence_scope,
+                evidence_guards=evidence_guards,
+                supplemental=True,
+                upstream_descriptor_kind=relation.upstream_descriptor_kind,
+                downstream_descriptor_kind=relation.downstream_descriptor_kind,
+                installed_descriptor_kind=relation.installed_descriptor_kind,
+            )
+        )
+
+    def _patch_target_uses_descriptor(
+        self,
+        module_info: ModuleInfo,
+        upstream_callable: CallableInfo,
+        evidence_target: str | None,
+    ) -> bool:
+        """Return whether the patch writes into a class namespace."""
+
+        if upstream_callable.owner is None:
+            return False
+        if not evidence_target or "." not in evidence_target:
+            return True
+        owner_expression = evidence_target.rsplit(".", 1)[0]
+        root, separator, remainder = owner_expression.partition(".")
+        imported = module_info.imports.get(root)
+        resolved_owner = (
+            f"{imported}.{remainder}"
+            if imported is not None and separator
+            else (imported if imported is not None else owner_expression)
+        )
+        return resolved_owner not in self.upstream.typed_instance_aliases
 
     def _final_bindings(
         self,
@@ -3547,28 +3971,45 @@ class InterfaceBoundaryGenerator:
         downstream_callable = (
             downstream_variants[0] if downstream_variants else self.downstream.find_callable(downstream_name)
         )
+        upstream_descriptor_kind, upstream_descriptor_conditional = self._aggregate_descriptor_kinds(
+            upstream_variants or (upstream_callable,)
+        )
+        downstream_candidates = downstream_variants or (
+            (downstream_callable,) if downstream_callable is not None else ()
+        )
+        downstream_descriptor_kind, downstream_descriptor_conditional = self._aggregate_descriptor_kinds(
+            downstream_candidates
+        )
         evidence_line = (
             downstream_callable.binding_line
             if downstream_callable and downstream_callable.binding_line is not None
             else getattr(method_node, "lineno", 0)
         )
-        self.relations.append(
-            Relation(
-                relation="override",
-                upstream_file=upstream_callable.file,
-                upstream_owner=upstream_callable.owner,
-                upstream_name=upstream_callable.name,
-                upstream_signature=upstream_callable.signature,
-                downstream_file=class_info.file,
-                downstream_owner=class_info.name,
-                downstream_name=method_name,
-                downstream_signature=(
-                    downstream_callable.signature if downstream_callable else _jsonable_signature(method_node)
-                ),
-                evidence_file=class_info.file,
-                evidence_line=evidence_line,
-                upstream_package=self._source_package(upstream_callable.qualified_name),
-            )
+        relation = Relation(
+            relation="override",
+            upstream_file=upstream_callable.file,
+            upstream_owner=upstream_callable.owner,
+            upstream_name=upstream_callable.name,
+            upstream_signature=upstream_callable.signature,
+            downstream_file=class_info.file,
+            downstream_owner=class_info.name,
+            downstream_name=method_name,
+            downstream_signature=(
+                downstream_callable.signature if downstream_callable else _jsonable_signature(method_node)
+            ),
+            evidence_file=class_info.file,
+            evidence_line=evidence_line,
+            upstream_package=self._source_package(upstream_callable.qualified_name),
+            upstream_descriptor_kind=upstream_descriptor_kind,
+            downstream_descriptor_kind=downstream_descriptor_kind,
+            installed_descriptor_kind=downstream_descriptor_kind,
+        )
+        self.relations.append(relation)
+        self._append_descriptor_finding(
+            relation,
+            target_expression=upstream_name,
+            evidence_line=evidence_line,
+            conditional=(upstream_descriptor_conditional or downstream_descriptor_conditional),
         )
 
     def _effective_method_resolution(
@@ -3695,6 +4136,15 @@ class InterfaceBoundaryGenerator:
                     owner=None,
                     name=node.name,
                     node=node,
+                    descriptor_kind=_definition_descriptor_kind(
+                        node,
+                        imports=module_info.imports,
+                        shadowed_names=_scope_bound_names_before(
+                            module_info.tree.body,
+                            getattr(node, "lineno", 0),
+                        ),
+                        ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
+                    ),
                 )
                 definitions[identity] = PrivateHelperDefinition(
                     identity=identity,
@@ -5536,6 +5986,15 @@ class InterfaceBoundaryGenerator:
                     owner=None,
                     name=node.name,
                     node=node,
+                    descriptor_kind=_definition_descriptor_kind(
+                        node,
+                        imports=module_info.imports,
+                        shadowed_names=_scope_bound_names_before(
+                            module_info.tree.body,
+                            getattr(node, "lineno", 0),
+                        ),
+                        ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
+                    ),
                 )
                 context.bindings.pop(node.name, None)
                 context.binding_alternatives.pop(node.name, None)
@@ -5593,6 +6052,7 @@ class InterfaceBoundaryGenerator:
                         owner=None,
                         name=node.name,
                         node=node,
+                        descriptor_kind=None,
                     )
                 ]
                 scope_identity = (
@@ -6452,6 +6912,35 @@ class InterfaceBoundaryGenerator:
             return
 
         definition_line = getattr(replacement.info.node, "lineno", None)
+        upstream_descriptor_kind, upstream_descriptor_conditional = self._aggregate_descriptor_kinds(
+            upstream_variants or (upstream_callable,)
+        )
+        replacement_is_class = isinstance(replacement.info.node, ast.ClassDef)
+        downstream_descriptor_kind = (
+            None
+            if replacement_is_class and replacement.info.descriptor_kind is None
+            else (
+                replacement.info.descriptor_kind if replacement.info.descriptor_kind in DESCRIPTOR_KINDS else "unknown"
+            )
+        )
+
+        target_uses_descriptor = self._patch_target_uses_descriptor(
+            module_info,
+            upstream_callable,
+            evidence_target,
+        )
+        if not target_uses_descriptor:
+            upstream_descriptor_kind = None
+            upstream_descriptor_conditional = False
+        installed_descriptor_kind = (
+            None
+            if not target_uses_descriptor or (replacement_is_class and replacement.installed_descriptor_kind is None)
+            else (
+                replacement.installed_descriptor_kind
+                if replacement.installed_descriptor_kind in DESCRIPTOR_KINDS
+                else "unknown"
+            )
+        )
         evidence = RelationEvidence(
             file=module_info.file,
             line=line,
@@ -6461,23 +6950,34 @@ class InterfaceBoundaryGenerator:
             definition_line=definition_line,
             binding_line=replacement.info.binding_line,
             target_expression=evidence_target or target,
+            installed_descriptor_kind=installed_descriptor_kind,
         )
-        self.relations.append(
-            Relation(
-                relation="monkey_patch",
-                upstream_file=upstream_callable.file,
-                upstream_owner=upstream_callable.owner,
-                upstream_name=upstream_callable.name,
-                upstream_signature=upstream_callable.signature,
-                downstream_file=replacement.info.file,
-                downstream_owner=replacement.info.owner,
-                downstream_name=replacement.info.name,
-                downstream_signature=replacement.info.signature,
-                evidence_file=module_info.file,
-                evidence_line=line,
-                evidence=(evidence,),
-                upstream_package=self._source_package(upstream_callable.qualified_name),
-            )
+        relation = Relation(
+            relation="monkey_patch",
+            upstream_file=upstream_callable.file,
+            upstream_owner=upstream_callable.owner,
+            upstream_name=upstream_callable.name,
+            upstream_signature=upstream_callable.signature,
+            downstream_file=replacement.info.file,
+            downstream_owner=replacement.info.owner,
+            downstream_name=replacement.info.name,
+            downstream_signature=replacement.info.signature,
+            evidence_file=module_info.file,
+            evidence_line=line,
+            evidence=(evidence,),
+            upstream_package=self._source_package(upstream_callable.qualified_name),
+            upstream_descriptor_kind=upstream_descriptor_kind,
+            downstream_descriptor_kind=downstream_descriptor_kind,
+            installed_descriptor_kind=installed_descriptor_kind,
+        )
+        self.relations.append(relation)
+        self._append_descriptor_finding(
+            relation,
+            target_expression=evidence_target or target,
+            evidence_line=line,
+            conditional=upstream_descriptor_conditional,
+            evidence_scope=self._scope_name(context),
+            evidence_guards=context.guard_texts,
         )
 
     def _field_patch_finding(
@@ -6608,13 +7108,21 @@ class InterfaceBoundaryGenerator:
         line: int,
     ) -> PatchReplacement:
         kind = "replacement"
+        installed_descriptor_kind: str | None = None
         if isinstance(node, ast.Call):
-            wrapper = _expression_name(node.func)
-            if wrapper in {"classmethod", "staticmethod"} and len(node.args) == 1:
+            shadowed_names = {
+                *_scope_bound_names_before(module_info.tree.body, line),
+                *context.local_callables,
+            }
+            wrapper_reference = _resolved_decorator_reference(
+                node.func,
+                module_info.imports,
+                shadowed_names,
+            )
+            wrapper = _BUILTIN_DESCRIPTOR_DECORATORS.get(wrapper_reference or "")
+            if wrapper in {"classmethod", "property", "staticmethod"} and len(node.args) == 1 and not node.keywords:
                 kind = wrapper
-                node = node.args[0]
-            elif wrapper == "property" and node.args:
-                kind = "property"
+                installed_descriptor_kind = wrapper
                 node = node.args[0]
             else:
                 produced = self._resolve_wrapper_factory_call(
@@ -6630,6 +7138,7 @@ class InterfaceBoundaryGenerator:
                     info=None,
                     kind="wrapper",
                     reason="patch replacement is produced by an unresolved call",
+                    installed_descriptor_kind="unknown",
                 )
 
         if isinstance(node, ast.Lambda):
@@ -6642,8 +7151,10 @@ class InterfaceBoundaryGenerator:
                     owner=None,
                     name=f"<lambda>@{definition_line}",
                     node=node,
+                    descriptor_kind="ordinary",
                 ),
-                kind="lambda",
+                kind=(kind if installed_descriptor_kind is not None else "lambda"),
+                installed_descriptor_kind=(installed_descriptor_kind or "ordinary"),
             )
 
         expression = _expression_name(node)
@@ -6652,6 +7163,7 @@ class InterfaceBoundaryGenerator:
                 info=None,
                 kind=kind,
                 reason="unsupported patch replacement expression",
+                installed_descriptor_kind=(installed_descriptor_kind or "unknown"),
             )
 
         if "." not in expression:
@@ -6661,12 +7173,14 @@ class InterfaceBoundaryGenerator:
                 return PatchReplacement(
                     info=candidate,
                     kind=(candidate.origin_kind if candidate.origin_kind != "definition" else kind),
+                    installed_descriptor_kind=(installed_descriptor_kind or candidate.descriptor_kind or "unknown"),
                 )
             if len(local_candidates) > 1:
                 return PatchReplacement(
                     info=None,
                     kind=kind,
                     reason="ambiguous local replacement callable",
+                    installed_descriptor_kind=(installed_descriptor_kind or "unknown"),
                 )
 
         references = self._resolve_patch_references(
@@ -6680,6 +7194,7 @@ class InterfaceBoundaryGenerator:
                 kind="restore_original",
                 is_restore=True,
                 lifecycle_source=target,
+                installed_descriptor_kind=None,
             )
         upstream_references = {reference for reference in references if reference.startswith("vllm.")}
         if len(upstream_references) == 1:
@@ -6696,15 +7211,20 @@ class InterfaceBoundaryGenerator:
                     kind="save_original",
                     is_save=True,
                     lifecycle_source=source,
+                    installed_descriptor_kind=None,
                 )
         if upstream_references:
             return PatchReplacement(
                 info=None,
                 kind="alias_rebind",
                 reason="replacement is another upstream callable",
+                installed_descriptor_kind="unknown",
             )
 
-        candidates: dict[tuple[str, str | None, str], CallableInfo] = {}
+        candidates: dict[
+            tuple[str, str | None, str],
+            tuple[CallableInfo, str],
+        ] = {}
         for reference in references:
             candidate = self._find_downstream_patch_replacement(reference)
             if candidate is None and reference.startswith(f"{module_info.name}."):
@@ -6713,17 +7233,53 @@ class InterfaceBoundaryGenerator:
                     reference.rsplit(".", 1)[-1],
                 )
             if candidate:
-                candidates[(candidate.file, candidate.owner, candidate.name)] = candidate
+                candidates[(candidate.file, candidate.owner, candidate.name)] = (
+                    candidate,
+                    reference,
+                )
         if len(candidates) == 1:
+            candidate, reference = next(iter(candidates.values()))
             return PatchReplacement(
-                info=next(iter(candidates.values())),
+                info=candidate,
                 kind=kind,
+                installed_descriptor_kind=(
+                    installed_descriptor_kind
+                    or self._installed_descriptor_kind_from_reference(
+                        candidate,
+                        reference,
+                        expression,
+                    )
+                ),
             )
         return PatchReplacement(
             info=None,
             kind=kind,
             reason=("ambiguous replacement callable" if candidates else "replacement callable was not found"),
+            installed_descriptor_kind=(installed_descriptor_kind or "unknown"),
         )
+
+    def _installed_descriptor_kind_from_reference(
+        self,
+        candidate: CallableInfo,
+        reference: str,
+        expression: str,
+    ) -> str | None:
+        kind = candidate.descriptor_kind
+        if kind is None and isinstance(candidate.node, ast.ClassDef):
+            return None
+        if kind not in DESCRIPTOR_KINDS:
+            return "unknown"
+        if candidate.owner is None or "." not in expression:
+            return kind
+
+        owner_name = reference.rsplit(".", 1)[0]
+        if self.downstream.find_class(owner_name) is None:
+            return kind
+        if kind in {"ordinary", "staticmethod"}:
+            return "ordinary"
+        if kind == "property":
+            return "property"
+        return "unknown"
 
     def _resolve_wrapper_factory_call(
         self,
@@ -6824,6 +7380,15 @@ class InterfaceBoundaryGenerator:
 
         returned_name, returned_node = next(iter(returned_nodes.items()))
         kind = "wrapper_or_identity" if identity_return else "wrapper_factory"
+        descriptor_kind = _definition_descriptor_kind(
+            returned_node,
+            imports=module_info.imports,
+            shadowed_names=_scope_bound_names_before(
+                factory.node.body,
+                getattr(returned_node, "lineno", 0),
+            ),
+            ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
+        )
         return PatchReplacement(
             info=CallableInfo(
                 qualified_name=f"{factory.qualified_name}.<return>.{returned_name}",
@@ -6834,8 +7399,10 @@ class InterfaceBoundaryGenerator:
                 node=returned_node,
                 binding_line=line,
                 origin_kind=kind,
+                descriptor_kind=descriptor_kind,
             ),
             kind=kind,
+            installed_descriptor_kind=("unknown" if identity_return else descriptor_kind or "unknown"),
         )
 
     def _find_downstream_patch_replacement(
@@ -7115,7 +7682,7 @@ def _relation_payloads(
     external_sources: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     grouped: dict[
-        tuple[str, str, str | None, str, str],
+        tuple[str, str, str | None, str, str, str | None],
         list[Relation],
     ] = defaultdict(list)
     for relation in relations:
@@ -7131,6 +7698,7 @@ def _relation_payloads(
                 relation.upstream_owner,
                 relation.upstream_name,
                 signature_key,
+                relation.upstream_descriptor_kind,
             )
         ].append(relation)
 
@@ -7146,7 +7714,7 @@ def _relation_payloads(
             item[4],
         ),
     ):
-        source_package, upstream_file, owner, name, signature_key = key
+        source_package, upstream_file, owner, name, signature_key, upstream_descriptor_kind = key
         consumers = []
         evidence_records = []
         for relation in sorted(
@@ -7165,6 +7733,8 @@ def _relation_payloads(
                     relation.downstream_owner,
                     relation.downstream_name,
                     relation.downstream_signature,
+                    relation.downstream_descriptor_kind,
+                    relation.installed_descriptor_kind,
                 ]
             )
             evidence_records.append(
@@ -7187,6 +7757,7 @@ def _relation_payloads(
                     owner,
                     name,
                     json.loads(signature_key),
+                    upstream_descriptor_kind,
                 ],
                 "c": consumers,
                 "e": evidence_records,
@@ -7237,9 +7808,13 @@ def _load_compact_relations(path: Path) -> list[Relation]:
         payload = json.loads(line)
         if "_meta" in payload or "f" in payload:
             continue
-        upstream_file, upstream_owner, upstream_name, upstream_signature = payload["u"]
+        upstream = payload["u"]
+        upstream_file, upstream_owner, upstream_name, upstream_signature = upstream[:4]
+        upstream_descriptor_kind = upstream[4] if len(upstream) > 4 else None
         for consumer in payload["c"]:
-            relation, downstream_file, downstream_owner, downstream_name, downstream_signature = consumer
+            relation, downstream_file, downstream_owner, downstream_name, downstream_signature = consumer[:5]
+            downstream_descriptor_kind = consumer[5] if len(consumer) > 5 else None
+            installed_descriptor_kind = consumer[6] if len(consumer) > 6 else None
             if relation not in SUPPORTED_RELATIONS:
                 continue
             relations.append(
@@ -7256,6 +7831,9 @@ def _load_compact_relations(path: Path) -> list[Relation]:
                     evidence_file=downstream_file,
                     evidence_line=0,
                     upstream_package=payload.get("p", "vllm"),
+                    upstream_descriptor_kind=upstream_descriptor_kind,
+                    downstream_descriptor_kind=downstream_descriptor_kind,
+                    installed_descriptor_kind=installed_descriptor_kind,
                 )
             )
     return relations
@@ -7319,6 +7897,39 @@ def compare_relations(
         for key in baseline_exact
         if any(alias in generated_exact_aliases for alias in baseline_exact[key].comparison_exact_keys())
     }
+    descriptor_kind_changes = []
+    for key in sorted(exact_matches):
+        baseline_relation = baseline_exact[key]
+        baseline_kinds = (
+            baseline_relation.upstream_descriptor_kind,
+            baseline_relation.downstream_descriptor_kind,
+            baseline_relation.installed_descriptor_kind,
+        )
+        if baseline_kinds == (None, None, None):
+            continue
+        generated_relation = next(
+            (
+                relation
+                for relation in generated
+                if any(alias in relation.comparison_exact_keys() for alias in baseline_relation.comparison_exact_keys())
+            ),
+            None,
+        )
+        if generated_relation is None:
+            continue
+        generated_kinds = (
+            generated_relation.upstream_descriptor_kind,
+            generated_relation.downstream_descriptor_kind,
+            generated_relation.installed_descriptor_kind,
+        )
+        if generated_kinds != baseline_kinds:
+            descriptor_kind_changes.append(
+                {
+                    "relation": _relation_label(generated_relation),
+                    "baseline": list(baseline_kinds),
+                    "generated": list(generated_kinds),
+                }
+            )
     different_upstream = []
     baseline_downstream_keys = {relation.downstream_key() for relation in baseline}
     for key in sorted(baseline_downstream_keys & set(generated_downstream)):
@@ -7365,6 +7976,7 @@ def compare_relations(
             "generated_relations": len(generated),
             "baseline_relations": len(baseline),
             "exact_matches": len(exact_matches),
+            "descriptor_kind_changes": len(descriptor_kind_changes),
             "same_downstream_different_upstream": len(different_upstream),
             "old_only": len(old_only_keys),
             "new_only": len(new_only_keys),
@@ -7388,6 +8000,7 @@ def compare_relations(
             "baseline_by_relation": dict(sorted(Counter(relation.relation for relation in baseline).items())),
         },
         "same_downstream_different_upstream": different_upstream,
+        "descriptor_kind_changes": descriptor_kind_changes,
         "old_only": [_relation_label(baseline_exact[key]) for key in sorted(old_only_keys)],
         "new_only": [_relation_label(generated_exact[key]) for key in sorted(new_only_keys)],
         "missing_downstream": [_downstream_label(key) for key in sorted(missing_downstream_keys)],
@@ -7537,6 +8150,7 @@ def main() -> None:
         args.vllm_root,
         args.ascend_root,
         external_roots,
+        source_versions={"vllm": vllm_sha, **external_sources},
     )
     relations, findings = generator.generate()
     _write_jsonl(

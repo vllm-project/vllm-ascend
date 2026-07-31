@@ -4,6 +4,54 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.24.0 - descriptor binding contracts (in progress)
+
+- Red-test checkpoint: `922a810e8` (10 new tests; 9 initially failed and one
+  existing-correct module-wrapper control passed).
+- Problem: signature-only contracts could not see a change between an
+  ordinary method, `property`, `classmethod`, and `staticmethod`.  In the
+  pinned source pair this hid ten real override differences, including
+  `Platform.num_compute_units`, whose parameter names still match.
+- Changes:
+  - schema v5 records the upstream definition kind, downstream definition
+    kind, and the kind actually installed by a patch; descriptor fields stay
+    outside relation identity so a binding change is not misreported as a
+    removed/new edge;
+  - a known mismatch or unknown/conditional kind keeps the verified Relation
+    and adds a supplemental review finding; the independent coverage auditor
+    ignores supplemental findings as dispositions, avoiding a false
+    `verified + review` conflict;
+  - class-body decorators and explicit `property(...)`, `classmethod(...)`,
+    and `staticmethod(...)` wrappers are interpreted in Python application
+    order.  Unknown outer decorators are not guessed, while an outer proven
+    descriptor wrapper remains decisive;
+  - patch definition kind and installed kind are separate, preserving cases
+    such as an ordinary getter installed with `property(getter)` and
+    `staticmethod(lambda ...)`;
+  - class, module, and typed-runtime-instance targets are distinguished because
+    only writes into a class namespace install descriptors;
+  - semantic adapters for `vllm.tracing.instrument` and
+    `torch.inference_mode` are enabled only for the exact pinned source SHAs;
+    an unregistered source version remains `unknown` instead of inheriting an
+    unverified assumption.
+- First fixed-source run (before class/module/instance refinement): 971
+  relations, exactly matching all v0.23 edges, plus 67 supplemental reviews
+  (52 unknown and 15 known mismatches).  Manual review proved that the 15
+  mismatches are source facts, while most unknowns were analyzer errors caused
+  by treating whole-class and module-level replacements as class descriptors.
+- Additional fixed-source audit established the expected stable result:
+  - all 655 overrides have known kinds and retain ten source mismatches;
+  - all 124 patches have an installed-kind distribution of 66 not-applicable,
+    50 ordinary, 3 classmethod, 4 staticmethod, and 1 property, retaining five
+    source mismatches;
+  - three module-level `@classmethod` replacements must remain classmethod when
+    installed into a class, while the temporary
+    `current_platform.verify_quantization` write is an instance attribute and
+    therefore has no installed descriptor kind.
+- Status: implementation tests pass (147 total); the refined fixed-source run,
+  independent audit, consumer UT update, and final output review are still
+  required before this checkpoint can be accepted.
+
 ## v0.23.0 - exact presence and missing-super checkpoint
 
 - Previous accepted checkpoint: `10c86dc4a`; initial red-test checkpoint:
