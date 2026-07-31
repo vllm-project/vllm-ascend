@@ -974,6 +974,20 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
+# ** 18.1. File: worker/patch_topk_topp_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p`
+#    Why:
+#       Temporarily force the PyTorch path by disabling the upstream
+#       `current_platform.is_cpu()` and `HAS_TRITON and batch>=8` branches
+#       for Ascend nightly validation.
+#    How：
+#       Replace `apply_top_k_top_p` so it always calls `apply_top_k_top_p_pytorch`.
+#    Related PR (if no, explain why):
+#       Experimental patch for nightly; not intended as a long-term Ascend change.
+#    Future Plan:
+#       Remove this patch once the upstream sampling path is confirmed or fixed.
+#
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
