@@ -16,6 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_gva_layerwise_config,
+    get_layerwise_physical_layer_index,
 )
 
 
@@ -270,6 +271,22 @@ def test_layout_includes_mtp_layers():
     assert 4 in layout.layer_entries
     assert layout.storage_slots == [[0], [1, 3], [2, 4]]
     assert layout.prefetch_layer_map == {3: 1, 4: 2}
+
+
+@pytest.mark.parametrize(
+    ("layer_name", "expected"),
+    [
+        ("model.mtp.0.self_attn", 4),
+        ("mtp.layers.0.self_attn", 4),
+        ("model.mtp.layers.1.self_attn", 5),
+        ("model.layers.4.self_attn", 4),
+    ],
+)
+def test_physical_layer_index_supports_mtp_names(
+    layer_name,
+    expected,
+):
+    assert get_layerwise_physical_layer_index(layer_name, 4) == expected
 
 
 def test_complete_physical_cache_signature_controls_reuse():
