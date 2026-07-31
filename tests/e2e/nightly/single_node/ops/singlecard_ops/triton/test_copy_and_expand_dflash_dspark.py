@@ -5,7 +5,7 @@ import torch
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.spec_decode.utils import (
-    copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid,
+    copy_and_expand_dflash_and_dspark_inputs_kernel,
 )
 from vllm_ascend.ops.triton.triton_utils import (
     get_vectorcore_num,
@@ -176,7 +176,7 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     num_blocks_needed = triton.cdiv(total_ctx + num_query_total, BLOCK_SIZE)
     grid = (min(num_blocks_needed, get_vectorcore_num()),)
 
-    copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[grid](
+    copy_and_expand_dflash_and_dspark_inputs_kernel[grid](
         next_token_ids_ptr=next_token_ids,
         target_positions_ptr=target_positions,
         context_slot_mapping_ptr=context_slot_mapping,

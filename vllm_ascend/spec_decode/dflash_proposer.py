@@ -9,7 +9,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
+from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
@@ -109,7 +109,7 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
-        copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[
+        copy_and_expand_dflash_and_dspark_inputs_kernel[
             _copy_and_expand_grid(num_context, num_query_total)
         ](
             # Inputs

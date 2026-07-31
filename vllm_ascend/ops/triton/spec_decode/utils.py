@@ -66,7 +66,7 @@ def prepare_inputs_padded_kernel(
 
 
 @triton.jit
-def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
+def copy_and_expand_dflash_and_dspark_inputs_kernel(
     # Inputs
     next_token_ids_ptr,  # [num_reqs]
     target_positions_ptr,  # [num_context]
