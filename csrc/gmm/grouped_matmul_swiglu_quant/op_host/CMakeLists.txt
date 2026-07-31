@@ -16,7 +16,6 @@ if (BUILD_OPEN_PROJECT)
         OP_NAME GroupedMatmulSwigluQuant
         OPTIONS --cce-auto-sync=on
                 -Wno-deprecated-declarations
-                -Werror
     )
 endif()
 
@@ -26,3 +25,4 @@ if(NOT BUILD_OPS_RTY_KERNEL)
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 endif()
+

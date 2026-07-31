@@ -4,19 +4,20 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
+#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
-"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:1
@@ -29,18 +30,18 @@ msgstr "概述"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:5
 msgid ""
-"LMCache-Ascend is a community maintained plugin for running LMCache on "
-"the Ascend NPU."
-msgstr "LMCache-Ascend 是一个社区维护的插件，用于在 Ascend NPU 上运行 LMCache。"
+"LMCache-Ascend is a community maintained plugin for running LMCache on the "
+"Ascend NPU."
+msgstr "LMCache-Ascend 是一个社区维护的插件，用于在昇腾 NPU 上运行 LMCache。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:7
 msgid ""
-"We provide a simple deployment guide here. For further info about "
-"deployment notes, please refer to [LMCache-Ascend "
+"We provide a simple deployment guide here. For further info about deployment"
+" notes, please refer to [LMCache-Ascend "
 "doc](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)"
 msgstr ""
-"我们在此提供一个简单的部署指南。有关部署注意事项的更多信息，请参考 [LMCache-Ascend 文档]"
-"(https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)"
+"此处提供简单的部署指南。有关部署说明的更多信息，请参考 [LMCache-Ascend "
+"文档](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:9
 msgid "Getting Started"
@@ -52,9 +53,9 @@ msgstr "克隆 LMCache-Ascend 仓库"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:13
 msgid ""
-"Our repo contains a kvcache ops submodule for ease of maintenance, "
-"therefore we recommend cloning the repo with submodules."
-msgstr "我们的仓库包含一个 kvcache ops 子模块以便于维护，因此我们建议使用子模块方式克隆仓库。"
+"Our repo contains a kvcache ops submodule for ease of maintenance, therefore"
+" we recommend cloning the repo with submodules."
+msgstr "我们的仓库包含一个 kvcache ops 子模块以便于维护，因此建议使用子模块方式克隆仓库。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:20
 msgid "Docker"
@@ -72,7 +73,7 @@ msgstr "手动安装"
 msgid ""
 "Assuming your working directory is ```/workspace``` and vllm/vllm-ascend "
 "have already been installed."
-msgstr "假设您的工作目录是 `/workspace`，并且 vllm/vllm-ascend 已安装。"
+msgstr "假设工作目录为 ```/workspace```，且 vllm/vllm-ascend 已安装。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:57
 msgid "Install LMCache Repo"
@@ -89,9 +90,11 @@ msgstr "使用方法"
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:72
 msgid ""
 "We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, "
-"therefore LMCache-Ascend Connector can be used via the kv transfer config"
-" in the two following setting."
-msgstr "我们通过 LMCacheAscendConnectorV1Dynamic 引入了一个动态 KVConnector，因此 LMCache-Ascend Connector 可以通过以下两种设置中的 kv transfer 配置来使用。"
+"therefore LMCache-Ascend Connector can be used via the kv transfer config in"
+" the two following setting."
+msgstr ""
+"我们通过 LMCacheAscendConnectorV1Dynamic 引入动态 KVConnector，因此 LMCache-Ascend "
+"Connector 可通过以下两种设置中的 kv transfer 配置使用。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:74
 msgid "Online serving"

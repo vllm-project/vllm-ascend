@@ -1,0 +1,484 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:1
+msgid "Recompute CPU Offload Guide"
+msgstr "重新计算CPU卸载指南"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:5
+msgid ""
+"`RecomputeCPUOffloadConnector` preserves the KV cache of requests that are "
+"preempted by the Decode-side recompute scheduler. When HBM KV blocks are not"
+" enough, `RecomputeScheduler` may preempt a running Decode request. Without "
+"this connector, the request falls back to the original recompute path and "
+"may be sent back to the Prefill node to run prefill again. With recompute "
+"CPU offload enabled, the already-computed KV blocks are copied from HBM to "
+"CPU DRAM before the HBM blocks are reused, and copied back to HBM when the "
+"request is scheduled again."
+msgstr ""
+"`RecomputeCPUOffloadConnector`保留被解码端重新计算调度器抢占的请求的KV缓存。当HBM "
+"KV块不足时，`RecomputeScheduler`可能会抢占正在运行的解码请求。如果没有此连接器，请求将回退到原始重新计算路径，并可能被发送回预填充节点再次执行预填充。启用重新计算CPU卸载后，在HBM块被重用之前，已计算的KV块会从HBM复制到CPU"
+" DRAM，并在请求再次被调度时复制回HBM。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:14
+msgid ""
+"This feature is designed for online P/D disaggregation workloads where "
+"Decode nodes are tuned for decode throughput and cannot efficiently "
+"recompute long prefills after preemption. It is opt-in and focuses on "
+"correctness first."
+msgstr ""
+"此功能专为在线P/D分离部署工作负载设计，其中解码节点针对解码吞吐量进行了调优，无法在抢占后高效地重新计算长预填充。该功能为可选启用，并首先关注正确性。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:18
+msgid ""
+"In a typical Decode deployment, `max_num_batched_tokens` is often sized "
+"around `max_num_seqs * (1 + num_spec_tokens)` so that the Decode node mainly"
+" schedules one new token, plus speculative tokens if MTP is enabled, per "
+"request. This is efficient for decode but too small for recomputing long "
+"prompts after preemption. Recompute CPU offload avoids sending such requests"
+" back through the full prompt recompute path when their KV state can be "
+"preserved locally."
+msgstr ""
+"在典型的解码部署中，`max_num_batched_tokens`通常设置为`max_num_seqs * (1 + "
+"num_spec_tokens)`左右，这样解码节点主要每个请求调度一个新token，加上如果启用MTP时的推测token。这对解码来说是高效的，但对于抢占后重新计算长提示来说太小了。重新计算CPU卸载避免了在KV状态可以本地保留时将此类请求发送回完整的提示重新计算路径。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:25
+msgid "Key Concepts"
+msgstr "关键概念"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:27
+msgid ""
+"**Recompute preemption**: When Decode-side HBM KV cache is exhausted, "
+"`RecomputeScheduler` can preempt a running request and later resume it."
+msgstr "**重新计算抢占**：当解码端HBM KV缓存耗尽时，`RecomputeScheduler`可以抢占正在运行的请求，并在之后恢复它。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:29
+msgid ""
+"**CPU DRAM preservation**: `RecomputeCPUOffloadConnector` stores the "
+"preempted request's computed KV blocks in CPU memory."
+msgstr "**CPU DRAM保留**：`RecomputeCPUOffloadConnector`将被抢占请求的已计算KV块存储在CPU内存中。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:31
+msgid ""
+"**H2D restore**: When the preempted request is scheduled again, the "
+"connector restores the preserved KV blocks before model forward."
+msgstr "**H2D恢复**：当被抢占的请求再次被调度时，连接器在模型前向传播之前恢复保留的KV块。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:33
+msgid ""
+"**Fallback behavior**: If the connector is not configured, the recompute "
+"scheduler is not enabled, or CPU offload capacity is insufficient, vLLM "
+"falls back to the original recompute behavior."
+msgstr "**回退行为**：如果未配置连接器、未启用重新计算调度器或CPU卸载容量不足，vLLM将回退到原始的重新计算行为。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:36
+msgid ""
+"**`MultiConnector` integration**: In P/D disaggregation, use "
+"`MultiConnector` to combine the P/D connector, such as "
+"`MooncakeConnectorV1`, with `RecomputeCPUOffloadConnector` on Decode nodes."
+msgstr ""
+"**`MultiConnector`集成**：在P/D分离部署中，使用`MultiConnector`将P/D连接器（例如`MooncakeConnectorV1`）与解码节点上的`RecomputeCPUOffloadConnector`组合。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:40
+msgid "Configuration Parameters"
+msgstr "配置参数"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:42
+msgid ""
+"`RecomputeCPUOffloadConnector` is configured through `kv-transfer-config`."
+msgstr "`RecomputeCPUOffloadConnector`通过`kv-transfer-config`进行配置。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "`kv_connector`"
+msgstr "`kv_connector`"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "Must be set to `RecomputeCPUOffloadConnector`."
+msgstr "必须设置为`RecomputeCPUOffloadConnector`。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "`kv_role`"
+msgstr "`kv_role`"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "Set to `kv_consumer` on Decode nodes."
+msgstr "在解码节点上设置为`kv_consumer`。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "`cpu_bytes_to_use_per_rank`"
+msgstr "`cpu_bytes_to_use_per_rank`"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid ""
+"Optional and recommended. CPU memory budget in bytes used by each rank/card "
+"for recompute offload. If set, it overrides `cpu_bytes_to_use / world_size`."
+msgstr ""
+"可选且推荐。每个rank/卡用于重新计算卸载的CPU内存预算（字节）。如果设置，它将覆盖`cpu_bytes_to_use / world_size`。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "`cpu_bytes_to_use`"
+msgstr "`cpu_bytes_to_use`"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid ""
+"Optional. Total CPU memory budget in bytes for this vLLM instance. The "
+"connector divides it by `world_size` to get the per-rank budget. This is "
+"less direct than `cpu_bytes_to_use_per_rank` and is easier to misconfigure "
+"in DP deployments. The default is 8 GiB total."
+msgstr ""
+"可选。此vLLM实例的总CPU内存预算（字节）。连接器将其除以`world_size`以获得每个rank的预算。这不如`cpu_bytes_to_use_per_rank`直接，并且在DP部署中更容易配置错误。默认总大小为8"
+" GiB。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid "`enable_offload_prefix_caching`"
+msgstr "`enable_offload_prefix_caching`"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md
+msgid ""
+"Optional. Enables CPU block sharing for full hashed blocks with the same "
+"prefix-cache hash. The default is `false`; keep it disabled unless "
+"explicitly testing prefix sharing."
+msgstr "可选。为具有相同前缀缓存哈希的完整哈希块启用CPU块共享。默认值为`false`；除非明确测试前缀共享，否则保持禁用状态。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:52
+msgid ""
+"Prefer `cpu_bytes_to_use_per_rank` when you want every rank/card to use the "
+"same offload capacity. For example, set `cpu_bytes_to_use_per_rank` to "
+"`17179869184` for 16 GiB per rank/card."
+msgstr ""
+"当您希望每个rank/卡使用相同的卸载容量时，首选`cpu_bytes_to_use_per_rank`。例如，将`cpu_bytes_to_use_per_rank`设置为`17179869184`，即每个rank/卡16"
+" GiB。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:56
+msgid ""
+"If you use `cpu_bytes_to_use`, remember that it is divided by `world_size`. "
+"In typical P/D Decode deployments, this means the value is divided by the "
+"active Decode DP size. For example, when starting a DP2TP8 Decode service, "
+"setting `cpu_bytes_to_use` to 16 GiB gives each DP rank's cards about 8 GiB "
+"of recompute offload space. To avoid ambiguity, use "
+"`cpu_bytes_to_use_per_rank` for new deployments."
+msgstr ""
+"如果您使用`cpu_bytes_to_use`，请记住它会被`world_size`除。在典型的P/D解码部署中，这意味着该值除以活动的解码DP大小。例如，当启动DP2TP8解码服务时，将`cpu_bytes_to_use`设置为16"
+" GiB，每个DP rank的卡将获得大约8 GiB的重新计算卸载空间。为避免歧义，新部署请使用`cpu_bytes_to_use_per_rank`。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:63
+msgid ""
+"`recompute_scheduler_enable` must also be enabled in `additional-config` on "
+"P/D-disaggregated Decode nodes:"
+msgstr "在P/D分离的解码节点上，还必须在`additional-config`中启用`recompute_scheduler_enable`："
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:71
+msgid ""
+"`recompute_scheduler_enable` is only valid in P/D-disaggregated mode "
+"(`kv_role` is `kv_producer` or `kv_consumer`). Do not enable it in PD-mixed "
+"mode (`kv_role` is `kv_both`)."
+msgstr ""
+"`recompute_scheduler_enable`仅在P/D分离模式（`kv_role`为`kv_producer`或`kv_consumer`）下有效。请勿在PD混合模式（`kv_role`为`kv_both`）下启用它。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:76
+msgid "Docker Shared Memory"
+msgstr "Docker共享内存"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:78
+msgid ""
+"Recompute CPU offload allocates pinned CPU tensors for the offloaded KV "
+"blocks. When running in Docker, make sure the container's shared memory is "
+"large enough. If `--shm-size` is too small, a large per-card offload budget,"
+" such as 16 GiB per card, can fail to allocate CPU tensors and may cause the"
+" service to OOM or hang during startup."
+msgstr ""
+"重新计算CPU卸载会为卸载的KV块分配固定的CPU张量。在Docker中运行时，请确保容器的共享内存足够大。如果`--shm-"
+"size`太小，较大的每卡卸载预算（例如每卡16 GiB）可能无法分配CPU张量，并可能导致服务在启动时OOM或挂起。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:84
+msgid ""
+"For typical A3 deployments with a large recompute-offload budget, set "
+"`--shm-size=1024g` when starting the container. The following snippet "
+"follows the Docker style used by the DeepSeek-V4-Flash tutorial:"
+msgstr ""
+"对于具有较大重新计算卸载预算的典型A3部署，在启动容器时设置`--shm-"
+"size=1024g`。以下代码片段遵循DeepSeek-V4-Flash教程中使用的Docker风格："
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:124
+msgid "Usage with P/D Disaggregation"
+msgstr "与P/D分离部署一起使用"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:126
+msgid ""
+"On Decode nodes, configure `MultiConnector` with both the P/D connector and "
+"`RecomputeCPUOffloadConnector`. The P/D connector handles KV transfer from "
+"Prefill to Decode, while `RecomputeCPUOffloadConnector` handles Decode-side "
+"preemption preservation and restore."
+msgstr ""
+"在解码节点上，配置`MultiConnector`，同时包含P/D连接器和`RecomputeCPUOffloadConnector`。P/D连接器处理从预填充到解码的KV传输，而`RecomputeCPUOffloadConnector`处理解码端的抢占保留和恢复。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:131
+msgid "The following example uses `MooncakeConnectorV1` for P/D KV transfer."
+msgstr "以下示例使用`MooncakeConnectorV1`进行P/D KV传输。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:178
+msgid ""
+"For the Prefill node, keep the normal P/D connector configuration, for "
+"example `MooncakeConnectorV1` with `kv_role` set to `kv_producer`."
+msgstr ""
+"对于预填充节点，保持正常的P/D连接器配置，例如将`MooncakeConnectorV1`的`kv_role`设置为`kv_producer`。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:181
+msgid ""
+"When `kv_load_failure_policy` is also needed for the P/D connector, "
+"configure it on the top-level `MultiConnector` `kv-transfer-config`, not "
+"inside child connectors."
+msgstr ""
+"当P/D连接器也需要`kv_load_failure_policy`时，请将其配置在顶层`MultiConnector`的`kv-transfer-"
+"config`中，而非子连接器内部。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:185
+msgid "Standalone Connector Example"
+msgstr "独立连接器示例"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:187
+msgid ""
+"`RecomputeCPUOffloadConnector` must be used together with the vLLM-Ascend "
+"`RecomputeScheduler`. Because `RecomputeScheduler` is only supported on "
+"P/D-disaggregated Decode nodes, recompute CPU offload is currently only "
+"available for P/D-disaggregated Decode nodes as well."
+msgstr ""
+"`RecomputeCPUOffloadConnector`必须与vLLM-"
+"Ascend的`RecomputeScheduler`配合使用。由于`RecomputeScheduler`仅支持P/D分离的Decode节点，因此重计算CPU卸载当前也仅适用于P/D分离的Decode节点。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:192
+msgid ""
+"The following standalone connector configuration is intended only as a "
+"minimal configuration fragment for validating the recompute-offload path on "
+"a P/D-disaggregated Decode node. It is not a PD-mixed deployment mode. In "
+"PD-mixed or normal non-P/D deployments, do not enable recompute CPU offload;"
+" the engine uses the normal vLLM recompute behavior instead."
+msgstr ""
+"以下独立连接器配置仅作为在P/D分离的Decode节点上验证重计算卸载路径的最小配置片段。它并非PD混合部署模式。在PD混合或普通非P/D部署中，请勿启用重计算CPU卸载；引擎将使用正常的vLLM重计算行为。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:211
+msgid "For online serving:"
+msgstr "在线服务场景："
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:226
+msgid "How It Works"
+msgstr "工作原理"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:228
+msgid ""
+"When `RecomputeScheduler` cannot allocate enough HBM KV blocks, it selects a"
+" Decode-side running request for preemption."
+msgstr "当`RecomputeScheduler`无法分配足够的HBM KV块时，它会选择一个Decode端正在运行的请求进行抢占。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:230
+msgid ""
+"Before the request's HBM blocks are reused, the scheduler calls the "
+"connector's preemption hook. If enough CPU blocks are available, the "
+"connector records the HBM block to CPU block mapping."
+msgstr "在请求的HBM块被重用之前，调度器会调用连接器的抢占钩子。如果CPU块足够，连接器会记录HBM块到CPU块的映射。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:233
+msgid ""
+"The model runner calls `handle_preemptions()` before updating worker state. "
+"The worker copies the selected KV blocks from HBM to pinned CPU tensors."
+msgstr "模型运行器在更新工作节点状态前调用`handle_preemptions()`。工作节点将选中的KV块从HBM复制到固定的CPU张量。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:235
+msgid ""
+"After all workers report that the store is complete, the preempted request "
+"becomes restorable."
+msgstr "在所有工作节点报告存储完成后，被抢占的请求变为可恢复状态。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:237
+msgid ""
+"When the request is scheduled again, the connector reports the number of "
+"tokens that can be restored from CPU memory."
+msgstr "当请求再次被调度时，连接器报告可从CPU内存恢复的token数量。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:239
+msgid ""
+"The scheduler allocates new HBM blocks and the connector builds the CPU "
+"block to HBM block reload mapping."
+msgstr "调度器分配新的HBM块，连接器构建CPU块到HBM块的重载映射。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:241
+msgid ""
+"Before model forward, the worker copies the restored KV blocks back to HBM. "
+"Forward then continues from the restored KV state."
+msgstr "在模型前向计算前，工作节点将恢复的KV块复制回HBM。前向计算随后从恢复的KV状态继续执行。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:244
+msgid "Sliding-Window and MTP Support"
+msgstr "滑动窗口与MTP支持"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:246
+msgid ""
+"Sliding-window models can contain logical block tables with null block IDs "
+"for tokens outside the attention window. The connector preserves logical "
+"block positions instead of compressing non-zero block IDs, so a block table "
+"such as `[0, 0, 20, 21]` remains aligned as `[0, 0, cpu_20, cpu_21]` on the "
+"CPU side. Only non-zero blocks are transferred."
+msgstr ""
+"滑动窗口模型可能包含注意力窗口外token的空块ID逻辑块表。连接器保留逻辑块位置而非压缩非零块ID，因此像`[0, 0, 20, "
+"21]`这样的块表在CPU端保持对齐为`[0, 0, cpu_20, cpu_21]`。仅传输非零块。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:252
+msgid ""
+"With MTP or speculative decode enabled, the scheduler may allocate lookahead"
+" blocks. The reload path clips the H2D range to the GPU block table actually"
+" allocated for the resumed request."
+msgstr "启用MTP或推测解码时，调度器可能分配预读块。重载路径将H2D范围裁剪为实际分配给恢复请求的GPU块表。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:256
+msgid "Notes and Limitations"
+msgstr "注意事项与限制"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:258
+msgid ""
+"This feature requires the vLLM V1 engine and the vLLM-Ascend recompute "
+"scheduler."
+msgstr "此功能需要vLLM V1引擎和vLLM-Ascend重计算调度器。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:260
+msgid ""
+"The feature is only intended for Decode nodes in P/D disaggregation. It is "
+"not supported in PD-mixed or normal non-P/D deployments."
+msgstr "该功能仅适用于P/D分离场景中的Decode节点。PD混合或普通非P/D部署不支持。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:262
+msgid ""
+"Do not enable `recompute_scheduler_enable` in PD-mixed deployments. Without "
+"P/D-disaggregated Decode-side `RecomputeScheduler`, recompute CPU offload is"
+" not active and vLLM follows the normal recompute path."
+msgstr ""
+"请勿在PD混合部署中启用`recompute_scheduler_enable`。没有P/D分离的Decode端`RecomputeScheduler`，重计算CPU卸载不会生效，vLLM将遵循正常重计算路径。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:265
+msgid ""
+"When running in Docker with a large per-rank offload budget, reserve enough "
+"shared memory. For typical A3 deployments with 16 GiB per-card offload, use "
+"`--shm-size=1024g`."
+msgstr ""
+"在Docker中运行且每rank卸载预算较大时，请预留足够的共享内存。对于每卡16 GiB卸载的典型A3部署，使用`--shm-size=1024g`。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:268
+msgid ""
+"`enable_offload_prefix_caching` is experimental and disabled by default."
+msgstr "`enable_offload_prefix_caching`为实验性功能，默认关闭。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:269
+msgid ""
+"Current D2H and H2D transfers use basic torch copy operations. They are "
+"correctness-oriented and not yet optimized for transfer throughput."
+msgstr "当前的D2H和H2D传输使用基础的torch复制操作。这些操作以正确性为导向，尚未针对传输吞吐量进行优化。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:271
+msgid ""
+"Qwen3.5 with async scheduling is not fully supported yet. Disable async "
+"scheduling when using recompute CPU offload with Qwen3.5 models."
+msgstr "Qwen3.5的异步调度尚未完全支持。使用Qwen3.5模型进行重计算CPU卸载时，请禁用异步调度。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:273
+msgid ""
+"If CPU memory capacity is insufficient, the connector skips offload for that"
+" request and the scheduler falls back to the original recompute behavior."
+msgstr "如果CPU内存容量不足，连接器会跳过该请求的卸载，调度器回退到原始重计算行为。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:276
+msgid "FAQ"
+msgstr "常见问题"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:278
+msgid "How much CPU memory should I configure?"
+msgstr "应配置多少CPU内存？"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:280
+msgid ""
+"Start with a budget that can hold the expected number of preempted request "
+"blocks. Prefer `cpu_bytes_to_use_per_rank` because it directly controls the "
+"offload budget for each rank/card. For example, "
+"`cpu_bytes_to_use_per_rank=17179869184` gives each rank/card 16 GiB."
+msgstr ""
+"从能容纳预期被抢占请求块数量的预算开始。优先使用`cpu_bytes_to_use_per_rank`，因为它直接控制每个rank/卡的卸载预算。例如，`cpu_bytes_to_use_per_rank=17179869184`为每个rank/卡提供16"
+" GiB。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:285
+msgid ""
+"`cpu_bytes_to_use` is divided by `world_size`. In a DP2TP8 Decode service, "
+"setting `cpu_bytes_to_use=17179869184` gives each DP rank's cards about 8 "
+"GiB of offload space. Increase the budget if logs show that CPU cache free "
+"blocks are insufficient."
+msgstr ""
+"`cpu_bytes_to_use`按`world_size`均分。在DP2TP8的Decode服务中，设置`cpu_bytes_to_use=17179869184`为每个DP"
+" rank的卡提供约8 GiB的卸载空间。如果日志显示CPU缓存空闲块不足，请增加预算。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:290
+msgid "How do I know the offload path is active?"
+msgstr "如何确认卸载路径已激活？"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:292
+msgid "Look for logs similar to:"
+msgstr "查找类似以下日志："
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:300
+msgid ""
+"If offload cannot be prepared, logs may show that CPU cache free blocks are "
+"insufficient, and the request will fall back to the original recompute path."
+msgstr "如果无法准备卸载，日志可能显示CPU缓存空闲块不足，请求将回退到原始重计算路径。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:303
+msgid "Is this the same as KV Cache CPU Offload?"
+msgstr "这与KV缓存CPU卸载相同吗？"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:305
+msgid ""
+"No. `KV Cache CPU Offload` is a prefix-cache offload path for inactive KV "
+"cache blocks. `RecomputeCPUOffloadConnector` is specifically for preserving "
+"KV blocks of requests preempted by the Decode-side recompute scheduler."
+msgstr ""
+"不同。`KV Cache CPU "
+"Offload`是针对非活跃KV缓存块的前缀缓存卸载路径。`RecomputeCPUOffloadConnector`专门用于保留被Decode端重计算调度器抢占的请求的KV块。"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:309
+msgid "Reference"
+msgstr "参考"
+
+#: ../../source/user_guide/feature_guide/recompute_cpu_offload.md:311
+msgid ""
+"For design background and implementation details, see [#10820: Recompute CPU"
+" Offload Connector](https://github.com/vllm-project/vllm-"
+"ascend/issues/10820)."
+msgstr ""
+"设计背景和实现细节请参见[#10820: Recompute CPU Offload "
+"Connector](https://github.com/vllm-project/vllm-ascend/issues/10820)。"

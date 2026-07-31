@@ -65,7 +65,7 @@ python3 -m pip install -r requirements-dev.txt
 
 ::::
 
-::::{tab-item} Single card
+::::{tab-item} Single-card
 :sync: single
 
 ```{code-block} bash
@@ -107,7 +107,7 @@ pip install -r requirements-dev.txt
 
 ::::
 
-::::{tab-item} Multi cards
+::::{tab-item} Multi-cards
 :sync: multi
 
 ```{code-block} bash

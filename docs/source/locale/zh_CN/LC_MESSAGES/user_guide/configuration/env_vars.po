@@ -1,19 +1,23 @@
-# Translations template for PROJECT.
-# Copyright (C) 2025 ORGANIZATION
-# This file is distributed under the same license as the PROJECT project.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
+#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: PROJECT VERSION\n"
-"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/configuration/env_vars.md:1
@@ -29,11 +33,10 @@ msgstr "vllm-ascend 使用以下环境变量来配置系统："
 #: ../../source/user_guide/configuration/env_vars.md:5
 msgid ""
 "**Note:** Some environment variables are being migrated to `--additional-"
-"config` options. These environment variables are still supported during "
-"the migration period, and it is recommended to use `--additional-config` "
-"for new deployments. See [Additional Configuration](additional_config.md)"
-" for details."
+"config` options. These environment variables are still supported during the "
+"migration period, and it is recommended to use `--additional-config` for new"
+" deployments. See [Additional Configuration](additional_config.md) for "
+"details."
 msgstr ""
-"**注意：** 部分环境变量正在迁移至 `--additional-config` "
-"选项。迁移期间这些环境变量仍受支持，建议新部署使用 `--additional-config`。"
-"详情请参阅[附加配置](additional_config.md)。"
+"**注意：** 部分环境变量正在迁移至 `--additional-config` 选项。迁移期间这些环境变量仍受支持，建议新部署使用 "
+"`--additional-config`。详情请参见[附加配置](additional_config.md)。"

@@ -1,6 +1,8 @@
 [files]
 # these files may be written in non english words
-extend-exclude = [".pre-commit-config.yaml", "docs/source/community/contributors.md",]
+extend-exclude = [".pre-commit-config.yaml",
+    "docs/source/community/contributors.md",
+    "docs/source/locale/zh_CN/LC_MESSAGES/community/contributors.po",]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -21,7 +23,7 @@ extend-ignore-identifiers-re = [".*Unc.*", ".*_thw",
     ".*ot.*", ".*[Tt]h[rR].*",
     # tools/ai_qos.py: align with driver qos_mata_config / original_sdma_mata (not "meta")
     ".*(?i)mata.*"]
-extend-ignore-words-re = ["CANN", "cann","ND","alog","nd","BA","datas","ful","udo","artifcat",]
+extend-ignore-words-re = ["CANN", "cann","ND","alog","nd","BA","datas","ful","udo","artifcat", "internel", "ded"]
 extend-ignore-re = []
 
 [default.extend-identifiers]

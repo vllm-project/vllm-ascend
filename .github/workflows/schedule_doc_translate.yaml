@@ -27,6 +27,11 @@ on:
         required: false
         default: 'releases/v0.23.0'
         type: string
+      force:
+        description: 'Retranslate all PO files'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: translation-${{ github.ref }}
@@ -77,6 +82,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y make
           pip install -r requirements-docs.txt
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Removing existing PO files before clean regeneration"
+            find source/locale/zh_CN/LC_MESSAGES \
+              -type f -name '*.po' -delete
+          fi
           make clean && make html
           sphinx-build -b gettext source _build/gettext
           sphinx-intl update -p _build/gettext -l zh_CN
@@ -85,9 +95,16 @@ jobs:
         id: detect
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          tracked=$(git diff --name-only --diff-filter=ACMUX || true)
-          untracked=$(git ls-files --others --exclude-standard || true)
-          po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
+          if [ "${{ inputs.force }}" = "true" ]; then
+            po_files=$(find docs/source/locale/zh_CN/LC_MESSAGES \
+              -type f -name '*.po' -print | sort | tr '\n' ',' | sed 's/,$//')
+            echo "Full retranslation requested"
+          else
+            tracked=$(git diff --name-only --diff-filter=ACMUX || true)
+            untracked=$(git ls-files --others --exclude-standard || true)
+            po_files=$(printf "%s\n%s" "$tracked" "$untracked" \
+              | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
+          fi
 
           if [ -z "$po_files" ]; then
             echo "No PO files to translate"
@@ -103,9 +120,22 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
+          RETRANSLATE_ARGS=()
+          if [ "${{ inputs.force }}" = "true" ]; then
+            RETRANSLATE_ARGS+=(--retranslate-all)
+          fi
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
-            --output-json /tmp/translation_results.json
+            --output-json /tmp/translation_results.json \
+            "${RETRANSLATE_ARGS[@]}"
+
+      - name: Validate translated PO files
+        if: steps.detect.outputs.has_changes == 'true'
+        run: |
+          python .github/workflows/scripts/po_translate.py \
+            --files "${{ steps.detect.outputs.files }}" \
+            --validate-only
+          make -C docs intl SPHINXOPTS="-W --keep-going"
 
       - name: Process translated files
         if: steps.detect.outputs.has_changes == 'true'
@@ -123,16 +153,17 @@ jobs:
 
           count=0
           file_list=""
-          mkdir -p /tmp/translated_po_files
           while IFS= read -r file; do
             [ -n "$file" ] && [ -f "$file" ] && {
               count=$((count + 1))
               file_list="${file_list}- <code>${file}</code>"$'\n'
-              git add "$file"
             }
           done <<< "$success_files"
 
           [ $count -eq 0 ] && echo "No files processed" && exit 1
+          # Stage translated files and obsolete PO files removed during a
+          # clean full regeneration.
+          git add -A docs/source/locale/zh_CN/LC_MESSAGES
           echo "Processed $count file(s)"
           {
             echo "file_count=$count"
