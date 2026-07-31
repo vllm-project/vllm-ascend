@@ -17,22 +17,20 @@ using namespace AscendC;
 using WyMmAType = MatmulType<TPosition::GM, CubeFormat::ND, half, false>;
 using WyMmBType = MatmulType<TPosition::GM, CubeFormat::ND, half, false>;
 using WyMmBTransType = MatmulType<TPosition::GM, CubeFormat::ND, half, true>;
-using WyMmCType = MatmulType<TPosition::GM, CubeFormat::ND, float>;
-using WyMmBiasType = MatmulType<TPosition::GM, CubeFormat::ND, float>;
+using WyMmCType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
+using WyMmBiasType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
 
 using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType>;
 using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, WyMmBiasType>;
 
-// GM staging: A_half(64*128) + B_half(64*128) + C_float(64*128).
+// GM staging: A_half(64*128) + B_half(64*128). Cube writes C directly to UB.
 // Doubling applies U/W separately so N <= 128 (no stacked 256-wide staging).
 constexpr uint32_t WY_CUBE_MAX_HEAD = 128;
 constexpr uint32_t WY_CUBE_CHUNK = 64;
 constexpr uint32_t WY_CUBE_STAGING_A_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
 constexpr uint32_t WY_CUBE_STAGING_B_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(half);
-constexpr uint32_t WY_CUBE_STAGING_C_BYTES = WY_CUBE_CHUNK * WY_CUBE_MAX_HEAD * sizeof(float);
 constexpr uint32_t WY_CUBE_STAGING_A_OFF = 0;
 constexpr uint32_t WY_CUBE_STAGING_B_OFF = WY_CUBE_STAGING_A_BYTES;
-constexpr uint32_t WY_CUBE_STAGING_C_OFF = WY_CUBE_STAGING_A_BYTES + WY_CUBE_STAGING_B_BYTES;
 
 class WyCubeGemm {
  public:
@@ -62,7 +60,6 @@ class WyCubeGemm {
         workspaceOffset + static_cast<uint64_t>(blockIdx) * static_cast<uint64_t>(perCoreBytes_);
     aGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_A_OFF));
     bGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(workspace + coreBase + WY_CUBE_STAGING_B_OFF));
-    cGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace + coreBase + WY_CUBE_STAGING_C_OFF));
   }
 
   // C[64,64] = A[64,K] @ B[64,K]^T
@@ -84,15 +81,13 @@ class WyCubeGemm {
       mmAttn_.SetLocalWorkspace(localWs_);
       mmAttn_.SetTensorA(aGm_[k0], false);
       mmAttn_.SetTensorB(bGm_[k0], true);
-      mmAttn_.IterateAll(cGm_);
-      WaitMte3ToMte2();
-      PipeBarrier<PIPE_ALL>();
       if (k0 == 0) {
-        CopyFloatRowsFromGm(cUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-        WaitMte2ToV();
+        mmAttn_.IterateAll(cUb);
       } else {
-        CopyFloatRowsFromGm(accScratch, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-        WaitMte2ToV();
+        mmAttn_.IterateAll(accScratch);
+      }
+      PipeBarrier<PIPE_ALL>();
+      if (k0 != 0) {
         Add(cUb, cUb, accScratch, WY_CUBE_CHUNK * WY_CUBE_CHUNK);
         PipeBarrier<PIPE_V>();
       }
@@ -115,12 +110,8 @@ class WyCubeGemm {
     mmSquare_.SetLocalWorkspace(localWs_);
     mmSquare_.SetTensorA(aGm_, false);
     mmSquare_.SetTensorB(bGm_, false);
-    mmSquare_.IterateAll(cGm_);
-    WaitMte3ToMte2();
+    mmSquare_.IterateAll(pUb);
     PipeBarrier<PIPE_ALL>();
-
-    CopyFloatRowsFromGm(pUb, cGm_, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    WaitMte2ToV();
   }
 
   // Cast P[64,64] → halfScratch and upload to aGm_. halfScratch must stay live until
@@ -154,21 +145,18 @@ class WyCubeGemm {
       mmApplyU_.SetLocalWorkspace(localWs_);
       mmApplyU_.SetTensorA(aGm_, false);
       mmApplyU_.SetTensorB(bGm_, false);
-      mmApplyU_.IterateAll(cGm_);
+      mmApplyU_.IterateAll(floatScratch);
     } else {
       mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
       mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
       mmApplyW_.SetLocalWorkspace(localWs_);
       mmApplyW_.SetTensorA(aGm_, false);
       mmApplyW_.SetTensorB(bGm_, false);
-      mmApplyW_.IterateAll(cGm_);
+      mmApplyW_.IterateAll(floatScratch);
     }
-    WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
-    // C[64,nDim] from GM -> floatScratch, then R += C
-    CopyFloatRowsFromGm(floatScratch, cGm_, WY_CUBE_CHUNK, nDim, nDim);
-    WaitMte2ToV();
+    // Cube wrote C[64,nDim] directly to floatScratch; now R += C.
     if (rLda == nDim) {
       Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nDim);
     } else {
@@ -192,13 +180,6 @@ class WyCubeGemm {
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2));
     SetFlag<HardEvent::MTE3_MTE2>(evt);
     WaitFlag<HardEvent::MTE3_MTE2>(evt);
-  }
-
-  __aicore__ inline void WaitMte2ToV() const
-  {
-    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-    SetFlag<HardEvent::MTE2_V>(evt);
-    WaitFlag<HardEvent::MTE2_V>(evt);
   }
 
   __aicore__ inline void CastFloatRowsToHalfContiguous(LocalTensor<half> dst, const LocalTensor<float> src,
@@ -228,20 +209,6 @@ class WyCubeGemm {
     DataCopy(dst, src, params);
   }
 
-  __aicore__ inline void CopyFloatRowsFromGm(LocalTensor<float> dst, GlobalTensor<float> src, uint32_t rows,
-                                             uint32_t cols, uint32_t lda) const
-  {
-    const uint32_t rowBytes = cols * sizeof(float);
-    if (lda == cols) {
-      DataCopyParams params{1, static_cast<uint16_t>((rows * rowBytes + 31) / 32), 0, 0};
-      DataCopy(dst, src, params);
-      return;
-    }
-    DataCopyParams params{static_cast<uint16_t>(rows), static_cast<uint16_t>((rowBytes + 31) / 32), 0,
-                          static_cast<uint16_t>(((lda - cols) * sizeof(float)) / 32)};
-    DataCopy(dst, src, params);
-  }
-
   TPipe *pipe_{nullptr};
   uint32_t perCoreBytes_{0};
   uint32_t usedCoreNum_{1};
@@ -252,7 +219,6 @@ class WyCubeGemm {
   WyMatmulNoTrans mmApplyW_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
-  GlobalTensor<float> cGm_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy
