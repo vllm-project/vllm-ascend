@@ -268,6 +268,22 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             }
             break;
         }
+        case KEY_BF16_CACHEMODE_2_QUANTMODE_1: {
+            MLAPO_BF16::MLAOperation<__bf16, 2, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm2Qm1(mlaTilingData, tiling);
+            opBf16Cm2Qm1.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5);
+            if ASCEND_IS_AIC {
+                opBf16Cm2Qm1.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm2Qm1.ProcessVector();
+            }
+            break;
+        }
         case KEY_BF16_CACHEMODE_3_QUANTMODE_1: {
             MLAPO_BF16::MLAOperation<__bf16, 3, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
                                      QuantMode::PER_TOKEN_SYMM_QUANT>
@@ -376,6 +392,22 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             }
             if ASCEND_IS_AIV {
                 opBf16Cm1Qm1Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_2_QUANTMODE_1_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 2, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TOKEN_SYMM_QUANT>
+                opBf16Cm2Qm1Inner(mlaTilingData, tiling);
+            opBf16Cm2Qm1Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm2Qm1Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm2Qm1Inner.ProcessVector();
             }
             break;
         }
