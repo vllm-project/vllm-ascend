@@ -6,8 +6,9 @@ generator problem.
 
 ## v0.24.0 - descriptor binding contracts (in progress)
 
-- Red-test checkpoint: `922a810e8` (10 new tests; 9 initially failed and one
-  existing-correct module-wrapper control passed).
+- Red-test checkpoints: `922a810e8` (10 new tests; 9 initially failed and one
+  existing-correct module-wrapper control passed) and `2e032820e` (8 focused
+  installation tests; the typed lazy instance case initially failed).
 - Problem: signature-only contracts could not see a change between an
   ordinary method, `property`, `classmethod`, and `staticmethod`.  In the
   pinned source pair this hid ten real override differences, including
@@ -30,6 +31,10 @@ generator problem.
     `staticmethod(lambda ...)`;
   - class, module, and typed-runtime-instance targets are distinguished because
     only writes into a class namespace install descriptors;
+  - an instance write no longer erases the descriptor kind of the upstream
+    class member.  This preserves a real `classmethod -> instance attribute`
+    mismatch, while the established `ordinary -> ordinary instance function`
+    binding remains an intentional equivalent case;
   - semantic adapters for `vllm.tracing.instrument` and
     `torch.inference_mode` are enabled only for the exact pinned source SHAs;
     an unregistered source version remains `unknown` instead of inheriting an
@@ -48,7 +53,7 @@ generator problem.
     installed into a class, while the temporary
     `current_platform.verify_quantization` write is an instance attribute and
     therefore has no installed descriptor kind.
-- Status: implementation tests pass (147 total); the refined fixed-source run,
+- Status: implementation tests pass (155 total); the refined fixed-source run,
   independent audit, consumer UT update, and final output review are still
   required before this checkpoint can be accepted.
 

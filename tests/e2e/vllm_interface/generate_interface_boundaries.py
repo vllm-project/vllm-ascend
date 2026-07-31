@@ -3366,10 +3366,14 @@ class InterfaceBoundaryGenerator:
             relation.downstream_descriptor_kind,
             relation.installed_descriptor_kind,
         )
-        if kinds == (None, None, None) or (
-            relation.relation == "monkey_patch"
-            and relation.upstream_descriptor_kind is None
-            and relation.installed_descriptor_kind is None
+        if (
+            kinds == (None, None, None)
+            or (
+                relation.relation == "monkey_patch"
+                and relation.upstream_descriptor_kind is None
+                and relation.installed_descriptor_kind is None
+            )
+            or (relation.relation == "monkey_patch" and kinds == ("ordinary", "ordinary", None))
         ):
             return
         if conditional:
@@ -3378,12 +3382,15 @@ class InterfaceBoundaryGenerator:
                 "the callable has different descriptor kinds on normally "
                 "completing source paths; no single binding kind was guessed"
             )
-        elif "unknown" in kinds or None in kinds:
+        elif "unknown" in kinds:
             reason_code = "unknown_descriptor_kind"
             reason = "a dynamic decorator or binding prevents an exact descriptor kind from being proven statically"
         elif relation.upstream_descriptor_kind != relation.installed_descriptor_kind:
             reason_code = "descriptor_kind_mismatch"
             reason = "the downstream binding installs a different callable kind from the upstream member"
+        elif None in kinds:
+            reason_code = "unknown_descriptor_kind"
+            reason = "a dynamic decorator or binding prevents an exact descriptor kind from being proven statically"
         else:
             return
         self.findings.append(
@@ -6929,7 +6936,7 @@ class InterfaceBoundaryGenerator:
             upstream_callable,
             evidence_target,
         )
-        if not target_uses_descriptor:
+        if upstream_callable.owner is None:
             upstream_descriptor_kind = None
             upstream_descriptor_conditional = False
         installed_descriptor_kind = (
