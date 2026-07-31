@@ -722,7 +722,7 @@ class KVPoolWorker:
                 continue
             layer_names_by_physical.setdefault(phys, []).append(layer_name)
 
-        layer_offsets = [0]
+        layer_cache_entry_offsets = [0]
         for phys in sorted(layer_names_by_physical):
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
@@ -732,11 +732,11 @@ class KVPoolWorker:
                     group_addrs.append(base_addr)
                     group_block_lens.append(block_len)
                     group_block_strides.append(block_stride)
-            layer_offsets.append(len(group_addrs))
+            layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
-        self.group_layer_offsets[group_id] = layer_offsets
+        self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
         self.group_num_layers[group_id] = len(layer_names_by_physical)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
@@ -778,7 +778,7 @@ class KVPoolWorker:
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
-        self.group_layer_offsets: dict[int, list[int]] = {}
+        self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: self._get_group_family(self.kv_cache_group_families, group_id)
@@ -848,7 +848,7 @@ class KVPoolWorker:
             cache_role="kv",
             group_cache_families=self.group_kv_cache_families,
             group_num_layers=self.group_num_layers,
-            group_layer_offsets=self.group_layer_offsets,
+            group_layer_cache_entry_offsets=self.group_layer_cache_entry_offsets,
         )
 
         if self.tp_mismatch:
@@ -1120,8 +1120,8 @@ class KVPoolWorker:
             if not self.layerwise_offload or layer_id in self.independent_layers:
                 partial_block_index = None
             partial_gva = (
-                request.partial_load_gvas_by_group[group_id]
-                if group_id < len(request.partial_load_gvas_by_group)
+                request.partial_load_gva_per_group[group_id]
+                if group_id < len(request.partial_load_gva_per_group)
                 else request.last_block_gva
             )
             if partial_gva is None or partial_gva <= 0:
@@ -1224,7 +1224,7 @@ class KVPoolWorker:
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
-            request.partial_save_gvas_by_group = [0] * self.num_kv_cache_groups
+            request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
@@ -1337,7 +1337,7 @@ class KVPoolWorker:
                             )
                     # Partial keys are request-scoped; do not retain them forever.
                     self._allocated_gvas.pop(partial_key, None)
-                    request.partial_save_gvas_by_group[group_id] = partial_gva
+                    request.partial_save_gva_per_group[group_id] = partial_gva
 
                 logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
@@ -1392,7 +1392,7 @@ class KVPoolWorker:
 
             all_group_load_gvas: list[np.ndarray] = []
             all_group_load_keys: list[str] = []
-            request.partial_load_gvas_by_group = [0] * self.num_kv_cache_groups
+            request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
@@ -1566,7 +1566,7 @@ class KVPoolWorker:
                         full_gvas[load_start_block + i] = gva
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
                 if partial_block_index is not None and len(gvas) > normal_gva_count:
-                    request.partial_load_gvas_by_group[group_id] = gvas[normal_gva_count]
+                    request.partial_load_gva_per_group[group_id] = gvas[normal_gva_count]
 
             if all_group_load_gvas:
                 request.load_keys = all_group_load_keys
