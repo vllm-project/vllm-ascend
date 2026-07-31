@@ -4,6 +4,25 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.5.0 - resolve class-body callable aliases
+
+- Starting commit: `f147a936f`.
+- Problem: `_method_nodes()` indexed only `def` statements. A valid binding
+  such as `get_state_dtype = _310p_get_state_dtype` was therefore absent from
+  both override discovery and patch-replacement lookup.
+- Change: collect simple class-body callable assignments, including
+  `staticmethod`, `classmethod`, and `property` wrappers; materialize them only
+  when the right-hand side resolves to a real function or lambda. Class-valued
+  data attributes are not promoted to methods.
+- Evidence retained: the helper definition line and the class binding line.
+- Fixed-source effect: the two patch sites using
+  `AscendGatedDeltaNetAttention310.get_state_dtype` collapse into one verified
+  monkey-patch edge with two evidence occurrences, and the class binding adds
+  one verified override. Relations increased from 959 to 961; findings fell
+  from 40 to 38; generator issues fell from 18 to 16.
+- Reason: this is statically provable Python binding behavior and was a true
+  generator omission, not an upstream compatibility risk.
+
 ## v0.4.0 - classify every non-verified candidate
 
 - Baseline commit: `7954d7c2ab35959c450b48aa52dae5401a8d4b4f`.

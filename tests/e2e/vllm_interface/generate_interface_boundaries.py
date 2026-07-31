@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.4.0"
+GENERATOR_VERSION = "0.5.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
 
@@ -320,6 +320,8 @@ class CallableInfo:
     owner: str | None
     name: str
     node: ast.AST | None = field(compare=False, hash=False, repr=False)
+    binding_line: int | None = None
+    origin_kind: str = "definition"
 
     @property
     def signature(self) -> list[object] | None:
@@ -354,6 +356,7 @@ class RelationEvidence:
     guards: tuple[str, ...] = ()
     patch_kind: str | None = None
     definition_line: int | None = None
+    binding_line: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -368,6 +371,8 @@ class RelationEvidence:
             payload["patch_kind"] = self.patch_kind
         if self.definition_line is not None:
             payload["definition_line"] = self.definition_line
+        if self.binding_line is not None:
+            payload["binding_line"] = self.binding_line
         return payload
 
 
@@ -569,6 +574,9 @@ class RepositoryIndex:
         self.classes: dict[str, ClassInfo] = {}
         self.callables: dict[str, CallableInfo] = {}
         self.aliases: dict[str, str] = {}
+        self._pending_method_aliases: list[
+            tuple[str, str, str, str, int]
+        ] = []
         self.parse_errors: list[dict[str, str]] = []
         self._parse()
 
@@ -672,6 +680,13 @@ class RepositoryIndex:
                             name=method_name,
                             node=method_node,
                         )
+                    self._collect_class_callable_aliases(
+                        node,
+                        module,
+                        qualified_name,
+                        imports,
+                        {*classes, *functions},
+                    )
                 elif isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                     imports.pop(node.name, None)
                     qualified_name = f"{module}.{node.name}"
@@ -718,6 +733,89 @@ class RepositoryIndex:
             self.modules[module] = module_info
             for local_name, target in imports.items():
                 self.aliases[f"{module}.{local_name}"] = target
+
+        self._materialize_class_callable_aliases()
+
+    def _collect_class_callable_aliases(
+        self,
+        node: ast.ClassDef,
+        module: str,
+        class_name: str,
+        imports: dict[str, str],
+        local_names: set[str],
+    ) -> None:
+        explicit_methods = _method_nodes(node)
+        for statement in node.body:
+            value: ast.AST | None = None
+            targets: Sequence[ast.AST] = ()
+            if isinstance(statement, ast.Assign):
+                value = statement.value
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                value = statement.value
+                targets = (statement.target,)
+            else:
+                continue
+
+            kind = "callable_alias"
+            if isinstance(value, ast.Call):
+                wrapper = _expression_name(value.func)
+                if wrapper not in {"classmethod", "property", "staticmethod"}:
+                    continue
+                if len(value.args) != 1:
+                    continue
+                kind = wrapper
+                value = value.args[0]
+            expression = _expression_name(value)
+            if expression is None:
+                continue
+            resolved = _resolve_bound_reference(
+                module,
+                expression,
+                imports,
+                local_names,
+            )
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id in explicit_methods:
+                    continue
+                self._pending_method_aliases.append(
+                    (
+                        class_name,
+                        target.id,
+                        resolved,
+                        kind,
+                        getattr(statement, "lineno", 0),
+                    )
+                )
+
+    def _materialize_class_callable_aliases(self) -> None:
+        for class_name, member_name, target, kind, line in (
+            self._pending_method_aliases
+        ):
+            source = self.find_callable(target)
+            if source is None or not isinstance(
+                source.node,
+                (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda),
+            ):
+                continue
+            class_info = self.classes[class_name]
+            if member_name in class_info.methods:
+                continue
+            qualified_name = f"{class_name}.{member_name}"
+            alias = CallableInfo(
+                qualified_name=qualified_name,
+                module=class_info.module,
+                file=class_info.file,
+                owner=class_info.name,
+                name=member_name,
+                node=source.node,
+                binding_line=line,
+                origin_kind=kind,
+            )
+            class_info.methods[member_name] = source.node
+            self.callables[qualified_name] = alias
 
     def resolve_reference(self, module: str, expression: str) -> str:
         parts = expression.split(".")
@@ -1096,6 +1194,15 @@ class InterfaceBoundaryGenerator:
                 )
                 if upstream_callable is None:
                     continue
+                downstream_callable = self.downstream.find_callable(
+                    f"{class_info.qualified_name}.{method_name}"
+                )
+                evidence_line = (
+                    downstream_callable.binding_line
+                    if downstream_callable
+                    and downstream_callable.binding_line is not None
+                    else getattr(method_node, "lineno", 0)
+                )
                 self.relations.append(
                     Relation(
                         relation="override",
@@ -1106,9 +1213,13 @@ class InterfaceBoundaryGenerator:
                         downstream_file=class_info.file,
                         downstream_owner=class_info.name,
                         downstream_name=method_name,
-                        downstream_signature=_jsonable_signature(method_node),
+                        downstream_signature=(
+                            downstream_callable.signature
+                            if downstream_callable
+                            else _jsonable_signature(method_node)
+                        ),
                         evidence_file=class_info.file,
-                        evidence_line=getattr(method_node, "lineno", 0),
+                        evidence_line=evidence_line,
                     )
                 )
 
@@ -1723,6 +1834,7 @@ class InterfaceBoundaryGenerator:
             guards=context.guards,
             patch_kind=replacement.kind,
             definition_line=definition_line,
+            binding_line=replacement.info.binding_line,
         )
         self.relations.append(
             Relation(

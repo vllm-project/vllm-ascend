@@ -754,6 +754,66 @@ First.run = property(replacement)
     )
 
 
+def test_class_body_callable_alias_is_a_method_and_patch_replacement(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def hook(self, value):
+        return value
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+def alias_hook(self, value):
+    return value
+
+
+class Child(Base):
+    hook = alias_hook
+
+
+Base.hook = Child.hook
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    alias_relations = [
+        relation
+        for relation in relations
+        if relation.downstream_owner == "Child"
+        and relation.downstream_name == "hook"
+    ]
+    assert {relation.relation for relation in alias_relations} == {
+        "monkey_patch",
+        "override",
+    }
+    patch = next(
+        relation
+        for relation in alias_relations
+        if relation.relation == "monkey_patch"
+    )
+    assert patch.evidence[0].binding_line is not None
+    assert patch.evidence[0].definition_line is not None
+    assert not findings
+
+
 def test_lambda_patch_and_parse_failures_are_explicit(tmp_path: Path) -> None:
     vllm_root = tmp_path / "vllm-repo"
     ascend_root = tmp_path / "ascend-repo"
