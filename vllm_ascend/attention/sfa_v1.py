@@ -2104,7 +2104,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if attn_metadata.indexer_seq_lens is not None else
             actual_seq_lengths_key)
         dsa_mgr = None
-        if self._dsa_split_indexer_cache_enabled():
+        if self._dsa_split_indexer_cache_enabled() and not _EXTRA_CTX.is_draft_model:
             from vllm_ascend.dsa_sparse.dsa_runtime import (
                 get_dsa_worker_manager,
             )
