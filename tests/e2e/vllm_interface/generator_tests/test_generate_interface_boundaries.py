@@ -6521,3 +6521,115 @@ if not hasattr(Target, "run"):
 
     assert not [relation for relation in relations if relation.relation == "monkey_patch"]
     assert not findings
+
+
+def test_v023_wrapper_alias_preserves_conditional_source_presence(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    if feature_enabled():
+        def _run(value):
+            return value
+    else:
+        _run = None
+
+    run = staticmethod(_run)
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(value):
+    return value
+
+
+Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(findings) == 1
+    assert (
+        findings[0].target_expression,
+        findings[0].status,
+        findings[0].reason_code,
+        findings[0].generator_issue,
+    ) == (
+        "vllm.base.Target.run",
+        "review",
+        "conditional_callable_presence",
+        False,
+    )
+
+
+def test_v023_module_level_classmethod_wrapper_is_not_a_callable_endpoint(
+    tmp_path: Path,
+) -> None:
+    vllm_root, _ = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def implementation(cls, value):
+    return value
+
+
+run = classmethod(implementation)
+""",
+    )
+
+    index = generator.RepositoryIndex(vllm_root, "vllm")
+
+    assert {binding.kind for binding in index.find_final_bindings("vllm.base.run")} == {"value"}
+    assert not index.find_final_callable_variants("vllm.base.run")
+
+
+def test_v023_dead_super_call_does_not_create_missing_target_risk(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    pass
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        if False:
+            return super().run(value)
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len([relation for relation in relations if relation.relation == "inheritance"]) == 1
+    assert not [relation for relation in relations if relation.relation == "override"]
+    assert not findings
