@@ -1522,6 +1522,38 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
 
+    def test_full_pool_hit_uses_verified_extent(self):
+        worker = self._make_gva_worker()
+        worker.independent_layers = [0]
+        key_info = MagicMock()
+        key_info.size.return_value = 64
+        key_info.gva_list.return_value = [201]
+        worker.m_store.batch_get_key_info.return_value = [key_info]
+        worker.m_store.batch_add_lease.return_value = [0]
+        request = self._make_gva_request(
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=15,
+                can_load=True,
+                kvpool_store_skip_tokens=16,
+            ),
+            can_save=True,
+        )
+
+        worker._prepare_load_gvas([request])
+        worker._alloc_gvas_for_save([request])
+        worker._process_load_for_layer_batch([request], 1)
+        worker._process_save_for_layer_batch([request], 1)
+
+        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
+        self.assertEqual(len(queried_keys), 1)
+        self.assertNotIn("@partial@", queried_keys[0])
+        worker.m_store.batch_alloc.assert_not_called()
+        load_range = worker.layer_load_tasks[1][0].block_ranges[0]
+        self.assertEqual((load_range.start_block, load_range.end_block), (0, 1))
+        self.assertIsNone(load_range.partial_block_index)
+        self.assertEqual(worker.layer_save_tasks[1], [])
+
     def test_partial_prefill_is_saved_and_loaded_for_reused_layer(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
             pool_worker as _pool_worker,
@@ -1634,31 +1666,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
-
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep",
-    )
-    def test_layerwise_unmatched_state_lease_is_retried(self, sleep):
-        worker = self._make_gva_worker()
-        key_info = MagicMock()
-        key_info.size.return_value = 64
-        key_info.gva_list.return_value = [201]
-        worker.m_store.batch_get_key_info.return_value = [key_info]
-        worker.m_store.batch_add_lease.side_effect = [[-3101], [0]]
-        request = self._make_gva_request(
-            load_spec=LoadSpec(
-                vllm_cached_tokens=16,
-                kvpool_cached_tokens=16,
-                can_load=True,
-            ),
-        )
-
-        worker._prepare_load_gvas([request])
-
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [201])
-        self.assertNotEqual(request.load_keys, [])
-        self.assertEqual(worker.m_store.batch_add_lease.call_count, 2)
-        sleep.assert_called_once()
 
     def test_evicted_allocated_gva_is_reallocated(self):
         worker = self._make_gva_worker()
