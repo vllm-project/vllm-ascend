@@ -1385,7 +1385,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
-                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score_v2(
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                     query=query,
                     key=key,
                     value=value,
@@ -1429,7 +1429,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
-            decode_out, _ = DeviceOperator.npu_fused_infer_attention_score_v2(
+            decode_out, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query=query[:num_decode_tokens],
                 key=key,
                 value=value,
@@ -1453,7 +1453,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             prefill_seq_qlen = [
                 actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
             ]
-            prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score_v2(
+            prefill_out, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query=query[num_decode_tokens:num_tokens],
                 key=key,
                 value=value,
@@ -2157,7 +2157,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                 return output
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output, layer)
+                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
                 return self._forward_c8_fp8_decode(query, attn_metadata, output, layer)
@@ -2218,7 +2218,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
                 if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output, layer)
+                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
                 elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
