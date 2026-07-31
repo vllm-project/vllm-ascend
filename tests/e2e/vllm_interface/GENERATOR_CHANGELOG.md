@@ -4,6 +4,33 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.6.0 - resolve statically provable wrapper factories
+
+- Starting commit: `944a5b924`.
+- Problem: a patch replacement produced by any function call was treated as
+  unresolved. This missed `make_load_weights`, `tensor_parallel_wrap`, and
+  `_wrap_destroy_distributed_environment`.
+- Change: resolve a local/downstream factory and inspect returns in that exact
+  function scope without entering nested scopes. Accept one returned nested
+  function or lambda, optionally together with an identity return of a factory
+  parameter. Propagate the produced callable through a simple local assignment.
+- Safety boundary: multiple returned wrappers, non-callable return values, and
+  unknown callees remain review findings; the resolver does not execute code.
+- Full-source audit exposed one adjacent resolver gap: the public
+  `vllm.distributed.destroy_distributed_environment` name comes from
+  `from .parallel_state import *`. The index now follows public callable star
+  re-exports to the defining symbol instead of reporting the export as missing.
+- Fixed-source effect: four findings became three verified patch edges because
+  the two destroy-function patch sites use the same returned wrapper and remain
+  separate evidence occurrences. Relations increased from 961 to 964;
+  findings fell from 38 to 34; generator issues fell from 16 to 12.
+- A fast candidate gate avoids analysing ordinary function calls as factories;
+  the final full run returned to about 97 seconds after an initial 144-second
+  audit run, without changing output hash
+  `dc30d3c9d548b568f2518fb3a9e72a2f47788c592329c795ea3f4fa580b4e02c`.
+- Reason: these return bindings are directly provable from AST control-flow
+  shape and were true generator omissions.
+
 ## v0.5.0 - resolve class-body callable aliases
 
 - Starting commit: `f147a936f`.

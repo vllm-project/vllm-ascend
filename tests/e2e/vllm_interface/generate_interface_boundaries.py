@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.5.0"
+GENERATOR_VERSION = "0.6.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
 
@@ -129,6 +129,22 @@ def _method_nodes(node: ast.ClassDef) -> dict[str, ast.AST]:
         for child in node.body
         if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
     }
+
+
+def _function_scope_nodes(
+    node: ast.AsyncFunctionDef | ast.FunctionDef,
+) -> Iterable[ast.AST]:
+    """Walk one function scope without entering nested scopes."""
+    stack: list[ast.AST] = list(reversed(node.body))
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(
+            current,
+            (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
+        ):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
 
 
 def _is_exact_tag_check(node: ast.AST) -> bool:
@@ -339,6 +355,7 @@ class ModuleInfo:
     functions: dict[str, CallableInfo]
     loose_functions: dict[str, list[CallableInfo]]
     string_constants: dict[str, tuple[str, ...]]
+    star_imports: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -600,6 +617,7 @@ class RepositoryIndex:
             functions: dict[str, CallableInfo] = {}
             loose_functions: dict[str, list[CallableInfo]] = defaultdict(list)
             string_constants: dict[str, set[str]] = defaultdict(set)
+            star_imports: list[str] = []
             tag_guard_names = _tag_guard_names(tree.body)
             module_statements = list(
                 _main_module_statements(
@@ -626,6 +644,7 @@ class RepositoryIndex:
                     )
                     for alias in node.names:
                         if alias.name == "*":
+                            star_imports.append(source_module)
                             continue
                         local_name = alias.asname or alias.name
                         imports[local_name] = (
@@ -729,12 +748,47 @@ class RepositoryIndex:
                     name: tuple(sorted(values))
                     for name, values in string_constants.items()
                 },
+                star_imports=tuple(star_imports),
             )
             self.modules[module] = module_info
             for local_name, target in imports.items():
                 self.aliases[f"{module}.{local_name}"] = target
 
+        self._materialize_star_import_aliases()
         self._materialize_class_callable_aliases()
+
+    def _materialize_star_import_aliases(self) -> None:
+        """Resolve public top-level callables imported with ``import *``."""
+        changed = True
+        while changed:
+            changed = False
+            for module_info in self.modules.values():
+                desired: dict[str, str] = {}
+                for source_module in module_info.star_imports:
+                    source = self.modules.get(source_module)
+                    if source is None:
+                        continue
+                    exported_names = {
+                        *source.classes,
+                        *source.functions,
+                        *(
+                            alias.rsplit(".", 1)[-1]
+                            for alias in self.aliases
+                            if alias.startswith(f"{source_module}.")
+                            and "." not in alias[len(source_module) + 1 :]
+                        ),
+                    }
+                    for name in sorted(exported_names):
+                        if name.startswith("_"):
+                            continue
+                        alias = f"{module_info.name}.{name}"
+                        target = f"{source_module}.{name}"
+                        desired[alias] = target
+                for alias, target in desired.items():
+                    if self.aliases.get(alias) == target:
+                        continue
+                    self.aliases[alias] = target
+                    changed = True
 
     def _collect_class_callable_aliases(
         self,
@@ -1601,6 +1655,16 @@ class InterfaceBoundaryGenerator:
         value: ast.AST | None,
         context: PatchScanContext,
     ) -> None:
+        produced = (
+            self._resolve_wrapper_factory_call(
+                module_info,
+                value,
+                context,
+                line=getattr(value, "lineno", 0),
+            )
+            if isinstance(value, ast.Call)
+            else None
+        )
         string_values = self._string_values(value, context)
         expression = _expression_name(value)
         references = (
@@ -1615,6 +1679,10 @@ class InterfaceBoundaryGenerator:
         for target in targets:
             if not isinstance(target, ast.Name):
                 continue
+            if produced is not None and produced.info is not None:
+                context.local_callables[target.id] = [produced.info]
+            elif target.id in context.local_callables:
+                context.local_callables.pop(target.id)
             if string_values:
                 context.strings[target.id] = set(string_values)
             else:
@@ -1871,10 +1939,19 @@ class InterfaceBoundaryGenerator:
                 kind = "property"
                 node = node.args[0]
             else:
+                produced = self._resolve_wrapper_factory_call(
+                    module_info,
+                    node,
+                    context,
+                    target=target,
+                    line=line,
+                )
+                if produced is not None:
+                    return produced
                 return PatchReplacement(
                     info=None,
                     kind="wrapper",
-                    reason="patch replacement is produced by a call or wrapper",
+                    reason="patch replacement is produced by an unresolved call",
                 )
 
         if isinstance(node, ast.Lambda):
@@ -1904,9 +1981,14 @@ class InterfaceBoundaryGenerator:
         if "." not in expression:
             local_candidates = context.local_callables.get(expression, [])
             if len(local_candidates) == 1:
+                candidate = local_candidates[0]
                 return PatchReplacement(
-                    info=local_candidates[0],
-                    kind=kind,
+                    info=candidate,
+                    kind=(
+                        candidate.origin_kind
+                        if candidate.origin_kind != "definition"
+                        else kind
+                    ),
                 )
             if len(local_candidates) > 1:
                 return PatchReplacement(
@@ -1958,6 +2040,133 @@ class InterfaceBoundaryGenerator:
             ),
         )
 
+    def _resolve_wrapper_factory_call(
+        self,
+        module_info: ModuleInfo,
+        node: ast.Call,
+        context: PatchScanContext,
+        *,
+        target: str | None = None,
+        line: int,
+    ) -> PatchReplacement | None:
+        expression = _expression_name(node.func)
+        if expression is None:
+            return None
+
+        root_name = expression.split(".", 1)[0]
+        local_factory = (
+            expression in context.local_callables
+            or expression in module_info.functions
+        )
+        downstream_binding = any(
+            candidate.startswith("vllm_ascend.")
+            for candidate in context.bindings.get(root_name, ())
+        )
+        if not (
+            local_factory
+            or downstream_binding
+            or expression.startswith("vllm_ascend.")
+        ):
+            return None
+
+        factories: dict[tuple[str, str | None, str], CallableInfo] = {}
+        if "." not in expression:
+            for candidate in context.local_callables.get(expression, []):
+                factories[(candidate.file, candidate.owner, candidate.name)] = candidate
+        references = self._resolve_patch_references(
+            module_info,
+            expression,
+            context,
+        )
+        for reference in references:
+            if not reference.startswith("vllm_ascend."):
+                continue
+            candidate = self._find_downstream_patch_replacement(reference)
+            if candidate is not None:
+                factories[(candidate.file, candidate.owner, candidate.name)] = candidate
+        if len(factories) != 1:
+            return None
+
+        factory = next(iter(factories.values()))
+        if not isinstance(
+            factory.node,
+            (ast.AsyncFunctionDef, ast.FunctionDef),
+        ):
+            return None
+        scope_nodes = list(_function_scope_nodes(factory.node))
+        nested = {
+            child.name: child
+            for child in scope_nodes
+            if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
+        }
+        returns = [
+            child
+            for child in scope_nodes
+            if isinstance(child, ast.Return)
+        ]
+        if not returns:
+            return None
+
+        parameters = {
+            argument.arg
+            for argument in (
+                *factory.node.args.posonlyargs,
+                *factory.node.args.args,
+                *factory.node.args.kwonlyargs,
+            )
+        }
+        if factory.node.args.vararg:
+            parameters.add(factory.node.args.vararg.arg)
+        if factory.node.args.kwarg:
+            parameters.add(factory.node.args.kwarg.arg)
+
+        returned_nodes: dict[str, ast.AST] = {}
+        identity_return = False
+        for return_node in returns:
+            value = return_node.value
+            if isinstance(value, ast.Name) and value.id in nested:
+                returned_nodes[value.id] = nested[value.id]
+                continue
+            if isinstance(value, ast.Lambda):
+                returned_nodes[f"<lambda>@{getattr(value, 'lineno', line)}"] = value
+                continue
+            if isinstance(value, ast.Name) and value.id in parameters:
+                identity_return = True
+                continue
+            return PatchReplacement(
+                info=None,
+                kind="wrapper_factory",
+                reason="wrapper factory has unsupported return values",
+            )
+
+        if len(returned_nodes) != 1:
+            return PatchReplacement(
+                info=None,
+                kind="wrapper_factory",
+                reason=(
+                    "wrapper factory has ambiguous callable returns"
+                    if returned_nodes
+                    else "wrapper factory only returns an input callable"
+                ),
+                is_restore=bool(target and identity_return),
+            )
+
+        returned_name, returned_node = next(iter(returned_nodes.items()))
+        kind = "wrapper_or_identity" if identity_return else "wrapper_factory"
+        return PatchReplacement(
+            info=CallableInfo(
+                qualified_name=f"{factory.qualified_name}.<return>.{returned_name}",
+                module=factory.module,
+                file=factory.file,
+                owner=None,
+                name=returned_name,
+                node=returned_node,
+                binding_line=line,
+                origin_kind=kind,
+            ),
+            kind=kind,
+        )
+
     def _find_downstream_patch_replacement(
         self,
         qualified_name: str,
@@ -2007,10 +2216,13 @@ class InterfaceBoundaryGenerator:
             "ambiguous replacement callable": "ambiguous_replacement_callable",
             "ambiguous setattr patch target": "ambiguous_patch_target",
             "dynamic setattr attribute name": "dynamic_setattr_name",
-            "patch replacement is produced by a call or wrapper": "wrapper_factory",
+            "patch replacement is produced by an unresolved call": "wrapper_factory",
             "replacement callable was not found": "missing_replacement_callable",
             "replacement is another upstream callable": "upstream_alias_rebind",
             "unsupported patch replacement expression": "unsupported_replacement_expression",
+            "wrapper factory has ambiguous callable returns": "ambiguous_wrapper_factory",
+            "wrapper factory has unsupported return values": "unsupported_wrapper_factory",
+            "wrapper factory only returns an input callable": "identity_wrapper_factory",
         }
         self.findings.append(
             CandidateFinding(
