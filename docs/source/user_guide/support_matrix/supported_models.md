@@ -38,12 +38,12 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | MiniMax-M2.5/2.7 | ✅ |  | ✅ | A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
     | Qwen2.5-Math-RM-72B | ✅ | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
-    | Qwen3-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
-    | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
+    | Qwen3-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+    | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
 
 #### Extended Compatible Models
 
@@ -88,16 +88,16 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Bert                          | 🔵        |                                                                      |         A2/A3            |🟡 |      |
     | Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     | Model | Support | Note | Supported Hardware | W8A8|Doc |
     |-------|---------|------|--------------------|-----|------|
-    | Qwen3-Embedding | 🔵 | FP16 | Atlas inference products |🟡| [Qwen3_Embedding](../../tutorials/models/Qwen3-Embedding.md) |
-    | Qwen3-VL-Embedding | 🔵 | FP16 | Atlas inference products |🔵| [Qwen3_VL_Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
-    | Qwen3-Reranker  | 🔵 | FP16 | Atlas inference products |🟡| [Qwen3_Reranker](../../tutorials/models/Qwen3-Reranker.md) |
-    | Qwen3-VL-Reranker | 🔵 | FP16 | Atlas inference products |🔵| [Qwen3_VL_Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
-    | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas inference products |🟡| |
-    | Qwen2.5-based | 🔵 | FP16 classification | Atlas inference products |🟡| |
+    | Qwen3-Embedding | 🔵 | FP16 | Atlas 300I DUO |🟡| [Qwen3_Embedding](../../tutorials/models/Qwen3-Embedding.md) |
+    | Qwen3-VL-Embedding | 🔵 | FP16 | Atlas 300I DUO |🔵| [Qwen3_VL_Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | Qwen3-Reranker  | 🔵 | FP16 | Atlas 300I DUO |🟡| [Qwen3_Reranker](../../tutorials/models/Qwen3-Reranker.md) |
+    | Qwen3-VL-Reranker | 🔵 | FP16 | Atlas 300I DUO |🔵| [Qwen3_VL_Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
+    | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas 300I DUO |🟡| |
+    | Qwen2.5-based | 🔵 | FP16 classification | Atlas 300I DUO |🟡| |
 
 ## Multimodal Language Models
 
@@ -117,17 +117,17 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-Omni-30B-A3B-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6 | ✅ |  |  | A2/A3 |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
-    | Qwen3-VL | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
-    | Qwen3.5-Dense | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
-    | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
-    | Qwen3.6-27B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
-    | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas inference products | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
-    | PaddleOCR-VL | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
-    | Qwen3-ASR | ✅ |  | ❌ | Atlas inference products | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
+    | Qwen3-VL | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
+    | Qwen3.5-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
+    | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.6-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | PaddleOCR-VL | ✅ |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
+    | Qwen3-ASR | ✅ |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
 
 #### Extended Compatible Models
 
