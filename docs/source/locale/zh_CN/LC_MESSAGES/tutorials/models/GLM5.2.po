@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -25,8 +25,8 @@ msgid "GLM-5.2"
 msgstr "GLM-5.2"
 
 #: ../../source/tutorials/models/GLM5.2.md:3
-msgid "Introduction"
-msgstr "简介"
+msgid "1 Introduction"
+msgstr "1 引言"
 
 #: ../../source/tutorials/models/GLM5.2.md:5
 msgid ""
@@ -45,8 +45,8 @@ msgid ""
 msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点与多节点部署、精度及性能评估。"
 
 #: ../../source/tutorials/models/GLM5.2.md:9
-msgid "Supported Features"
-msgstr "支持的特性"
+msgid "2 Supported Features"
+msgstr "2 支持的特性"
 
 #: ../../source/tutorials/models/GLM5.2.md:11
 msgid ""
@@ -63,161 +63,196 @@ msgid ""
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/GLM5.2.md:15
-msgid "Environment Preparation"
-msgstr "环境准备"
+msgid "3 Prerequisites"
+msgstr "3 前提条件"
 
 #: ../../source/tutorials/models/GLM5.2.md:17
-msgid "Model Weight"
-msgstr "模型权重"
+msgid "3.1 Model Weight"
+msgstr "3.1 模型权重"
 
 #: ../../source/tutorials/models/GLM5.2.md:19
 msgid ""
-"`GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128G × 8) node or 4 Atlas "
-"800 A2 (64G × 8) node.[Download model "
+"`GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas"
+" 800 A2 (64GB × 8) node.[Download model "
 "weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)."
 msgstr ""
-"`GLM-5.2`（BF16版本）：需要2个Atlas 800 A3（128G × 8）节点或4个Atlas 800 A2（64G × "
-"8）节点。[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)。"
+"`GLM-5.2`（BF16 版本）：需要 2 个 Atlas 800 A3（128GB × 8）节点或 4 个 Atlas 800 A2（64GB ×"
+" 8）节点。[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)。"
 
 #: ../../source/tutorials/models/GLM5.2.md:20
 msgid ""
-"`GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 "
-"(64G × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-"
-"Tech/GLM-5.2-w8a8)."
+"`GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 "
+"(64GB × 8) node.[Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8)."
 msgstr ""
-"`GLM-5.2-w8a8`：需要1个Atlas 800 A3（128G × 8）节点或2个Atlas 800 A2（64G × "
+"`GLM-5.2-w8a8`：需要 1 个 Atlas 800 A3（128GB × 8）节点或 2 个 Atlas 800 A2（64GB × "
 "8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8)。"
 
 #: ../../source/tutorials/models/GLM5.2.md:21
 msgid ""
-"`GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 "
-"(64G × 8) node.[Download model weight](https://modelscope.cn/models/Eco-"
+"`GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2"
+" (64GB × 8) node(If the KV Cache is sufficient, there is no need to enable "
+"sfac8 and lic8(\"enable_sparse_sfa_c8\" : true, \"enable_sparse_li_c8\": "
+"true), and Do not enable the two configurations sfac8 and lic8 for other "
+"weights.).[Download model weight](https://www.modelscope.cn/models/Eco-"
 "Tech/GLM-5.2-w4a8c8)."
 msgstr ""
-"`GLM-5.2-w4a8c8`：需要1个Atlas 800 A3（128G × 8）节点或2个Atlas 800 A2（64G × "
-"8）节点。[下载模型权重](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8)。"
+"`GLM-5.2-w4a8c8`：需要 1 个 Atlas 800 A3（128GB × 8）节点或 2 个 Atlas 800 A2（64GB × "
+"8）节点（如果 KV Cache 充足，则无需启用 sfac8 和 lic8（\"enable_sparse_sfa_c8\" : true, "
+"\"enable_sparse_li_c8\": true），且其他权重请勿启用 sfac8 和 lic8 "
+"这两个配置。）。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8)。"
 
 #: ../../source/tutorials/models/GLM5.2.md:22
+msgid ""
+"`GLM-5.2-w4a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 "
+"(64GB × 8) node.[Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8)."
+msgstr ""
+"`GLM-5.2-w4a8`：需要 1 个 Atlas 800 A3（128GB × 8）节点或 2 个 Atlas 800 A2（64GB × "
+"8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:23
 msgid ""
 "You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to "
 "quantize the model directly."
 msgstr "您可以使用[msmodelslim](https://gitcode.com/Ascend/msmodelslim)直接对模型进行量化。"
 
-#: ../../source/tutorials/models/GLM5.2.md:24
+#: ../../source/tutorials/models/GLM5.2.md:25
 msgid ""
 "It is recommended to download the model weight to the shared directory of "
 "multiple nodes, such as `/root/.cache/`"
 msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`"
 
-#: ../../source/tutorials/models/GLM5.2.md:26
-msgid "Installation"
-msgstr "安装"
-
-#: ../../source/tutorials/models/GLM5.2.md:28
-msgid "You can use our official docker image to run GLM-5.2 directly."
-msgstr "您可以使用官方提供的Docker镜像直接运行GLM-5.2。"
+#: ../../source/tutorials/models/GLM5.2.md:27
+msgid "4 Installation"
+msgstr "4 安装"
 
 #: ../../source/tutorials/models/GLM5.2.md:29
+msgid "4.1 Docker Image Installation"
+msgstr "4.1 Docker 镜像安装"
+
+#: ../../source/tutorials/models/GLM5.2.md:31
 msgid ""
-"[KV Cache Pool (Ascend Store) Deployment "
-"Guide](https://docs.vllm.ai/projects/ascend/zh-"
-"cn/latest/user_guide/feature_guide/kv_pool.html)"
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
 msgstr ""
-"[KV缓存池（Ascend Store）部署指南](https://docs.vllm.ai/projects/ascend/zh-"
-"cn/latest/user_guide/feature_guide/kv_pool.html)"
+"根据您的机器类型选择镜像，并在您的节点上启动 docker 镜像，请参考[使用 docker](../../installation.md#set-"
+"up-using-docker)。"
 
 #: ../../source/tutorials/models/GLM5.2.md
 msgid "A3 series"
 msgstr "A3系列"
 
-#: ../../source/tutorials/models/GLM5.2.md:38
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动Docker镜像。"
+#: ../../source/tutorials/models/GLM5.2.md:40
+#: ../../source/tutorials/models/GLM5.2.md:84
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 docker 镜像。"
 
 #: ../../source/tutorials/models/GLM5.2.md
 msgid "A2 series"
 msgstr "A2系列"
 
-#: ../../source/tutorials/models/GLM5.2.md:86
-msgid "Start the docker image on each of your nodes."
-msgstr "在每个节点上启动Docker镜像。"
-
-#: ../../source/tutorials/models/GLM5.2.md:119
+#: ../../source/tutorials/models/GLM5.2.md:118
 msgid ""
-"If you want to deploy multi-node environment, you need to set up environment"
-" on each node."
-msgstr "如需部署多节点环境，需要在每个节点上进行环境配置。"
+"After a successful docker run, you can verify the running container service "
+"by executing the `docker ps` command."
+msgstr "docker run 成功后，您可以通过执行 `docker ps` 命令来验证正在运行的容器服务。"
 
-#: ../../source/tutorials/models/GLM5.2.md:121
-msgid "Deployment"
-msgstr "部署"
+#: ../../source/tutorials/models/GLM5.2.md:120
+msgid "4.2 Source Code Installation"
+msgstr "4.2 源码安装"
 
-#: ../../source/tutorials/models/GLM5.2.md:123
-msgid "Single-node Deployment"
-msgstr "单节点部署"
-
-#: ../../source/tutorials/models/GLM5.2.md:125
+#: ../../source/tutorials/models/GLM5.2.md:122
 msgid ""
-"Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64G × "
+"If you don't want to use the docker image as above, you can also build all "
+"from source:"
+msgstr "如果您不想像上面那样使用 docker 镜像，您也可以从源码构建所有内容："
+
+#: ../../source/tutorials/models/GLM5.2.md:124
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:126
+msgid ""
+"If you want to deploy a multi-node environment, you need to set up the "
+"environment on each node."
+msgstr "如果您想部署多节点环境，您需要在每个节点上配置环境。"
+
+#: ../../source/tutorials/models/GLM5.2.md:128
+msgid "5 Online Service Deployment"
+msgstr "5 在线服务部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:130
+msgid ""
+"[KV Cache Pool (Ascend Store) Deployment "
+"Guide](https://docs.vllm.ai/projects/ascend/en/v0.23.0/user_guide/feature_guide/kv_pool.html)"
+msgstr ""
+"[KV Cache 池（Ascend "
+"Store）部署指南](https://docs.vllm.ai/projects/ascend/en/v0.23.0/user_guide/feature_guide/kv_pool.html)"
+
+#: ../../source/tutorials/models/GLM5.2.md:132
+msgid "5.1 Single-node Deployment"
+msgstr "5.1 单节点部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:134
+msgid ""
+"Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × "
 "16) ."
-msgstr "量化模型 `GLM-5.2-w4a8c8` 可部署在1个Atlas 800 A3（64G × 16）上。"
+msgstr "量化模型 `GLM-5.2-w4a8c8` 可以部署在 1 个 Atlas 800 A3（64GB × 16）上。"
 
-#: ../../source/tutorials/models/GLM5.2.md:127
+#: ../../source/tutorials/models/GLM5.2.md:136
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
-#: ../../source/tutorials/models/GLM5.2.md:162
-#: ../../source/tutorials/models/GLM5.2.md:831
-#: ../../source/tutorials/models/GLM5.2.md:1128
+#: ../../source/tutorials/models/GLM5.2.md:173
+#: ../../source/tutorials/models/GLM5.2.md:823
+#: ../../source/tutorials/models/GLM5.2.md:1102
 msgid "**Notice:** The parameters are explained as follows:"
 msgstr "**注意：** 参数说明如下："
 
-#: ../../source/tutorials/models/GLM5.2.md:165
+#: ../../source/tutorials/models/GLM5.2.md:176
 msgid ""
 "For single-node deployment, we recommend using `dp1tp16` and turn off expert"
 " parallel in low-latency scenarios."
 msgstr "对于单节点部署，在低延迟场景下建议使用 `dp1tp16` 并关闭专家并行。"
 
-#: ../../source/tutorials/models/GLM5.2.md:166
-#: ../../source/tutorials/models/GLM5.2.md:835
-#: ../../source/tutorials/models/GLM5.2.md:1132
-msgid "If the video memory is sufficient, there is no need to enable sfac8."
-msgstr "如果显存充足，则无需启用sfac8。"
-
-#: ../../source/tutorials/models/GLM5.2.md:167
+#: ../../source/tutorials/models/GLM5.2.md:177
 msgid ""
 "For short sequences, DCP does not need to be enabled;For long sequences, DCP"
 " needs to be enabled."
 msgstr "对于短序列，无需启用DCP；对于长序列，需要启用DCP。"
 
-#: ../../source/tutorials/models/GLM5.2.md:168
-#: ../../source/tutorials/models/GLM5.2.md:836
-#: ../../source/tutorials/models/GLM5.2.md:1133
+#: ../../source/tutorials/models/GLM5.2.md:178
+#: ../../source/tutorials/models/GLM5.2.md:828
+#: ../../source/tutorials/models/GLM5.2.md:1107
 msgid "There are two cases:"
 msgstr "存在两种情况："
 
-#: ../../source/tutorials/models/GLM5.2.md:169
-#: ../../source/tutorials/models/GLM5.2.md:837
-#: ../../source/tutorials/models/GLM5.2.md:1134
+#: ../../source/tutorials/models/GLM5.2.md:179
+#: ../../source/tutorials/models/GLM5.2.md:829
+#: ../../source/tutorials/models/GLM5.2.md:1108
 msgid ""
 "If the GPU memory is insufficient for the sequence length, enable the DCP "
 "configuration. However, enabling the DCP configuration will affect the TPOT "
 "performance."
 msgstr "如果GPU内存不足以支持当前序列长度，请启用DCP配置。但启用DCP配置会影响TPOT性能。"
 
-#: ../../source/tutorials/models/GLM5.2.md:170
-#: ../../source/tutorials/models/GLM5.2.md:838
-#: ../../source/tutorials/models/GLM5.2.md:1135
+#: ../../source/tutorials/models/GLM5.2.md:180
+#: ../../source/tutorials/models/GLM5.2.md:830
+#: ../../source/tutorials/models/GLM5.2.md:1109
 msgid ""
 "If the GPU memory is sufficient, you are advised not to enable the DCP "
 "configuration."
 msgstr "如果GPU内存充足，建议不要启用DCP配置。"
 
-#: ../../source/tutorials/models/GLM5.2.md:172
-msgid "Multi-node Deployment"
-msgstr "多节点部署"
+#: ../../source/tutorials/models/GLM5.2.md:182
+msgid "5.2 Multi-node Deployment"
+msgstr "5.2 多节点部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:174
+#: ../../source/tutorials/models/GLM5.2.md:184
 msgid ""
 "If you want to deploy multi-node environment, you need to verify multi-node "
 "communication according to [verify multi-node communication "
@@ -226,78 +261,83 @@ msgstr ""
 "如需部署多节点环境，需按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
 "communication)的步骤验证多节点通信。"
 
-#: ../../source/tutorials/models/GLM5.2.md:186
-#: ../../source/tutorials/models/GLM5.2.md:294
+#: ../../source/tutorials/models/GLM5.2.md:196
+#: ../../source/tutorials/models/GLM5.2.md:304
 msgid "**node 0**"
 msgstr "**节点0**"
 
-#: ../../source/tutorials/models/GLM5.2.md:237
-#: ../../source/tutorials/models/GLM5.2.md:351
+#: ../../source/tutorials/models/GLM5.2.md:247
+#: ../../source/tutorials/models/GLM5.2.md:360
 msgid "**node 1**"
 msgstr "**节点1**"
 
-#: ../../source/tutorials/models/GLM5.2.md:411
-msgid "Prefill-Decode Disaggregation"
-msgstr "预填充-解码分离"
+#: ../../source/tutorials/models/GLM5.2.md:419
+msgid "5.3 Prefill-Decode Disaggregation"
+msgstr "5.3 Prefill-Decode 分离部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:413
+#: ../../source/tutorials/models/GLM5.2.md:421
 msgid ""
 "We'd like to show the deployment guide of `GLM-5` on multi-node environment "
 "with 1P1D for better performance."
 msgstr "下面将展示`GLM-5`在多节点环境下采用1P1D配置以获得更好性能的部署指南。"
 
-#: ../../source/tutorials/models/GLM5.2.md:415
+#: ../../source/tutorials/models/GLM5.2.md:423
 msgid ""
-"Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64G × 32)."
-msgstr "预填充-解码分离可部署在4个Atlas 800 A3（64G × 32）上。"
+"Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 8)."
+msgstr "Prefill-Decode 分离部署可以部署在 4 个 Atlas 800 A3（64GB × 8）上。"
 
-#: ../../source/tutorials/models/GLM5.2.md:417
+#: ../../source/tutorials/models/GLM5.2.md:425
 msgid "Before you start, please"
 msgstr "开始之前，请"
 
-#: ../../source/tutorials/models/GLM5.2.md:419
+#: ../../source/tutorials/models/GLM5.2.md:427
 msgid "prepare the script `launch_online_dp.py` on each node:"
 msgstr "在每个节点上准备脚本 `launch_online_dp.py`："
 
-#: ../../source/tutorials/models/GLM5.2.md:522
+#: ../../source/tutorials/models/GLM5.2.md:530
 msgid "prepare the script `run_dp_template.sh` on each node."
 msgstr "在每个节点上准备脚本 `run_dp_template.sh`。"
 
-#: ../../source/tutorials/models/GLM5.2.md:524
-#: ../../source/tutorials/models/GLM5.2.md:803
+#: ../../source/tutorials/models/GLM5.2.md:532
+#: ../../source/tutorials/models/GLM5.2.md:795
 msgid "Prefill node 0"
 msgstr "预填充节点0"
 
-#: ../../source/tutorials/models/GLM5.2.md:594
-#: ../../source/tutorials/models/GLM5.2.md:810
+#: ../../source/tutorials/models/GLM5.2.md:597
+#: ../../source/tutorials/models/GLM5.2.md:802
 msgid "Prefill node 1"
 msgstr "预填充节点1"
 
-#: ../../source/tutorials/models/GLM5.2.md:663
-#: ../../source/tutorials/models/GLM5.2.md:817
+#: ../../source/tutorials/models/GLM5.2.md:661
+#: ../../source/tutorials/models/GLM5.2.md:809
 msgid "Decode node 0"
 msgstr "解码节点0"
 
-#: ../../source/tutorials/models/GLM5.2.md:732
-#: ../../source/tutorials/models/GLM5.2.md:824
+#: ../../source/tutorials/models/GLM5.2.md:727
+#: ../../source/tutorials/models/GLM5.2.md:816
 msgid "Decode node 1"
 msgstr "解码节点1"
 
-#: ../../source/tutorials/models/GLM5.2.md:801
+#: ../../source/tutorials/models/GLM5.2.md:793
 msgid ""
 "Once the preparation is done, you can start the server with the following "
 "command on each node:"
 msgstr "准备工作完成后，可在每个节点上使用以下命令启动服务："
 
-#: ../../source/tutorials/models/GLM5.2.md:834
-#: ../../source/tutorials/models/GLM5.2.md:1131
+#: ../../source/tutorials/models/GLM5.2.md:826
+#: ../../source/tutorials/models/GLM5.2.md:1105
 msgid ""
 "Like a single node,For short sequences, DCP does not need to be enabled; For"
 " long sequences, DCP needs to be enabled."
 msgstr "与单节点类似，对于短序列，无需启用DCP；对于长序列，需要启用DCP。"
 
-#: ../../source/tutorials/models/GLM5.2.md:840
-#: ../../source/tutorials/models/GLM5.2.md:1137
+#: ../../source/tutorials/models/GLM5.2.md:827
+#: ../../source/tutorials/models/GLM5.2.md:1106
+msgid "If the video memory is sufficient, there is no need to enable sfac8."
+msgstr "如果显存充足，则无需启用sfac8。"
+
+#: ../../source/tutorials/models/GLM5.2.md:832
+#: ../../source/tutorials/models/GLM5.2.md:1111
 msgid ""
 "To set up request forwarding, run the following script on any machine. You "
 "can get the proxy program in the repository's examples: "
@@ -308,11 +348,11 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/models/GLM5.2.md:895
-msgid "Deployment on 8 Atlas 800 A2"
-msgstr "在8个Atlas 800 A2上部署"
+#: ../../source/tutorials/models/GLM5.2.md:887
+msgid "5.4 Deployment on 8 Atlas 800 A2"
+msgstr "5.4 在 8 个 Atlas 800 A2 上部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:897
+#: ../../source/tutorials/models/GLM5.2.md:889
 msgid ""
 "On Atlas 800 A2, where each node exposes 8 cards, the same global P/D "
 "topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 "
@@ -328,20 +368,20 @@ msgstr ""
 "4张卡）。上述`launch_online_dp.py`直接复用。预填充侧启用FlashComm1和DSA "
 "CP；解码侧启用MLAPO和带有`FULL_DECODE_ONLY`图的`DYNAMIC_EPLB`。两侧均启用前缀缓存和MTP（`num_speculative_tokens=3`）。以下所有IP、网卡名称、端口和权重路径均为占位符。"
 
-#: ../../source/tutorials/models/GLM5.2.md:899
+#: ../../source/tutorials/models/GLM5.2.md:891
 msgid "`run_dp_template.sh` for the prefill nodes:"
 msgstr "预填充节点的 `run_dp_template.sh`："
 
-#: ../../source/tutorials/models/GLM5.2.md:997
+#: ../../source/tutorials/models/GLM5.2.md:982
 msgid "`run_dp_template.sh` for the decode nodes:"
 msgstr "解码节点的 `run_dp_template.sh`："
 
-#: ../../source/tutorials/models/GLM5.2.md:1106
+#: ../../source/tutorials/models/GLM5.2.md:1080
 msgid ""
 "Once the preparation is done, start the server with the following commands:"
 msgstr "准备工作完成后，使用以下命令启动服务："
 
-#: ../../source/tutorials/models/GLM5.2.md:1108
+#: ../../source/tutorials/models/GLM5.2.md:1082
 msgid ""
 "Prefill nodes — run on `$node_p0_ip`, `$node_p1_ip`, `$node_p2_ip`, "
 "`$node_p3_ip` with `--dp-rank-start` `0/1/2/3`:"
@@ -349,7 +389,7 @@ msgstr ""
 "预填充节点 — 在 `$node_p0_ip`、`$node_p1_ip`、`$node_p2_ip`、`$node_p3_ip` 上运行，并指定 "
 "`--dp-rank-start` 为 `0/1/2/3`："
 
-#: ../../source/tutorials/models/GLM5.2.md:1117
+#: ../../source/tutorials/models/GLM5.2.md:1091
 msgid ""
 "Decode nodes — run on `$node_d0_ip`, `$node_d1_ip`, `$node_d2_ip`, "
 "`$node_d3_ip` with `--dp-rank-start` `0/2/4/6`:"
@@ -357,22 +397,22 @@ msgstr ""
 "解码节点 — 在 `$node_d0_ip`、`$node_d1_ip`、`$node_d2_ip`、`$node_d3_ip` 上运行，使用 "
 "`--dp-rank-start` 参数 `0/2/4/6`："
 
-#: ../../source/tutorials/models/GLM5.2.md:1126
+#: ../../source/tutorials/models/GLM5.2.md:1100
 msgid ""
 "For request forwarding on this 8-node A2 layout, use 4 prefiller hosts (1 "
 "endpoint each) and 4 decoder hosts (2 endpoints each) in the Request "
 "Forwarding command below."
 msgstr "对于此8节点A2布局的请求转发，请在下面的请求转发命令中使用4个预填充主机（每个1个端点）和4个解码主机（每个2个端点）。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1168
+#: ../../source/tutorials/models/GLM5.2.md:1142
 msgid "**Notice:**"
 msgstr "**注意：**"
 
-#: ../../source/tutorials/models/GLM5.2.md:1170
+#: ../../source/tutorials/models/GLM5.2.md:1144
 msgid "Some configurations for optimization are shown below:"
 msgstr "以下是一些用于优化的配置："
 
-#: ../../source/tutorials/models/GLM5.2.md:1172
+#: ../../source/tutorials/models/GLM5.2.md:1146
 msgid ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce "
 "communication and computation overhead on prefill node. With FlashComm "
@@ -380,13 +420,13 @@ msgid ""
 msgstr ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用FlashComm优化以减少预填充节点上的通信和计算开销。启用FlashComm后，layer_sharding列表不能包含o_proj作为元素。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1173
+#: ../../source/tutorials/models/GLM5.2.md:1147
 msgid ""
 "`VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused "
 "operator."
 msgstr "`VLLM_ASCEND_ENABLE_FUSED_MC2`：启用dispatch_ffn_combine融合算子。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1175
+#: ../../source/tutorials/models/GLM5.2.md:1149
 msgid ""
 "Please refer to the following python file for further explanation and "
 "restrictions of the environment variables above: "
@@ -396,151 +436,147 @@ msgstr ""
 "请参考以下Python文件以了解上述环境变量的详细说明和限制：[envs.py](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/vllm_ascend/envs.py)"
 
-#: ../../source/tutorials/models/GLM5.2.md:1177
-msgid "1M Context Configuration"
-msgstr "1M上下文配置"
+#: ../../source/tutorials/models/GLM5.2.md:1151
+msgid "5.5 1M Context Configuration"
+msgstr "5.5 1M 上下文配置"
 
-#: ../../source/tutorials/models/GLM5.2.md:1179
+#: ../../source/tutorials/models/GLM5.2.md:1153
 msgid ""
 "Recommended configurations for serving `GLM-5.2` with a 1M context window on"
-" Atlas 800 A3 (64G x 16) and quantized GLM-5.2(W4A8C8) weights:"
+" Atlas 800 A3 (64GB x 16) and quantized GLM-5.2(W4A8C8) weights:"
 msgstr ""
-"在Atlas 800 A3（64G x 16）上使用1M上下文窗口服务`GLM-5.2`以及量化后的GLM-5.2(W4A8C8)权重的推荐配置："
+"在 Atlas 800 A3（64GB x 16）上使用 1M 上下文窗口服务 `GLM-5.2`以及量化 "
+"GLM-5.2（W4A8C8）权重的推荐配置："
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Mode"
 msgstr "模式"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Hardware"
 msgstr "硬件"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Parallelism"
 msgstr "并行度"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Context"
 msgstr "上下文"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Single-node co-located"
 msgstr "单节点共部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
-msgid "1 Atlas 800 A3 (64G x 16)"
-msgstr "1台Atlas 800 A3（64G x 16）"
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "1 Atlas 800 A3 (64GB x 16)"
+msgstr "1 个 Atlas 800 A3（64GB x 16）"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "`DP1 PP1 TP16 PCP1 DCP16`"
 msgstr "`DP1 PP1 TP16 PCP1 DCP16`"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "`1024000`"
 msgstr "`1024000`"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Dual-node co-located"
 msgstr "双节点共部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
-msgid "2 Atlas 800 A3 (64G x 16)"
-msgstr "2台Atlas 800 A3（64G x 16）"
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "2 Atlas 800 A3 (64GB x 16)"
+msgstr "2 个 Atlas 800 A3（64GB x 16）"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "`DP4 PP1 TP8 PCP1 DCP8`"
 msgstr "`DP4 PP1 TP8 PCP1 DCP8`"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "1P1D PD disaggregation"
 msgstr "1P1D PD分离部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes"
 msgstr "1个预填充节点（2台A3节点）+ 1个解码节点（2台A3节点）"
 
-#: ../../source/tutorials/models/GLM5.2.md:353
+#: ../../source/tutorials/models/GLM5.2.md:362
 msgid "Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8`"
 msgstr "预填充 `DP4 PP1 TP8 PCP1 DCP8`，解码 `DP4 PP1 TP8 PCP1 DCP8`"
 
-#: ../../source/tutorials/models/GLM5.2.md:1187
-msgid "Single-Node 1M Deployment"
-msgstr "单节点1M部署"
+#: ../../source/tutorials/models/GLM5.2.md:1161
+msgid "5.5.1 Single-Node 1M Deployment"
+msgstr "5.5.1 单节点 1M 部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:1189
+#: ../../source/tutorials/models/GLM5.2.md:1163
 msgid "Recommended command:"
 msgstr "推荐命令："
 
-#: ../../source/tutorials/models/GLM5.2.md:1226
-msgid "Dual-Node Co-Located 1M Deployment"
-msgstr "双节点共部署1M部署"
+#: ../../source/tutorials/models/GLM5.2.md:1199
+msgid "5.5.2 Dual-Node Co-Located 1M Deployment"
+msgstr "5.5.2 双节点共置 1M 部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:1228
+#: ../../source/tutorials/models/GLM5.2.md:1201
 msgid "Recommended command for both co-located nodes:"
 msgstr "两个共部署节点的推荐命令："
 
-#: ../../source/tutorials/models/GLM5.2.md:1281
-msgid "PD Disaggregation 1M Deployment"
-msgstr "PD分离部署1M部署"
+#: ../../source/tutorials/models/GLM5.2.md:1253
+msgid "5.5.3 PD Disaggregation 1M Deployment"
+msgstr "5.5.3 PD 分离 1M 部署"
 
-#: ../../source/tutorials/models/GLM5.2.md:1283
+#: ../../source/tutorials/models/GLM5.2.md:1255
 msgid "Recommended command for both prefiller nodes:"
 msgstr "两个预填充节点的推荐命令："
 
-#: ../../source/tutorials/models/GLM5.2.md:1354
+#: ../../source/tutorials/models/GLM5.2.md:1325
 msgid "Recommended command for both decoder nodes:"
 msgstr "两个解码节点的推荐命令："
 
-#: ../../source/tutorials/models/GLM5.2.md:1425
+#: ../../source/tutorials/models/GLM5.2.md:1395
 msgid "Recommended proxy command:"
 msgstr "推荐代理命令："
 
-#: ../../source/tutorials/models/GLM5.2.md:1440
-msgid "Functional Verification"
-msgstr "功能验证"
+#: ../../source/tutorials/models/GLM5.2.md:1410
+msgid "6 Functional Verification"
+msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/GLM5.2.md:1442
+#: ../../source/tutorials/models/GLM5.2.md:1412
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示查询模型："
 
-#: ../../source/tutorials/models/GLM5.2.md:1455
-msgid "Accuracy Evaluation"
-msgstr "精度评估"
+#: ../../source/tutorials/models/GLM5.2.md:1425
+msgid "7 Accuracy Evaluation"
+msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/GLM5.2.md:1457
+#: ../../source/tutorials/models/GLM5.2.md:1427
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1459
-#: ../../source/tutorials/models/GLM5.2.md:1471
-msgid "Using AISBench"
-msgstr "使用AISBench"
+#: ../../source/tutorials/models/GLM5.2.md:1429
+msgid "7.1 Using AISBench"
+msgstr "7.1 使用 AISBench"
 
-#: ../../source/tutorials/models/GLM5.2.md:1461
+#: ../../source/tutorials/models/GLM5.2.md:1431
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1463
+#: ../../source/tutorials/models/GLM5.2.md:1433
 msgid "After execution, you can get the result."
 msgstr "执行后，您可以获取结果。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1465
-msgid "Using Language Model Evaluation Harness"
-msgstr "使用Language Model Evaluation Harness"
+#: ../../source/tutorials/models/GLM5.2.md:1435
+msgid "8 Performance"
+msgstr "8 性能"
 
-#: ../../source/tutorials/models/GLM5.2.md:1467
-msgid "Not tested yet."
-msgstr "尚未测试。"
+#: ../../source/tutorials/models/GLM5.2.md:1437
+msgid "8.1 Using AISBench"
+msgstr "8.1 使用 AISBench"
 
-#: ../../source/tutorials/models/GLM5.2.md:1469
-msgid "Performance"
-msgstr "性能"
-
-#: ../../source/tutorials/models/GLM5.2.md:1473
+#: ../../source/tutorials/models/GLM5.2.md:1439
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -549,32 +585,193 @@ msgstr ""
 "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1475
-msgid "Using vLLM Benchmark"
-msgstr "使用vLLM基准测试"
+#: ../../source/tutorials/models/GLM5.2.md:1441
+msgid "8.2 Using vLLM Benchmark"
+msgstr "8.2 使用 vLLM Benchmark"
 
-#: ../../source/tutorials/models/GLM5.2.md:1477
+#: ../../source/tutorials/models/GLM5.2.md:1443
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
 "more details."
 msgstr ""
 "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1479
+#: ../../source/tutorials/models/GLM5.2.md:1445
 msgid ""
 "**Notice:** `max-model-len` and `max-num-seqs` need to be set according to "
 "the actual usage scenario. For other settings, please refer to the "
 "**Deployment** chapter."
 msgstr "**注意：** `max-model-len`和`max-num-seqs`需要根据实际使用场景设置。其他设置请参考**部署**章节。"
 
-#: ../../source/tutorials/models/GLM5.2.md:1482
-msgid "FAQ"
-msgstr "常见问题"
+#: ../../source/tutorials/models/GLM5.2.md:1448
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/GLM5.2.md:1484
+#: ../../source/tutorials/models/GLM5.2.md:1450
+msgid "9.1 Recommended Configurations"
+msgstr "9.1 推荐配置"
+
+#: ../../source/tutorials/models/GLM5.2.md:1452
+msgid ""
+"**Note**: The following configurations are validated in specific test "
+"environments and are for reference only. The optimal configuration depends "
+"on factors such as maximum input/output length, prefix cache hit rate, "
+"precision requirements, and deployment machine ratios. It is recommended to "
+"refer to Section 9.2 for tuning based on actual conditions."
+msgstr ""
+"**注意**：以下配置在特定测试环境中经过验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求以及部署机器比例等因素。建议根据实际情况参考第"
+" 9.2 节进行调优。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1454
+msgid "Table 1: Scenario Overview"
+msgstr "表 1：场景概览"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Deployment Mode"
+msgstr "部署模式"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "*Total NPUs"
+msgstr "*NPU 总数"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Weight Version"
+msgstr "权重版本"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Key Considerations"
+msgstr "关键考量"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "High Throughput"
+msgstr "高吞吐"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "1P1D deployment"
+msgstr "1P1D 部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "32 (A3)"
+msgstr "32（A3）"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "GLM-5.2-w4a8c8"
+msgstr "GLM-5.2-w4a8c8"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid ""
+"dp4 tp8 on P nodes and dp32 tp1 on D nodes to balanced latency and "
+"throughput"
+msgstr "P 节点上使用 dp4 tp8，D 节点上使用 dp32 tp1，以平衡延迟和吞吐"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Low Latency"
+msgstr "低延迟"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "dp2 tp16 on both P and D nodes to reduce latency"
+msgstr "P 和 D 节点上均使用 dp2 tp16 以降低延迟"
+
+#: ../../source/tutorials/models/GLM5.2.md:1461
+msgid ""
+"`*Total NPUs` indicates the total number of NPUs used across all nodes."
+msgstr "`*NPU 总数`表示所有节点上使用的 NPU 总数。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1463
+msgid "Table 2: Detailed Node Configuration"
+msgstr "表 2：详细节点配置"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "NPUs"
+msgstr "NPU"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "TP"
+msgstr "TP"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "DP"
+msgstr "DP"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Max Num Seqs"
+msgstr "最大序列数"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Max Num Batched Tokens"
+msgstr "最大批处理 Token 数"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "Max Model Len"
+msgstr "最大模型长度"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "MTP Speculation Num"
+msgstr "MTP 推测数量"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "High Throughput (A3)"
+msgstr "高吞吐（A3）"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "32"
+msgstr "32"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "P:8 D:1"
+msgstr "P:8 D:1"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "P:4 D:32"
+msgstr "P:4 D:32"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "P:64 D:32"
+msgstr "P:64 D:32"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "P:8192 D:164"
+msgstr "P:8192 D:164"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "P:133120 D:133120"
+msgstr "P:133120 D:133120"
+
+#: ../../source/tutorials/models/GLM5.2.md:362
+msgid "5"
+msgstr "5"
+
+#: ../../source/tutorials/models/GLM5.2.md:1469
+msgid "10 FAQ"
+msgstr "10 常见问题"
+
+#: ../../source/tutorials/models/GLM5.2.md:1471
 msgid "**Q: How to enable function calling for GLM-5.2?**"
 msgstr "**问：如何为GLM-5.2启用函数调用？**"
 
-#: ../../source/tutorials/models/GLM5.2.md:1486
+#: ../../source/tutorials/models/GLM5.2.md:1473
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在vLLM启动命令中添加以下配置"
+
+#~ msgid "Environment Preparation"
+#~ msgstr "环境准备"
+
+#~ msgid "You can use our official docker image to run GLM-5.2 directly."
+#~ msgstr "您可以使用官方提供的Docker镜像直接运行GLM-5.2。"
+
+#~ msgid "Start the docker image on each of your nodes."
+#~ msgstr "在每个节点上启动Docker镜像。"
+
+#~ msgid "Using Language Model Evaluation Harness"
+#~ msgstr "使用Language Model Evaluation Harness"
+
+#~ msgid "Not tested yet."
+#~ msgstr "尚未测试。"

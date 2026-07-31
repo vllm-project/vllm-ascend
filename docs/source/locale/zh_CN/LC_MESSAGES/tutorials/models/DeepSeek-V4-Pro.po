@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -102,11 +102,11 @@ msgstr "3.1 模型权重"
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:26
 msgid ""
 "`DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 "
-"(128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"(128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. [Download model "
 "weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)"
 msgstr ""
-"`DeepSeek-V4-Pro-w4a8-mtp`（量化版本）：需要 2 个 Atlas 800 A3（128G × 8）节点或 4 个 Atlas "
-"800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"`DeepSeek-V4-Pro-w4a8-mtp`（量化版本）：需要2个Atlas 800 A3（128GB × 8）节点或4个Atlas 800 "
+"A2（64GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/DeepSeek-V4-Pro-w4a8-mtp)"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:28
@@ -203,11 +203,11 @@ msgstr "5.1 多节点在线部署"
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:141
 msgid ""
 "The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800"
-" A3 (128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Run the following "
+" A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. Run the following "
 "scripts on each node respectively."
 msgstr ""
-"量化模型 `DeepSeek-V4-Pro-w4a8-mtp` 至少需要 2 个 Atlas 800 A3（128G × 8）节点或 4 个 Atlas"
-" 800 A2（64G × 8）节点。请分别在每个节点上运行以下脚本。"
+"量化模型`DeepSeek-V4-Pro-w4a8-mtp`至少需要2个Atlas 800 A3（128GB × 8）节点或4个Atlas 800 "
+"A2（64GB × 8）节点。请分别在每个节点上运行以下脚本。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:150
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:309
@@ -333,8 +333,8 @@ msgstr ""
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:468
 msgid ""
 "The following sections describe PD separation deployment on both Atlas 800 "
-"A3 (128G × 8) and Atlas 800 A2 (64G × 8) multi-node environments."
-msgstr "以下章节描述在Atlas 800 A3（128G × 8）和Atlas 800 A2（64G × 8）多节点环境下的PD分离部署。"
+"A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments."
+msgstr "以下章节介绍在Atlas 800 A3（128GB × 8）和Atlas 800 A2（64GB × 8）多节点环境下的PD分离部署。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:470
 msgid "5.2.1 A3 Series PD Separation Deployment"
@@ -343,9 +343,9 @@ msgstr "5.2.1 A3系列PD分离部署"
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:472
 msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 A3 "
-"(128G × 8) multi-node environment with 1P1D for better performance."
+"(128GB × 8) multi-node environment with 1P1D for better performance."
 msgstr ""
-"本节展示在Atlas 800 A3（128G × 8）多节点环境下，采用1P1D配置以获得更优性能的DeepSeek-V4-Pro部署指南。"
+"本节展示DeepSeek-V4-Pro在Atlas 800 A3（128GB × 8）多节点环境中采用1P1D配置以获得更优性能的部署指南。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:474
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:850
@@ -537,8 +537,8 @@ msgstr "5.2.2 A2系列PD分离部署"
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:848
 msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 A2 "
-"(64G × 8) multi-node environment with 1P1D for better performance."
-msgstr "本节展示在Atlas 800 A2（64G × 8）多节点环境下，采用1P1D配置以获得更优性能的DeepSeek-V4-Pro部署指南。"
+"(64GB × 8) multi-node environment with 1P1D for better performance."
+msgstr "本节展示DeepSeek-V4-Pro在Atlas 800 A2（64GB × 8）多节点环境中采用1P1D配置以获得更优性能的部署指南。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:956
 msgid "Prefill node (4 P nodes share the same script)"
@@ -706,8 +706,8 @@ msgid "89.90"
 msgstr "89.90"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:305
-msgid "1 Atlas 800 A3 (128G × 8)"
-msgstr "1 Atlas 800 A3（128G × 8）"
+msgid "1 Atlas 800 A3 (128GB × 8)"
+msgstr "1个Atlas 800 A3（128GB × 8）"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:305
 msgid "GSM8K"

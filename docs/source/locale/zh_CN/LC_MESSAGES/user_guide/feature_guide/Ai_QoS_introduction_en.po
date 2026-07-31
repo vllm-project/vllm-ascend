@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -31,10 +31,10 @@ msgstr "背景"
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:5
 msgid ""
 "​In the inference scenario, there are different types of traffic, such as "
-"operator delivery, collective communication, and KVCache. Such traffics are "
-"transmitted through network and affect each other, increasing the inference "
-"latency."
-msgstr "​在推理场景中，存在不同类型的流量，例如算子下发、集合通信和 KVCache。这些流量通过网络传输并相互影响，从而增加推理延迟。"
+"operator delivery, collective communication, and KVCache. Such traffic are "
+"transmitted through the network and affect each other, increasing the "
+"inference latency."
+msgstr "​在推理场景中，存在不同类型的流量，如算子下发、集合通信和KVCache。这些流量通过网络传输并相互影响，增加了推理时延。"
 
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:7
 msgid ""
@@ -198,15 +198,15 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:56
 msgid ""
-"​AI QoS manual mode calculates the QoS tag of traffic based on the priority "
-"of different types of traffic set by users, and generates and prints the UB "
-"switch configuration.You can copy the outputs and log in to the UB switch to"
-" configure the QoS configurations of UB switch. This configuration will "
+"​AI QoS manual mode calculates the QoS tags of traffic based on the priority"
+" of different types of traffic set by users, and generates and prints the UB"
+" switch configuration. You can copy the outputs and log in to the UB switch "
+"to configure the QoS configurations of UB switch. This configuration will "
 "overwrite the current QoS configuration on the UB switch. If there is any "
 "existing QoS configuration, please back it up in advance."
 msgstr ""
-"​AI QoS 手动模式根据用户设置的不同类型流量的优先级计算流量的 QoS 标签，并生成和打印 UB 交换机配置。您可以复制输出并登录到 UB "
-"交换机来配置 UB 交换机的 QoS 配置。此配置将覆盖 UB 交换机上的当前 QoS 配置。如果存在任何现有 QoS 配置，请提前备份。"
+"​AI "
+"QoS手动模式根据用户设置的不同类型流量的优先级计算流量的QoS标签，并生成和打印UB交换机配置。您可以复制输出并登录UB交换机进行UB交换机的QoS配置。此配置将覆盖UB交换机上当前的QoS配置。如果存在任何现有QoS配置，请提前备份。"
 
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:58
 msgid ""
@@ -244,14 +244,13 @@ msgstr "auto"
 
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
 msgid ""
-"The  mode of AI QoS, default mode is \"auto\", another mode is  "
-"\"manual\",some parameters need to be configured if you choose  \"manual\" "
-"mode."
-msgstr "AI QoS 的模式，默认模式为 \"auto\"，另一种模式为 \"manual\"，如果选择 \"manual\" 模式，则需要配置一些参数。"
+"The mode of AI QoS, default mode is \"auto\", another mode is \"manual\", "
+"some parameters need to be configured if you choose \"manual\" mode."
+msgstr "AI QoS的模式，默认模式为\"auto\"，另一种模式为\"manual\"，如果选择\"manual\"模式，则需要配置一些参数。"
 
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
-msgid "AIV_D2D、AIV_H2D、SDMA_D2D、SDMA_H2D、PCIEDMA_H2D"
-msgstr "AIV_D2D、AIV_H2D、SDMA_D2D、SDMA_H2D、PCIEDMA_H2D"
+msgid "AIV_D2D,AIV_H2D,SDMA_D2D,SDMA_H2D,PCIEDMA_H2D"
+msgstr "AIV_D2D,AIV_H2D,SDMA_D2D,SDMA_H2D,PCIEDMA_H2D"
 
 #: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
 msgid ""

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -194,9 +194,9 @@ msgstr "硬件要求"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:47
 msgid ""
-"FA3 currently requires Ascend Atlas A2 and A3 inference products NPUs. We "
-"will support other NPUs in the future."
-msgstr "FA3目前需要昇腾Atlas A2和A3推理产品NPU。未来将支持其他NPU。"
+"FA3 currently requires Ascend Atlas A2 and A3 inference NPUs. We will "
+"support other NPUs in the future."
+msgstr "FA3 目前需要昇腾 Atlas A2 和 A3 推理 NPU。未来我们将支持其他 NPU。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:50
 msgid "Software Requirements"
@@ -215,11 +215,11 @@ msgstr "安装"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:56
 msgid ""
-"Install the `flash_attn_npu` wheel package refer to: "
+"To install the `flash_attn_npu` wheel package, refer to: "
 "<https://github.com/MinghuasLab/flash-attention-"
 "npu/blob/main/README.md#installation>."
 msgstr ""
-"安装`flash_attn_npu`的wheel包请参考：<https://github.com/MinghuasLab/flash-"
+"要安装 `flash_attn_npu` wheel 包，请参阅：<https://github.com/MinghuasLab/flash-"
 "attention-npu/blob/main/README.md#installation>。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:58

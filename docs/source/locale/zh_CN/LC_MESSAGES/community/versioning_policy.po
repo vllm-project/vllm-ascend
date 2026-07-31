@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -246,6 +246,11 @@ msgstr "3.2.0.dev20260322"
 #: ../../source/community/versioning_policy.md
 msgid "v0.18.0rc1"
 msgstr "v0.18.0rc1"
+
+#: ../../source/community/versioning_policy.md
+#: ../../source/community/versioning_policy.md:62
+msgid "N/A"
+msgstr "不适用"
 
 #: ../../source/community/versioning_policy.md
 msgid "v0.17.0rc1"
@@ -914,10 +919,6 @@ msgid "End of Life (EOL)"
 msgstr "生命周期终止"
 
 #: ../../source/community/versioning_policy.md:62
-msgid "N/A"
-msgstr "不适用"
-
-#: ../../source/community/versioning_policy.md:62
 msgid "Branch no longer accepting changes"
 msgstr "分支不再接受变更"
 
@@ -1034,8 +1035,10 @@ msgid "rfc/long_seq_optimization"
 msgstr "rfc/long_seq_optimization"
 
 #: ../../source/community/versioning_policy.md:62
-msgid "<https://github.com/vllm-project/vllm/issues/22693>"
-msgstr "<https://github.com/vllm-project/vllm/issues/22693>"
+msgid ""
+"[RFC: long sequence optimization #22693](https://github.com/vllm-"
+"project/vllm/issues/22693)"
+msgstr "[RFC：长序列优化 #22693](https://github.com/vllm-project/vllm/issues/22693)"
 
 #: ../../source/community/versioning_policy.md:62
 msgid "930"

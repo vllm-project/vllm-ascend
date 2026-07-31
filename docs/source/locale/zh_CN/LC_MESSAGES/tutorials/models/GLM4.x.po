@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -105,18 +105,18 @@ msgid ""
 "`GLM-4.6-w8a8`(Quantized version without mtp): [Download model "
 "weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm"
 " does not support GLM4.6 mtp in October, we do not provide an mtp version. "
-"Last month, it was supported; you can use the following quantization scheme "
-"to add mtp weights to the quantized weights."
+"Since it is now supported, you can use the following quantization scheme to "
+"add mtp weights to the quantized weights."
 msgstr ""
-"`GLM-4.6-w8a8`（不含mtp的量化版本）：[下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8)。由于vllm在十月份不支持GLM4.6的mtp，我们未提供mtp版本。上个月已支持该功能；您可以使用以下量化方案将mtp权重添加到量化权重中。"
+"`GLM-4.6-w8a8`（无mtp量化版本）：[下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8)。由于vllm在十月份不支持GLM4.6的mtp，我们未提供mtp版本。现在已支持，您可以使用以下量化方案将mtp权重添加到量化权重中。"
 
 #: ../../source/tutorials/models/GLM4.x.md:26
 msgid ""
-"`GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download "
-"model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp)."
+"`GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp)."
 msgstr ""
 "`GLM-4.7-w8a8-with-float-"
-"mtp`（不含mtp的量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-"
+"mtp`（含mtp量化版本）：[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/GLM-4.7-W8A8-floatmtp)。"
 
 #: ../../source/tutorials/models/GLM4.x.md:27
@@ -147,16 +147,13 @@ msgid "A3 series"
 msgstr "A3系列"
 
 #: ../../source/tutorials/models/GLM4.x.md:42
+#: ../../source/tutorials/models/GLM4.x.md:85
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动Docker镜像。"
 
 #: ../../source/tutorials/models/GLM4.x.md
 msgid "A2 series"
 msgstr "A2系列"
-
-#: ../../source/tutorials/models/GLM4.x.md:85
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动Docker镜像。"
 
 #: ../../source/tutorials/models/GLM4.x.md:118
 msgid ""
@@ -251,9 +248,9 @@ msgstr "Prefill-Decode分离部署"
 
 #: ../../source/tutorials/models/GLM4.x.md:270
 msgid ""
-"We'd like to show the deployment guide of `GLM-4.7` on multi-node "
+"We'd like to show the deployment guide of `GLM-4.7` in a multi-node "
 "environment with 2P1D for better performance."
-msgstr "我们将展示`GLM-4.7`在多节点环境下采用2P1D配置以获得更好性能的部署指南。"
+msgstr "我们希望在多节点环境中展示`GLM-4.7`的部署指南，采用2P1D配置以获得更好的性能。"
 
 #: ../../source/tutorials/models/GLM4.x.md:272
 msgid "Before you start, please"
@@ -524,3 +521,6 @@ msgid ""
 msgstr ""
 "答：首先减小 `--max-num-seqs` 和 `--max-model-len`。如有必要，降低并发度和负载测试压力（例如 `max-"
 "concurrency` / `num-prompts`）。"
+
+#~ msgid "Start the docker image on your each node."
+#~ msgstr "在每个节点上启动Docker镜像。"

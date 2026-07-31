@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -115,8 +115,8 @@ msgid "Atlas inference products or Atlas 200I Pro"
 msgstr "Atlas 推理产品或 Atlas 200I Pro"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "[Download](https://modelscope.cn/models/Qwen/Qwen3.5-2B)"
-msgstr "[下载](https://modelscope.cn/models/Qwen/Qwen3.5-2B)"
+msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B)"
+msgstr "[下载](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B)"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:256
@@ -124,8 +124,8 @@ msgid "Qwen3.5-4B"
 msgstr "Qwen3.5-4B"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "[Download](https://modelscope.cn/models/Qwen/Qwen3.5-4B)"
-msgstr "[下载](https://modelscope.cn/models/Qwen/Qwen3.5-4B)"
+msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B)"
+msgstr "[下载](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B)"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:256
@@ -133,8 +133,8 @@ msgid "Qwen3.5-9B"
 msgstr "Qwen3.5-9B"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "[Download](https://modelscope.cn/models/Qwen/Qwen3.5-9B)"
-msgstr "[下载](https://modelscope.cn/models/Qwen/Qwen3.5-9B)"
+msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B)"
+msgstr "[下载](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B)"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:27
 msgid ""
@@ -175,8 +175,8 @@ msgid "Atlas inference products"
 msgstr "Atlas 推理产品"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:41
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 docker 镜像。"
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 msgid "Atlas 200I Pro"
@@ -184,9 +184,9 @@ msgstr "Atlas 200I Pro"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:74
 msgid ""
-"Start the docker image on your each node. Adjust `--device=/dev/davinci0` "
+"Start the docker image on each node. Adjust `--device=/dev/davinci0` "
 "according to the NPU ID you want to use."
-msgstr "在每个节点上启动 docker 镜像。根据您要使用的 NPU ID 调整 `--device=/dev/davinci0`。"
+msgstr "在每个节点上启动docker镜像。根据您要使用的NPU ID调整`--device=/dev/davinci0`。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 msgid "Ubuntu 24.04"

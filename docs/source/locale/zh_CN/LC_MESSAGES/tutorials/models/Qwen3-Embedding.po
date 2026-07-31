@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -121,7 +121,7 @@ msgstr "A3 系列"
 
 #: ../../source/tutorials/models/Qwen3-Embedding.md:36
 #: ../../source/tutorials/models/Qwen3-Embedding.md:65
-msgid "Start the docker image on your each node."
+msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
 #: ../../source/tutorials/models/Qwen3-Embedding.md

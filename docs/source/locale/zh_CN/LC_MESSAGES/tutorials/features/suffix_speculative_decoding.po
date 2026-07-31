@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -130,9 +130,9 @@ msgstr "**下载vllm-ascend镜像**"
 
 #: ../../source/tutorials/features/suffix_speculative_decoding.md:22
 msgid ""
-"This tutorial uses the official image, version v0.13.0rc1. Use the following"
-" command to download:"
-msgstr "本教程使用官方镜像，版本为v0.13.0rc1。使用以下命令下载："
+"This tutorial uses the official image. Use the following command to "
+"download:"
+msgstr "本教程使用官方镜像。使用以下命令下载："
 
 #: ../../source/tutorials/features/suffix_speculative_decoding.md:30
 msgid "**Run with Docker**"
@@ -206,13 +206,12 @@ msgstr "**测试结果**"
 #: ../../source/tutorials/features/suffix_speculative_decoding.md:147
 msgid ""
 "Below are the detailed test results of the six open-source datasets in this "
-"evaluation. Compared to the baseline performance, the improvement in TPOT "
-"and throughput performance at different concurrency levels after enabling "
-"Suffix Decoding varies across datasets. The extent of improvement after "
-"enabling Suffix Decoding differs among the datasets. Below is a summary of "
-"the results:"
+"evaluation. Compared to the baseline, the improvement in TPOT and throughput"
+" performance at different concurrency levels after enabling Suffix Decoding "
+"varies across datasets. Below is a summary of the results:"
 msgstr ""
-"以下是本次评估中六个开源数据集的详细测试结果。与基线性能相比，启用后缀解码后，不同并发级别下的TPOT和吞吐量性能提升因数据集而异。各数据集启用后缀解码后的提升幅度不同。以下是结果摘要："
+"以下是本次评估中六个开源数据集的详细测试结果。与基线相比，启用 Suffix Decoding 后在不同并发级别下 TPOT "
+"和吞吐量性能的提升因数据集而异。以下是结果摘要："
 
 #: ../../source/tutorials/features/suffix_speculative_decoding.md:34
 msgid "**Typical Representative**"
@@ -303,8 +302,8 @@ msgid "TPS Gain"
 msgstr "TPS增益"
 
 #: ../../source/tutorials/features/suffix_speculative_decoding.md:34
-msgid "**Humaneval**"
-msgstr "**Humaneval**"
+msgid "**HumanEval**"
+msgstr "**HumanEval**"
 
 #: ../../source/tutorials/features/suffix_speculative_decoding.md:34
 msgid "1"

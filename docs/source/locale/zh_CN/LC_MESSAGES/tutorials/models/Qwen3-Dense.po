@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -122,9 +122,9 @@ msgstr "Qwen3-0.6B"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid ""
-"1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G"
-" × 8)"
-msgstr "1个Atlas A3推理产品（64G × 16），1个Atlas A2推理产品（64G × 8）"
+"1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products "
+"(64GB × 8)"
+msgstr "1个Atlas A3推理产品（64GB × 16），1个Atlas A2推理产品（64GB × 8）"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "[Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)"
@@ -188,9 +188,9 @@ msgstr "W4A8"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid ""
-"1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products "
-"(64G × 8)"
-msgstr "1个Atlas A3推理产品（64G × 16）或1个Atlas A2推理产品（64G × 8）"
+"1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products "
+"(64GB × 8)"
+msgstr "1个Atlas A3推理产品（64GB × 16）或1个Atlas A2推理产品（64GB × 8）"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "[Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8)"
@@ -313,8 +313,8 @@ msgid "**Docker Run:**"
 msgstr "**Docker运行：**"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:72
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动Docker镜像。"
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md
 msgid "Atlas A3 inference products"

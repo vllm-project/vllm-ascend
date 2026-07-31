@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -108,8 +108,8 @@ msgid "Qwen3-30B-A3B (BF16)"
 msgstr "Qwen3-30B-A3B (BF16)"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
-msgid "Atlas 800I A3 (64G, 1\\~2 cards)<br>Atlas 800I A2 (64G, 2\\~4 cards)"
-msgstr "Atlas 800I A3 (64G, 1\\~2 卡)<br>Atlas 800I A2 (64G, 2\\~4 卡)"
+msgid "Atlas 800I A3 (64GB, 1\\~2 cards)<br>Atlas 800I A2 (64GB, 2\\~4 cards)"
+msgstr "Atlas 800I A3（64GB，1\\~2卡）<br>Atlas 800I A2（64GB，2\\~4卡）"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
 msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)"
@@ -133,8 +133,12 @@ msgid "NA"
 msgstr "不适用"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
-msgid "[Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"
-msgstr "[下载](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"
+msgid ""
+"[Download](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)"
+msgstr ""
+"[下载](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:29
 msgid "**Quantized Versions for Atlas inference products:**"
@@ -154,15 +158,8 @@ msgid "W8A8"
 msgstr "W8A8"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
-msgid "Atlas inference products (48G,2 cards)"
-msgstr "Atlas 推理产品 (48G, 2 卡)"
-
-#: ../../source/tutorials/models/Qwen3-30B-A3B.md
-msgid ""
-"[Download](https://modelscope.cn/models/Eco-"
-"Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)"
-msgstr ""
-"[下载](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)"
+msgid "Atlas inference products (48GB,2 cards)"
+msgstr "Atlas推理产品（48GB，2卡）"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:35
 msgid ""
@@ -842,3 +839,6 @@ msgid ""
 " only covers model-specific issues."
 msgstr ""
 "常见环境、安装及通用参数问题请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本章仅涉及模型相关问题。"
+
+#~ msgid "[Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"
+#~ msgstr "[下载](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"

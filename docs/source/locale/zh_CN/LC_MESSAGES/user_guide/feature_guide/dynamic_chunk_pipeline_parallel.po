@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -68,10 +68,10 @@ msgstr "支持场景"
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:18
 msgid ""
-"Currently CPP mainly focuses on optimization during the prefill phase. It is"
-" better to be used in PD disaggregation scenarios. Supported features are as"
-" follows:"
-msgstr "目前 CPP 主要关注预填充阶段的优化，更适合在 PD 分离场景中使用。支持特性如下："
+"Currently CPP mainly focuses on optimization during the prefill phase. CPP "
+"is recommended for PD (Prefill/Decode) disaggregation scenarios. Supported "
+"features are as follows:"
+msgstr "目前CPP主要关注预填充阶段的优化。CPP推荐用于PD（预填充/解码）分离场景。支持的功能如下："
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
 msgid "Eager"
@@ -239,16 +239,16 @@ msgstr "max-num-batched-tokens"
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:69
 msgid ""
 "**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` "
-"(considered the initial chunksize for dynamic solving).** Because if it is "
-"too large, it will introduce significant computational waste, and if it is "
-"too small, it will lead to a decrease in operator efficiency. To leave "
-"enough room for dynamic adjustments, we recommend that the longer the "
-"sequence being processed, the larger the `max-num-batched-tokens` should be "
-"set. Recommended values:"
+"(considered as the initial chunk size for dynamic chunk calculation).** "
+"Because if it is too large, it will introduce significant computational "
+"waste, and if it is too small, it will lead to a decrease in operator "
+"efficiency. To leave enough room for dynamic adjustments, we recommend that "
+"the longer the sequence being processed, the larger the `max-num-batched-"
+"tokens` should be set. Recommended values:"
 msgstr ""
-"**值得注意的是，CPP 的 TTFT 对 `max-num-batched-tokens`（视为动态求解的初始分块大小）非常敏感。** "
-"因为如果该值过大，会引入大量计算浪费；如果过小，则会导致算子效率下降。为了给动态调整留出足够空间，我们建议处理的序列越长，`max-num-"
-"batched-tokens` 设置得越大。推荐值如下："
+"**值得注意的是，CPP的TTFT对`max-num-batched-tokens`（视为动态分块计算的初始块大小）非常敏感。** "
+"因为如果该值过大，会引入显著的计算浪费；如果过小，则会导致算子效率下降。为了给动态调整留出足够空间，我们建议处理的序列越长，`max-num-"
+"batched-tokens`应设置得越大。推荐值如下："
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
 msgid "Sequence Length"
@@ -285,13 +285,12 @@ msgstr "为获得最佳性能，请在生产前使用真实数据进行在线校
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:80
 msgid ""
-"You can use aisbench to generate fixed-length random datasets. Refer to "
+"You can use ais_bench to generate fixed-length random datasets. Refer to "
 "[Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
 msgstr ""
-"您可以使用 aisbench 生成固定长度的随机数据集，详情请参见[使用 AISBench "
-"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"您可以使用ais_bench生成固定长度的随机数据集。详情请参阅[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:82
@@ -332,11 +331,12 @@ msgstr ""
 msgid ""
 "To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long "
 "sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and "
-"**Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference products*64G "
-"(A3), the configuration and performance data are as follows."
+"**Qwen3-235B**, we deploy a P (Prefill) instance on Ascend Atlas A3 "
+"inference products (64 GB, A3), the configuration and performance data are "
+"as follows."
 msgstr ""
-"为评估动态分块流水线并行在长序列 LLM 推理场景中的效果，我们使用 **DeepSeek-V3.1-W8A8** 和 **Qwen3-235B**，在"
-" Ascend Atlas A3 推理产品 *64G (A3) 上部署 P 实例，配置与性能数据如下。"
+"为了评估动态分块流水线并行在长序列LLM推理场景中的有效性，我们使用**DeepSeek-V3.1-W8A8**和**Qwen3-235B**，在Ascend"
+" Atlas A3推理产品（64 GB，A3）上部署P（预填充）实例，配置和性能数据如下。"
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:116
 msgid "**Fixed-length requests, concurrency=1**:"
@@ -360,8 +360,8 @@ msgid "PP <br>(Static Chunk, <br> chunksize=32k)"
 msgstr "PP <br>（静态分块，<br> 分块大小=32k）"
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
-msgid "Input length  128k"
-msgstr "输入长度 128k"
+msgid "Input length 128k"
+msgstr "输入长度128k"
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
 msgid "TTFT: 22.5s"
@@ -376,8 +376,8 @@ msgid "Qwen3-235B:"
 msgstr "Qwen3-235B："
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
-msgid "Input length  256k"
-msgstr "输入长度 256k"
+msgid "Input length 256k"
+msgstr "输入长度256k"
 
 #: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
 msgid "TTFT: 53.5s"

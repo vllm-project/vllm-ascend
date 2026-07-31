@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -393,7 +393,6 @@ msgid "`dump_tensor_data`: Tensor payloads that were collected."
 msgstr "`dump_tensor_data`：已收集的张量载荷。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:202
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:231
 msgid ""
 "`dump.json`: Statistics for the forward data of each API or module, "
 "including names, dtype, shape, max, min, mean, L2 norm (square root of the "
@@ -422,6 +421,12 @@ msgstr "`construct.json`：层次结构描述。当 `level=L1` 时为空。"
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:207
 msgid "graph mode:"
 msgstr "graph 模式："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:231
+msgid ""
+"`dump.json`: See [dump.json file description](#dumpjson-file-description) "
+"for details."
+msgstr "`dump.json`：有关详细信息，请参阅[dump.json文件描述](#dumpjson-file-description)。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:233
 msgid "5. Analyze the results"

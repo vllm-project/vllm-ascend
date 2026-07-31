@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -106,36 +106,35 @@ msgstr "为确保所有节点（包括模型路径和 Python 环境）的执行�
 msgid ""
 "For setting up a multi-node inference cluster with Ray, **containerized "
 "deployment** is the preferred approach. Containers should be started on both"
-" the primary and secondary nodes, with the `--net=host` option to enable "
-"proper network connectivity."
+" the head and worker nodes, with the `--net=host` option to enable proper "
+"network connectivity."
 msgstr ""
-"对于使用 Ray 搭建多节点推理集群，**容器化部署**是推荐方式。应在主节点和从节点上均启动容器，并使用 `--net=host` "
-"选项以确保网络正常连通。"
+"要使用 Ray 搭建多节点推理集群，**容器化部署**是首选方案。应在头节点和工作节点上均启动容器，并使用 `--net=host` "
+"选项以确保网络连接正常。"
 
 #: ../../source/tutorials/features/ray.md:58
 msgid ""
 "Below is the example container setup command, which should be executed on "
-"**all nodes** :"
-msgstr "以下为示例容器搭建命令，需在**所有节点**上执行："
+"**all nodes**:"
+msgstr "以下是在**所有节点**上执行的示例容器设置命令："
 
 #: ../../source/tutorials/features/ray.md:94
 msgid "Start Ray Cluster"
 msgstr "启动 Ray 集群"
 
-#: ../../source/tutorials/features/ray.md:96
+#: ../../source/tutorials/features/ray.md:101
 msgid ""
 "After setting up the containers and installing vllm-ascend on each node, "
 "follow the steps below to start the Ray cluster and execute inference tasks."
 msgstr "在每个节点上搭建好容器并安装 vllm-ascend 后，按照以下步骤启动 Ray 集群并执行推理任务。"
 
-#: ../../source/tutorials/features/ray.md:98
+#: ../../source/tutorials/features/ray.md:103
 msgid ""
-"Choose one machine as the primary node and the others as secondary nodes. "
-"Before proceeding, use `ip addr` to check your `nic_name` (network interface"
-" name)."
-msgstr "选择一台机器作为主节点，其余作为从节点。操作前，请使用 `ip addr` 检查您的 `nic_name`（网络接口名称）。"
+"Choose one machine as the head node and the others as worker nodes. Before "
+"proceeding, use `ip addr` to check your `nic_name` (network interface name)."
+msgstr "选择一台机器作为头节点，其余机器作为工作节点。在继续之前，使用 `ip addr` 检查您的 `nic_name`（网络接口名称）。"
 
-#: ../../source/tutorials/features/ray.md:100
+#: ../../source/tutorials/features/ray.md:105
 msgid ""
 "Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU "
 "devices to use. For Ray versions above 2.1, also set the "
@@ -145,29 +144,19 @@ msgstr ""
 "设置 `ASCEND_RT_VISIBLE_DEVICES` 环境变量以指定要使用的 NPU 设备。对于 Ray 2.1 以上版本，还需设置 "
 "`RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` 变量以避免设备识别问题。"
 
-#: ../../source/tutorials/features/ray.md:102
-msgid "Below are the commands for the primary and secondary nodes:"
-msgstr "以下是主节点和从节点的命令："
-
-#: ../../source/tutorials/features/ray.md:104
-msgid "**Primary node**:"
-msgstr "**主节点**："
-
 #: ../../source/tutorials/features/ray.md:107
-#: ../../source/tutorials/features/ray.md:124
-msgid ""
-"When starting a Ray cluster for multi-node inference, the environment "
-"variables on each node must be set **before** starting the Ray cluster for "
-"them to take effect. Updating the environment variables requires restarting "
-"the Ray cluster."
-msgstr ""
-"启动用于多节点推理的 Ray 集群时，必须在启动 Ray 集群**之前**设置好每个节点的环境变量，否则无法生效。更新环境变量需要重启 Ray 集群。"
+msgid "Below are the commands for the head and worker nodes:"
+msgstr "以下是头节点和工作节点的命令："
+
+#: ../../source/tutorials/features/ray.md:109
+msgid "**Head node**:"
+msgstr "**头节点**："
 
 #: ../../source/tutorials/features/ray.md:121
-msgid "**Secondary node**:"
-msgstr "**从节点**："
+msgid "**Worker node**:"
+msgstr "**工作节点**："
 
-#: ../../source/tutorials/features/ray.md:137
+#: ../../source/tutorials/features/ray.md:133
 msgid ""
 "Once the cluster is started on multiple nodes, execute `ray status` and `ray"
 " list nodes` to verify the Ray cluster's status. You should see the correct "
@@ -176,7 +165,7 @@ msgstr ""
 "在多节点上启动集群后，执行 `ray status` 和 `ray list nodes` 以验证 Ray 集群的状态。应能看到正确的节点数和 NPU "
 "数量。"
 
-#: ../../source/tutorials/features/ray.md:139
+#: ../../source/tutorials/features/ray.md:135
 msgid ""
 "After Ray is successfully started, the following content will appear: A "
 "local Ray instance has started successfully. Dashboard URL: The access "
@@ -187,21 +176,21 @@ msgstr ""
 "Ray 成功启动后，将显示以下内容：本地 Ray 实例已成功启动。Dashboard URL：Ray Dashboard "
 "的访问地址（默认：<http://localhost:8265>）；节点状态（CPU/内存资源、健康节点数量）；集群连接地址（用于添加多个节点）。"
 
-#: ../../source/tutorials/features/ray.md:143
+#: ../../source/tutorials/features/ray.md:139
 msgid "Start the Online Inference Service on Multi-node scenario"
 msgstr "在多节点场景下启动在线推理服务"
 
-#: ../../source/tutorials/features/ray.md:145
+#: ../../source/tutorials/features/ray.md:141
 msgid ""
 "In the container, you can use vLLM as if all NPUs were on a single node. "
 "vLLM will utilize NPU resources across all nodes in the Ray cluster."
 msgstr "在容器中，您可以像所有 NPU 都在单节点上一样使用 vLLM。vLLM 将利用 Ray 集群中所有节点的 NPU 资源。"
 
-#: ../../source/tutorials/features/ray.md:147
+#: ../../source/tutorials/features/ray.md:143
 msgid "**You only need to run the vllm command on one node.**"
 msgstr "**您只需在一个节点上运行 vllm 命令。**"
 
-#: ../../source/tutorials/features/ray.md:149
+#: ../../source/tutorials/features/ray.md:145
 msgid ""
 "To set up parallelism, the common practice is to set the `tensor-parallel-"
 "size` to the number of NPUs per node, and the `pipeline-parallel-size` to "
@@ -210,13 +199,13 @@ msgstr ""
 "设置并行时，通常的做法是将 `tensor-parallel-size` 设置为每个节点的 NPU 数量，将 `pipeline-parallel-"
 "size` 设置为节点数量。"
 
-#: ../../source/tutorials/features/ray.md:151
+#: ../../source/tutorials/features/ray.md:147
 msgid ""
 "For example, with 16 NPUs across 2 nodes (8 NPUs per node), set the tensor "
 "parallel size to 8 and the pipeline parallel size to 2:"
 msgstr "例如，在 2 个节点上共有 16 个 NPU（每个节点 8 个 NPU），将张量并行大小设置为 8，流水线并行大小设置为 2："
 
-#: ../../source/tutorials/features/ray.md:167
+#: ../../source/tutorials/features/ray.md:163
 msgid ""
 "Alternatively, if you want to use only tensor parallelism, set the tensor "
 "parallel size to the total number of NPUs in the cluster. For example, with "
@@ -224,7 +213,15 @@ msgid ""
 msgstr ""
 "或者，如果您只想使用张量并行，则将张量并行大小设置为集群中 NPU 的总数。例如，在 2 个节点上共有 16 个 NPU，将张量并行大小设置为 16："
 
-#: ../../source/tutorials/features/ray.md:182
+#: ../../source/tutorials/features/ray.md:178
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#~ msgid ""
+#~ "When starting a Ray cluster for multi-node inference, the environment "
+#~ "variables on each node must be set **before** starting the Ray cluster for "
+#~ "them to take effect. Updating the environment variables requires restarting "
+#~ "the Ray cluster."
+#~ msgstr ""
+#~ "启动用于多节点推理的 Ray 集群时，必须在启动 Ray 集群**之前**设置好每个节点的环境变量，否则无法生效。更新环境变量需要重启 Ray 集群。"

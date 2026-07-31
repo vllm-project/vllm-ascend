@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -177,14 +177,17 @@ msgid "Ascend 950DT series"
 msgstr "Ascend 950DT 系列"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:53
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:93
-#: ../../source/tutorials/models/DeepSeek-V3.1.md:137
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md
 msgid "A3 series"
 msgstr "A3 系列"
+
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:93
+#: ../../source/tutorials/models/DeepSeek-V3.1.md:137
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md
 msgid "A2 series"
@@ -230,10 +233,10 @@ msgstr "5.1 单节点在线部署"
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node. The quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on"
-" 1 Atlas 800 A3 (64G × 16)."
+" 1 Atlas 800 A3 (64GB × 16)."
 msgstr ""
-"单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `DeepSeek-V3.1-w8a8-mtp-QuaRot` 可部署在 1 台"
-" Atlas 800 A3（64G × 16）上。"
+"单节点部署在同一节点内完成Prefill和Decode。量化模型`DeepSeek-V3.1-w8a8-mtp-QuaRot`可部署在1台Atlas "
+"800 A3（64GB × 16）上。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:194
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:234
@@ -267,11 +270,11 @@ msgstr "对于单节点部署，我们建议使用 `dp4tp4` 而不是 `dp2tp8`�
 msgid ""
 "`--max-model-len` specifies the maximum context length - that is, the sum of"
 " input and output tokens for a single request. For performance testing with "
-"an input length of 3.5K and output length of 1.5K, a value of `16384` is "
+"an input length of 3.5k and output length of 1.5k, a value of `16384` is "
 "sufficient, however, for precision testing, please set it at least `35000`."
 msgstr ""
-"`--max-model-len` 指定最大上下文长度，即单个请求的输入和输出 token 总数。对于输入长度 3.5K、输出长度 1.5K "
-"的性能测试，`16384` 的值已足够；但对于精度测试，请至少设置为 `35000`。"
+"`--max-model-"
+"len`指定最大上下文长度，即单个请求的输入和输出token之和。对于输入长度为3.5k、输出长度为1.5k的性能测试，`16384`的值已足够，但对于精度测试，请至少设置为`35000`。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:285
 msgid ""
@@ -318,8 +321,8 @@ msgstr "5.2 多节点数据并行部署"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:340
 msgid ""
-"`DeepSeek-V3.1-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64G × 8)."
-msgstr "`DeepSeek-V3.1-w8a8-mtp-QuaRot`：至少需要 2 台 Atlas 800 A2（64G × 8）。"
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64GB × 8)."
+msgstr "`DeepSeek-V3.1-w8a8-mtp-QuaRot`：至少需要2台Atlas 800 A2（64GB × 8）。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:342
 msgid "Run the following scripts on two nodes respectively."
@@ -431,23 +434,23 @@ msgstr "此架构推荐用于具有并发多用户工作负载的生产部署，
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:511
 msgid ""
-"Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 "
+"Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 "
 "nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to "
 "serve high concurrency in 1P1D case."
 msgstr ""
-"以Atlas 800 A3（64G × "
-"16）为例，我们建议部署2P1D（4个节点）而不是1P1D（2个节点），因为在1P1D情况下没有足够的NPU内存来服务高并发。"
+"以Atlas 800 A3（64GB × "
+"16）为例，我们建议部署2P1D（4节点）而非1P1D（2节点），因为在1P1D场景下没有足够的NPU内存来支持高并发。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:513
 msgid ""
-"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G ×"
-" 16)."
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64GB "
+"× 16)."
 msgstr ""
-"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` 需要4个Atlas 800 A3（64G × 16）。"
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise`需要4台Atlas 800 A3（64GB × 16）。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:514
-msgid "`DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend 950DT (96G × 8)."
-msgstr "`DeepSeek-V3.1-w8a8c8-mtp 2P1D` 需要8个Ascend 950DT（96G × 8）。"
+msgid "`DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend 950DT (96GB × 8)."
+msgstr "`DeepSeek-V3.1-w8a8c8-mtp 2P1D`需要8台Ascend 950DT（96GB × 8）。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:516
 msgid ""
@@ -799,8 +802,8 @@ msgid "90.94"
 msgstr "90.94"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1029
-msgid "1 Atlas 800 A3 (64G × 16)"
-msgstr "1 Atlas 800 A3 (64G × 16)"
+msgid "1 Atlas 800 A3 (64GB × 16)"
+msgstr "1台Atlas 800 A3（64GB × 16）"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1029
 msgid "gsm8k"
@@ -890,9 +893,8 @@ msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例，运行如下代码。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1230
-msgid ""
-"After about several minutes, you can get the performance evaluation result."
-msgstr "大约几分钟后，您即可获得性能评估结果。"
+msgid "After several minutes, you can get the performance evaluation result."
+msgstr "几分钟后，您即可获得性能评估结果。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1232
 msgid "9 Performance Tuning"
@@ -919,8 +921,8 @@ msgstr "表1：场景概览（A3）"
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1240
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
-"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
-msgstr "`*NPU总数` 表示所有节点使用的NPU总数。1节点 = 1台Atlas 800 A3服务器（64G × 16 NPU）。"
+"node = 1 Atlas 800 A3 server (64GB × 16 NPUs)."
+msgstr "`*Total NPUs`表示所有节点使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64GB × 16个NPU）。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.1.md:1029
 msgid "Scenario"

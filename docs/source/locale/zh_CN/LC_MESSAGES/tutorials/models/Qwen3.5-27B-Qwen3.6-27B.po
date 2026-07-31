@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -96,22 +96,22 @@ msgstr "**Qwen3.5-27B**"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:23
 msgid ""
-"`Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 "
-"Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model "
-"weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)"
+"`Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 "
+"Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)"
 msgstr ""
-"`Qwen3.5-27B` (BF16版本)：需要1个Atlas 800 A3 (64G × 16)节点或1个Atlas 800 A2 (64G × "
-"8)节点或Atlas推理产品。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3.5-27B)"
+"`Qwen3.5-27B`（BF16版本）：需要1个Atlas 800 A3（64GB × 16）节点或1个Atlas 800 A2（64GB × "
+"8）节点或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:24
 msgid ""
-"`Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) "
-"node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download"
-" model weight](https://www.modelscope.cn/models/Eco-"
+"`Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) "
+"node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. "
+"[Download model weight](https://www.modelscope.cn/models/Eco-"
 "Tech/Qwen3.5-27B-w8a8-mtp)"
 msgstr ""
-"`Qwen3.5-27B-w8a8` (量化版本)：需要1个Atlas 800 A3 (64G × 16)节点或1个Atlas 800 A2 (64G "
-"× 8)节点或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"`Qwen3.5-27B-w8a8`（量化版本）：需要1个Atlas 800 A3（64GB × 16）节点或1个Atlas 800 A2（64GB ×"
+" 8）节点或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/Qwen3.5-27B-w8a8-mtp)"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:26
@@ -120,21 +120,22 @@ msgstr "**Qwen3.6-27B**"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:28
 msgid ""
-"`Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 "
-"Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download model "
-"weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)"
+"`Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 "
+"Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)"
 msgstr ""
-"`Qwen3.6-27B` (BF16版本)：需要1个Atlas 800 A3 (64G × 16)节点或1个Atlas 800 A2 (64G × "
-"8)节点或Atlas推理产品。[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3.6-27B)"
+"`Qwen3.6-27B`（BF16版本）：需要1个Atlas 800 A3（64GB × 16）节点或1个Atlas 800 A2（64GB × "
+"8）节点或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:29
 msgid ""
-"`Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) "
-"node or 1 Atlas 800 A2 (64G × 8) node or Atlas inference products. [Download"
-" model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)"
+"`Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) "
+"node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. "
+"[Download model weight](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3.6-27B-w8a8)"
 msgstr ""
-"`Qwen3.6-27B-w8a8` (量化版本)：需要1个Atlas 800 A3 (64G × 16)节点或1个Atlas 800 A2 (64G "
-"× 8)节点或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"`Qwen3.6-27B-w8a8`（量化版本）：需要1个Atlas 800 A3（64GB × 16）节点或1个Atlas 800 A2（64GB ×"
+" 8）节点或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/Qwen3.6-27B-w8a8)"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:31
@@ -198,7 +199,7 @@ msgstr "A3系列"
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:52
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:95
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:130
-msgid "Start the docker image on your each node."
+msgid "Start the docker image on each node."
 msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
@@ -276,14 +277,14 @@ msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node, suitable for development, testing, and medium-scale inference "
 "scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and "
-"`Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64G × 16) "
-"or 1 Atlas 800 A2 (64G × 8). On Atlas inference products, at least 2 devices"
-" are required. The quantized versions need to start with the `--quantization"
-" ascend` parameter."
+"`Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64GB × 16) "
+"or 1 Atlas 800 A2 (64GB × 8). On Atlas inference products, at least 2 "
+"devices are required. The quantized versions need to start with the "
+"`--quantization ascend` parameter."
 msgstr ""
-"单节点部署在同一节点内完成Prefill和Decode，适用于开发、测试和中规模推理场景。`Qwen3.5-27B`、`Qwen3.5-27B-w8a8`、`Qwen3.6-27B`和`Qwen3.6-27B-w8a8`模型均可部署在1个Atlas"
-" 800 A3 (64G × 16)或1个Atlas 800 A2 (64G × "
-"8)上。在Atlas推理产品上，至少需要2个设备。量化版本需要使用`--quantization ascend`参数启动。"
+"单节点部署在同一节点内完成Prefill和Decode，适用于开发、测试及中等规模推理场景。`Qwen3.5-27B`、`Qwen3.5-27B-w8a8`、`Qwen3.6-27B`和`Qwen3.6-27B-w8a8`模型均可部署在1个Atlas"
+" 800 A3（64GB × 16）或1个Atlas 800 A2（64GB × "
+"8）上。在Atlas推理产品上，至少需要2个设备。量化版本需要使用`--quantization ascend`参数启动。"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:201
 msgid ""
@@ -654,18 +655,18 @@ msgstr "**Decode 节点**专注于低延迟令牌生成，针对内存带宽进�
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:424
 msgid ""
 "For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** "
-"configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill node +"
-" 1 Decode node), with **TP=2** and **DP=8** on each node, which fully "
+"configuration requires **2 Atlas 800 A3 (64GB × 16) nodes** (1 Prefill node "
+"+ 1 Decode node), with **TP=2** and **DP=8** on each node, which fully "
 "utilizes all 16 NPUs of an Atlas A3. The example below uses "
 "`Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with "
 "`Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` "
 "(and `--max-model-len` to 262144 if needed)."
 msgstr ""
-"对于 `Qwen3.5-27B-w8a8` 和 `Qwen3.6-27B-w8a8`，典型的 **1P1D** 配置需要 **2 个 Atlas 800"
-" A3 (64G × 16) 节点**（1 个 Prefill 节点 + 1 个 Decode 节点），每个节点上 **TP=2** 和 "
-"**DP=8**，这充分利用了 Atlas A3 的所有 16 个 NPU。以下示例使用 `Qwen3.5-27B-w8a8`；对于 "
-"`Qwen3.6-27B-w8a8`，将模型路径替换为 `Eco-Tech/Qwen3.6-27B-w8a8`，并将 `--served-model-"
-"name` 调整为 `qwen3.6`（如果需要，将 `--max-model-len` 调整为 262144）。"
+"对于`Qwen3.5-27B-w8a8`和`Qwen3.6-27B-w8a8`，典型的**1P1D**配置需要**2个Atlas 800 A3（64GB"
+" × 16）节点**（1个Prefill节点+1个Decode节点），每个节点上**TP=2**和**DP=8**，充分利用Atlas "
+"A3的全部16个NPU。以下示例使用`Qwen3.5-27B-w8a8`；对于`Qwen3.6-27B-w8a8`，将模型路径替换为`Eco-"
+"Tech/Qwen3.6-27B-w8a8`，并将`--served-model-name`调整为`qwen3.6`（如需，将`--max-model-"
+"len`调整为262144）。"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:426
 msgid ""
@@ -1228,8 +1229,8 @@ msgid "Key Considerations"
 msgstr "关键考量"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
-msgid "High Throughput<br>(128K context)"
-msgstr "高吞吐量<br>（128K 上下文）"
+msgid "High Throughput<br>(128k context)"
+msgstr "高吞吐<br>（128k上下文）"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
 msgid "Single-Node (A2)"
@@ -1260,8 +1261,8 @@ msgid "TP=2 + DP=8 fully utilizes all 16 NPUs for parallel request batches"
 msgstr "TP=2 + DP=8 充分利用所有 16 个 NPU 进行并行请求批处理"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
-msgid "Low Latency<br>(128K context)"
-msgstr "低延迟<br>（128K 上下文）"
+msgid "Low Latency<br>(128k context)"
+msgstr "低延迟<br>（128k上下文）"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
 msgid ""
@@ -1270,8 +1271,8 @@ msgid ""
 msgstr "TP=2 + DP=8 减少了小交互批次的逐层 Allreduce 开销"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
-msgid "Long Context<br>(256K+ context)"
-msgstr "长上下文<br>（256K+ 上下文）"
+msgid "Long Context<br>(256k+ context)"
+msgstr "长上下文<br>（256k+上下文）"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
 msgid ""
@@ -1384,8 +1385,8 @@ msgid "8192"
 msgstr "8192"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:408
-msgid "266000"
-msgstr "266000"
+msgid "262144"
+msgstr "262144"
 
 #: ../../source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md:817
 msgid ""
@@ -1423,3 +1424,6 @@ msgid ""
 msgstr ""
 "常见的环境、安装和通用参数问题，请参考 [vLLM-Ascend 公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+#~ msgid "266000"
+#~ msgstr "266000"

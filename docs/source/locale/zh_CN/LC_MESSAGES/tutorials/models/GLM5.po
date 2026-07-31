@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -102,9 +102,9 @@ msgstr ""
 #: ../../source/tutorials/models/GLM5.md:24
 msgid ""
 "`GLM-5-w4a8`(Quantized version): [Download model "
-"weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8)."
+"weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8)."
 msgstr ""
-"`GLM-5-w4a8`（量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-"
+"`GLM-5-w4a8`（量化版本）：[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/GLM-5-w4a8)。"
 
 #: ../../source/tutorials/models/GLM5.md:25
@@ -174,7 +174,7 @@ msgstr "A3 系列"
 
 #: ../../source/tutorials/models/GLM5.md:49
 #: ../../source/tutorials/models/GLM5.md:96
-msgid "Start the docker image on your each node."
+msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
 #: ../../source/tutorials/models/GLM5.md
@@ -221,49 +221,49 @@ msgstr "5.1 单节点在线部署"
 #: ../../source/tutorials/models/GLM5.md:152
 msgid ""
 "Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas "
-"800 A3 (64G × 16) ."
-msgstr "量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可在 1 台 Atlas 800 A3（64G × 16）上部署。"
+"800 A3 (64GB × 16) ."
+msgstr "量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可部署在 1 台 Atlas 800 A3（64GB × 16）上。"
 
 #: ../../source/tutorials/models/GLM5.md:154
-#: ../../source/tutorials/models/GLM5.md:194
-#: ../../source/tutorials/models/GLM5.md:234
+#: ../../source/tutorials/models/GLM5.md:195
+#: ../../source/tutorials/models/GLM5.md:236
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
 #: ../../source/tutorials/models/GLM5.md:156
-#: ../../source/tutorials/models/GLM5.md:236
-#: ../../source/tutorials/models/GLM5.md:280
-#: ../../source/tutorials/models/GLM5.md:1410
+#: ../../source/tutorials/models/GLM5.md:238
+#: ../../source/tutorials/models/GLM5.md:283
+#: ../../source/tutorials/models/GLM5.md:1425
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
 msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
 
-#: ../../source/tutorials/models/GLM5.md:192
+#: ../../source/tutorials/models/GLM5.md:193
 msgid ""
 "Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas "
-"800 A3 (64G × 16) ."
-msgstr "量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可在 1 台 Atlas 800 A3（64G × 16）上部署。"
+"800 A3 (64GB × 16) ."
+msgstr "量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可部署在 1 台 Atlas 800 A3（64GB × 16）上。"
 
-#: ../../source/tutorials/models/GLM5.md:232
+#: ../../source/tutorials/models/GLM5.md:234
 msgid ""
-"Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) ."
-msgstr "量化模型 `glm-5-w4a8` 可在 1 台 Atlas 800 A2（64G × 8）上部署。"
+"Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) ."
+msgstr "量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64GB × 8）上。"
 
-#: ../../source/tutorials/models/GLM5.md:271
+#: ../../source/tutorials/models/GLM5.md:274
 msgid "**Notice:** The parameters are explained as follows:"
 msgstr "**注意：** 参数说明如下："
 
-#: ../../source/tutorials/models/GLM5.md:274
+#: ../../source/tutorials/models/GLM5.md:277
 msgid ""
 "For single-node deployment, we recommend using `dp1tp16` and turn off expert"
 " parallel in low-latency scenarios."
 msgstr "对于单节点部署，在低延迟场景下建议使用 `dp1tp16` 并关闭专家并行。"
 
-#: ../../source/tutorials/models/GLM5.md:276
+#: ../../source/tutorials/models/GLM5.md:279
 msgid "5.2 Multi-node Deployment"
 msgstr "5.2 多节点部署"
 
-#: ../../source/tutorials/models/GLM5.md:278
+#: ../../source/tutorials/models/GLM5.md:281
 msgid ""
 "If you want to deploy multi-node environment, you need to verify multi-node "
 "communication according to [verify multi-node communication "
@@ -272,30 +272,31 @@ msgstr ""
 "如需部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
 "communication)进行通信验证。"
 
-#: ../../source/tutorials/models/GLM5.md:289
+#: ../../source/tutorials/models/GLM5.md:292
 msgid ""
-"`glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × 16)."
-msgstr "`glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64G × 16）。"
+"`glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × "
+"16)."
+msgstr "`glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64GB × 16）。"
 
-#: ../../source/tutorials/models/GLM5.md:291
-#: ../../source/tutorials/models/GLM5.md:389
-#: ../../source/tutorials/models/GLM5.md:556
+#: ../../source/tutorials/models/GLM5.md:294
+#: ../../source/tutorials/models/GLM5.md:394
+#: ../../source/tutorials/models/GLM5.md:563
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"
 
-#: ../../source/tutorials/models/GLM5.md:293
-#: ../../source/tutorials/models/GLM5.md:391
-#: ../../source/tutorials/models/GLM5.md:558
+#: ../../source/tutorials/models/GLM5.md:296
+#: ../../source/tutorials/models/GLM5.md:396
+#: ../../source/tutorials/models/GLM5.md:565
 msgid "**node 0**"
 msgstr "**节点 0**"
 
-#: ../../source/tutorials/models/GLM5.md:338
-#: ../../source/tutorials/models/GLM5.md:438
-#: ../../source/tutorials/models/GLM5.md:608
+#: ../../source/tutorials/models/GLM5.md:342
+#: ../../source/tutorials/models/GLM5.md:444
+#: ../../source/tutorials/models/GLM5.md:616
 msgid "**node 1**"
 msgstr "**节点 1**"
 
-#: ../../source/tutorials/models/GLM5.md:489
+#: ../../source/tutorials/models/GLM5.md:496
 msgid ""
 "For bf16 weight, use this script on each node to enable [Multi Token "
 "Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md)."
@@ -303,15 +304,15 @@ msgstr ""
 "对于 bf16 权重，在每个节点上使用此脚本启用[多 Token "
 "预测（MTP）](../../user_guide/feature_guide/speculative_decoding.md)。"
 
-#: ../../source/tutorials/models/GLM5.md:554
-msgid "`glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16)."
-msgstr "`glm-5-w8a8`：需要 2 台 Atlas 800 A3（64G × 16）。"
+#: ../../source/tutorials/models/GLM5.md:561
+msgid "`glm-5-w8a8`: require 2 Atlas 800 A3 (64GB × 16)."
+msgstr "`glm-5-w8a8`：需要 2 台 Atlas 800 A3（64GB × 16）。"
 
-#: ../../source/tutorials/models/GLM5.md:662
+#: ../../source/tutorials/models/GLM5.md:671
 msgid "5.3 Prefill-Decode Disaggregation"
 msgstr "5.3 预填充-解码分离"
 
-#: ../../source/tutorials/models/GLM5.md:664
+#: ../../source/tutorials/models/GLM5.md:673
 msgid ""
 "We'd like to show the deployment guide of `GLM-5` on multi-node environment "
 "with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to "
@@ -321,19 +322,19 @@ msgstr ""
 "我们将展示 `GLM-5` 在多节点环境下采用 1P1D 配置以获得更好性能的部署指南。*预填充-"
 "解码分离*是指将预填充阶段和解码阶段分布到不同节点上，以提升吞吐量和降低延迟。"
 
-#: ../../source/tutorials/models/GLM5.md:666
+#: ../../source/tutorials/models/GLM5.md:675
 msgid "Before you start, please"
 msgstr "开始之前，请"
 
-#: ../../source/tutorials/models/GLM5.md:668
+#: ../../source/tutorials/models/GLM5.md:677
 msgid "prepare the script `launch_online_dp.py` on each node:"
 msgstr "在每个节点上准备脚本 `launch_online_dp.py`："
 
-#: ../../source/tutorials/models/GLM5.md:771
+#: ../../source/tutorials/models/GLM5.md:780
 msgid "prepare the script `run_dp_template.sh` on each node."
 msgstr "在每个节点上准备脚本 `run_dp_template.sh`。"
 
-#: ../../source/tutorials/models/GLM5.md:773
+#: ../../source/tutorials/models/GLM5.md:782
 msgid ""
 "To support a 200k context window on the stage of prefill, the parameter "
 "`\"layer_sharding\": [\"q_b_proj\", \"o_proj\"]` needs to be added to "
@@ -342,47 +343,47 @@ msgstr ""
 "为了在预填充阶段支持 200k 上下文窗口，需要在每个预填充节点的 `--additional_config` 中添加参数 "
 "`\"layer_sharding\": [\"q_b_proj\", \"o_proj\"]`。"
 
-#: ../../source/tutorials/models/GLM5.md:774
-#: ../../source/tutorials/models/GLM5.md:1254
+#: ../../source/tutorials/models/GLM5.md:783
+#: ../../source/tutorials/models/GLM5.md:1269
 msgid "Prefill node 0"
 msgstr "预填充节点 0"
 
-#: ../../source/tutorials/models/GLM5.md:852
-#: ../../source/tutorials/models/GLM5.md:1261
+#: ../../source/tutorials/models/GLM5.md:862
+#: ../../source/tutorials/models/GLM5.md:1276
 msgid "Prefill node 1"
 msgstr "预填充节点 1"
 
-#: ../../source/tutorials/models/GLM5.md:931
-#: ../../source/tutorials/models/GLM5.md:1268
+#: ../../source/tutorials/models/GLM5.md:942
+#: ../../source/tutorials/models/GLM5.md:1283
 msgid "Decode node 0"
 msgstr "解码节点0"
 
-#: ../../source/tutorials/models/GLM5.md:1012
-#: ../../source/tutorials/models/GLM5.md:1275
+#: ../../source/tutorials/models/GLM5.md:1024
+#: ../../source/tutorials/models/GLM5.md:1290
 msgid "Decode node 1"
 msgstr "解码节点1"
 
-#: ../../source/tutorials/models/GLM5.md:1092
-#: ../../source/tutorials/models/GLM5.md:1282
+#: ../../source/tutorials/models/GLM5.md:1105
+#: ../../source/tutorials/models/GLM5.md:1297
 msgid "Decode node 2"
 msgstr "解码节点2"
 
-#: ../../source/tutorials/models/GLM5.md:1172
-#: ../../source/tutorials/models/GLM5.md:1289
+#: ../../source/tutorials/models/GLM5.md:1186
+#: ../../source/tutorials/models/GLM5.md:1304
 msgid "Decode node 3"
 msgstr "解码节点3"
 
-#: ../../source/tutorials/models/GLM5.md:1252
+#: ../../source/tutorials/models/GLM5.md:1267
 msgid ""
 "Once the preparation is done, you can start the server with the following "
 "command on each node:"
 msgstr "准备工作完成后，可在每个节点上使用以下命令启动服务器："
 
-#: ../../source/tutorials/models/GLM5.md:1296
+#: ../../source/tutorials/models/GLM5.md:1311
 msgid "5.4 Request Forwarding"
 msgstr "5.4请求转发"
 
-#: ../../source/tutorials/models/GLM5.md:1298
+#: ../../source/tutorials/models/GLM5.md:1313
 msgid ""
 "To set up request forwarding, run the following script on any machine. You "
 "can get the proxy program in the repository's examples: "
@@ -393,15 +394,15 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/models/GLM5.md:1337
+#: ../../source/tutorials/models/GLM5.md:1352
 msgid "**Notice:**"
 msgstr "**注意：**"
 
-#: ../../source/tutorials/models/GLM5.md:1339
+#: ../../source/tutorials/models/GLM5.md:1354
 msgid "Some configurations for optimization are shown below:"
 msgstr "以下是一些用于优化的配置："
 
-#: ../../source/tutorials/models/GLM5.md:1341
+#: ../../source/tutorials/models/GLM5.md:1356
 msgid ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce "
 "communication and computation overhead on prefill node. With FlashComm "
@@ -409,19 +410,19 @@ msgid ""
 msgstr ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用FlashComm优化以减少prefill节点上的通信和计算开销。启用FlashComm后，layer_sharding列表不能包含o_proj作为元素。"
 
-#: ../../source/tutorials/models/GLM5.md:1342
+#: ../../source/tutorials/models/GLM5.md:1357
 msgid ""
 "`VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: "
 "dispatch_gmm_combine_decode and dispatch_ffn_combine operator."
 msgstr ""
 "`VLLM_ASCEND_ENABLE_FUSED_MC2`：启用以下融合算子：dispatch_gmm_combine_decode和dispatch_ffn_combine算子。"
 
-#: ../../source/tutorials/models/GLM5.md:1343
+#: ../../source/tutorials/models/GLM5.md:1358
 msgid ""
 "`VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation."
 msgstr "`VLLM_ASCEND_ENABLE_MLAPO`：启用融合算子MlaPreprocessOperation。"
 
-#: ../../source/tutorials/models/GLM5.md:1345
+#: ../../source/tutorials/models/GLM5.md:1360
 msgid ""
 "Please refer to the following python file for further explanation and "
 "restrictions of the environment variables above: "
@@ -431,47 +432,47 @@ msgstr ""
 "有关上述环境变量的进一步解释和限制，请参考以下Python文件：[envs.py](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/vllm_ascend/envs.py)"
 
-#: ../../source/tutorials/models/GLM5.md:1347
+#: ../../source/tutorials/models/GLM5.md:1362
 msgid "6 Functional Verification"
 msgstr "6功能验证"
 
-#: ../../source/tutorials/models/GLM5.md:1349
+#: ../../source/tutorials/models/GLM5.md:1364
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/GLM5.md:1362
+#: ../../source/tutorials/models/GLM5.md:1377
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/GLM5.md:1368
+#: ../../source/tutorials/models/GLM5.md:1383
 msgid "7 Accuracy Evaluation"
 msgstr "7精度评估"
 
-#: ../../source/tutorials/models/GLM5.md:1370
+#: ../../source/tutorials/models/GLM5.md:1385
 msgid "7.1 Using AISBench"
 msgstr "7.1使用AISBench"
 
-#: ../../source/tutorials/models/GLM5.md:1372
+#: ../../source/tutorials/models/GLM5.md:1387
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详细信息请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/GLM5.md:1374
+#: ../../source/tutorials/models/GLM5.md:1389
 msgid "After execution, you can get the result."
 msgstr "执行后即可获取结果。"
 
-#: ../../source/tutorials/models/GLM5.md:1376
+#: ../../source/tutorials/models/GLM5.md:1391
 msgid "8 Performance Evaluation"
 msgstr "8性能评估"
 
-#: ../../source/tutorials/models/GLM5.md:1378
+#: ../../source/tutorials/models/GLM5.md:1393
 msgid "8.1 Using AISBench"
 msgstr "8.1使用AISBench"
 
-#: ../../source/tutorials/models/GLM5.md:1380
+#: ../../source/tutorials/models/GLM5.md:1395
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -480,26 +481,25 @@ msgstr ""
 "详细信息请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/GLM5.md:1382
+#: ../../source/tutorials/models/GLM5.md:1397
 msgid "8.2 Using vLLM Benchmark"
 msgstr "8.2使用vLLM基准测试"
 
-#: ../../source/tutorials/models/GLM5.md:1384
+#: ../../source/tutorials/models/GLM5.md:1399
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
-msgstr ""
-"更多详细信息请参考[vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
+msgstr "更多详细信息，请参阅 [vllm 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/GLM5.md:1386
+#: ../../source/tutorials/models/GLM5.md:1401
 msgid "9 Performance Tuning"
 msgstr "9性能调优"
 
-#: ../../source/tutorials/models/GLM5.md:1388
+#: ../../source/tutorials/models/GLM5.md:1403
 msgid "9.1 Recommended Configurations"
 msgstr "9.1推荐配置"
 
-#: ../../source/tutorials/models/GLM5.md:1390
+#: ../../source/tutorials/models/GLM5.md:1405
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration depends "
@@ -509,149 +509,149 @@ msgid ""
 msgstr ""
 "**注意**：以下配置在特定测试环境中经过验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第9.2节进行调优。"
 
-#: ../../source/tutorials/models/GLM5.md:1392
+#: ../../source/tutorials/models/GLM5.md:1407
 msgid "Table 1: Scenario Overview"
 msgstr "表1：场景概览"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Scenario"
 msgstr "场景"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Deployment Mode"
 msgstr "部署模式"
 
-#: ../../source/tutorials/models/GLM5.md:610
-msgid "*Total NPUs"
-msgstr "*NPU总数"
+#: ../../source/tutorials/models/GLM5.md:618
+msgid "Total NPUs"
+msgstr "NPU 总数"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Weight Version"
 msgstr "权重版本"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Key Considerations"
 msgstr "关键考量"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "High Throughput"
 msgstr "高吞吐量"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "1P1D deployment"
 msgstr "1P1D部署"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "32 (A3)"
 msgstr "32 (A3)"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "GLM5-w8a8/GLM5.1-w8a8"
 msgstr "GLM5-w8a8/GLM5.1-w8a8"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid ""
 "dp4 tp8 on P nodes and dp8 dp4 on D nodes to balanced latency and throughput"
 msgstr "P节点上dp4 tp8，D节点上dp8 dp4，以平衡延迟和吞吐量"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Low Latency"
 msgstr "低延迟"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "dp4 tp8 on both P and D nodes to reduce latency"
 msgstr "P节点和D节点上均使用dp4 tp8以降低延迟"
 
-#: ../../source/tutorials/models/GLM5.md:1399
+#: ../../source/tutorials/models/GLM5.md:1414
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes."
 msgstr "`*NPU总数`表示所有节点上使用的NPU总数。"
 
-#: ../../source/tutorials/models/GLM5.md:1401
+#: ../../source/tutorials/models/GLM5.md:1416
 msgid "Table 2: Detailed Node Configuration"
 msgstr "表2：详细节点配置"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "NPUs"
 msgstr "NPU数量"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "TP"
 msgstr "TP"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "DP"
 msgstr "DP"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Max Num Seqs"
 msgstr "最大序列数"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Max Num Batched Tokens"
 msgstr "最大批处理Token数"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Max Model Len"
 msgstr "最大模型长度"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "MTP Speculation Num"
 msgstr "MTP推测数量"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "High Throughput (A3)"
 msgstr "高吞吐量 (A3)"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "32"
 msgstr "32"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "P:8 D:4"
 msgstr "P:8 D:4"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "P:4 D:8"
 msgstr "P:4 D:8"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "P:64 D:128"
 msgstr "P:64 D:128"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "P:4096 D:32"
 msgstr "P:4096 D:32"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "P:133120 D:150000"
 msgstr "P:133120 D:150000"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "3"
 msgstr "3"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "Low Latency (A3)"
 msgstr "低延迟 (A3)"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "4"
 msgstr "4"
 
-#: ../../source/tutorials/models/GLM5.md:610
+#: ../../source/tutorials/models/GLM5.md:618
 msgid "8"
 msgstr "8"
 
-#: ../../source/tutorials/models/GLM5.md:1408
+#: ../../source/tutorials/models/GLM5.md:1423
 msgid "10 FAQ"
 msgstr "10常见问题"
 
-#: ../../source/tutorials/models/GLM5.md:1412
+#: ../../source/tutorials/models/GLM5.md:1427
 msgid ""
 "**Q: How to solve ValueError: Tokenizer class TokenizersBackend does not "
 "exist or is not currently imported?**"
@@ -659,14 +659,21 @@ msgstr ""
 "**问：如何解决ValueError: Tokenizer class TokenizersBackend does not exist or is "
 "not currently imported？**"
 
-#: ../../source/tutorials/models/GLM5.md:1414
+#: ../../source/tutorials/models/GLM5.md:1429
 msgid "A: Please update the version of transformers to 5.2.0"
 msgstr "答：请将transformers版本更新至5.2.0"
 
-#: ../../source/tutorials/models/GLM5.md:1416
+#: ../../source/tutorials/models/GLM5.md:1431
 msgid "**Q: How to enable function calling for GLM-5?**"
 msgstr "**问：如何为GLM-5启用函数调用？**"
 
-#: ../../source/tutorials/models/GLM5.md:1418
+#: ../../source/tutorials/models/GLM5.md:1433
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在vLLM启动命令中添加以下配置"
+
+#~ msgid ""
+#~ "`GLM-5-w4a8`(Quantized version): [Download model "
+#~ "weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8)."
+#~ msgstr ""
+#~ "`GLM-5-w4a8`（量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-"
+#~ "Tech/GLM-5-w4a8)。"

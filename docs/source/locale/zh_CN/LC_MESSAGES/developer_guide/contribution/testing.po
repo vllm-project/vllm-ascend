@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -49,7 +49,7 @@ msgid "You can run the unit tests on CPUs with the following steps:"
 msgstr "您可以通过以下步骤在CPU上运行单元测试："
 
 #: ../../source/developer_guide/contribution/testing.md
-msgid "Single card"
+msgid "Single-card"
 msgstr "单卡"
 
 #: ../../source/developer_guide/contribution/testing.md:97
@@ -59,8 +59,8 @@ msgid ""
 msgstr "启动容器后，您应安装所需的软件包："
 
 #: ../../source/developer_guide/contribution/testing.md
-msgid "Multi cards"
-msgstr "多卡"
+msgid "Multi-cards"
+msgstr "多卡片"
 
 #: ../../source/developer_guide/contribution/testing.md:153
 msgid "Running tests"
@@ -110,10 +110,6 @@ msgstr ""
 #: ../../source/developer_guide/contribution/testing.md:163
 msgid "You can run the unit tests using `pytest`:"
 msgstr "您可以使用 `pytest` 运行单元测试："
-
-#: ../../source/developer_guide/contribution/testing.md
-msgid "Single-card"
-msgstr "单卡"
 
 #: ../../source/developer_guide/contribution/testing.md
 msgid "Multi-card"
@@ -290,3 +286,9 @@ msgstr "`docs/_build/linkcheck/output.txt`"
 #: ../../source/developer_guide/contribution/testing.md:376
 msgid "`docs/_build/linkcheck/output.json`"
 msgstr "`docs/_build/linkcheck/output.json`"
+
+#~ msgid "Single card"
+#~ msgstr "单卡"
+
+#~ msgid "Multi cards"
+#~ msgstr "多卡"

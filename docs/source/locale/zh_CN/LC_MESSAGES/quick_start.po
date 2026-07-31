@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -48,10 +48,10 @@ msgid ""
 "For details on using different functions, see the corresponding function "
 "tutorial in the \"Function Tutorials\" directory, for example, [Prefill-"
 "Decode Disaggregation "
-"(Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md)."
+"(DeepSeek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md)."
 msgstr ""
-"关于不同功能的使用详情，请参见\"功能教程\"目录中对应的功能教程，例如[Prefill-Decode Disaggregation "
-"(Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md)。"
+"有关使用不同功能的详细信息，请参阅“功能教程”目录中相应的功能教程，例如，[预填充-"
+"解码分离（DeepSeek）](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md)。"
 
 #: ../../source/quick_start.md:10
 msgid "Prerequisites"
@@ -217,11 +217,11 @@ msgstr "安装vLLM后，您可以开始为输入提示列表生成文本（即�
 msgid "Create and run a simple inference test. The `example.py` can be like:"
 msgstr "创建并运行一个简单的推理测试。`example.py`可以如下所示："
 
-#: ../../source/quick_start.md:244
+#: ../../source/quick_start.md:243
 msgid "Then run:"
 msgstr "然后运行："
 
-#: ../../source/quick_start.md:250
+#: ../../source/quick_start.md:249
 msgid ""
 "If you encounter a connection error with Hugging Face (e.g., `We couldn't "
 "connect to 'https://huggingface.co' to load the files, and couldn't find "
@@ -232,15 +232,15 @@ msgstr ""
 " load the files, and couldn't find them in the cached "
 "files.`），请运行以下命令使用ModelScope作为替代："
 
-#: ../../source/quick_start.md:258
+#: ../../source/quick_start.md:257
 msgid "This section shows ascend platform is successfully detected in vllm:"
 msgstr "此部分显示vllm中成功检测到昇腾平台："
 
-#: ../../source/quick_start.md:267
+#: ../../source/quick_start.md:266
 msgid "This section shows the final output:"
 msgstr "此部分显示最终输出："
 
-#: ../../source/quick_start.md:276
+#: ../../source/quick_start.md:275
 msgid ""
 "This section shows process exits after offline inference, and does not "
 "affect actual inference:"
@@ -250,7 +250,7 @@ msgstr "此部分显示进程在离线推理后退出，不影响实际推理：
 msgid "OpenAI Completions API"
 msgstr "OpenAI Completions API"
 
-#: ../../source/quick_start.md:289
+#: ../../source/quick_start.md:288
 msgid ""
 "vLLM can also be deployed as a server that implements the OpenAI API "
 "protocol. Run the following command to start the vLLM server with the "
@@ -259,23 +259,23 @@ msgstr ""
 "vLLM也可以部署为实现OpenAI "
 "API协议的服务器。运行以下命令，使用[Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)模型启动vLLM服务器："
 
-#: ../../source/quick_start.md:300
+#: ../../source/quick_start.md:299
 msgid "If you see a log as below:"
 msgstr "如果您看到如下日志："
 
-#: ../../source/quick_start.md:309
+#: ../../source/quick_start.md:308
 msgid "Congratulations, you have successfully started the vLLM server!"
 msgstr "恭喜，您已成功启动vLLM服务器！"
 
-#: ../../source/quick_start.md:311
+#: ../../source/quick_start.md:310
 msgid "You can query the list of models:"
 msgstr "您可以查询模型列表："
 
-#: ../../source/quick_start.md:319
+#: ../../source/quick_start.md:318
 msgid "You can also query the model with input prompts:"
 msgstr "您也可以使用输入提示查询模型："
 
-#: ../../source/quick_start.md:334
+#: ../../source/quick_start.md:333
 msgid ""
 "vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` to "
 "stop the background process gracefully, which is similar to `Ctrl-C` for "
@@ -283,10 +283,10 @@ msgid ""
 msgstr ""
 "vLLM作为后台进程运行，您可以使用`kill -2 $VLLM_PID`优雅地停止后台进程，类似于使用`Ctrl-C`停止前台vLLM进程："
 
-#: ../../source/quick_start.md:343
+#: ../../source/quick_start.md:342
 msgid "The output is as below:"
 msgstr "输出如下："
 
-#: ../../source/quick_start.md:352
+#: ../../source/quick_start.md:351
 msgid "Finally, you can exit the container by using `ctrl-D`."
 msgstr "最后，您可以使用`ctrl-D`退出容器。"

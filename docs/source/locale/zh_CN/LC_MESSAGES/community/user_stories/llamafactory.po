@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -25,8 +25,8 @@ msgid "LLaMA-Factory"
 msgstr "LLaMA-Factory"
 
 #: ../../source/community/user_stories/llamafactory.md:3
-msgid "**Introduction**"
-msgstr "**简介**"
+msgid "Introduction"
+msgstr "简介"
 
 #: ../../source/community/user_stories/llamafactory.md:5
 msgid ""
@@ -45,8 +45,8 @@ msgid ""
 msgstr "LLaMA-Factory 用户在微调后需要对模型进行评估并执行推理。"
 
 #: ../../source/community/user_stories/llamafactory.md:9
-msgid "**Business challenge**"
-msgstr "**业务挑战**"
+msgid "Business challenge"
+msgstr "业务挑战"
 
 #: ../../source/community/user_stories/llamafactory.md:11
 msgid ""
@@ -55,8 +55,8 @@ msgid ""
 msgstr "LLaMA-Factory 使用 Transformers 在 Ascend NPU 上执行推理，但速度较慢。"
 
 #: ../../source/community/user_stories/llamafactory.md:13
-msgid "**Benefits with vLLM Ascend**"
-msgstr "**vLLM Ascend 的优势**"
+msgid "Benefits with vLLM Ascend"
+msgstr "vLLM Ascend 的优势"
 
 #: ../../source/community/user_stories/llamafactory.md:15
 msgid ""
@@ -71,8 +71,8 @@ msgstr ""
 "Factory 在模型推理过程中实现了显著的性能提升。基准测试结果显示，其推理速度相比 Transformers 实现现在最高可提升 2 倍。"
 
 #: ../../source/community/user_stories/llamafactory.md:17
-msgid "**Learn more**"
-msgstr "**了解更多**"
+msgid "Learn more"
+msgstr "了解更多"
 
 #: ../../source/community/user_stories/llamafactory.md:19
 msgid ""

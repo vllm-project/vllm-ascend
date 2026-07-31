@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -96,12 +96,12 @@ msgstr "3.1 模型权重"
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:26
 msgid ""
 "`DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 "
-"(128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model "
+"(128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model "
 "weight](https://www.modelscope.cn/models/Eco-"
 "Tech/DeepSeek-V4-Flash-w8a8-mtp)"
 msgstr ""
-"`DeepSeek-V4-Flash-w8a8-mtp`（量化版本）：需要 1 个 Atlas 800 A3（128G × 8）节点或 1 个 "
-"Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"`DeepSeek-V4-Flash-w8a8-mtp`（量化版本）：需要1个Atlas 800 A3（128GB × 8）节点或1个Atlas 800"
+" A2（64GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/DeepSeek-V4-Flash-w8a8-mtp)"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:28
@@ -199,10 +199,10 @@ msgstr "5.1 单节点在线部署"
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 "
-"Atlas 800 A3 (128G × 8) or 1 Atlas 800 A2 (64G × 8)."
+"Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8)."
 msgstr ""
-"单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `DeepSeek-V4-Flash-w8a8-mtp` 可部署在 1 个 "
-"Atlas 800 A3（128G × 8）或 1 个 Atlas 800 A2（64G × 8）上。"
+"单节点部署在同一节点内完成Prefill和Decode。量化模型`DeepSeek-V4-Flash-w8a8-mtp`可部署在1个Atlas 800 "
+"A3（128GB × 8）或1个Atlas 800 A2（64GB × 8）上。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:150
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:198
@@ -334,8 +334,8 @@ msgstr ""
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:287
 msgid ""
 "The following sections describe PD separation deployment on both Atlas 800 "
-"A3 (128G × 8) and Atlas 800 A2 (64G × 8) multi-node environments."
-msgstr "以下章节将介绍在Atlas 800 A3（128G × 8）和Atlas 800 A2（64G × 8）多节点环境下的PD分离部署。"
+"A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments."
+msgstr "以下章节介绍在Atlas 800 A3（128GB × 8）和Atlas 800 A2（64GB × 8）多节点环境下的PD分离部署。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:289
 msgid "5.2.1 A3 Series PD Separation Deployment"
@@ -344,9 +344,9 @@ msgstr "5.2.1 A3系列PD分离部署"
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:291
 msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3"
-" (128G × 8) multi-node environment with 1P1D for better performance."
+" (128GB × 8) multi-node environment with 1P1D for better performance."
 msgstr ""
-"本节展示在Atlas 800 A3（128G × 8）多节点环境下，采用1P1D配置以获得更好性能的DeepSeek-V4-Flash部署指南。"
+"本节介绍DeepSeek-V4-Flash在Atlas 800 A3（128GB × 8）多节点环境下采用1P1D配置以获得更优性能的部署指南。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:293
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:585
@@ -522,10 +522,11 @@ msgstr "5.2.2 A2系列PD分离部署"
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:583
 msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2"
-" (64G × 8) multi-node environment with 4\\*1P 1\\*4D for better performance."
+" (64GB × 8) multi-node environment with 4\\*1P 1\\*4D for better "
+"performance."
 msgstr ""
-"本节展示在Atlas 800 A2（64G × 8）多节点环境下，采用4\\*1P "
-"1\\*4D配置以获得更好性能的DeepSeek-V4-Flash部署指南。"
+"本节介绍DeepSeek-V4-Flash在Atlas 800 A2（64GB × 8）多节点环境下采用4\\*1P "
+"1\\*4D配置以获得更优性能的部署指南。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:658
 msgid "Prefill node (4 P nodes share the same script)"
@@ -657,8 +658,8 @@ msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:894
-msgid "Here are two accuracy evaluation methods."
-msgstr "以下是两种精度评估方法。"
+msgid "Here is the accuracy evaluation method using AISBench."
+msgstr "以下是使用AISBench进行精度评估的方法。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:896
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:909
@@ -717,8 +718,8 @@ msgid "88.17"
 msgstr "88.17"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:194
-msgid "1 Atlas 800 A3 (128G × 8)"
-msgstr "1 Atlas 800 A3 (128G × 8)"
+msgid "1 Atlas 800 A3 (128GB × 8)"
+msgstr "1个Atlas 800 A3（128GB × 8）"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:194
 msgid "GSM8K"
@@ -959,9 +960,9 @@ msgstr ""
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:949
 msgid ""
-"Currently, we support 4K prefix cache hit in an experimental manner. You "
+"Currently, we support 4k prefix cache hit in an experimental manner. You "
 "only need to change the value of --block-size from 128 to 32 in the service."
-msgstr "目前，我们以实验方式支持4K前缀缓存命中。您只需将服务中的--block-size值从128改为32即可。"
+msgstr "目前，我们以实验方式支持4k前缀缓存命中。您只需将服务中的--block-size值从128改为32即可。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:951
 msgid "9.2 Tuning Guidelines"
