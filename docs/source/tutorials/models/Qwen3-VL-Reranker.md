@@ -12,7 +12,7 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)
+- `Qwen3-VL-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)
 - `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -255,7 +255,7 @@ Here are two accuracy evaluation methods.
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     
-        model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-VL-Reranker-2B",
+        model = VllmCrossEncoderWrapper(f"/root/.cache/Qwen3-VL-Reranker-2B",
                                     revision="norm",
                                     dtype="float16",
                                     enforce_eager=True,
