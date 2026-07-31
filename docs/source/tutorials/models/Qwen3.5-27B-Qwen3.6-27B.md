@@ -289,7 +289,9 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
 === "Atlas inference products"
 
-    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path.The quantized versions need to start with the `--quantization ascend` parameter.
+    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path. The quantized versions need to start with the `--quantization ascend` parameter.
+
+    > **Warning**: The examples in this tab apply **only to Atlas inference products** (e.g., Atlas 300I Duo). Do not reuse them on Atlas 800 A2 / Atlas 800 A3 (Ascend 910B series) devices: with the w8a8 quantized models, `--dtype float16` is not supported by the quantized matmul operator there and the engine fails during initialization with `aclnnQuantMatmulWeightNz` error code 161002 (`Tensor scale not implemented for DT_FLOAT16`). On Atlas 800 A2 / A3, follow the "Atlas 800 A3 / Atlas 800 A2" tab instead, which keeps the default `bfloat16` dtype.
 
     === "Qwen3.5-27B-w8a8"
 
@@ -353,8 +355,8 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory; The Qwen3.6-27B model supports up to 262144.
     - `--max-num-seqs` indicates the maximum number of concurrent requests. Configure it as needed—setting it too high may cause OOM.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
-    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products, only `float16` is supported.
-    - `--dtype float16` must be set on Atlas inference products. These devices only support the FP16 data type.
+    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products, only `float16` is supported. On Atlas 800 A2 / A3, keep the default `bfloat16` instead.
+    - `--dtype float16` must be set on Atlas inference products, because these devices only support the FP16 data type. **Do not** set it on Atlas 800 A2 / A3 (Ascend 910B series): the w8a8 quantized matmul only accepts `bfloat16` scales there, and starting with `--dtype float16` fails with `aclnnQuantMatmulWeightNz` error code 161002 (`Tensor scale not implemented for DT_FLOAT16`).
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas inference products, it is recommended to set `num_speculative_tokens` to `1`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
