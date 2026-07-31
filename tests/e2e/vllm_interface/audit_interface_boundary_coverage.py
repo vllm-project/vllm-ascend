@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-AUDIT_VERSION = "0.3.0"
+AUDIT_VERSION = "0.4.0"
 RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 STATUSES = frozenset({"verified", "risk", "expected", "excluded", "review"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -167,6 +167,7 @@ class MethodSlot:
     kind: str
     value_expression: str | None = None
     value_targets: tuple[str, ...] = ()
+    calls_same_method_on_super: bool = False
 
 
 @dataclass(frozen=True)
@@ -698,7 +699,17 @@ class IndependentCandidateScanner:
         methods: list[MethodSlot] = []
         for child in node.body:
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                methods.append(MethodSlot(child.name, child.lineno, "definition"))
+                methods.append(
+                    MethodSlot(
+                        child.name,
+                        child.lineno,
+                        "definition",
+                        calls_same_method_on_super=self._calls_same_method_on_super(
+                            child,
+                            child.name,
+                        ),
+                    )
+                )
                 continue
             if not isinstance(child, (ast.Assign, ast.AnnAssign)):
                 continue
@@ -725,6 +736,164 @@ class IndependentCandidateScanner:
                         )
                     )
         return methods
+
+    def _calls_same_method_on_super(
+        self,
+        method_node: ast.FunctionDef | ast.AsyncFunctionDef,
+        method_name: str,
+    ) -> bool:
+        """Return whether a live method path directly calls ``super().name``.
+
+        Only zero-argument ``super()`` and the current method's own name are
+        accepted.  Deferred nested scopes are deliberately not traversed, and
+        statically dead branches or statements after an unconditional exit do
+        not prove a runtime dependency.
+        """
+
+        state = FlowState()
+
+        def condition_value(node: ast.AST) -> bool | None:
+            if isinstance(node, ast.BoolOp):
+                values = [condition_value(value) for value in node.values]
+                if isinstance(node.op, ast.And):
+                    if False in values:
+                        return False
+                    return True if all(value is True for value in values) else None
+                if isinstance(node.op, ast.Or):
+                    if True in values:
+                        return True
+                    return False if all(value is False for value in values) else None
+            return _main_condition_value(node, state)
+
+        def expression_has_call(node: ast.AST | None) -> bool:
+            if node is None or isinstance(
+                node,
+                (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
+            ):
+                return False
+            if isinstance(node, ast.BoolOp):
+                for value in node.values:
+                    if expression_has_call(value):
+                        return True
+                    value_condition = condition_value(value)
+                    if isinstance(node.op, ast.And) and value_condition is False:
+                        break
+                    if isinstance(node.op, ast.Or) and value_condition is True:
+                        break
+                return False
+            if isinstance(node, ast.IfExp):
+                if expression_has_call(node.test):
+                    return True
+                selected = condition_value(node.test)
+                if selected is True:
+                    return expression_has_call(node.body)
+                if selected is False:
+                    return expression_has_call(node.orelse)
+                return expression_has_call(node.body) or expression_has_call(node.orelse)
+            if isinstance(node, ast.Call):
+                function = node.func
+                if (
+                    isinstance(function, ast.Attribute)
+                    and function.attr == method_name
+                    and isinstance(function.value, ast.Call)
+                ):
+                    super_call = function.value
+                    if (
+                        isinstance(super_call.func, ast.Name)
+                        and super_call.func.id == "super"
+                        and not super_call.args
+                        and not super_call.keywords
+                    ):
+                        return True
+            return any(expression_has_call(child) for child in ast.iter_child_nodes(node))
+
+        def scan_block(statements: Sequence[ast.stmt]) -> tuple[bool, bool]:
+            """Return ``(found, may_complete_normally)`` for one live block."""
+
+            for statement in statements:
+                if isinstance(
+                    statement,
+                    (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef),
+                ):
+                    continue
+                if isinstance(statement, ast.If):
+                    if expression_has_call(statement.test):
+                        return True, True
+                    selected = condition_value(statement.test)
+                    if selected is True:
+                        found, live = scan_block(statement.body)
+                    elif selected is False:
+                        found, live = scan_block(statement.orelse)
+                    else:
+                        body_found, body_live = scan_block(statement.body)
+                        else_found, else_live = scan_block(statement.orelse)
+                        found = body_found or else_found
+                        live = body_live or else_live
+                    if found:
+                        return True, live
+                    if not live:
+                        return False, False
+                    continue
+                if isinstance(statement, ast.Try):
+                    branches = [scan_block(statement.body)]
+                    branches.extend(scan_block(handler.body) for handler in statement.handlers)
+                    branches.append(scan_block(statement.orelse))
+                    if any(found for found, _ in branches):
+                        return True, True
+                    final_found, final_live = scan_block(statement.finalbody)
+                    if final_found:
+                        return True, final_live
+                    if not final_live:
+                        return False, False
+                    continue
+                if isinstance(statement, ast.While):
+                    if expression_has_call(statement.test):
+                        return True, True
+                    selected = condition_value(statement.test)
+                    if selected is not False:
+                        body_found, _ = scan_block(statement.body)
+                        if body_found:
+                            return True, True
+                    else_found, _ = scan_block(statement.orelse)
+                    if else_found:
+                        return True, True
+                    continue
+                if isinstance(statement, (ast.For, ast.AsyncFor)):
+                    if expression_has_call(statement.iter):
+                        return True, True
+                    body_found, _ = scan_block(statement.body)
+                    else_found, _ = scan_block(statement.orelse)
+                    if body_found or else_found:
+                        return True, True
+                    continue
+                if isinstance(statement, (ast.With, ast.AsyncWith)):
+                    if any(expression_has_call(item.context_expr) for item in statement.items):
+                        return True, True
+                    found, live = scan_block(statement.body)
+                    if found:
+                        return True, live
+                    if not live:
+                        return False, False
+                    continue
+
+                expressions: tuple[ast.AST | None, ...] = ()
+                if isinstance(
+                    statement,
+                    (ast.AnnAssign, ast.Assign, ast.AugAssign, ast.Expr, ast.Return),
+                ):
+                    expressions = (statement.value,)
+                elif isinstance(statement, ast.Raise):
+                    expressions = (statement.exc, statement.cause)
+                elif isinstance(statement, ast.Assert):
+                    expressions = (statement.test, statement.msg)
+                if any(expression_has_call(expression) for expression in expressions):
+                    return True, True
+                if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                    return False, False
+            return False, True
+
+        found, _ = scan_block(method_node.body)
+        return found
 
     def _expand_alias(self, qualified_name: str, *, limit: int = 24) -> set[str]:
         pending = deque([qualified_name])
@@ -943,6 +1112,23 @@ class IndependentCandidateScanner:
                         None,
                     )
                     if effective_owner is None:
+                        missing_super_owner = (
+                            next(
+                                (owner for owner in mro.owners[1:] if self._package_role(owner) == "upstream"),
+                                None,
+                            )
+                            if method.calls_same_method_on_super and not hasattr(object, method.name)
+                            else None
+                        )
+                        if missing_super_owner is not None:
+                            self._add_candidate(
+                                "override",
+                                record.file,
+                                method.line,
+                                None,
+                                {f"{missing_super_owner}.{method.name}"},
+                                "missing_upstream_super_target",
+                            )
                         continue
                     role = self._package_role(effective_owner)
                     if role not in {"upstream", "external"}:

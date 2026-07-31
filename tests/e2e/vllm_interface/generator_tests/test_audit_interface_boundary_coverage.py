@@ -672,6 +672,114 @@ class Child(Mixin, Base):
     assert overrides[0].targets == ("vllm.base.Base.run",)
 
 
+def test_missing_upstream_super_target_is_an_override_candidate_not_an_orphan(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/base.py", "class Base:\n    pass\n")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return super().run(value)
+""",
+    )
+
+    candidates = auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+    override = next(candidate for candidate in candidates if candidate.relation == "override")
+
+    assert override.line == 6
+    assert override.targets == ("vllm.base.Base.run",)
+    assert override.kinds == ("missing_upstream_super_target",)
+
+    mapping = tmp_path / "mapping.jsonl"
+    _write_jsonl(
+        mapping,
+        [
+            {"_meta": {}},
+            {
+                "f": {
+                    "relation": "override",
+                    "downstream": {
+                        "file": override.file,
+                        "owner": "Child",
+                        "name": "run",
+                    },
+                    "target_expression": "vllm.base.Base.run",
+                    "evidence": {"file": override.file, "line": override.line},
+                    "status": "risk",
+                    "reason_code": "missing_upstream_super_target",
+                    "generator_issue": False,
+                    "reason": "fixture",
+                }
+            },
+            *[_relation_payload(candidate) for candidate in candidates if candidate.site_key != override.site_key],
+        ],
+    )
+
+    report = auditor.audit_mapping_coverage(vllm_root, ascend_root, mapping)
+
+    assert report["summary"]["missing"] == 0
+    assert report["summary"]["orphan"] == 0
+
+
+def test_missing_super_candidate_excludes_non_direct_or_unreachable_calls(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/base.py", "class Base:\n    pass\n")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def __init__(self):
+        super().__init__()
+
+    def dead_branch(self):
+        if False:
+            return super().dead_branch()
+
+    def after_return(self):
+        return None
+        return super().after_return()
+
+    def nested_function(self):
+        def deferred():
+            return super().nested_function()
+        return deferred
+
+    def different_name(self):
+        return super().other_name()
+
+    def explicit_super(self):
+        return super(Base, self).explicit_super()
+""",
+    )
+
+    overrides = [
+        candidate
+        for candidate in auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+        if candidate.relation == "override"
+    ]
+
+    assert not overrides
+
+
 def test_external_reexport_is_not_a_vllm_owned_patch(
     tmp_path: Path,
 ) -> None:

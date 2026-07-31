@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.22.0"
+GENERATOR_VERSION = "0.23.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -1015,7 +1015,12 @@ def _canonical_guard(
 
     expression = " ".join(ast.unparse(node).split())
     key = f"expr:{ast.dump(node, include_attributes=False)}"
-    text = expression if truth else f"not ({expression})"
+    if truth:
+        text = expression
+    elif isinstance(node, ast.Call) and _expression_name(node.func) == "hasattr":
+        text = f"not {expression}"
+    else:
+        text = f"not ({expression})"
     return key, truth, text
 
 
@@ -1867,6 +1872,12 @@ class RepositoryIndex:
         self.classes: dict[str, ClassInfo] = {}
         self.callables: dict[str, CallableInfo] = {}
         self.callable_variants: dict[str, tuple[CallableInfo, ...]] = {}
+        self.class_variants: dict[str, list[ClassInfo]] = defaultdict(list)
+        self._class_variant_bindings: dict[
+            str,
+            list[dict[str, tuple[_ScopeBinding, ...]]],
+        ] = defaultdict(list)
+        self.class_base_conflicts: set[str] = set()
         self.final_bindings: dict[str, tuple[_ScopeBinding, ...]] = {}
         self.values: dict[str, ValueInfo] = {}
         self.aliases: dict[str, str] = {}
@@ -2029,6 +2040,8 @@ class RepositoryIndex:
                         methods={name: candidates[0] for name, candidates in method_variants.items()},
                         method_variants=method_variants,
                     )
+                    self.class_variants[qualified_name].append(info)
+                    self._class_variant_bindings[qualified_name].append(class_final_bindings)
                     classes[node.name] = info
                     self.classes[qualified_name] = info
                     if class_is_unconditional:
@@ -2195,9 +2208,99 @@ class RepositoryIndex:
             for export_name, target in typed_lazy_exports.items():
                 self.aliases[f"{module}.{export_name}"] = target
 
+        self._aggregate_class_variants()
         self._materialize_star_import_aliases()
         self._materialize_dataclass_initializers()
         self._materialize_class_callable_aliases()
+
+    def _aggregate_class_variants(self) -> None:
+        """Merge same-name class definitions that can be final at runtime."""
+
+        for qualified_name, variants in self.class_variants.items():
+            if len(variants) < 2:
+                continue
+            binding_states = self._class_variant_bindings[qualified_name]
+            merged_bindings = _merge_scope_binding_states(binding_states) or {}
+            member_names = {name for state in binding_states for name in state}
+            for member_name in member_names:
+                member_qualified_name = f"{qualified_name}.{member_name}"
+                alternatives = merged_bindings[member_name]
+                self.final_bindings[member_qualified_name] = alternatives
+                function_nodes = tuple(
+                    dict.fromkeys(
+                        alternative.node
+                        for alternative in alternatives
+                        if alternative.kind == "function" and alternative.node is not None
+                    )
+                )
+                self.unconditional_symbols.discard(member_qualified_name)
+                if not function_nodes:
+                    self.callables.pop(member_qualified_name, None)
+                    self.callable_variants.pop(member_qualified_name, None)
+                    continue
+                representative = variants[0]
+                callable_variants = tuple(
+                    CallableInfo(
+                        qualified_name=member_qualified_name,
+                        module=representative.module,
+                        file=representative.file,
+                        owner=representative.name,
+                        name=member_name,
+                        node=node,
+                    )
+                    for node in function_nodes
+                )
+                self.callables[member_qualified_name] = callable_variants[0]
+                self.callable_variants[member_qualified_name] = callable_variants
+                if (
+                    qualified_name in self.unconditional_symbols
+                    and alternatives
+                    and all(alternative.kind == "function" for alternative in alternatives)
+                ):
+                    self.unconditional_symbols.add(member_qualified_name)
+
+            base_shapes = {(variant.bases, variant.resolved_bases) for variant in variants}
+            if len(base_shapes) != 1:
+                self.class_base_conflicts.add(qualified_name)
+            representative = variants[0]
+            method_variants = {
+                name: tuple(
+                    candidate.node
+                    for candidate in self.callable_variants.get(
+                        f"{qualified_name}.{name}",
+                        (),
+                    )
+                    if candidate.node is not None
+                )
+                for name in member_names
+                if self.callable_variants.get(f"{qualified_name}.{name}")
+            }
+            aggregate = ClassInfo(
+                qualified_name=qualified_name,
+                module=representative.module,
+                file=representative.file,
+                name=representative.name,
+                bases=representative.bases,
+                resolved_bases=representative.resolved_bases,
+                methods={name: candidates[0] for name, candidates in method_variants.items()},
+                method_variants=method_variants,
+            )
+            self.classes[qualified_name] = aggregate
+            self.modules[aggregate.module].classes[aggregate.name] = aggregate
+            class_nodes = tuple(
+                candidate.node
+                for candidate in self.final_bindings.get(qualified_name, ())
+                if candidate.kind == "class" and candidate.node is not None
+            )
+            if class_nodes:
+                self.callables[qualified_name] = CallableInfo(
+                    qualified_name=qualified_name,
+                    module=aggregate.module,
+                    file=aggregate.file,
+                    owner=None,
+                    name=aggregate.name,
+                    node=class_nodes[0],
+                )
 
     def _materialize_star_import_aliases(self) -> None:
         """Resolve public top-level callables imported with ``import *``."""
@@ -2450,7 +2553,7 @@ class RepositoryIndex:
                 wrapper = _expression_name(value.func)
                 if wrapper not in {"classmethod", "property", "staticmethod"}:
                     continue
-                if len(value.args) != 1:
+                if len(value.args) != 1 or value.keywords:
                     continue
                 kind = wrapper
                 value = value.args[0]
@@ -2558,17 +2661,22 @@ class RepositoryIndex:
         qualified_name: str,
     ) -> tuple[_ScopeBinding, ...]:
         canonical = self.canonical_name(qualified_name)
-        return tuple(
-            self._refine_final_binding(canonical, binding) for binding in self.final_bindings.get(canonical, ())
-        )
+        refined = {
+            candidate
+            for binding in self.final_bindings.get(canonical, ())
+            for candidate in self._refine_final_binding_variants(
+                canonical,
+                binding,
+                frozenset(),
+            )
+        }
+        return tuple(sorted(refined))
 
     def _final_alias_target(
         self,
         qualified_name: str,
         binding: _ScopeBinding,
     ) -> str | None:
-        if binding.kind != "alias":
-            return None
         node = binding.node
         if isinstance(node, (ast.AnnAssign, ast.Assign)):
             value = node.value
@@ -2576,9 +2684,17 @@ class RepositoryIndex:
             return None
         if isinstance(value, ast.Call):
             wrapper = _expression_name(value.func)
-            if wrapper not in {"classmethod", "staticmethod"} or len(value.args) != 1:
+            if wrapper not in {"classmethod", "staticmethod"} or len(value.args) != 1 or value.keywords:
+                return None
+            owner_name = qualified_name.rsplit(".", 1)[0]
+            if owner_name not in self.classes:
+                # classmethod/staticmethod objects are descriptors only when
+                # installed in a class namespace; at module scope they are
+                # ordinary non-callable values.
                 return None
             value = value.args[0]
+        elif binding.kind != "alias":
+            return None
         expression = _expression_name(value)
         if expression is None:
             return None
@@ -2600,6 +2716,40 @@ class RepositoryIndex:
                 module,
                 expression,
             )
+        )
+
+    def _refine_final_binding_variants(
+        self,
+        qualified_name: str,
+        binding: _ScopeBinding,
+        seen: frozenset[str],
+    ) -> tuple[_ScopeBinding, ...]:
+        """Propagate every final kind through a provable callable alias."""
+
+        if qualified_name in seen:
+            return (binding,)
+        target = self._final_alias_target(qualified_name, binding)
+        if target is None:
+            return (binding,)
+        source_bindings = self.final_bindings.get(target, ())
+        if not source_bindings:
+            return (self._refine_final_binding(qualified_name, binding),)
+        refined_sources = (
+            candidate
+            for source_binding in source_bindings
+            for candidate in self._refine_final_binding_variants(
+                target,
+                source_binding,
+                frozenset((*seen, qualified_name)),
+            )
+        )
+        return tuple(
+            replace(
+                binding,
+                kind=source.kind,
+                node=source.node,
+            )
+            for source in refined_sources
         )
 
     def _refine_final_binding(
@@ -2657,7 +2807,23 @@ class RepositoryIndex:
                 frozenset((*seen, canonical)),
             ):
                 if endpoint is None:
-                    variants.append(source)
+                    owner_name, member_name = canonical.rsplit(".", 1)
+                    owner = self.find_class(owner_name)
+                    if owner is None:
+                        variants.append(source)
+                    else:
+                        variants.append(
+                            replace(
+                                source,
+                                qualified_name=canonical,
+                                module=owner.module,
+                                file=owner.file,
+                                owner=owner.name,
+                                name=member_name,
+                                binding_line=binding.line,
+                                origin_kind="callable_alias",
+                            )
+                        )
                 else:
                     variants.append(
                         replace(
@@ -2916,6 +3082,22 @@ class InterfaceBoundaryGenerator:
     ) -> tuple[list[str], list[str]]:
         if qualified_name in STDLIB_STRUCTURAL_BASES:
             return list(STDLIB_STRUCTURAL_BASES[qualified_name]), []
+        index: RepositoryIndex | None = None
+        if qualified_name.startswith("vllm_ascend."):
+            index = self.downstream
+        elif qualified_name.startswith("vllm."):
+            index = self.upstream
+        else:
+            index = next(
+                (
+                    candidate
+                    for package, candidate in self.externals.items()
+                    if qualified_name == package or qualified_name.startswith(f"{package}.")
+                ),
+                None,
+            )
+        if index is not None and qualified_name in index.class_base_conflicts:
+            return [], [f"conditional class variants have different bases: {qualified_name}"]
         info = self._class_info(qualified_name)
         if info is None:
             return [], [qualified_name]
@@ -2932,6 +3114,29 @@ class InterfaceBoundaryGenerator:
                 missing.append(f"opaque or unresolved base: {candidate}")
                 break
         return bases, missing
+
+    def _conditional_class_dependency(
+        self,
+        qualified_name: str,
+        seen: frozenset[str] = frozenset(),
+    ) -> str | None:
+        """Return the first base that is a class only on some live paths."""
+
+        if qualified_name in seen:
+            return None
+        class_info = self._class_info(qualified_name)
+        if class_info is None:
+            return None
+        next_seen = frozenset((*seen, qualified_name))
+        for base in class_info.resolved_bases:
+            base = self._canonical_reference(base)
+            kinds = self._final_binding_kinds(base)
+            if "class" in kinds and kinds != {"class"}:
+                return base
+            nested = self._conditional_class_dependency(base, next_seen)
+            if nested is not None:
+                return nested
+        return None
 
     def _linearized_mro(
         self,
@@ -3041,6 +3246,23 @@ class InterfaceBoundaryGenerator:
                         )
                     )
                     continue
+                upstream_kinds = self._final_binding_kinds(resolved)
+                if "class" in upstream_kinds and upstream_kinds != {"class"}:
+                    self.findings.append(
+                        CandidateFinding(
+                            relation="inheritance",
+                            downstream_file=class_info.file,
+                            downstream_owner=class_info.name,
+                            downstream_name=class_info.name,
+                            target_expression=resolved,
+                            evidence_line=self._class_line(class_info),
+                            reason=("upstream base is a class only on some normally completing module paths"),
+                            status="review",
+                            reason_code="conditional_class_presence",
+                            generator_issue=False,
+                        )
+                    )
+                    continue
                 self.relations.append(
                     Relation(
                         relation="inheritance",
@@ -3059,6 +3281,8 @@ class InterfaceBoundaryGenerator:
 
     def _collect_verified_overrides(self) -> None:
         for class_info in self.downstream.classes.values():
+            if self._conditional_class_dependency(class_info.qualified_name) is not None:
+                continue
             mro_result = self._linearized_mro(class_info.qualified_name)
             mro = mro_result.owners
             if mro_result.complete and not any(owner.startswith("vllm.") for owner in mro[1:]):
@@ -3068,6 +3292,35 @@ class InterfaceBoundaryGenerator:
                     mro[1:],
                     method_name,
                 )
+                downstream_name = f"{class_info.qualified_name}.{method_name}"
+                downstream_kinds = self._final_binding_kinds(downstream_name)
+                downstream_callable_kinds = downstream_kinds & {"function"}
+                downstream_other_kinds = downstream_kinds - {"function"}
+                upstream_target_owners = (
+                    *resolution.callable_owners,
+                    *resolution.blocking_owners,
+                )
+                if downstream_callable_kinds and downstream_other_kinds and upstream_target_owners:
+                    target_owner = upstream_target_owners[0]
+                    self.findings.append(
+                        CandidateFinding(
+                            relation="override",
+                            downstream_file=class_info.file,
+                            downstream_owner=class_info.name,
+                            downstream_name=method_name,
+                            target_expression=f"{target_owner}.{method_name}",
+                            evidence_line=getattr(method_node, "lineno", 0),
+                            reason=(
+                                "downstream member is callable only on some "
+                                "normally completing class paths; other final "
+                                f"bindings: {', '.join(sorted(downstream_other_kinds))}"
+                            ),
+                            status="review",
+                            reason_code="conditional_callable_presence",
+                            generator_issue=False,
+                        )
+                    )
+                    continue
                 effective_owners = resolution.callable_owners if resolution.is_total_callable else ()
                 if not effective_owners:
                     conditional_owners = (
@@ -3090,6 +3343,39 @@ class InterfaceBoundaryGenerator:
                                 ),
                                 status="review",
                                 reason_code="conditional_callable_presence",
+                                generator_issue=False,
+                            )
+                        )
+                        continue
+                    super_target = (
+                        next(
+                            (owner for owner in mro[1:] if owner.startswith("vllm.")),
+                            None,
+                        )
+                        if mro_result.complete
+                        and not hasattr(object, method_name)
+                        and self._calls_same_method_on_super(
+                            method_node,
+                            method_name,
+                        )
+                        else None
+                    )
+                    if super_target is not None:
+                        self.findings.append(
+                            CandidateFinding(
+                                relation="override",
+                                downstream_file=class_info.file,
+                                downstream_owner=class_info.name,
+                                downstream_name=method_name,
+                                target_expression=f"{super_target}.{method_name}",
+                                evidence_line=getattr(method_node, "lineno", 0),
+                                reason=(
+                                    "downstream method directly calls the same "
+                                    "method through super(), but no upstream "
+                                    "implementation exists in the complete MRO"
+                                ),
+                                status="risk",
+                                reason_code="missing_upstream_super_target",
                                 generator_issue=False,
                             )
                         )
@@ -3132,6 +3418,45 @@ class InterfaceBoundaryGenerator:
                         effective_owner,
                         mro,
                     )
+
+    def _calls_same_method_on_super(
+        self,
+        method_node: ast.AST,
+        method_name: str,
+    ) -> bool:
+        """Whether this method directly evaluates ``super().<same-name>(...)``."""
+
+        if not isinstance(
+            method_node,
+            (ast.AsyncFunctionDef, ast.FunctionDef),
+        ):
+            return False
+        tag_guard_names = _tag_guard_names(method_node.body)
+        for statement in _main_module_statements(
+            method_node.body,
+            tag_guard_names,
+        ):
+            for expression in self._statement_expressions(statement):
+                for candidate in _main_expression_calls(
+                    expression,
+                    tag_guard_names,
+                ):
+                    function = candidate.func
+                    if not (
+                        isinstance(function, ast.Attribute)
+                        and function.attr == method_name
+                        and isinstance(function.value, ast.Call)
+                    ):
+                        continue
+                    super_call = function.value
+                    if (
+                        isinstance(super_call.func, ast.Name)
+                        and super_call.func.id == "super"
+                        and not super_call.args
+                        and not super_call.keywords
+                    ):
+                        return True
+        return False
 
     def _record_verified_override_owner(
         self,
@@ -3573,6 +3898,17 @@ class InterfaceBoundaryGenerator:
     ) -> PatchFlowResult:
         exits: list[PatchFlowExit] = []
         for node in statements:
+            if isinstance(node, ast.Assert):
+                result = self._assert_flow(
+                    module_info,
+                    node,
+                    context,
+                    tag_guard_names,
+                )
+                exits.extend(result.exits)
+                if not result.live:
+                    return PatchFlowResult(live=False, exits=exits)
+                continue
             if self._statement_may_raise(module_info, node, context):
                 exits.append(PatchFlowExit("raise", context.clone()))
             for expression in self._statement_expressions(node):
@@ -4565,21 +4901,28 @@ class InterfaceBoundaryGenerator:
         owner = self._canonical_reference(owner)
         if owner in self.upstream.modules:
             # A child module existing on disk does not make it an attribute of
-            # the package object.  Require a direct, unconditional export.
-            return f"{owner}.{member}" in self.upstream.unconditional_exports
-        target = self._canonical_reference(f"{owner}.{member}")
-        if target in self.upstream.unconditional_symbols:
-            return True
+            # the package object.  Require a direct binding on every normal
+            # module path; any bound value makes hasattr() true.
+            target = self._canonical_reference(f"{owner}.{member}")
+            alternatives = self._final_bindings(target)
+            return bool(alternatives) and all(alternative.kind != "unbound" for alternative in alternatives)
         owner_info = self.upstream.find_class(owner)
         if owner_info is None:
             return False
         mro_result = self._linearized_mro(owner_info.qualified_name)
         if not mro_result.complete:
             return False
-        return any(
-            self._canonical_reference(f"{candidate}.{member}") in self.upstream.unconditional_symbols
-            for candidate in mro_result.owners[1:]
-        )
+        for candidate in mro_result.owners:
+            alternatives = self._final_bindings(self._canonical_reference(f"{candidate}.{member}"))
+            if not alternatives:
+                continue
+            kinds = {alternative.kind for alternative in alternatives}
+            if "unbound" not in kinds:
+                return bool(kinds)
+            # On unbound variants normal attribute lookup continues through
+            # the MRO.  The member is proven only if that fallback is itself
+            # present on every remaining path.
+        return False
 
     def _static_value_alternatives(
         self,
@@ -4892,18 +5235,129 @@ class InterfaceBoundaryGenerator:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             return True
         for expression in self._statement_expressions(node):
-            if expression is None:
-                continue
-            for candidate in ast.walk(expression):
-                if isinstance(candidate, (ast.Await, ast.Subscript, ast.YieldFrom)):
-                    return True
-                if isinstance(candidate, ast.Call) and not self._proven_safe_literal_call(
-                    module_info,
-                    candidate,
-                    context,
-                ):
-                    return True
+            if self._expression_may_raise_now(
+                module_info,
+                expression,
+                context,
+            ):
+                return True
         return False
+
+    def _assert_flow(
+        self,
+        module_info: ModuleInfo,
+        node: ast.Assert,
+        context: PatchScanContext,
+        tag_guard_names: set[str],
+    ) -> PatchFlowResult:
+        """Model the normal and exceptional outcomes of one ``assert``.
+
+        The assertion message is evaluated only when the test is false.  A
+        definitely-false assertion raises ``AssertionError`` and terminates
+        the normal path; an unknown test keeps both outcomes.
+        """
+
+        exits: list[PatchFlowExit] = []
+        if self._expression_may_raise_now(
+            module_info,
+            node.test,
+            context,
+        ):
+            exits.append(PatchFlowExit("raise", context.clone()))
+
+        truth = _main_condition_value(node.test, tag_guard_names)
+        if truth is True:
+            return PatchFlowResult(live=True, exits=exits)
+        if self._expression_may_raise_now(
+            module_info,
+            node.msg,
+            context,
+        ):
+            exits.append(PatchFlowExit("raise", context.clone()))
+        exits.append(
+            PatchFlowExit(
+                "raise",
+                context.clone(),
+                exception_name="builtins.AssertionError",
+            )
+        )
+        return PatchFlowResult(live=truth is None, exits=exits)
+
+    def _expression_may_raise_now(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+    ) -> bool:
+        """Whether an expression evaluated now may raise on a live path."""
+
+        if node is None or isinstance(node, ast.Constant):
+            return False
+        if isinstance(node, ast.Lambda):
+            return any(
+                self._expression_may_raise_now(module_info, value, context)
+                for value in (*node.args.defaults, *node.args.kw_defaults)
+                if value is not None
+            )
+        if isinstance(node, ast.BoolOp):
+            for value in node.values:
+                if self._expression_may_raise_now(module_info, value, context):
+                    return True
+                truth = _main_condition_value(value, set())
+                if isinstance(node.op, ast.And) and truth is False:
+                    break
+                if isinstance(node.op, ast.Or) and truth is True:
+                    break
+            return False
+        if isinstance(node, ast.IfExp):
+            if self._expression_may_raise_now(module_info, node.test, context):
+                return True
+            truth = _main_condition_value(node.test, set())
+            if truth is True:
+                return self._expression_may_raise_now(module_info, node.body, context)
+            if truth is False:
+                return self._expression_may_raise_now(module_info, node.orelse, context)
+            return self._expression_may_raise_now(
+                module_info,
+                node.body,
+                context,
+            ) or self._expression_may_raise_now(
+                module_info,
+                node.orelse,
+                context,
+            )
+        if isinstance(node, ast.Name):
+            name = node.id
+            return not (
+                name in context.bindings
+                or name in context.local_callables
+                or name in context.parameter_names
+                or name in module_info.imports
+                or name in module_info.classes
+                or name in module_info.functions
+                or hasattr(builtins, name)
+            )
+        if isinstance(node, ast.Call):
+            return not self._proven_safe_literal_call(
+                module_info,
+                node,
+                context,
+            )
+        if isinstance(node, (ast.Await, ast.Subscript, ast.YieldFrom)):
+            return True
+        if isinstance(node, (ast.Dict, ast.List, ast.Set, ast.Tuple)):
+            values: Iterable[ast.AST | None]
+            if isinstance(node, ast.Dict):
+                values = (*node.keys, *node.values)
+            else:
+                values = node.elts
+            return any(self._expression_may_raise_now(module_info, value, context) for value in values)
+        if isinstance(node, ast.NamedExpr):
+            return self._expression_may_raise_now(module_info, node.value, context)
+        # Attribute lookup, operators, formatting, comprehensions, and dynamic
+        # protocol hooks can execute user code.  Keep both success and raise
+        # outcomes instead of proving them safe from syntax alone.
+        return True
 
     def _update_with_bindings(
         self,
@@ -5016,6 +5470,17 @@ class InterfaceBoundaryGenerator:
     ) -> PatchFlowResult:
         exits: list[PatchFlowExit] = []
         for node in statements:
+            if isinstance(node, ast.Assert):
+                result = self._assert_flow(
+                    module_info,
+                    node,
+                    context,
+                    tag_guard_names,
+                )
+                exits.extend(result.exits)
+                if not result.live:
+                    return PatchFlowResult(live=False, exits=exits)
+                continue
             if self._statement_may_raise(module_info, node, context):
                 exits.append(PatchFlowExit("raise", context.clone()))
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -5829,17 +6294,6 @@ class InterfaceBoundaryGenerator:
         *,
         evidence_target: str | None = None,
     ) -> None:
-        field_finding = self._field_patch_finding(
-            module_info,
-            target,
-            replacement_node,
-            context,
-            line,
-            evidence_target=evidence_target,
-        )
-        if field_finding is not None:
-            self.findings.append(field_finding)
-            return
         replacement = self._resolve_patch_replacement(
             module_info,
             replacement_node,
@@ -5847,6 +6301,18 @@ class InterfaceBoundaryGenerator:
             target,
             line,
         )
+        field_finding = self._field_patch_finding(
+            module_info,
+            target,
+            replacement_node,
+            context,
+            line,
+            evidence_target=evidence_target,
+            replacement=replacement,
+        )
+        if field_finding is not None:
+            self.findings.append(field_finding)
+            return
         if replacement.is_restore:
             self._append_unresolved_patch(
                 module_info,
@@ -5888,6 +6354,27 @@ class InterfaceBoundaryGenerator:
             target,
             context,
         )
+        if presence_kinds == {"unbound"} and self._matching_hasattr_polarities(
+            target,
+            context,
+        ) == {False}:
+            self.findings.append(
+                CandidateFinding(
+                    relation="monkey_patch",
+                    downstream_file=replacement.info.file,
+                    downstream_owner=replacement.info.owner,
+                    downstream_name=replacement.info.name,
+                    target_expression=target,
+                    evidence_line=line,
+                    reason=("assignment injects a callable only when the upstream member is absent"),
+                    status="expected",
+                    reason_code="inject_missing_member",
+                    generator_issue=False,
+                    evidence_scope=self._scope_name(context),
+                    evidence_guards=context.guard_texts,
+                )
+            )
+            return
         callable_kinds = presence_kinds & {"class", "function"}
         other_kinds = presence_kinds - {"class", "function"}
         if callable_kinds and other_kinds:
@@ -6002,11 +6489,42 @@ class InterfaceBoundaryGenerator:
         line: int,
         *,
         evidence_target: str | None,
+        replacement: PatchReplacement,
     ) -> CandidateFinding | None:
         if self._find_upstream_patch_target(target) is not None:
             return None
         upstream_value = self.upstream.find_value(target)
         if upstream_value is not None:
+            final_bindings = self._final_bindings(target)
+            final_value_nodes = []
+            for binding in final_bindings:
+                value_node = binding.node
+                if isinstance(value_node, (ast.AnnAssign, ast.Assign)):
+                    value_node = value_node.value
+                final_value_nodes.append(value_node)
+            if (
+                replacement.info is not None
+                and final_bindings
+                and all(binding.kind == "value" for binding in final_bindings)
+                and all(self._definitely_non_callable(value_node) for value_node in final_value_nodes)
+            ):
+                return CandidateFinding(
+                    relation="monkey_patch",
+                    downstream_file=replacement.info.file,
+                    downstream_owner=replacement.info.owner,
+                    downstream_name=replacement.info.name,
+                    target_expression=target,
+                    evidence_line=line,
+                    reason=(
+                        "upstream member is definitely non-callable, so this "
+                        "callable assignment may target a removed interface"
+                    ),
+                    status="risk",
+                    reason_code="possible_stale_patch",
+                    generator_issue=False,
+                    evidence_scope=self._scope_name(context),
+                    evidence_guards=context.guard_texts,
+                )
             return CandidateFinding(
                 relation="monkey_patch",
                 downstream_file=module_info.file,
@@ -6558,6 +7076,12 @@ class InterfaceBoundaryGenerator:
         qualified_name: str,
     ) -> CallableInfo | None:
         qualified_name = self._canonical_reference(qualified_name)
+        final_bindings = self._final_bindings(qualified_name)
+        if final_bindings and not any(binding.kind in {"class", "function"} for binding in final_bindings):
+            return None
+        final_variants = self._callable_variants(qualified_name)
+        if final_variants:
+            return final_variants[0]
         direct = self._callable_info(qualified_name)
         if direct is not None:
             return direct

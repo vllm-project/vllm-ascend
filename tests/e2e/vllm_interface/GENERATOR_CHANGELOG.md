@@ -4,6 +4,76 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.23.0 - exact presence and missing-super checkpoint
+
+- Previous accepted checkpoint: `10c86dc4a`; initial red-test checkpoint:
+  `8079a7892`. Additional red-test checkpoints cover negative `hasattr`,
+  wrapper reachability, and builtin `super()` targets.
+- Problems fixed:
+  - implicit exception scanning walked deferred lambda bodies and skipped
+    short-circuit rules, while `assert False` did not produce an exact
+    `AssertionError` path;
+  - a negative `hasattr` path could still be emitted as a verified patch, and
+    `hasattr` did not account for bound values or inherited members;
+  - downstream methods and upstream base classes that were callable/classes
+    on only some normal paths could be treated as unconditional;
+  - same-name conditional class definitions overwrote one another, losing
+    callable signature variants;
+  - class-body `staticmethod(_impl)` and `classmethod(_impl)` assignments
+    exposed `_impl` instead of the installed member, and lost conditional
+    source presence; module-level descriptor wrappers were incorrectly
+    promoted to callable endpoints;
+  - a callable written over a definitely non-callable final member was called
+    a field mutation instead of a possible stale interface patch;
+  - a downstream `super().same_method(...)` call disappeared when the upstream
+    method was removed, while dead calls and methods supplied by `object` could
+    be false positives.
+- Changes:
+  - evaluate expression exceptions only on paths that execute now; model
+    assertion success and exact `AssertionError` exits separately;
+  - use final binding alternatives and complete MRO lookup for callable,
+    class, value, unbound, and `hasattr` presence;
+  - aggregate every final same-name class variant and every method binding,
+    adding `unbound` for a variant that lacks the member; differing conditional
+    base shapes make the MRO incomplete rather than selecting one branch;
+  - propagate final kinds and callable signatures through provable class-body
+    aliases while keeping the installed endpoint name;
+  - report a missing upstream same-name `super()` target only for a reachable
+    direct call, a complete MRO, and a method not supplied by `object`.
+- Safety boundaries:
+  - an incomplete inheritance chain remains review and is never guessed;
+  - a genuine missing upstream class, patch target, or direct `super()` target
+    remains a non-generator risk;
+  - a downstream missing-member injection remains expected and is not turned
+    into a verified relation;
+  - builtin descriptor wrappers are recognized only in a class namespace with
+    one positional argument and no keywords.
+- Test evidence: all 137 isolated generator/auditor tests pass. The new
+  fixtures cover assertion flow, short-circuit calls, custom exception
+  inheritance, negative `hasattr`, conditional class/method presence,
+  same-name class variants, assignment-form static/class methods, definite
+  `None`, reachable/dead/builtin `super()` calls, wrapper-source alternatives,
+  and module-level descriptor wrappers.
+- Fixed-source result: vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`, vllm-ascend
+  `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0` generated in 307.8 seconds:
+  971 relations and 45 findings (8 risk, 9 expected, 22 excluded, 6 verified),
+  with zero review and zero generator issues. Its SHA-256 is
+  `49e9b8df8d4abfc21f51d636e6502ba2d47891bbd2fa826aa1b5465dcd55c661`.
+  All 673 raw contract records are byte-for-byte identical to the independently
+  rerun v0.22 output. The only new finding is the real downstream call from
+  `NPUModelRunner.postprocess` to the now-missing
+  `GPUModelRunner.postprocess`; four `object.__init__/__repr__` false positives
+  were reproduced and removed.
+- Independent coverage audit v0.4 classifies all 1,019 candidates with zero
+  missing, conflicting, or generator-issue records. It recognizes the new
+  missing-super risk as a real candidate and retains only the two pre-existing
+  monkey-patch orphans.
+- This is a rollback checkpoint, not final completion. Descriptor binding
+  kinds and `support_torch_compile` runtime class transformation remain the
+  next accuracy stages.
+
 ## v0.22.0 - exact NPU platform path checkpoint
 
 - Starting commit: `f2a2bf13a`; rollback checkpoint: `04e6a5cf8`.
