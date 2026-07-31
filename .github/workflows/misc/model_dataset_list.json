@@ -289,6 +289,7 @@
       "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
       "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
       "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
+      "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp",
       "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
       "Eco-Tech/Kimi-K2.6-w4a8",
       "lightseekorg/kimi-k2.6-eagle3",
@@ -351,6 +352,7 @@
       "vllm-ascend/GSM8K-in65536-bs512-prefix90-ds",
       "vllm-ascend/GSM8K-in128k-bs512-prefix90-ds",
       "vllm-ascend/GSM8K-in1M-bs4-prefix99-ds",
+      "vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi",
       "vllm-ascend/GSM8K-in3500-bs8000-qwen3"
     ]
   }
