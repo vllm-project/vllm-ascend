@@ -508,8 +508,6 @@ class DCPManager:
         original_is_prefilling = common_attn_metadata.is_prefilling
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        dcp_metadata.query_lens_cpu = query_lens_cpu
-        dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
 
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
         if is_mla:
@@ -536,11 +534,31 @@ class DCPManager:
             seq_lens_for_dcp = dcp_metadata.draft_base_seq_lens
         else:
             seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
+
+        # PR #13252 rebuilds the MTP mask for GQA as well as MLA. Under FULL
+        # graph mode, every padded token is represented as a one-token decode
+        # row: common_attn_metadata.num_reqs and query_start_loc therefore use
+        # the captured token count (for example, 90 rows for 10 real requests
+        # with 9 MTP tokens). Extend the saved real-request sequence lengths
+        # with zero-history graph rows so every DCP tensor uses that same batch
+        # dimension. Non-FULL execution already has equal sizes and is unchanged.
+        num_draft_reqs = query_lens_cpu.shape[0]
+        if seq_lens_for_dcp.shape[0] < num_draft_reqs:
+            seq_lens_for_dcp = torch.nn.functional.pad(
+                seq_lens_for_dcp,
+                (0, num_draft_reqs - seq_lens_for_dcp.shape[0]),
+            )
+            if is_mla:
+                dcp_metadata.draft_base_seq_lens = seq_lens_for_dcp
+        else:
+            seq_lens_for_dcp = seq_lens_for_dcp[:num_draft_reqs]
+        query_lens_cpu = query_lens_cpu[:num_draft_reqs]
+        dcp_metadata.query_lens_cpu = query_lens_cpu
+        dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
         if getattr(self, "speculative_config", None) is not None:
-            num_draft_reqs = query_lens_cpu.shape[0]
             draft_base_seq_lens = dcp_metadata.draft_base_seq_lens if is_mla else seq_lens_for_dcp
             assert draft_base_seq_lens is not None
             draft_histories = (draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
@@ -579,6 +597,17 @@ class DCPManager:
         seq_lens_for_dcp = seq_lens
         if seq_lens_cpu is not None:
             seq_lens_for_dcp = seq_lens_cpu
+        if attn_metadata.decode_meta is not None:
+            # Do not collapse the FULL graph rows materialized by the builder
+            # back to the number of real requests during this second update.
+            num_decode_rows = len(attn_metadata.decode_meta.num_computed_tokens_of_dcp)
+            if seq_lens_for_dcp.shape[0] < num_decode_rows:
+                seq_lens_for_dcp = torch.nn.functional.pad(
+                    seq_lens_for_dcp,
+                    (0, num_decode_rows - seq_lens_for_dcp.shape[0]),
+                )
+            else:
+                seq_lens_for_dcp = seq_lens_for_dcp[:num_decode_rows]
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         rank_seq_lens = local_seq_lens[:, self.dcp_world_rank]
 
