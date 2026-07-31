@@ -161,7 +161,7 @@ def test_invalid_layout_config_is_rejected():
         build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": True})
     with pytest.raises(ValueError):
         build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 0})
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         build_layerwise_cache_layout(27, {"layerwise_independent_layers": 27})
     with pytest.raises(TypeError):
         build_layerwise_cache_layout(27, {"layerwise_independent_layers": "1,4"})
