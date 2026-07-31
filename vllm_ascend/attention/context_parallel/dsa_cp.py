@@ -139,6 +139,9 @@ class CompressorSPMetadata:
     tail_token_ranges: tuple[tuple[int, int], ...] = ()
     padding_row_indices: torch.Tensor = None
     padding_row_slice: tuple[int, int] | None = None
+    sp_row_counts_per_rank: tuple[int, ...] = ()
+    tp_rank: int = 0
+    tp_size: int = 1
 
 
 @dataclass
@@ -837,6 +840,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             return CompressorSPMetadata(False, "missing_cpu_metadata")
 
         tp_size = get_tp_group().world_size
+        tp_rank = get_tp_group().rank_in_group
         query_start_loc_key = tuple(query_start_loc_cpu[: num_reqs + 1].tolist())
         seq_lens_key = tuple(seq_lens_cpu[:num_reqs].tolist())
         input_positions_key = tuple(input_positions_cpu.tolist())
@@ -887,6 +891,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=seq_lens_cpu[:num_reqs].tolist(),
             local_start=local_start,
             local_end=local_end,
+            tp_rank=tp_rank,
         )
         metadata = self._to_compressor_sp_metadata(plan)
         metadata.path = path
@@ -932,6 +937,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 if plan.request_start_positions
                 else None,
                 tail_token_ranges=plan.tail_token_ranges,
+                sp_row_counts_per_rank=plan.sp_row_counts_per_rank,
+                tp_rank=plan.tp_rank,
+                tp_size=plan.tp_size,
             )
 
         def indices(values, index_slice):
@@ -1011,6 +1019,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             tail_token_ranges=plan.tail_token_ranges,
             padding_row_indices=indices(plan.padding_row_indices, plan.padding_row_slice),
             padding_row_slice=plan.padding_row_slice,
+            sp_row_counts_per_rank=plan.sp_row_counts_per_rank,
+            tp_rank=plan.tp_rank,
+            tp_size=plan.tp_size,
         )
 
     def _build_sas_metadata(
@@ -1556,6 +1567,77 @@ class AscendDSACPImpl(DSAAttentionImpl):
         indices = getattr(plan, f"{name}_indices")
         assert indices is not None
         return tensor.index_select(0, indices)
+
+    def _gather_compressor_sp_rows(
+        self,
+        local_rows: torch.Tensor,
+        plan: CompressorSPMetadata,
+    ) -> torch.Tensor:
+        """All-gather compressed rows from all TP ranks and concatenate in
+        rank order to reconstruct the full global compressed rows.
+
+        Uses padded fixed-shape all_gather for HCCL compatibility: each rank
+        pads its local rows to max_rows (the maximum across all ranks), the
+        all_gather collects fixed-shape tensors, then each rank's contribution
+        is sliced to its true count and concatenated.
+        """
+        sp_row_counts = plan.sp_row_counts_per_rank
+        tp_size = plan.tp_size
+        tp_rank = plan.tp_rank
+
+        if not sp_row_counts or tp_size <= 1:
+            return local_rows
+
+        total_rows = sum(sp_row_counts)
+        if total_rows == 0:
+            return local_rows[:0]
+
+        # Validate local row count matches plan expectation
+        expected_local = sp_row_counts[tp_rank]
+        if local_rows.shape[0] != expected_local:
+            raise RuntimeError(
+                f"CompressorSP gather: local_rows has {local_rows.shape[0]} rows "
+                f"but plan expects {expected_local} for rank {tp_rank}"
+            )
+
+        max_rows = max(sp_row_counts)
+        head_dim = local_rows.shape[1] if local_rows.dim() >= 2 else 0
+        if head_dim == 0:
+            raise RuntimeError(
+                "CompressorSP gather: local_rows must be at least 2D "
+                f"[num_rows, head_dim], got shape {local_rows.shape}"
+            )
+
+        # Pad local rows to [max_rows, head_dim]
+        if local_rows.shape[0] < max_rows:
+            pad = local_rows.new_zeros(max_rows - local_rows.shape[0], head_dim)
+            padded_local = torch.cat([local_rows, pad], dim=0)
+        else:
+            padded_local = local_rows
+
+        # All-gather: each rank contributes [max_rows, head_dim]
+        gather_list = [
+            torch.empty_like(padded_local) for _ in range(tp_size)
+        ]
+        dist.all_gather(
+            gather_list, padded_local, group=self.tp_group.device_group
+        )
+
+        # Slice each rank's contribution to its true count and concatenate
+        parts = []
+        for rank_idx in range(tp_size):
+            count = sp_row_counts[rank_idx]
+            if count > 0:
+                parts.append(gather_list[rank_idx][:count])
+
+        if not parts:
+            return local_rows[:0]
+        global_rows = torch.cat(parts, dim=0)
+        assert global_rows.shape[0] == total_rows, (
+            f"CompressorSP gather: expected {total_rows} global rows, "
+            f"got {global_rows.shape[0]}"
+        )
+        return global_rows
 
     def _compressor_sp_uses_boundary_replay(
         self, plan: CompressorSPMetadata | None
@@ -2337,12 +2419,23 @@ class AscendDSACPImpl(DSAAttentionImpl):
             local_cache = kv_cache.clone()
             full_cache = kv_cache.clone()
             if local_compressed_kv.numel() > 0:
-                torch.ops._C_ascend.npu_scatter_nd_update_v2(local_cache, slot_mapping, local_compressed_kv)
-                torch.ops._C_ascend.npu_scatter_nd_update_v2(full_cache, slot_mapping, full_rows)
+                # Gather local SP rows to reconstruct global compressed KV,
+                # then compare against the full compressor's global output and
+                # scatter with the full slot_mapping for complete cache replica.
+                global_local_compressed_kv = self._gather_compressor_sp_rows(
+                    local_compressed_kv, plan
+                )
+                full_slot_mapping = attn_metadata.req_metadata.slot_mapping
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                    local_cache, full_slot_mapping, global_local_compressed_kv
+                )
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                    full_cache, full_slot_mapping, full_compressed_kv
+                )
             cache_reason = self._compressor_sp_compare_cache_rows(
                 local_cache=local_cache,
                 full_cache=full_cache,
-                slot_mapping=slot_mapping,
+                slot_mapping=attn_metadata.req_metadata.slot_mapping,
                 layer_name=layer_name,
                 path="main",
                 coff=coff,
@@ -2404,8 +2497,16 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 elapsed_ms=self._compressor_sp_debug_elapsed_ms(timer_start),
             )
             return False, "local_rows_keep_rows_mismatch"
-        if compressed_kv.numel() > 0:
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(kv_cache, slot_mapping, compressed_kv)
+
+        # All-gather compressed rows from all TP ranks to reconstruct the
+        # full global compressed KV, then scatter with the full slot_mapping
+        # so every rank's local compress_kv_cache is a complete replica.
+        global_compressed_kv = self._gather_compressor_sp_rows(compressed_kv, plan)
+        full_slot_mapping = attn_metadata.req_metadata.slot_mapping
+        if global_compressed_kv.numel() > 0:
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                kv_cache, full_slot_mapping, global_compressed_kv
+            )
         self._record_compressor_sp_debug(
             path="main",
             status="local_hit",
@@ -2603,6 +2704,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     coff=coff,
                 )
                 if kv is not None:
+                    # Gather BF16 compressed rows from all ranks before
+                    # rotation and quantization so every rank gets a complete
+                    # and consistent view.
+                    kv = self._gather_compressor_sp_rows(kv, plan)
+                    slot_mapping = full_slot_mapping
                     used_local_sp = True
                 else:
                     used_local_sp = False

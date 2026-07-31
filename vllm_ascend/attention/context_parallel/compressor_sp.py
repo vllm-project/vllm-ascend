@@ -55,6 +55,14 @@ class CompressorSPPlan:
     tail_token_ranges: tuple[tuple[int, int], ...] = ()
     padding_row_indices: tuple[int, ...] = ()
     padding_row_slice: tuple[int, int] | None = None
+    # Number of rank-owned compressed output rows for every rank in the TP
+    # group, in rank order.  Because each rank owns a contiguous slice of the
+    # flattened token stream, these counts also describe how the global
+    # compressed rows partition across ranks, so an all-gather that
+    # concatenates rank outputs in rank order reproduces the global row order.
+    sp_row_counts_per_rank: tuple[int, ...] = ()
+    tp_rank: int = 0
+    tp_size: int = 1
 
 
 def _contiguous_slice(values: Sequence[int]) -> tuple[int, int] | None:
@@ -302,6 +310,7 @@ def build_compressor_sp_plan(
     seq_lens: Sequence[int],
     local_start: int,
     local_end: int,
+    tp_rank: int = 0,
 ) -> CompressorSPPlan:
     def disabled(reason: str, **kwargs: Any) -> CompressorSPPlan:
         return CompressorSPPlan(
@@ -583,6 +592,19 @@ def build_compressor_sp_plan(
     )
     padding_row_indices = list(range(len(compressed_row_indices), local_output_rows))
 
+    # Compute how many compressed output rows each rank owns.  Each rank's
+    # owned token range is [rank*tokens_per_rank, min((rank+1)*tokens_per_rank,
+    # num_input_tokens)), and a compressed row is owned by the rank whose
+    # true-owned range contains the flat token index that produced it.
+    num_tokens_pad = ((num_input_tokens + tp_size - 1) // tp_size) * tp_size
+    tokens_per_rank = num_tokens_pad // tp_size
+    sp_row_counts: list[int] = [0] * tp_size
+    for flat_idx, pos in enumerate(input_positions):
+        if (pos + 1) % compress_ratio != 0:
+            continue
+        owning_rank = min(flat_idx // tokens_per_rank, tp_size - 1)
+        sp_row_counts[owning_rank] += 1
+
     return CompressorSPPlan(
         enabled=True,
         reason="enabled",
@@ -656,6 +678,9 @@ def build_compressor_sp_plan(
         tail_token_ranges=tuple(tail_token_ranges),
         padding_row_indices=tuple(padding_row_indices),
         padding_row_slice=_contiguous_slice(padding_row_indices),
+        sp_row_counts_per_rank=tuple(sp_row_counts),
+        tp_rank=tp_rank,
+        tp_size=tp_size,
     )
 
 

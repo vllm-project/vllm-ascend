@@ -15,6 +15,7 @@ def _plan(
     allow_c128_non_aligned=False,
     is_chunked_prefill=False,
     tp_size=4,
+    tp_rank=0,
 ):
     return build_compressor_sp_plan(
         enabled=True,
@@ -30,6 +31,7 @@ def _plan(
         seq_lens=seq_lens,
         local_start=local_start,
         local_end=local_end,
+        tp_rank=tp_rank,
     )
 
 
@@ -623,3 +625,194 @@ def test_disabled_env_falls_back():
 
     assert not plan.enabled
     assert plan.reason == "env_disabled"
+
+
+# --- Tests for sp_row_counts_per_rank, tp_rank, tp_size ---
+
+
+def test_sp_row_counts_c4_even_split():
+    """C4 with 16 tokens, tp_size=4: tokens_per_rank=4, each rank owns 4 tokens.
+    Compressed rows at flat 3, 7, 11, 15 => one per rank."""
+    plan = _plan(
+        ratio=4,
+        positions=list(range(16)),
+        query_start_loc=[0, 16],
+        seq_lens=[16],
+        local_start=0,
+        local_end=4,
+        tp_size=4,
+        tp_rank=0,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (1, 1, 1, 1)
+    assert plan.tp_rank == 0
+    assert plan.tp_size == 4
+    assert plan.global_compressed_row_count == 4
+    assert sum(plan.sp_row_counts_per_rank) == plan.global_compressed_row_count
+
+
+def test_sp_row_counts_c4_uneven_rows():
+    """C4 with 32 tokens, tp_size=4: tokens_per_rank=8.
+    Compressed rows at positions 3,7,11,15,19,23,27,31.
+    Rank 0 owns [0,8) => flat 3,7 => 2 rows.
+    Rank 1 owns [8,16) => flat 11,15 => 2 rows.
+    Rank 2 owns [16,24) => flat 19,23 => 2 rows.
+    Rank 3 owns [24,32) => flat 27,31 => 2 rows."""
+    plan = _plan(
+        ratio=4,
+        positions=list(range(32)),
+        query_start_loc=[0, 32],
+        seq_lens=[32],
+        local_start=0,
+        local_end=8,
+        tp_size=4,
+        tp_rank=0,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (2, 2, 2, 2)
+    assert plan.global_compressed_row_count == 8
+    assert sum(plan.sp_row_counts_per_rank) == plan.global_compressed_row_count
+
+
+def test_sp_row_counts_c128_two_ranks():
+    """C128 with 256 tokens, tp_size=2: tokens_per_rank=128.
+    Compressed rows at flat 127 and 255.
+    Rank 0 owns [0,128) => row at 127 => 1 row.
+    Rank 1 owns [128,256) => row at 255 => 1 row."""
+    plan = _plan(
+        ratio=128,
+        positions=list(range(256)),
+        query_start_loc=[0, 256],
+        seq_lens=[256],
+        local_start=0,
+        local_end=128,
+        tp_size=2,
+        tp_rank=0,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (1, 1)
+    assert plan.tp_rank == 0
+    assert plan.tp_size == 2
+
+
+def test_sp_row_counts_c4_multiple_rows_per_rank():
+    """C4 with 32 tokens, tp_size=2: tokens_per_rank=16.
+    Compressed rows at flat 3,7,11,15,19,23,27,31 => 8 rows total.
+    Rank 0 owns [0,16) => rows at flat 3,7,11,15 => 4 rows.
+    Rank 1 owns [16,32) => rows at flat 19,23,27,31 => 4 rows."""
+    plan = _plan(
+        ratio=4,
+        positions=list(range(32)),
+        query_start_loc=[0, 32],
+        seq_lens=[32],
+        local_start=0,
+        local_end=16,
+        tp_size=2,
+        tp_rank=0,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (4, 4)
+    assert plan.global_compressed_row_count == 8
+
+
+def test_sp_row_counts_preserved_in_tp_rank_field():
+    """Verify that tp_rank is correctly preserved for different ranks."""
+    positions = list(range(16))
+    for rank in range(4):
+        plan = _plan(
+            ratio=4,
+            positions=positions,
+            query_start_loc=[0, 16],
+            seq_lens=[16],
+            local_start=rank * 4,
+            local_end=(rank + 1) * 4,
+            tp_size=4,
+            tp_rank=rank,
+        )
+        assert plan.enabled
+        assert plan.tp_rank == rank
+        assert plan.tp_size == 4
+        # All ranks compute the same sp_row_counts_per_rank
+        assert plan.sp_row_counts_per_rank == (1, 1, 1, 1)
+
+
+def test_sp_row_counts_multi_request():
+    """Multiple requests: 8 tokens each, total 16, tp_size=2.
+    positions: [0..7] + [0..7], compressed rows at flat 3,7,11,15.
+    tokens_per_rank = 8.
+    Rank 0 owns [0,8) => flat 3,7 => 2 rows.
+    Rank 1 owns [8,16) => flat 11,15 => 2 rows."""
+    plan = _plan(
+        ratio=4,
+        positions=list(range(8)) + list(range(8)),
+        query_start_loc=[0, 8, 16],
+        seq_lens=[8, 8],
+        local_start=0,
+        local_end=8,
+        tp_size=2,
+        tp_rank=0,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (2, 2)
+    assert plan.global_compressed_row_count == 4
+
+
+def test_sp_row_counts_zero_rows_rank():
+    """C128 with 256 tokens, tp_size=2: tokens_per_rank=128.
+    Compressed rows at flat 127, 255.
+    Rank 0 owns [0,128) => row at 127 => 1 row.
+    Rank 1 owns [128,256) => row at 255 => 1 row.
+    Both ranks produce the same sp_row_counts_per_rank since it's
+    computed from global input_positions, not just local data."""
+    plan = _plan(
+        ratio=128,
+        positions=list(range(256)),
+        query_start_loc=[0, 256],
+        seq_lens=[256],
+        local_start=128,
+        local_end=256,
+        tp_size=2,
+        tp_rank=1,
+    )
+
+    assert plan.enabled
+    assert plan.sp_row_counts_per_rank == (1, 1)
+    assert plan.tp_rank == 1
+
+
+def test_sp_row_counts_sum_equals_global_count():
+    """Verify that sp_row_counts always sums to global_compressed_row_count
+    across various configurations."""
+    configs = [
+        # (ratio, num_tokens, tp_size)
+        (4, 16, 4),
+        (4, 32, 2),
+        (4, 64, 8),
+        (128, 256, 2),
+        (128, 512, 4),
+    ]
+    for ratio, num_tokens, tp_size in configs:
+        positions = list(range(num_tokens))
+        tokens_per_rank = (
+            ((num_tokens + tp_size - 1) // tp_size) * tp_size
+        ) // tp_size
+        plan = _plan(
+            ratio=ratio,
+            positions=positions,
+            query_start_loc=[0, num_tokens],
+            seq_lens=[num_tokens],
+            local_start=0,
+            local_end=tokens_per_rank,
+            tp_size=tp_size,
+            tp_rank=0,
+        )
+        if plan.enabled:
+            assert sum(plan.sp_row_counts_per_rank) == plan.global_compressed_row_count, (
+                f"Failed for ratio={ratio}, num_tokens={num_tokens}, tp_size={tp_size}: "
+                f"sum({plan.sp_row_counts_per_rank}) != {plan.global_compressed_row_count}"
+            )
