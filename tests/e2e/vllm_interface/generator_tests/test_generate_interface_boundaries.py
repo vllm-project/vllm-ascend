@@ -5727,6 +5727,61 @@ def run(value, *, mode=None):
     return value
 
 
+if use_cpu_implementation():
+    from vllm.cpu import run_cpu
+
+    run = run_cpu
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value, *, mode=None):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert patches[0].upstream_signature == _v019_run_signature(
+        ("value", True),
+        keyword_only=(("mode", False),),
+    )
+    assert not findings
+
+
+def test_v022_cpu_only_callable_alias_is_inactive_for_npu_mapping(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/cpu.py",
+        """
+def run_cpu(value, cpu_context, **kwargs):
+    return value
+""",
+    )
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def run(value, *, mode=None):
+    return value
+
+
 if current_platform.is_cpu():
     from vllm.cpu import run_cpu
 
