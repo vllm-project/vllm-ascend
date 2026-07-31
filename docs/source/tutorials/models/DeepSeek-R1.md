@@ -41,7 +41,7 @@ Select an image based on your machine type and start the docker image on your no
 ::::{tab-item} A3 series
 :sync: A3
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -85,7 +85,7 @@ docker run --rm \
 ::::{tab-item} A2 series
 :sync: A2
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:

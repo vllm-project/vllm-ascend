@@ -24,13 +24,13 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
-- `Qwen3-VL-2B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
-- `Qwen3-VL-4B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
-- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-2B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
+- `Qwen3-VL-4B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
+- `Qwen3-VL-8B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
 Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
-- `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+- `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 

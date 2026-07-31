@@ -334,8 +334,8 @@ vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` to stop
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
-  VLLM_PID=$(pgrep -f "vllm serve")
-  kill -2 "$VLLM_PID"
+VLLM_PID=$(pgrep -f "vllm serve")
+kill -2 "$VLLM_PID"
 ```
 
 The output is as below:

@@ -24,13 +24,13 @@ The following model variants are available. It is recommended to download the mo
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 **Quantized Versions for Atlas inference products:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (48GB,2 cards) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (48GB,2 cards) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -203,7 +203,7 @@ If you prefer not to use the Docker image, you can build from source. Install vL
     For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
 
     pip uninstall -y triton-ascend triton
-     
+
 :::
 **Installation Verification:**
 
@@ -254,7 +254,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
         --gpu-memory-utilization 0.95 \
         --port 8000 \
-        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
+        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
     ```
 ::::
 ::::{tab-item} Atlas inference products
