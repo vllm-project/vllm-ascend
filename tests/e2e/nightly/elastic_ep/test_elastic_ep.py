@@ -178,7 +178,9 @@ class ElasticEPTestConfig:
 
 
 # Define common additional_config
-COMMON_ADDITIONAL_CONFIG = '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 128}}'
+COMMON_ADDITIONAL_CONFIG = (
+    '{"eplb_config": {"dynamic_eplb": false, "num_redundant_experts": 128}}'
+)
 
 # Define test configurations — indexed by name for stable lookup
 CONFIG_QWEN3_30B_DEFAULT = ElasticEPTestConfig(
@@ -312,13 +314,8 @@ def _build_vllm_args(config: ElasticEPTestConfig) -> list[str]:
         str(config.data_parallel_size_local),
         "--data-parallel-backend",
         "ray",
-        "--enable-expert-parallel",
         "--enable-elastic-ep",
-        "--enable-eplb",
-        "--eplb_config.use_async",
-        "false",
-        "--eplb_config.num_redundant_experts",
-        str(config.num_redundant_experts),
+        "--enable-expert-parallel",
         "--tensor-parallel-size",
         str(config.tensor_parallel_size),
         "--gpu-memory-utilization",

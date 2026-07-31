@@ -279,7 +279,8 @@ class AscendConfig:
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
-        if vllm_config.parallel_config.enable_elastic_ep:
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_elastic_ep:
             from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
             if get_ascend_device_type() != AscendDeviceType.A3:
@@ -290,6 +291,10 @@ class AscendConfig:
                     "Elastic EP with dynamic_eplb=True is temporarily unsupported. "
                     "Set dynamic_eplb=False in eplb_config to use Elastic EP."
                 )
+
+            parallel_config.eplb_config.num_redundant_experts = (
+                self.eplb_config.num_redundant_experts
+            )
 
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:

@@ -57,7 +57,6 @@ from vllm_ascend.distributed.parallel_state import (
     _replace_ascend_active_groups,
     get_mc2_group,
 )
-from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registration
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 
@@ -232,7 +231,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         updated_config = copy.copy(self.worker.vllm_config)
         updated_config.parallel_config = copy.deepcopy(self.worker.vllm_config.parallel_config)
         updated_config.parallel_config.data_parallel_size = new_dp_size
-        with set_current_vllm_config(updated_config), use_stateless_pg_with_world_registration():
+        with set_current_vllm_config(updated_config):
             create_standby_groups(
                 new_dp_size=new_dp_size,
                 new_world_size_across_dp=new_world_size_across_dp,
@@ -287,9 +286,8 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
 
     def switch_and_remove(self) -> None:
         self._release_cuda_graphs()
-        with use_stateless_pg_with_world_registration():
-            _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
-            _replace_ascend_active_groups(mc2=None, dynamic_eplb=None)
+        _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
+        _replace_ascend_active_groups(mc2=None, dynamic_eplb=None)
 
     def switch_and_prepare(self) -> None:
         self.old_ep_size = get_ep_group().world_size
@@ -304,9 +302,8 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.new_ep_size = new_ep_size
         parallel_config.data_parallel_size = new_dp_size
 
-        with use_stateless_pg_with_world_registration():
-            _replace_active_groups(**pop_standby_groups())
-            _replace_ascend_active_groups(**pop_ascend_standby_groups())
+        _replace_active_groups(**pop_standby_groups())
+        _replace_ascend_active_groups(**pop_ascend_standby_groups())
 
         if reconfig_request.new_data_parallel_rank != ReconfigureRankType.KEEP_CURRENT_RANK:
             parallel_config.data_parallel_rank = reconfig_request.new_data_parallel_rank

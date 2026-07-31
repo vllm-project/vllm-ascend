@@ -509,7 +509,39 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 20. File: platform/patch_use_v2_model_runner.py**
+# ** 20. File: platform/patch_elastic_ep.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `current_platform.is_cuda_alike` (temporarily)
+#      `vllm.config.parallel.ParallelConfig.__init__`
+#      `vllm.model_executor.layers.fused_moe.layer.FusedMoE`
+#    Why:
+#       ``--enable-elastic-ep`` requires ``enable_eplb=True`` and
+#       ``_validate_parallel_config`` gates ``enable_eplb`` behind
+#       ``is_cuda_alike()`` (False for NPUPlatform).  After init,
+#       ``enable_eplb`` is restored to the user-provided value, but
+#       model construction later calls ``FusedMoE`` which asserts
+#       ``num_redundant_experts == 0`` when ``enable_eplb`` is False
+#       — conflicting with ``ascend_config.py`` having set
+#       ``num_redundant_experts > 0``.
+#    How：
+#       (a) Save original ``enable_eplb``, ``eplb_config.use_async``,
+#       and ``current_platform.is_cuda_alike``.  Temporarily set them
+#       to pass-validation values, call the original ``__init__``, then
+#       restore all three in a ``finally`` block.
+#       (b) Wrap ``FusedMoE`` (already patched by ``patch_fused_moe.py``)
+#       to force ``enable_eplb=True`` in kwargs when
+#       ``enable_elastic_ep`` is True, so the redundant-expert assertion
+#       passes during model construction.
+#    Related PR (if no, explain why):
+#       Requires upstream to either (a) accept a platform-specific EPLB
+#       capability hook, or (b) merge ``is_cuda_alike`` and
+#       ``supports_eplb`` into separate methods.
+#    Future Plan:
+#       Remove this patch when upstream ``_validate_parallel_config``
+#       uses a platform-overridable method (e.g. ``supports_eplb()``)
+#       instead of hard-coding ``is_cuda_alike()`` for the EPLB gate.
+#
+# ** 21. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -534,7 +566,7 @@
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
-# ** 21. File: platform/patch_weight_transfer_engine.py**
+# ** 22. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
 #    Why:
@@ -575,6 +607,23 @@
 #       level in vllm.distributed.weight_transfer.ipc_engine (e.g. defers it into
 #       the code path that actually needs ray), so importing the IPC engine no
 #       longer requires the optional ray dependency.
+#
+# ** 23. File: platform/patch_stateless_coordinator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.stateless_coordinator.CudaCommunicator`
+#    Why:
+#       Upstream ``StatelessGroupCoordinator`` uses ``CudaCommunicator`` for
+#       device communication. On Ascend NPU, the coordinator must construct
+#       an HCCL-aware device communicator instead.
+#    How：
+#       Replace ``CudaCommunicator`` with ``NPUCommunicator`` in the
+#       ``stateless_coordinator`` module so the coordinator constructs an
+#       HCCL-aware device communicator.
+#    Related PR (if no, explain why):
+#       No, NPU-specific HCCL communicator selection requirement.
+#    Future Plan:
+#       Remove this patch if upstream ``StatelessGroupCoordinator`` gains a
+#       platform hook for communicator selection.
 #
 # * Worker Patch:
 # ===============
