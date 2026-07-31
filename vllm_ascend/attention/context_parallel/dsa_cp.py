@@ -306,7 +306,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["num_prefill_tokens"] = self.num_prefill_tokens
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=self.num_prefills == 0)
+            has_prefill = self.num_prefills > 0
+            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=not has_prefill)
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
@@ -466,35 +467,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens[:num_reqs],
             local_query_start_loc=self.spec_local_query_start_loc[draft_index - 1],
             local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
+            is_noncausal=is_noncausal,
         )
         local_query_start_loc = local_query_start_loc.clone()
         local_seq_lens = local_seq_lens.clone()
+        local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
+        local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
 
         _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu = self._build_local_token_metadata(
             num_reqs=num_reqs,
             num_input_tokens=num_input_tokens,
             query_start_loc=query_start_loc_cpu,
             seq_lens=self.seq_lens_cpu[:num_reqs],
+            is_noncausal=is_noncausal,
         )
-
-        if is_noncausal:
-            # Causal CP truncates the KV length at this rank's local query end.
-            # DSpark queries must see the whole query block, including tokens
-            # whose Q rows live on later CP ranks. Full KV is already written
-            # on every rank after the hidden-state all-gather in _forward().
-            local_query_lens = local_query_start_loc[1:] - local_query_start_loc[:-1]
-            local_seq_lens = torch.where(
-                local_query_lens > 0, self.seq_lens[:num_reqs], torch.zeros_like(self.seq_lens[:num_reqs])
-            )
-            local_query_lens_cpu = local_query_start_loc_cpu[1:] - local_query_start_loc_cpu[:-1]
-            local_seq_lens_cpu = torch.where(
-                local_query_lens_cpu > 0,
-                self.seq_lens_cpu[:num_reqs],
-                torch.zeros_like(self.seq_lens_cpu[:num_reqs]),
-            )
-
-        local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
-        local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
         local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
         max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
         max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
@@ -828,6 +814,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_query_start_loc=None,
         local_seq_lens=None,
         start_pos_out=None,
+        is_noncausal=False,
     ):
         """
         For example:
@@ -910,6 +897,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
                 start_pos_out[:num_reqs] = seq_lens[:num_reqs] - seq_lens_q
 
+        if is_noncausal:
+            local_query_lens = local_query_start_loc[1: num_reqs + 1] - local_query_start_loc[:num_reqs]
+            local_seq_lens.copy_(torch.where(
+                local_query_lens > 0, seq_lens[:num_reqs], torch.zeros_like(seq_lens[:num_reqs])
+            ))
         return (
             local_start,
             local_end,
