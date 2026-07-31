@@ -100,7 +100,7 @@ class TestLayerBatchBuilder(unittest.TestCase):
             {0: [10, 20, 30]},
             {0: [100, 200, 300]},
             group_num_layers={0: 2},
-            group_layer_offsets={0: [0, 2, 3]},
+            group_layer_cache_entry_offsets={0: [0, 2, 3]},
         )
         builder = LayerBatchBuilder(
             database,
