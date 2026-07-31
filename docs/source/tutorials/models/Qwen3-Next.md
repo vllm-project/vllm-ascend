@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 
@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 **A3 series:**
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```bash
 #!/bin/sh
@@ -228,7 +228,7 @@ vllm bench serve --model Qwen/Qwen3-Next-80B-A3B-Instruct  --dataset-name random
 
 After about several minutes, you can get the performance evaluation result.
 
-The performance result is:  
+The performance result is:
 
 ```bash
 Hardware: A3-752T, 2 node
