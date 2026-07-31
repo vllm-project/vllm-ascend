@@ -1774,6 +1774,47 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
+    def test_multi_group_load_failure_stops_before_forward(self):
+        worker = self._make_gva_worker(2)
+        valid_info = MagicMock()
+        valid_info.size.return_value = 64
+        valid_info.gva_list.return_value = [201]
+        missing_info = MagicMock()
+        missing_info.size.return_value = 0
+        missing_info.gva_list.return_value = []
+        worker.m_store.batch_get_key_info.side_effect = [
+            [valid_info],
+            [missing_info],
+        ]
+        worker.m_store.batch_add_lease.return_value = [0]
+        request = self._make_gva_request(
+            num_groups=2,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "multi-group KV load failed",
+        ):
+            worker._prepare_load_gvas([request])
+
+        group0_key = worker._make_layerwise_gva_key(0, "h0")
+        worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
+
+    def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
+        worker = self._make_worker()
+
+        self.assertEqual(
+            worker._extract_physical_layer_index(
+                "mtp.layers.0.self_attn",
+            ),
+            worker.num_layers,
+        )
+
     def test_evicted_allocated_gva_is_reallocated(self):
         worker = self._make_gva_worker()
         key = worker._make_layerwise_gva_key(0, "h0")
