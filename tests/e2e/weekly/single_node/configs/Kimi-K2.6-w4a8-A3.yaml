@@ -54,7 +54,7 @@ test_cases:
       - "0"
       - "--mm-encoder-tp-mode"
       - "data"
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 7}'
     benchmarks:
       perf:
@@ -120,7 +120,7 @@ test_cases:
       - "0"
       - "--mm-encoder-tp-mode"
       - "data"
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 7}'
     benchmarks:
       perf:
@@ -186,7 +186,7 @@ test_cases:
       - "0"
       - "--mm-encoder-tp-mode"
       - "data"
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 7}'
     benchmarks:
       perf:
@@ -246,7 +246,7 @@ test_cases:
       - "0"
       - "--mm-encoder-tp-mode"
       - "data"
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
     benchmarks:
       acc:

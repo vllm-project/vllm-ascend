@@ -41,7 +41,7 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,40,48,64,76,80,88,96,100,104,108,112,116,120,136,140,144],"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
@@ -96,7 +96,7 @@ test_cases:
       - "--no-enable-prefix-caching"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512],"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
       - "--async-scheduling"
@@ -159,7 +159,7 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,40,48,64,76,80,88,96,100,104,108,112,116,120,136,140,144],"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--speculative_config"
+      - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
