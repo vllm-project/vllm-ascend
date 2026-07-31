@@ -1410,19 +1410,25 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 self.compressor_wgate.weight,
                 state_cache.squeeze(-2),
                 self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
+                self.compress_ratio,
                 state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
                 start_pos=req_metadata.start_pos,
-                rope_head_dim=self.rope_head_dim,
-                cmp_ratio=self.compress_ratio,
                 coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
                 cache_mode=1,
+            )
+            # RMSNorm + RoPE (was fused inside old compressor kernel)
+            compressed_kv = compressed_kv[..., : self.compressor_head_dim]
+            compressed_kv = torch_npu.npu_rms_norm(
+                compressed_kv, self.compressor_norm.weight.to(torch.float32), self.compressor_norm_eps
+            )[0]
+            torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
+                compressed_kv.view(-1, 1, 1, self.compressor_head_dim),
+                compress_cos.view(-1, 1, 1, self.rope_head_dim),
+                compress_sin.view(-1, 1, 1, self.rope_head_dim),
+                rotary_mode="interleave",
+                partial_slice=[self.compressor_head_dim - self.rope_head_dim, self.compressor_head_dim],
             )
 
             if compressed_kv.numel() == 0:
@@ -1549,19 +1555,23 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.indexcom_wgate.weight,
             indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
-            self.indexcom_norm.weight,
-            compressed_sin.view(-1, compressed_sin.shape[-1]),
-            compressed_cos.view(-1, compressed_cos.shape[-1]),
+            self.compress_ratio,
             state_block_table=indexer_kv_state_metadata.req_metadata.block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
             start_pos=indexer_kv_scale_metadata.req_metadata.start_pos,
-            rope_head_dim=self.rope_head_dim,
-            cmp_ratio=self.compress_ratio,
             coff=coff,
-            norm_eps=self.compressor_norm_eps,
-            rotary_mode=2,
             cache_mode=1,
+        )
+        # RMSNorm + RoPE (was fused inside old compressor kernel)
+        kv = kv[..., : self.indexcom_head_dim]
+        kv = torch_npu.npu_rms_norm(kv, self.indexcom_norm.weight.to(torch.float32), self.compressor_norm_eps)[0]
+        torch.ops.cann_ops_transformer.inplace_partial_rotary_mul(
+            kv.view(-1, 1, 1, self.indexcom_head_dim),
+            compressed_cos.view(-1, 1, 1, self.rope_head_dim),
+            compressed_sin.view(-1, 1, 1, self.rope_head_dim),
+            rotary_mode="interleave",
+            partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
 
         if kv.numel() == 0:

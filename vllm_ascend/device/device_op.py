@@ -555,7 +555,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def dsa_compressor(*args, **kwargs):
-        return torch.ops._C_ascend.compressor(*args, **kwargs)
+        return torch.ops.cann_ops_transformer.compressor(*args, **kwargs)
 
     # ===== Sparse Attention Metadata & Op Selectors =====
 
@@ -1335,7 +1335,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def dsa_compressor(*args, **kwargs):
-        return torch.ops.custom.compressor(*args, **kwargs)
+        return torch.ops.cann_ops_transformer.compressor(*args, **kwargs)
 
     # ===== Sparse Attention Metadata & Op Selectors =====
 
