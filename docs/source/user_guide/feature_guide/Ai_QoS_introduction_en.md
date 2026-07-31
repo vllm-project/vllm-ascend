@@ -53,7 +53,7 @@ cmake --install tools/ai_qos/build
 
 ​python tools/ai_qos.py --mode manual --AIV_D2D {priority} --AIV_H2D {priority} --SDMA_D2D {priority} --SDMA_H2D {priority} --PCIEDMA_H2D {priority}
 
-​AI QoS manual mode calculates the QoS tag of traffic based on the priority of different types of traffic set by users, and generates and prints the UB switch configuration. You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
+​AI QoS manual mode calculates the QoS tags of traffic based on the priority of different types of traffic set by users, and generates and prints the UB switch configuration.You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
 
 ​In manual mode, you can specify the priority of only one type of traffic. The parameters are described as follows:
 
