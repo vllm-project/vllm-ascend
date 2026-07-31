@@ -23,8 +23,10 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    LayerTransferTask,
     LoadSpec,
     ReqMeta,
+    SharedBlockData,
 )
 
 
@@ -1428,6 +1430,33 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.process_layer_data([MagicMock()])
 
         self.assertEqual(call_order, ["load", "save"])
+
+    def test_build_shared_save_data_marks_last_actual_task(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+            KVCacheStoreLayerSendingThread,
+        )
+
+        worker = self._make_worker()
+        worker.num_layers = 3
+        worker.num_kv_cache_groups = 1
+        first_task = LayerTransferTask(layer_id=0, block_ranges=[])
+        last_task = LayerTransferTask(layer_id=1, block_ranges=[])
+        worker.layer_save_tasks = [[first_task], [last_task], []]
+        shared = SharedBlockData(
+            block_ids_arr=np.asarray([0]),
+            block_gvas_arr=np.asarray([100]),
+            req_ids=["r1"],
+            is_last_chunks=[True],
+            save_keys=["k0"],
+        )
+        send_thread = object.__new__(KVCacheStoreLayerSendingThread)
+        send_thread.build_shared_data = MagicMock(return_value=shared)
+        worker.kv_send_thread = send_thread
+
+        worker._build_shared_save_data()
+
+        self.assertEqual(first_task.write_finish_keys, [])
+        self.assertEqual(last_task.write_finish_keys, ["k0"])
 
     def test_process_save_for_layer_batch_skip_no_save(self):
         worker = self._make_worker()

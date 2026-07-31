@@ -1400,6 +1400,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         all_sizes = []
         all_req_ids = []
         all_save_keys: list[str] = []
+        write_finish_keys: list[str] = []
         for task in transfer_tasks:
             shared = task.shared_block_data
             if shared is None:
@@ -1411,6 +1412,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.dec_stored_request(req_id)
                 all_req_ids.append(req_id)
             all_save_keys.extend(shared.save_keys)
+            write_finish_keys.extend(task.write_finish_keys)
             all_gvas.append(req_meta.gvas_array)
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
@@ -1441,14 +1443,15 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 save_keys = list(dict.fromkeys(all_save_keys))
                 for key in save_keys:
                     self.write_results[key] = self.write_results.get(key, 0) or res
-                if physical_layer == self.final_layer_id:
-                    results = [self.write_results.pop(key) for key in save_keys]
-                    finish_results = self.m_store.batch_write_finish(save_keys, results)
-                    if len(finish_results) != len(save_keys) or any(result != 0 for result in finish_results):
-                        raise RuntimeError(
-                            f"Layerwise save batch_write_finish failed: "
-                            f"expected={len(save_keys)}, results={finish_results}"
-                        )
+            if write_finish_keys:
+                finish_keys = list(dict.fromkeys(write_finish_keys))
+                results = [self.write_results.pop(key) for key in finish_keys]
+                finish_results = self.m_store.batch_write_finish(finish_keys, results)
+                if len(finish_results) != len(finish_keys) or any(result != 0 for result in finish_results):
+                    raise RuntimeError(
+                        f"Layerwise save batch_write_finish failed: "
+                        f"expected={len(finish_keys)}, results={finish_results}"
+                    )
             for req_id in all_req_ids:
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)

@@ -1489,6 +1489,7 @@ class KVPoolWorker:
         group has different block_ranges (different effective_block_size).
         """
         if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
+            all_save_keys: list[str] = []
             for group_id in range(self.num_kv_cache_groups):
                 first_task = None
                 for layer_id in range(self.num_layers):
@@ -1502,10 +1503,19 @@ class KVPoolWorker:
                     continue
                 shared = self.kv_send_thread.build_shared_data(first_task)
                 if shared is not None:
+                    all_save_keys.extend(shared.save_keys)
                     for layer_id in range(self.num_layers):
                         for task in self.layer_save_tasks[layer_id]:
                             if task.group_id == group_id:
                                 task.shared_block_data = shared
+            last_task = None
+            for tasks in self.layer_save_tasks:
+                for task in tasks:
+                    task.write_finish_keys.clear()
+                    if task.shared_block_data is not None:
+                        last_task = task
+            if last_task is not None:
+                last_task.write_finish_keys.extend(dict.fromkeys(all_save_keys))
         elif isinstance(self.kv_send_thread, KVCacheStoreKeyLayerSendingThread):
             first_task = None
             for layer_id in range(self.num_layers):

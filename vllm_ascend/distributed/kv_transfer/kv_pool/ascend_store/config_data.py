@@ -1151,6 +1151,9 @@ class LayerTransferTask:
     shared_block_data: SharedBlockData | None = None
     group_id: int = 0
     layer_idx_in_group: int = 0
+    # Publish newly allocated GVA keys after this task completes the final
+    # actual layer copy for the batch.
+    write_finish_keys: list[str] = field(default_factory=list)
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
