@@ -149,22 +149,6 @@ msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
 msgid ""
-"- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas"
-" 800 A3 (64G × 16) ."
-msgstr ""
-"- 量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可部署在 1 台 Atlas 800 A3（64G × 16）上。"
-
-msgid ""
-"- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas"
-" 800 A3 (64G × 16) ."
-msgstr ""
-"- 量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可部署在 1 台 Atlas 800 A3（64G × 16）上。"
-
-msgid ""
-"- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) ."
-msgstr "- 量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64G × 8）上。"
-
-msgid ""
 "**Notice:**\n"
 "The parameters are explained as follows:"
 msgstr ""
@@ -192,19 +176,11 @@ msgid ""
 msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
 
 msgid ""
-"- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × "
-"16)."
-msgstr "- `glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64G × 16）。"
-
-msgid ""
 "- For bf16 weight, use this script on each node to enable [Multi Token "
 "Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md)."
 msgstr ""
 "- 对于 bf16 权重，在每个节点上使用此脚本启用[多 Token "
 "预测（MTP）](../../user_guide/feature_guide/speculative_decoding.md)。"
-
-msgid "- `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16)."
-msgstr "- `glm-5-w8a8`：需要 2 台 Atlas 800 A3（64G × 16）。"
 
 msgid "### 5.3 Prefill-Decode Disaggregation"
 msgstr "### 5.3 预填充-解码分离"
@@ -226,9 +202,6 @@ msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`："
 
 msgid "2. prepare the script `run_dp_template.sh` on each node."
 msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
-
-msgid "1. Prefill node 0"
-msgstr "1. 预填充节点 0"
 
 msgid ""
 "Once the preparation is done, you can start the server with the following "
@@ -319,12 +292,6 @@ msgstr ""
 msgid "### 8.2 Using vLLM Benchmark"
 msgstr "### 8.2 使用 vLLM Benchmark"
 
-msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
-"more details."
-msgstr ""
-"有关更多详细信息，请参阅 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
-
 msgid "## 9 Performance Tuning"
 msgstr "## 9 性能调优"
 
@@ -412,10 +379,6 @@ msgid "6. Decode node 3"
 msgstr "6. 解码节点 3"
 
 msgid ""
-"|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|"
-msgstr "|场景|部署模式|*NPU总数|权重版本|关键考量|"
-
-msgid ""
 "|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max "
 "Model Len|MTP Speculation Num|"
 msgstr "|场景|配置|NPU数量|TP|DP|最大序列数|最大批处理Token数|最大模型长度|MTP推测数量|"
@@ -431,3 +394,38 @@ msgid ""
 "|Low Latency|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on both P"
 " and D nodes to reduce latency|"
 msgstr "|低延迟|1P1D部署|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|在P和D节点上均使用dp4 tp8，以降低延迟|"
+
+msgid ""
+"- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas"
+" 800 A3 (64GB × 16) ."
+msgstr ""
+"- 量化模型 `glm-5-w4a8` 和 `glm-5.1-w4a8` 可部署在 1 台 Atlas 800 A3（64GB × 16）上。"
+
+msgid ""
+"- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas"
+" 800 A3 (64GB × 16) ."
+msgstr ""
+"- 量化模型 `glm-5-w8a8` 和 `glm-5.1-w8a8` 可部署在 1 台 Atlas 800 A3（64GB × 16）上。"
+
+msgid ""
+"- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) "
+"."
+msgstr "- 量化模型 `glm-5-w4a8` 可部署在 1 台 Atlas 800 A2（64GB × 8）上。"
+
+msgid ""
+"- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × "
+"16)."
+msgstr "- `glm-5-bf16` 和 `glm-5.1-bf16`：至少需要 2 台 Atlas 800 A3（64GB × 16）。"
+
+msgid "- `glm-5-w8a8`: require 2 Atlas 800 A3 (64GB × 16)."
+msgstr "- `glm-5-w8a8`：需要 2 台 Atlas 800 A3（64GB × 16）。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"更多详情请参阅 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid ""
+"|Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|"
+msgstr "|场景|部署模式|NPU总数|权重版本|关键注意事项|"

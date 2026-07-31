@@ -159,19 +159,6 @@ msgstr "运行docker容器以在单NPU上启动vLLM服务："
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
-msgid ""
-"- Add `--max_model_len` option to avoid ValueError that the "
-"Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum"
-" number of tokens that can be stored in KV cache. This will differ with "
-"different NPU series based on the on-chip memory size. Please modify the "
-"value according to a suitable value for your NPU series."
-msgstr ""
-"- 添加 `--max_model_len` "
-"选项以避免ValueError，即Qwen3-VL-8B-Instruct模型的最大序列长度（256000）大于KV缓存中可存储的最大token数。此值因不同NPU系列的片上内存大小而异。请根据您的NPU系列修改为合适的值。"
-
-msgid "If your service start successfully, you can see the info shown below:"
-msgstr "如果您的服务启动成功，您将看到如下信息："
-
 msgid "## 6 Functional Verification"
 msgstr "## 6 功能验证"
 
@@ -247,10 +234,6 @@ msgid ""
 "`serve` as an example. Run the code as follows."
 msgstr "性能评估必须以在线模式进行。以 `serve` 为例，运行代码如下。"
 
-msgid ""
-"After about several minutes, you can get the performance evaluation result."
-msgstr "大约几分钟后，您将获得性能评估结果。"
-
 msgid "## 9 Performance Tuning"
 msgstr "## 9 性能调优"
 
@@ -303,12 +286,6 @@ msgid ""
 msgstr ""
 "调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-msgid ""
-"Please refer to the [Feature "
-"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
-"feature descriptions."
-msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
-
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题解答"
 
@@ -327,28 +304,6 @@ msgid ""
 "|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|Weight "
 "Version|"
 msgstr "|场景|配置|NPU数|TP|DP|最大模型长度|MTP推测数|权重版本|"
-
-msgid ""
-"|High Throughput<br>(16K context)|Single-Node Mixed|1 "
-"(A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|"
-msgstr "|高吞吐量<br>（16K上下文）|单节点混合|1（A3）|Qwen3-VL-8B-Instruct|对高分辨率文本输入使用tp2|"
-
-msgid ""
-"|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|1 "
-"(A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|"
-msgstr ""
-"|长上下文<br>（128K，无前缀缓存）|单节点混合|1（A3）|Qwen3-VL-8B-Instruct|对高分辨率文本输入使用tp2|"
-
-msgid ""
-"|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|1 "
-"(A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|"
-msgstr ""
-"|长上下文<br>（128K，有前缀缓存）|单节点混合|1（A3）|Qwen3-VL-8B-Instruct|对高分辨率文本输入使用tp2|"
-
-msgid ""
-"|Multimodal<br>(1080P)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for"
-" high-resolution visual inputs|"
-msgstr "|多模态<br>（1080P）|单节点混合|1（A3）|Qwen3-VL-8B-Instruct|对高分辨率视觉输入使用tp2|"
 
 msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
 msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
@@ -431,3 +386,50 @@ msgstr ""
 
 msgid "| dataset  | metric   | mode | vllm-api-general-chat |"
 msgstr "| 数据集  | 指标     | 模式 | vllm-api-general-chat |"
+
+msgid ""
+"- Add the `--max_model_len` option to avoid the ValueError that occurs when "
+"the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum "
+"number of tokens that can be stored in KV cache. This will differ with "
+"different NPU series based on the on-chip memory size. Please modify the "
+"value according to a suitable value for your NPU series."
+msgstr ""
+"- 添加 `--max_model_len` 选项，以避免当 Qwen3-VL-8B-Instruct 模型的 max-seq-"
+"len（256000）超过 KV 缓存可存储的最大 token 数量时出现的 ValueError。该值因不同 NPU "
+"系列而异，取决于片上内存大小。请根据您的 NPU 系列选择合适值进行修改。"
+
+msgid "If your service starts successfully, you can see the info shown below:"
+msgstr "如果您的服务启动成功，您可以看到如下信息："
+
+msgid "After several minutes, you can get the performance evaluation result."
+msgstr "几分钟后，您将获得性能评估结果。"
+
+msgid ""
+"|High Throughput<br>(16k context)|Single-Node Mixed|1 "
+"(A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|"
+msgstr ""
+"|高吞吐<br>（16k 上下文）|单节点混合|1 (A3)|Qwen3-VL-8B-Instruct|使用 tp2 处理高分辨率文本输入|"
+
+msgid ""
+"|Long Context<br>(128k, no prefix cache)|Single-Node Mixed|1 "
+"(A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|"
+msgstr ""
+"|长上下文<br>（128k，无前缀缓存）|单节点混合|1 (A3)|Qwen3-VL-8B-Instruct|使用 tp2 处理高分辨率文本输入|"
+
+msgid ""
+"|Long Context<br>(128k, with prefix cache)|Single-Node Mixed|1 "
+"(A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|"
+msgstr ""
+"|长上下文<br>（128k，带前缀缓存）|单节点混合|1 (A3)|Qwen3-VL-8B-Instruct|使用 tp2 处理高分辨率文本输入|"
+
+msgid ""
+"|Multimodal<br>(1080p)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for"
+" high-resolution visual inputs|"
+msgstr "|多模态<br>（1080p）|单节点混合|1 (A3)|Qwen3-VL-8B-Instruct|使用 tp2 处理高分辨率视觉输入|"
+
+msgid ""
+"Please refer to the [Feature "
+"Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr ""
+"请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)以获取详细的特性说明。"
