@@ -9,7 +9,7 @@ set -euo pipefail
 
 : "${MODEL_PATH:?Set MODEL_PATH to the GLM-5.1 model directory}"
 
-DP_SIZE="${DP_SIZE:-1}"
+DP_SIZE="${DP_SIZE:-1}"  # DSA supports DP>1; each DP rank owns independent DSA state
 TP_SIZE="${TP_SIZE:-8}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"

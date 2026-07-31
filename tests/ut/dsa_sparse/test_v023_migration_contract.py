@@ -897,7 +897,6 @@ class TestV023LifecycleContract(unittest.TestCase):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
         for required_contract in (
             'architecture != "GlmMoeDsaForCausalLM"',
-            "data_parallel_size=1 only",
             "supports TP but not PP/DCP/PCP",
             "cannot be combined with SFA DSA-CP",
             "block_size != 128",
@@ -905,19 +904,16 @@ class TestV023LifecycleContract(unittest.TestCase):
             "source FP16/BF16 ABI",
             "requires non-chunked prefill",
             "does not support speculative/MTP decoding",
-            "enforce_eager = True",
         ):
             self.assertIn(required_contract, source)
 
-    def test_dsa_dp_guard_and_example_default_are_accuracy_safe(self):
+    def test_dsa_dp_is_supported_and_example_allows_dp(self):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
-        self.assertIn("if data_parallel_size != 1:", source)
-        self.assertIn("DP>1 can silently corrupt ", source)
-        self.assertIn('"token accuracy."', source)
+        # DP>1 must NOT be rejected — DSA state is worker-local.
+        self.assertNotIn("data_parallel_size=1 only", source)
+        self.assertNotIn("if data_parallel_size != 1:", source)
 
         example = _read("examples/glm51_dsa_sparse_mtp.sh")
-        self.assertIn('DP_SIZE="${DP_SIZE:-1}"', example)
-        self.assertNotIn('DP_SIZE="${DP_SIZE:-2}"', example)
         self.assertIn('\\"enable_dsa_cp\\":false', example)
 
     def test_example_enables_first_sample_trace_with_explicit_tp_rank(self):

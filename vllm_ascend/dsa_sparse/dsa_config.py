@@ -353,10 +353,10 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
     """Validate and normalize the supported v0.23 sparse-offload envelope.
 
     The implementation intentionally has a narrow first-class envelope:
-    GLM-5/5.1, decoder-only eager execution, and TP with DP=1 without speculative
+    GLM-5/5.1, decoder-only execution, and TP+DP without speculative
     decoding. Options which change cache ownership (prefix cache, KV
     connectors), add speculative tokens, or shard the token domain
-    (DP/DCP/PCP/PP) are rejected instead of silently producing an invalid
+    (DCP/PCP/PP) are rejected instead of silently producing an invalid
     resident map.
     """
     attach_dsa_sparse_cache_attrs(vllm_config)
@@ -378,15 +378,12 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
             "DSA sparse offload supports Ascend A2, A3 and A5, not 310P")
 
     parallel_config = vllm_config.parallel_config
-    data_parallel_size = int(
-        getattr(parallel_config, "data_parallel_size", 1))
-    if data_parallel_size != 1:
-        raise ValueError(
-            "DSA sparse offload currently supports TP with "
-            "data_parallel_size=1 only. DSA request stages, resident rows, "
-            "and hot-DRAM block tables are worker-local and are not included "
-            "in v0.23 DP metadata synchronization; DP>1 can silently corrupt "
-            "token accuracy.")
+    # DSA request stages, resident rows, and hot-DRAM block tables are
+    # worker-local.  Each DP rank runs an independent EngineCore that owns its
+    # own scheduler and worker processes; vLLM's DP synchronization only covers
+    # token counts and graph mode, not DSA metadata.  This is safe because DSA
+    # never shares mutable KV ownership across DP ranks -- each rank's
+    # resident pool, DRAM arena, and LIDU output buffers are process-local.
     incompatible_parallel = {
         "pipeline_parallel_size":
         int(getattr(parallel_config, "pipeline_parallel_size", 1)),
