@@ -112,6 +112,7 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
 # Server management
 # ---------------------------------------------------------------------------
 
+
 def _ft_server_args() -> list[str]:
     return [
         "--enforce-eager",
@@ -184,9 +185,7 @@ class FTServerManager:
                     print(f"Failed to start server rank {r}")
                     raise
 
-            thread = threading.Thread(
-                target=start_server, args=(rank, server_args)
-            )
+            thread = threading.Thread(target=start_server, args=(rank, server_args))
             thread.start()
             self.server_threads.append(thread)
 
@@ -194,9 +193,7 @@ class FTServerManager:
             thread.join()
 
         if len(self.servers) != self.dp_size:
-            raise RuntimeError(
-                f"Only {len(self.servers)}/{self.dp_size} servers started"
-            )
+            raise RuntimeError(f"Only {len(self.servers)}/{self.dp_size} servers started")
 
         return self.servers
 
@@ -216,9 +213,7 @@ def _ft_manager() -> FTServerManager:
     )
 
 
-def _server_for_rank(
-    servers: list[tuple[RemoteOpenAIServer, list[str]]], rank: int
-) -> RemoteOpenAIServer:
+def _server_for_rank(servers: list[tuple[RemoteOpenAIServer, list[str]]], rank: int) -> RemoteOpenAIServer:
     """Locate the server for a DP rank."""
     for server, sargs in servers:
         if "--data-parallel-rank" in sargs:
@@ -231,6 +226,7 @@ def _server_for_rank(
 # ---------------------------------------------------------------------------
 # Test primitives
 # ---------------------------------------------------------------------------
+
 
 def _complete(client) -> Any:
     """Issue one completion request; used to drive the serving loop."""
@@ -255,9 +251,7 @@ def _get_ft_status(server: RemoteOpenAIServer) -> dict:
     return resp.json()
 
 
-def _apply_ft(
-    server: RemoteOpenAIServer, instruction: str, params: dict | None = None
-) -> dict:
+def _apply_ft(server: RemoteOpenAIServer, instruction: str, params: dict | None = None) -> dict:
     """POST an FT instruction; assert it is accepted (202) and return body."""
     resp = requests.post(
         server.url_for("fault_tolerance/apply"),
@@ -272,20 +266,14 @@ def _assert_serving_and_healthy(
     servers: tuple[RemoteOpenAIServer, ...],
 ) -> None:
     """Wait until every engine is healthy, then serve one request per server."""
-    healthy = _wait_for_engines(
-        list(servers), match_key="status", match_values={"healthy"}
-    )
+    healthy = _wait_for_engines(list(servers), match_key="status", match_values={"healthy"})
     assert all(healthy), healthy
     _in_parallel(lambda s: _complete(s.get_client()), servers)
 
 
 def _kill_worker_process(server: RemoteOpenAIServer) -> None:
     """SIGKILL only the worker proc, leaving EngineCore and API server alive."""
-    workers = [
-        p
-        for p in psutil.Process(server.proc.pid).children(recursive=True)
-        if "Worker" in " ".join(p.cmdline())
-    ]
+    workers = [p for p in psutil.Process(server.proc.pid).children(recursive=True) if "Worker" in " ".join(p.cmdline())]
     assert len(workers) == 1, f"expected 1 worker proc, found: {workers}"
     workers[0].kill()
 
@@ -334,10 +322,7 @@ def _driving(*servers: RemoteOpenAIServer):
                 _complete(client)
             time.sleep(0.2)
 
-    threads = [
-        threading.Thread(target=_drive, args=(s,), daemon=True)
-        for s in servers
-    ]
+    threads = [threading.Thread(target=_drive, args=(s,), daemon=True) for s in servers]
     for t in threads:
         t.start()
     try:
@@ -348,9 +333,7 @@ def _driving(*servers: RemoteOpenAIServer):
             t.join(timeout=2)
 
 
-def _wait_for_ft_apply_outcome(
-    server: RemoteOpenAIServer, request_id: str, deadline_s: int
-) -> str | None:
+def _wait_for_ft_apply_outcome(server: RemoteOpenAIServer, request_id: str, deadline_s: int) -> str | None:
     """Wait until ``/fault_tolerance/status`` records the FT apply outcome."""
     engine_status = _wait_for_engines(
         [server],
@@ -365,6 +348,7 @@ def _wait_for_ft_apply_outcome(
 # Feature guard
 # ---------------------------------------------------------------------------
 
+
 def has_npu_ft_capability() -> bool:
     """Require at least 4 visible NPUs for DP=4 fault-tolerance tests."""
     if not torch.npu.is_available():
@@ -378,6 +362,7 @@ def has_npu_ft_capability() -> bool:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(
     not has_npu_ft_capability(),
@@ -401,9 +386,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
     with _ft_manager() as servers:
         assert len(servers) == DP_SIZE
-        all_ranks = tuple(
-            _server_for_rank(servers, r) for r in range(DP_SIZE)
-        )
+        all_ranks = tuple(_server_for_rank(servers, r) for r in range(DP_SIZE))
 
         # 1. All engines healthy and serving.
         _assert_serving_and_healthy(all_ranks)
@@ -419,8 +402,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
         for rank, engine_status in enumerate(faulted):
             assert engine_status is not None, (
-                f"rank {rank} did not report UNHEALTHY within "
-                f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
+                f"rank {rank} did not report UNHEALTHY within {FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
             )
 
         # The rank that raised carries the fault info from its own exception.
@@ -481,16 +463,14 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
         # Survivors must report the peer fault as UNHEALTHY.
         for label, result in [("rank 0", s0), ("rank 1", s1), ("rank 2", s2)]:
             assert result is not None, (
-                f"{label} did not report the peer fault within "
-                f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
+                f"{label} did not report the peer fault within {FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
             )
             assert result["status"] == "unhealthy", result
             assert result.get("fault_info"), result
 
         # Victim must report DEAD (its own worker is gone).
         assert victim_faulted is not None, (
-            "victim (rank 3) did not report its worker's death within "
-            f"{FAULT_DETECTION_DEADLINE_S}s"
+            f"victim (rank 3) did not report its worker's death within {FAULT_DETECTION_DEADLINE_S}s"
         )
         assert victim_faulted["status"] == "dead", victim_faulted
 
@@ -498,10 +478,6 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
         request_id = _apply_ft(victim, "retry")["request_id"]
 
         # 5. ...but the DEAD engine must reject it: recovery requires UNHEALTHY.
-        ft_error = _wait_for_ft_apply_outcome(
-            victim, request_id, FAULT_DETECTION_DEADLINE_S
-        )
-        assert ft_error is not None, (
-            "rejection was never recorded in /fault_tolerance/status"
-        )
+        ft_error = _wait_for_ft_apply_outcome(victim, request_id, FAULT_DETECTION_DEADLINE_S)
+        assert ft_error is not None, "rejection was never recorded in /fault_tolerance/status"
         assert "status is DEAD" in ft_error, ft_error
