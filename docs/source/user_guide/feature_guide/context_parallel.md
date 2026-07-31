@@ -15,12 +15,14 @@ To learn more about the theory and implementation details of context parallel, p
 
 ## Supported Scenarios
 
-Currently context parallel can be used together with most other features, supported features are as follows:
+CP(Context Parallel) supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
 
-|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | SpecDecode <br> (MTP) | PD <br> disaggregation | MLAPO |
-| ------- | ----- | ----- | ------ | ------ | ----- | ----- | ----- |
-| **PCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅|
-| **DCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅ |
+| Device | Attention Backend | Chunked Prefill + CP | Prefix Caching + CP | Graph Mode + CP | P/D Disaggregation + CP | MLAPO + CP | Speculative Decoding + CP |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Ascend A2/A3 | MLA/GQA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported (MLA)<br>— Not applicable (GQA) | 🟢 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend A2/A3 | SFA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported |
+| Ascend 950 | MLA/GQA | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental (MLA)<br>— Not applicable (GQA) | 🔵 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend 950 | SFA | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported |
 
 ## How to use Context Parallel
 
