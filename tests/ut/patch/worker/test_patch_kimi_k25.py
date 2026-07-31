@@ -57,8 +57,8 @@ def test_a5_moonvit_to_patch_uses_current_vllm_contract(monkeypatch):
     original_forward = Learnable2DInterpPosEmbDivided_fixed.forward
     monkeypatch.setattr(ascend_utils, "_ascend_device_type", ascend_utils.AscendDeviceType.A5)
 
-    patch_namespace = runpy.run_path(patch_kimi_k25.__file__)
     try:
+        patch_namespace = runpy.run_path(patch_kimi_k25.__file__)
         assert MoonViT3dPretrainedModel.to is patch_namespace["_patched_moonvit_to"]
 
         vision_tower = MoonViT3dPretrainedModel.__new__(MoonViT3dPretrainedModel)
