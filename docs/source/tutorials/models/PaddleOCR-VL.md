@@ -10,9 +10,9 @@ This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -204,7 +204,7 @@ In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-
         ```bash
         python -m pip install paddlepaddle==3.2.0
         wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-        pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+        pip install paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
         python -m pip install -U "paddleocr[doc-parser]"
         pip install safetensors
         ```
@@ -236,9 +236,9 @@ from paddleocr import PaddleOCRVL
 
 doclayout_model_path = "/path/to/your/PP-DocLayoutV2/"
 
-pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", 
-                       vl_rec_server_url="http://localhost:8000/v1", 
-                       layout_detection_model_name="PP-DocLayoutV2",  
+pipeline = PaddleOCRVL(vl_rec_backend="vllm-server",
+                       vl_rec_server_url="http://localhost:8000/v1",
+                       layout_detection_model_name="PP-DocLayoutV2",
                        layout_detection_model_dir=doclayout_model_path,
                        device="npu")
 

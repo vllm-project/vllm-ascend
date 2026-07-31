@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
 - `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -30,7 +30,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
 
@@ -497,23 +497,23 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
-        
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-        
+
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=400
-        
+
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        
+
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        
+
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
@@ -567,23 +567,23 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
-        
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-        
+
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=400
-        
+
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        
+
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-        
+
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
@@ -640,11 +640,11 @@ Before you start, please
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-        
+
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
-        
+
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
         export ACL_OP_INIT_MODE=1
@@ -708,11 +708,11 @@ Before you start, please
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-        
+
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
-        
+
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
         export ACL_OP_INIT_MODE=1
@@ -936,15 +936,15 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
                     "lookup_rpc_port":"0",
                     "backend": "mooncake"
                 }
-            }  
+            }
         ]
     }
     }' \
     --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
     --profiler-config \
     '{
-        "profiler": "torch", 
-        "torch_profiler_dir": "/mnt/share/xxx/prof", 
+        "profiler": "torch",
+        "torch_profiler_dir": "/mnt/share/xxx/prof",
         "torch_profiler_with_stack": false
     }' \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'
@@ -1050,8 +1050,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     }' \
     --profiler-config \
     '{
-        "profiler": "torch", 
-        "torch_profiler_dir": "/mnt/share/xxx/prof", 
+        "profiler": "torch",
+        "torch_profiler_dir": "/mnt/share/xxx/prof",
         "torch_profiler_with_stack": false
     }' \
     --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \

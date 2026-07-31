@@ -20,12 +20,12 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 **Qwen3.5-27B**
 
-- `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)
+- `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
 
 **Qwen3.6-27B**
 
-- `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)
+- `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)
 - `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -44,7 +44,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -83,7 +83,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -114,7 +114,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "Atlas inference products"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -220,7 +220,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         --served-model-name qwen3.5 \
         --max-num-seqs 32 \
         --max-model-len 133000 \
-        --max-num-batched-tokens 8096 \
+        --max-num-batched-tokens 16384 \
         --trust-remote-code \
         --gpu-memory-utilization 0.90 \
         --no-enable-prefix-caching \
@@ -261,7 +261,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         --served-model-name qwen3.6 \
         --max-num-seqs 32 \
         --max-model-len 262144 \
-        --max-num-batched-tokens 8096 \
+        --max-num-batched-tokens 16384 \
         --trust-remote-code \
         --gpu-memory-utilization 0.90 \
         --no-enable-prefix-caching \
@@ -548,11 +548,12 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
       }'
     ```
 
-Key Parameter Descriptions:
+   Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
+   - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
+   - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
+   - `--async-scheduling` (on decode nodes): enables asynchronous scheduling, which can reduce TPOT for high-concurrency decode workloads.
+   - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
 
 4. Run server for each node:
 
@@ -816,10 +817,10 @@ After about several minutes, you can get the performance evaluation result.
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | Async Scheduling |
 |----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|------------------|
-| High Throughput (128k) | Single-Node (A2) | 8 | 2 | 4 | 32 | 16384 | 133000 | 3 | On |
-| High Throughput (128k) | Single-Node (A3) | 16 | 2 | 8 | 32 | 16384 | 133000 | 3 | On |
-| Low Latency (128k) | Single-Node (A3) | 16 | 2 | 8 | 4 | 4096 | 133000 | 3 | On |
-| Long Context (256k+) | Single-Node (A3) | 16 | 8 | 2 | 8 | 8192 | 266000 | 3 | On |
+| High Throughput (128K) | Single-Node (A2) | 8 | 2 | 4 | 32 | 16384 | 133000 | 3 | On |
+| High Throughput (128K) | Single-Node (A3) | 16 | 2 | 8 | 32 | 16384 | 133000 | 3 | On |
+| Low Latency (128K) | Single-Node (A3) | 16 | 2 | 8 | 4 | 4096 | 133000 | 3 | On |
+| Long Context (256K+) | Single-Node (A3) | 16 | 8 | 2 | 8 | 8192 | 262144 | 3 | On |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
