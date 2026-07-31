@@ -95,6 +95,7 @@ struct MlaTilingData {
     uint32_t hiddenStateDim{7168};
 
     uint32_t isWeightQuantized{1};
+    uint32_t enableRope{1};
 
     // Model-specific MLA dimensions (derived from tensor shapes)
     uint32_t mm1OutSize{2112};        // q_lora_rank + kv_lora_rank + qk_rope_head_dim
