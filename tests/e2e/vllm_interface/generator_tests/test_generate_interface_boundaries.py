@@ -6671,3 +6671,439 @@ class Child(Base):
     assert len([relation for relation in relations if relation.relation == "inheritance"]) == 1
     assert not [relation for relation in relations if relation.relation == "override"]
     assert not findings
+
+
+def test_v024_records_exact_descriptor_kinds_for_overrides(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def ordinary(self, value):
+        return value
+
+    @property
+    def state(self):
+        return 1
+
+    @classmethod
+    def build(cls, value):
+        return cls()
+
+    @staticmethod
+    def normalize(value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def ordinary(self, value):
+        return value
+
+    @property
+    def state(self):
+        return 2
+
+    @classmethod
+    def build(cls, value):
+        return cls()
+
+    @staticmethod
+    def normalize(value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = {relation.downstream_name: relation for relation in relations if relation.relation == "override"}
+    assert set(overrides) == {"ordinary", "state", "build", "normalize"}
+    assert {
+        name: (
+            relation.upstream_descriptor_kind,
+            relation.downstream_descriptor_kind,
+            relation.installed_descriptor_kind,
+        )
+        for name, relation in overrides.items()
+    } == {
+        "ordinary": ("ordinary", "ordinary", "ordinary"),
+        "state": ("property", "property", "property"),
+        "build": ("classmethod", "classmethod", "classmethod"),
+        "normalize": ("staticmethod", "staticmethod", "staticmethod"),
+    }
+    assert not findings
+
+
+def test_v024_override_descriptor_mismatch_keeps_relation_and_supplemental_finding(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @property
+    def state(self):
+        return 1
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def state(self):
+        return 2
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = [relation for relation in relations if relation.relation == "override"]
+    assert len(overrides) == 1
+    assert (
+        overrides[0].upstream_descriptor_kind,
+        overrides[0].downstream_descriptor_kind,
+        overrides[0].installed_descriptor_kind,
+    ) == ("property", "ordinary", "ordinary")
+    assert len(findings) == 1
+    finding = findings[0]
+    assert (
+        finding.relation,
+        finding.target_expression,
+        finding.status,
+        finding.reason_code,
+        finding.generator_issue,
+        finding.supplemental,
+        finding.upstream_descriptor_kind,
+        finding.downstream_descriptor_kind,
+        finding.installed_descriptor_kind,
+    ) == (
+        "override",
+        "vllm.base.Base.state",
+        "review",
+        "descriptor_kind_mismatch",
+        False,
+        True,
+        "property",
+        "ordinary",
+        "ordinary",
+    )
+
+
+def test_v024_property_patch_keeps_definition_and_installed_kinds_separate(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    @property
+    def state(self):
+        return 1
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self):
+    return 2
+
+
+Target.state = property(replacement)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_descriptor_kind,
+        patches[0].downstream_descriptor_kind,
+        patches[0].installed_descriptor_kind,
+    ) == ("property", "ordinary", "property")
+    assert not findings
+
+
+def test_v024_conditional_descriptor_variants_are_not_guessed(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    if feature_enabled():
+        @property
+        def state(self):
+            return 1
+    else:
+        def state(self):
+            return 2
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @property
+    def state(self):
+        return 3
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = [relation for relation in relations if relation.relation == "override"]
+    assert len(overrides) == 1
+    assert (
+        overrides[0].upstream_descriptor_kind,
+        overrides[0].downstream_descriptor_kind,
+        overrides[0].installed_descriptor_kind,
+    ) == ("unknown", "property", "property")
+    assert len(findings) == 1
+    finding = findings[0]
+    assert (
+        finding.status,
+        finding.reason_code,
+        finding.generator_issue,
+        finding.supplemental,
+        finding.upstream_descriptor_kind,
+        finding.downstream_descriptor_kind,
+        finding.installed_descriptor_kind,
+    ) == (
+        "review",
+        "conditional_descriptor_kind",
+        False,
+        True,
+        "unknown",
+        "property",
+        "property",
+    )
+
+
+def test_v024_unknown_decorator_is_explicit_supplemental_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @runtime_descriptor
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = [relation for relation in relations if relation.relation == "override"]
+    assert len(overrides) == 1
+    assert overrides[0].upstream_descriptor_kind == "unknown"
+    assert len(findings) == 1
+    assert (
+        findings[0].reason_code,
+        findings[0].supplemental,
+        findings[0].upstream_descriptor_kind,
+    ) == ("unknown_descriptor_kind", True, "unknown")
+
+
+def test_v024_module_level_descriptor_wrappers_remain_values(
+    tmp_path: Path,
+) -> None:
+    vllm_root, _ = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def implementation(value):
+    return value
+
+
+as_property = property(implementation)
+as_classmethod = classmethod(implementation)
+as_staticmethod = staticmethod(implementation)
+""",
+    )
+
+    index = generator.RepositoryIndex(vllm_root, "vllm")
+
+    for name in ("as_property", "as_classmethod", "as_staticmethod"):
+        qualified_name = f"vllm.base.{name}"
+        assert {binding.kind for binding in index.find_final_bindings(qualified_name)} == {"value"}
+        assert not index.find_final_callable_variants(qualified_name)
+
+
+def test_v024_schema_v4_relations_load_with_unknown_descriptor_kinds(
+    tmp_path: Path,
+) -> None:
+    mapping = tmp_path / "v4.jsonl"
+    generator._write_jsonl(
+        mapping,
+        [
+            {"_meta": {"schema": 4}},
+            {
+                "u": [
+                    "vllm/base.py",
+                    "Base",
+                    "run",
+                    ["sync", [], [["self", True]], None, [], None],
+                ],
+                "c": [
+                    [
+                        "override",
+                        "vllm_ascend/plugin.py",
+                        "Child",
+                        "run",
+                        ["sync", [], [["self", True]], None, [], None],
+                    ]
+                ],
+                "e": [],
+            },
+        ],
+    )
+
+    relations = generator._load_compact_relations(mapping)
+
+    assert len(relations) == 1
+    assert (
+        relations[0].upstream_descriptor_kind,
+        relations[0].downstream_descriptor_kind,
+        relations[0].installed_descriptor_kind,
+    ) == (None, None, None)
+
+
+def test_v024_schema_v5_round_trips_descriptor_kinds(
+    tmp_path: Path,
+) -> None:
+    relation = generator.Relation(
+        relation="monkey_patch",
+        upstream_file="vllm/base.py",
+        upstream_owner="Target",
+        upstream_name="state",
+        upstream_signature=["sync", [], [["self", True]], None, [], None],
+        downstream_file="vllm_ascend/plugin.py",
+        downstream_owner=None,
+        downstream_name="replacement",
+        downstream_signature=["sync", [], [["self", True]], None, [], None],
+        evidence_file="vllm_ascend/plugin.py",
+        evidence_line=8,
+        upstream_descriptor_kind="property",
+        downstream_descriptor_kind="ordinary",
+        installed_descriptor_kind="property",
+    )
+
+    payloads = generator._relation_payloads(
+        [relation],
+        vllm_sha="upstream",
+        ascend_sha="downstream",
+    )
+    assert payloads[0]["_meta"]["schema"] == 5
+    assert payloads[1]["u"][-1] == "property"
+    assert payloads[1]["c"][0][-2:] == ["ordinary", "property"]
+
+    mapping = tmp_path / "v5.jsonl"
+    generator._write_jsonl(mapping, payloads)
+    loaded = generator._load_compact_relations(mapping)
+    assert len(loaded) == 1
+    assert (
+        loaded[0].upstream_descriptor_kind,
+        loaded[0].downstream_descriptor_kind,
+        loaded[0].installed_descriptor_kind,
+    ) == ("property", "ordinary", "property")
+
+
+def test_v024_comparison_reports_descriptor_kind_changes_separately() -> None:
+    common = {
+        "relation": "override",
+        "upstream_file": "vllm/base.py",
+        "upstream_owner": "Base",
+        "upstream_name": "state",
+        "upstream_signature": ["sync", [], [["self", True]], None, [], None],
+        "downstream_file": "vllm_ascend/plugin.py",
+        "downstream_owner": "Child",
+        "downstream_name": "state",
+        "downstream_signature": ["sync", [], [["self", True]], None, [], None],
+        "evidence_file": "vllm_ascend/plugin.py",
+        "evidence_line": 5,
+    }
+    baseline = generator.Relation(
+        upstream_descriptor_kind="ordinary",
+        downstream_descriptor_kind="ordinary",
+        installed_descriptor_kind="ordinary",
+        **common,
+    )
+    generated = generator.Relation(
+        upstream_descriptor_kind="property",
+        downstream_descriptor_kind="ordinary",
+        installed_descriptor_kind="ordinary",
+        **common,
+    )
+
+    report = generator.compare_relations([generated], [baseline], [])
+
+    assert report["summary"]["exact_matches"] == 1
+    assert report["summary"]["descriptor_kind_changes"] == 1
+    assert report["summary"]["old_only"] == 0
+    assert report["summary"]["new_only"] == 0
+    assert report["descriptor_kind_changes"] == [
+        {
+            "relation": generator._relation_label(generated),
+            "baseline": ["ordinary", "ordinary", "ordinary"],
+            "generated": ["property", "ordinary", "ordinary"],
+        }
+    ]

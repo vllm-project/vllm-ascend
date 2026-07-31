@@ -298,6 +298,93 @@ Target.run = replacement
     assert missing_report["summary"]["missing"] == 1
 
 
+def test_v024_supplemental_descriptor_finding_does_not_conflict_with_relation(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @property
+    def state(self):
+        return 1
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def state(self):
+        return 2
+""",
+    )
+    candidates = auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+    relations = []
+    for candidate in candidates:
+        payload = _relation_payload(candidate)
+        payload["u"].append("property" if candidate.relation == "override" else None)
+        for consumer in payload["c"]:
+            consumer.extend(
+                [
+                    "ordinary" if candidate.relation == "override" else None,
+                    "ordinary" if candidate.relation == "override" else None,
+                ]
+            )
+        relations.append(payload)
+    override = next(candidate for candidate in candidates if candidate.relation == "override")
+    mapping = tmp_path / "mapping.jsonl"
+    _write_jsonl(
+        mapping,
+        [
+            {"_meta": {"schema": 5}},
+            *relations,
+            {
+                "f": {
+                    "relation": "override",
+                    "downstream": {
+                        "file": override.file,
+                        "owner": "Child",
+                        "name": "state",
+                    },
+                    "target_expression": "vllm.base.Base.state",
+                    "evidence": {
+                        "file": override.file,
+                        "line": override.line,
+                    },
+                    "status": "review",
+                    "reason_code": "descriptor_kind_mismatch",
+                    "generator_issue": False,
+                    "supplemental": True,
+                    "upstream_descriptor_kind": "property",
+                    "downstream_descriptor_kind": "ordinary",
+                    "installed_descriptor_kind": "ordinary",
+                    "reason": "descriptor kind differs while the dependency edge remains verified",
+                }
+            },
+        ],
+    )
+
+    report = auditor.audit_mapping_coverage(vllm_root, ascend_root, mapping)
+
+    assert report["summary"] == {
+        "candidates": len(candidates),
+        "classified": len(candidates),
+        "missing": 0,
+        "conflicting": 0,
+        "orphan": 0,
+        "generator_issue_review": 0,
+    }
+
+
 def test_sha_mismatch_fails_before_reporting(
     source_pair: tuple[Path, Path],
     tmp_path: Path,
