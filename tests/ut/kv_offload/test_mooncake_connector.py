@@ -1071,12 +1071,12 @@ class TestCoreFunctionality(unittest.TestCase):
                     [0],
                 ),
             }
-            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000, 0x2800]]
-            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000, 0x4800]]}
-            self.thread.block_size_scale = [[1, 2, 2]]
-            self.thread.block_len_per_addr = [[1024, 2048, 256]]
-            self.thread.block_stride_per_addr = [[1024, 2048, 256]]
-            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192, 512]]
+            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
+            self.thread.block_size_scale = [[1, 2]]
+            self.thread.block_len_per_addr = [[1024, 2048]]
+            self.thread.block_stride_per_addr = [[1024, 2048]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192]]
 
             self.thread._transfer_kv_cache_all_groups(req)
 
@@ -1106,12 +1106,12 @@ class TestCoreFunctionality(unittest.TestCase):
                     [0],
                 ),
             }
-            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
-            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
-            self.thread.block_size_scale = [[1, 2]]
-            self.thread.block_len_per_addr = [[1024, 2048]]
-            self.thread.block_stride_per_addr = [[1024, 2048]]
-            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192]]
+            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000, 0x2800]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000, 0x4800]]}
+            self.thread.block_size_scale = [[1, 2, 2]]
+            self.thread.block_len_per_addr = [[1024, 2048, 256]]
+            self.thread.block_stride_per_addr = [[1024, 2048, 256]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192, 512]]
 
             self.thread._transfer_kv_cache_all_groups(req)
 
