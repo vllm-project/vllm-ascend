@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.14.0"
+GENERATOR_VERSION = "0.15.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -150,6 +150,30 @@ def _function_scope_nodes(
         ):
             continue
         stack.extend(reversed(list(ast.iter_child_nodes(current))))
+
+
+def _statements_must_terminate(statements: Sequence[ast.stmt]) -> bool:
+    return any(_statement_must_terminate(statement) for statement in statements)
+
+
+def _statement_must_terminate(node: ast.stmt) -> bool:
+    if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+        return True
+    if isinstance(node, ast.If):
+        return bool(node.orelse) and _statements_must_terminate(
+            node.body
+        ) and _statements_must_terminate(node.orelse)
+    if isinstance(node, ast.Try):
+        if _statements_must_terminate(node.finalbody):
+            return True
+        success = (*node.body, *node.orelse)
+        return bool(node.handlers) and _statements_must_terminate(
+            success
+        ) and all(
+            _statements_must_terminate(handler.body)
+            for handler in node.handlers
+        )
+    return False
 
 
 def _main_expression_calls(
@@ -264,6 +288,8 @@ def _main_condition_value(
     node: ast.AST,
     tag_guard_names: set[str],
 ) -> bool | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
     if _is_exact_tag_check(node):
         return False
     if isinstance(node, ast.Name) and node.id in tag_guard_names:
@@ -619,6 +645,7 @@ class PatchScanContext:
     strings: dict[str, set[str]] = field(default_factory=dict)
     local_callables: dict[str, list[CallableInfo]] = field(default_factory=dict)
     runtime_modules: dict[str, set[str]] = field(default_factory=dict)
+    parameter_names: set[str] = field(default_factory=set)
     scope: tuple[str, ...] = ()
     guards: tuple[str, ...] = ()
 
@@ -639,6 +666,7 @@ class PatchScanContext:
                 name: set(values)
                 for name, values in self.runtime_modules.items()
             },
+            parameter_names=set(self.parameter_names),
             scope=self.scope if scope is None else scope,
             guards=self.guards if guards is None else guards,
         )
@@ -662,6 +690,8 @@ class PatchScanContext:
         }
         merged_callables: dict[str, list[CallableInfo]] = {}
         for name in callable_names:
+            if any(name not in context.local_callables for context in contexts):
+                continue
             candidates: dict[tuple[str, str | None, str, int], CallableInfo] = {}
             for context in contexts:
                 for candidate in context.local_callables.get(name, []):
@@ -684,6 +714,22 @@ class PrivateHelperInvocation:
     guards: tuple[str, ...] = ()
 
 
+@dataclass
+class PrivateHelperDefinition:
+    identity: str
+    info: CallableInfo
+    module_info: ModuleInfo
+    tag_guard_names: frozenset[str]
+    entry_context: PatchScanContext | None = None
+
+
+@dataclass(frozen=True)
+class StaticValueAlternative:
+    target: str | None
+    truth: bool
+    guards: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True)
 class PatchReplacement:
     info: CallableInfo | None
@@ -697,11 +743,25 @@ class PatchReplacement:
 def _merge_candidate_maps(
     mappings: Iterable[dict[str, set[str]]],
 ) -> dict[str, set[str]]:
-    merged: dict[str, set[str]] = defaultdict(set)
-    for mapping in mappings:
-        for name, values in mapping.items():
-            merged[name].update(values)
-    return dict(merged)
+    materialized = list(mappings)
+    names = {
+        name
+        for mapping in materialized
+        for name in mapping
+    }
+    merged: dict[str, set[str]] = {}
+    for name in names:
+        branch_values = [mapping.get(name) for mapping in materialized]
+        if any(not values for values in branch_values):
+            merged[name] = set()
+        else:
+            merged[name] = {
+                value
+                for values in branch_values
+                if values is not None
+                for value in values
+            }
+    return merged
 
 
 class RepositoryIndex:
@@ -1340,6 +1400,11 @@ class InterfaceBoundaryGenerator:
         self._private_helper_invocations: dict[
             str, tuple[PrivateHelperInvocation, ...]
         ] = {}
+        self._private_helper_definitions: dict[
+            str, PrivateHelperDefinition
+        ] = {}
+        self._private_helper_exports: dict[str, str] = {}
+        self._private_helper_node_identities: dict[int, str] = {}
 
     def generate(self) -> tuple[list[Relation], list[CandidateFinding]]:
         self._collect_inheritance()
@@ -1799,13 +1864,62 @@ class InterfaceBoundaryGenerator:
             )
         return tuple(sorted(candidates))
 
+    def _index_private_helper_definitions(self) -> None:
+        definitions: dict[str, PrivateHelperDefinition] = {}
+        node_identities: dict[int, str] = {}
+        for module_info in self.downstream.modules.values():
+            tag_guard_names = _tag_guard_names(module_info.tree.body)
+            for node in _main_module_statements(
+                module_info.tree.body,
+                tag_guard_names,
+            ):
+                if not isinstance(
+                    node,
+                    (ast.AsyncFunctionDef, ast.FunctionDef),
+                ) or not (
+                    node.name.startswith("_")
+                    and not node.name.startswith("__")
+                ):
+                    continue
+                qualified_name = f"{module_info.name}.{node.name}"
+                identity = (
+                    f"<private-helper>:{qualified_name}:"
+                    f"{getattr(node, 'lineno', 0)}:"
+                    f"{getattr(node, 'col_offset', 0)}"
+                )
+                info = CallableInfo(
+                    qualified_name=qualified_name,
+                    module=module_info.name,
+                    file=module_info.file,
+                    owner=None,
+                    name=node.name,
+                    node=node,
+                )
+                definitions[identity] = PrivateHelperDefinition(
+                    identity=identity,
+                    info=info,
+                    module_info=module_info,
+                    tag_guard_names=frozenset(tag_guard_names),
+                )
+                node_identities[id(node)] = identity
+
+        exports = {}
+        for module_info in self.downstream.modules.values():
+            for name, info in module_info.functions.items():
+                if not (
+                    name.startswith("_") and not name.startswith("__")
+                ):
+                    continue
+                identity = node_identities.get(id(info.node))
+                if identity is not None:
+                    exports[info.qualified_name] = identity
+
+        self._private_helper_definitions = definitions
+        self._private_helper_exports = exports
+        self._private_helper_node_identities = node_identities
+
     def _prepare_private_helper_parameter_bindings(self) -> None:
-        helpers = {
-            info.qualified_name: info
-            for module_info in self.downstream.modules.values()
-            for name, info in module_info.functions.items()
-            if name.startswith("_") and not name.startswith("__")
-        }
+        self._index_private_helper_definitions()
         calls: dict[
             str,
             list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
@@ -1816,13 +1930,89 @@ class InterfaceBoundaryGenerator:
                 module_info.tree.body,
                 PatchScanContext(),
                 _tag_guard_names(module_info.tree.body),
-                helpers,
                 calls,
             )
 
-        invocations: dict[str, tuple[PrivateHelperInvocation, ...]] = {}
+        known = self._exact_private_helper_invocations(calls)
+        processed: set[tuple[str, PrivateHelperInvocation]] = set()
+        while True:
+            frontier = sorted(
+                (
+                    (helper_name, invocation)
+                    for helper_name, invocations in known.items()
+                    for invocation in invocations
+                    if (helper_name, invocation) not in processed
+                ),
+                key=lambda item: (item[0], item[1].bindings, item[1].guards),
+            )
+            if not frontier:
+                break
+            for helper_name, invocation in frontier:
+                processed.add((helper_name, invocation))
+                definition = self._private_helper_definitions[helper_name]
+                if definition.entry_context is None or not isinstance(
+                    definition.info.node,
+                    (ast.AsyncFunctionDef, ast.FunctionDef),
+                ):
+                    continue
+                guards = self._merge_guard_paths(
+                    definition.entry_context.guards,
+                    invocation.guards,
+                )
+                if guards is None:
+                    continue
+                context = definition.entry_context.clone(guards=guards)
+                for parameter, target in invocation.bindings:
+                    context.bindings[parameter] = {target}
+                forwarded_calls: dict[
+                    str,
+                    list[
+                        tuple[
+                            dict[str, set[str] | None],
+                            tuple[str, ...],
+                        ]
+                    ],
+                ] = defaultdict(list)
+                self._scan_private_helper_calls(
+                    definition.module_info,
+                    definition.info.node.body,
+                    context,
+                    set(definition.tag_guard_names),
+                    forwarded_calls,
+                )
+                for forwarded_name, forwarded_invocations in (
+                    self._exact_private_helper_invocations(
+                        forwarded_calls
+                    ).items()
+                ):
+                    known[forwarded_name].update(forwarded_invocations)
+
+        self._private_helper_invocations = {
+            helper_name: tuple(
+                sorted(
+                    invocations,
+                    key=lambda invocation: (
+                        invocation.bindings,
+                        invocation.guards,
+                    ),
+                )
+            )
+            for helper_name, invocations in known.items()
+            if invocations
+        }
+
+    def _exact_private_helper_invocations(
+        self,
+        calls: dict[
+            str,
+            list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
+        ],
+    ) -> defaultdict[str, set[PrivateHelperInvocation]]:
+        invocations: defaultdict[
+            str, set[PrivateHelperInvocation]
+        ] = defaultdict(set)
         for helper_name, helper_calls in calls.items():
-            helper = helpers[helper_name]
+            helper = self._private_helper_definitions[helper_name].info
             if not isinstance(
                 helper.node,
                 (ast.AsyncFunctionDef, ast.FunctionDef),
@@ -1849,20 +2039,11 @@ class InterfaceBoundaryGenerator:
                     exact_calls.add(
                         PrivateHelperInvocation(
                             bindings=tuple(sorted(exact_bindings)),
-                            guards=guards,
+                            guards=tuple(sorted(set(guards))),
                         )
                     )
-            if exact_calls:
-                invocations[helper_name] = tuple(
-                    sorted(
-                        exact_calls,
-                        key=lambda invocation: (
-                            invocation.bindings,
-                            invocation.guards,
-                        ),
-                    )
-                )
-        self._private_helper_invocations = invocations
+            invocations[helper_name].update(exact_calls)
+        return invocations
 
     def _scan_private_helper_calls(
         self,
@@ -1870,7 +2051,6 @@ class InterfaceBoundaryGenerator:
         statements: Sequence[ast.stmt],
         context: PatchScanContext,
         tag_guard_names: set[str],
-        helpers: dict[str, CallableInfo],
         calls: dict[
             str,
             list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
@@ -1883,8 +2063,8 @@ class InterfaceBoundaryGenerator:
                         module_info,
                         call,
                         context,
-                        helpers,
                         calls,
+                        tag_guard_names,
                     )
 
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -1916,11 +2096,14 @@ class InterfaceBoundaryGenerator:
                         branch_statements,
                         branch,
                         tag_guard_names,
-                        helpers,
                         calls,
                     )
-                    scanned.append(branch)
-                context.merge(scanned)
+                    if not _statements_must_terminate(branch_statements):
+                        scanned.append(branch)
+                if scanned:
+                    context.merge(scanned)
+                if _statement_must_terminate(node):
+                    return
                 continue
             if isinstance(node, ast.Try):
                 branches = []
@@ -1930,10 +2113,12 @@ class InterfaceBoundaryGenerator:
                     (*node.body, *node.orelse),
                     success,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
-                branches.append(success)
+                if not _statements_must_terminate(
+                    (*node.body, *node.orelse)
+                ):
+                    branches.append(success)
                 for handler in node.handlers:
                     branch = context.clone()
                     self._scan_private_helper_calls(
@@ -1941,34 +2126,46 @@ class InterfaceBoundaryGenerator:
                         handler.body,
                         branch,
                         tag_guard_names,
-                        helpers,
                         calls,
                     )
-                    branches.append(branch)
-                context.merge(branches)
+                    if not _statements_must_terminate(handler.body):
+                        branches.append(branch)
+                if branches:
+                    context.merge(branches)
                 self._scan_private_helper_calls(
                     module_info,
                     node.finalbody,
                     context,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
+                if _statement_must_terminate(node):
+                    return
                 continue
+            if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                return
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qualified_name = (
                     f"{module_info.name}."
                     f"{'.'.join((*context.scope, node.name))}"
                 )
-                context.bindings[node.name] = {qualified_name}
+                identity = self._private_helper_node_identities.get(id(node))
+                context.bindings[node.name] = {identity or qualified_name}
                 child = context.clone(scope=(*context.scope, node.name))
                 self._clear_function_parameter_bindings(node, child)
+                if identity is not None:
+                    definition = self._private_helper_definitions[identity]
+                    if definition.entry_context is None:
+                        definition.entry_context = child.clone()
+                    else:
+                        merged = definition.entry_context.clone()
+                        merged.merge([definition.entry_context, child])
+                        definition.entry_context = merged
                 self._scan_private_helper_calls(
                     module_info,
                     node.body,
                     child,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
                 continue
@@ -1984,7 +2181,6 @@ class InterfaceBoundaryGenerator:
                     node.body,
                     child,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
                 continue
@@ -1996,7 +2192,6 @@ class InterfaceBoundaryGenerator:
                     node.body,
                     branch,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
                 branches.append(branch)
@@ -2006,7 +2201,6 @@ class InterfaceBoundaryGenerator:
                     node.orelse,
                     context,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
                 continue
@@ -2017,7 +2211,6 @@ class InterfaceBoundaryGenerator:
                     node.body,
                     branch,
                     tag_guard_names,
-                    helpers,
                     calls,
                 )
                 context.merge([context.clone(), branch])
@@ -2040,11 +2233,11 @@ class InterfaceBoundaryGenerator:
         module_info: ModuleInfo,
         call: ast.Call,
         context: PatchScanContext,
-        helpers: dict[str, CallableInfo],
         calls: dict[
             str,
             list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
         ],
+        tag_guard_names: set[str],
     ) -> None:
         expression = _expression_name(call.func)
         if expression is None:
@@ -2052,7 +2245,9 @@ class InterfaceBoundaryGenerator:
         local_name = expression.rsplit(".", 1)[-1]
         root_name = expression.split(".", 1)[0]
         imported_private_helper = any(
-            self.downstream.canonical_name(candidate) in helpers
+            candidate in self._private_helper_definitions
+            or self.downstream.canonical_name(candidate)
+            in self._private_helper_exports
             for candidate in context.bindings.get(root_name, ())
         )
         if not local_name.startswith("_") and not imported_private_helper:
@@ -2062,26 +2257,39 @@ class InterfaceBoundaryGenerator:
             expression,
             context,
         )
-        candidates = sorted(set(references) & helpers.keys())
+        candidates = sorted(
+            {
+                identity
+                for reference in references
+                for identity in (
+                    (
+                        reference
+                        if reference in self._private_helper_definitions
+                        else self._private_helper_exports.get(
+                            self.downstream.canonical_name(reference)
+                        )
+                    ),
+                )
+                if identity is not None
+            }
+        )
         if not candidates:
             return
         for helper_name in candidates:
-            helper = helpers[helper_name]
+            helper = self._private_helper_definitions[helper_name].info
             if len(references) != 1 or not isinstance(
                 helper.node,
                 (ast.AsyncFunctionDef, ast.FunctionDef),
             ):
                 calls[helper_name].append(({}, context.guards))
                 continue
-            calls[helper_name].append(
-                (
-                    self._bound_owner_arguments(
-                        module_info,
-                        helper.node,
-                        call,
-                        context,
-                    ),
-                    context.guards,
+            calls[helper_name].extend(
+                self._bound_owner_arguments(
+                    module_info,
+                    helper.node,
+                    call,
+                    context,
+                    tag_guard_names,
                 )
             )
 
@@ -2116,7 +2324,10 @@ class InterfaceBoundaryGenerator:
         function: ast.AsyncFunctionDef | ast.FunctionDef,
         call: ast.Call,
         context: PatchScanContext,
-    ) -> dict[str, set[str] | None]:
+        tag_guard_names: set[str],
+    ) -> list[
+        tuple[dict[str, set[str] | None], tuple[str, ...]]
+    ]:
         positional = [*function.args.posonlyargs, *function.args.args]
         explicit_keywords = {
             keyword.arg: keyword.value
@@ -2125,56 +2336,244 @@ class InterfaceBoundaryGenerator:
         }
         has_starred = any(isinstance(argument, ast.Starred) for argument in call.args)
         has_kwargs = any(keyword.arg is None for keyword in call.keywords)
-        result: dict[str, set[str] | None] = {}
+        actuals: list[tuple[str, ast.AST | None, bool]] = []
         for index, parameter in enumerate(positional):
             actual = explicit_keywords.get(parameter.arg)
             if actual is None and index < len(call.args) and not has_starred:
                 actual = call.args[index]
-            if actual is None and (has_starred or has_kwargs):
-                result[parameter.arg] = None
-            else:
-                result[parameter.arg] = self._owner_argument_targets(
-                    module_info,
+            actuals.append(
+                (
+                    parameter.arg,
                     actual,
-                    context,
-                )
-        for parameter in function.args.kwonlyargs:
-            actual = explicit_keywords.get(parameter.arg)
-            result[parameter.arg] = (
-                None
-                if actual is None and has_kwargs
-                else self._owner_argument_targets(
-                    module_info,
-                    actual,
-                    context,
+                    actual is None and (has_starred or has_kwargs),
                 )
             )
-        return result
+        for parameter in function.args.kwonlyargs:
+            actual = explicit_keywords.get(parameter.arg)
+            actuals.append((parameter.arg, actual, actual is None and has_kwargs))
 
-    def _owner_argument_targets(
+        contexts: list[
+            tuple[dict[str, set[str] | None], tuple[str, ...]]
+        ] = [({}, context.guards)]
+        for parameter, actual, forced_unknown in actuals:
+            alternatives = (
+                None
+                if forced_unknown
+                else self._owner_argument_alternatives(
+                    module_info,
+                    actual,
+                    context,
+                    tag_guard_names,
+                )
+            )
+            if alternatives is None:
+                for arguments, _guards in contexts:
+                    arguments[parameter] = None
+                continue
+
+            expanded = []
+            for arguments, guards in contexts:
+                for target, alternative_guards in alternatives:
+                    merged_guards = self._merge_guard_paths(
+                        guards,
+                        alternative_guards,
+                    )
+                    if merged_guards is None:
+                        continue
+                    expanded.append(
+                        (
+                            {**arguments, parameter: {target}},
+                            merged_guards,
+                        )
+                    )
+            contexts = expanded
+        return contexts
+
+    def _owner_argument_alternatives(
         self,
         module_info: ModuleInfo,
         node: ast.AST | None,
         context: PatchScanContext,
-    ) -> set[str] | None:
-        expression = _expression_name(node)
-        if expression is None:
-            return None
-        references = self._resolve_patch_references(
+        tag_guard_names: set[str],
+    ) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+        alternatives = self._static_value_alternatives(
             module_info,
-            expression,
+            node,
             context,
+            tag_guard_names,
         )
-        candidates = {
-            reference
-            for reference in references
-            if reference.startswith("vllm.")
-            and (
-                reference in self.upstream.modules
-                or self.upstream.find_class(reference) is not None
+        if alternatives is None or any(
+            alternative.target is None for alternative in alternatives
+        ):
+            return None
+        return tuple(
+            sorted(
+                {
+                    (alternative.target, alternative.guards)
+                    for alternative in alternatives
+                    if alternative.target is not None
+                }
             )
-        }
-        return candidates or None
+        )
+
+    def _static_value_alternatives(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+        tag_guard_names: set[str],
+    ) -> tuple[StaticValueAlternative, ...] | None:
+        if node is None:
+            return None
+
+        if isinstance(node, ast.IfExp):
+            condition = _main_condition_value(node.test, tag_guard_names)
+            if condition is not None:
+                selected = node.body if condition else node.orelse
+                return self._static_value_alternatives(
+                    module_info,
+                    selected,
+                    context,
+                    tag_guard_names,
+                )
+            body = self._static_value_alternatives(
+                module_info,
+                node.body,
+                context,
+                tag_guard_names,
+            )
+            otherwise = self._static_value_alternatives(
+                module_info,
+                node.orelse,
+                context,
+                tag_guard_names,
+            )
+            if body is None or otherwise is None:
+                return None
+            guard = self._guard_text(node.test)
+            return self._guarded_value_alternatives(
+                body,
+                guard,
+            ) + self._guarded_value_alternatives(
+                otherwise,
+                f"not ({guard})",
+            )
+
+        if isinstance(node, ast.BoolOp):
+            alternatives = self._static_value_alternatives(
+                module_info,
+                node.values[0],
+                context,
+                tag_guard_names,
+            )
+            if alternatives is None:
+                return None
+            for value in node.values[1:]:
+                next_alternatives = self._static_value_alternatives(
+                    module_info,
+                    value,
+                    context,
+                    tag_guard_names,
+                )
+                if next_alternatives is None:
+                    return None
+                combined = []
+                for alternative in alternatives:
+                    short_circuits = (
+                        isinstance(node.op, ast.And) and not alternative.truth
+                    ) or (
+                        isinstance(node.op, ast.Or) and alternative.truth
+                    )
+                    if short_circuits:
+                        combined.append(alternative)
+                        continue
+                    for next_alternative in next_alternatives:
+                        guards = self._merge_guard_paths(
+                            alternative.guards,
+                            next_alternative.guards,
+                        )
+                        if guards is None:
+                            continue
+                        combined.append(
+                            StaticValueAlternative(
+                                target=next_alternative.target,
+                                truth=next_alternative.truth,
+                                guards=guards,
+                            )
+                        )
+                alternatives = tuple(set(combined))
+            return alternatives
+
+        expression = _expression_name(node)
+        if expression is not None:
+            references = self._resolve_patch_references(
+                module_info,
+                expression,
+                context,
+            )
+            candidates = {
+                reference
+                for reference in references
+                if (reference == "vllm" or reference.startswith("vllm."))
+                and (
+                    reference in self.upstream.modules
+                    or self.upstream.find_class(reference) is not None
+                )
+            }
+            if len(candidates) == 1:
+                return (
+                    StaticValueAlternative(
+                        target=next(iter(candidates)),
+                        truth=True,
+                    ),
+                )
+            if len(candidates) > 1:
+                return None
+
+        condition = _main_condition_value(node, tag_guard_names)
+        if condition is not None:
+            return (StaticValueAlternative(target=None, truth=condition),)
+        guard = self._guard_text(node)
+        return (
+            StaticValueAlternative(
+                target=None,
+                truth=True,
+                guards=(guard,),
+            ),
+            StaticValueAlternative(
+                target=None,
+                truth=False,
+                guards=(f"not ({guard})",),
+            ),
+        )
+
+    def _guarded_value_alternatives(
+        self,
+        alternatives: Sequence[StaticValueAlternative],
+        guard: str,
+    ) -> tuple[StaticValueAlternative, ...]:
+        guarded = []
+        for alternative in alternatives:
+            guards = self._merge_guard_paths(alternative.guards, (guard,))
+            if guards is None:
+                continue
+            guarded.append(replace(alternative, guards=guards))
+        return tuple(guarded)
+
+    def _merge_guard_paths(
+        self,
+        *paths: Sequence[str],
+    ) -> tuple[str, ...] | None:
+        guards = {guard for path in paths for guard in path}
+        for guard in tuple(guards):
+            opposite = (
+                guard[5:-1]
+                if guard.startswith("not (") and guard.endswith(")")
+                else f"not ({guard})"
+            )
+            if opposite in guards:
+                return None
+        return tuple(sorted(guards))
 
     def _statement_expressions(
         self,
@@ -2227,6 +2626,7 @@ class InterfaceBoundaryGenerator:
             context.strings.pop(parameter, None)
             context.local_callables.pop(parameter, None)
             context.runtime_modules.pop(parameter, None)
+            context.parameter_names.add(parameter)
 
     def _parameter_is_reassigned(
         self,
@@ -2270,6 +2670,8 @@ class InterfaceBoundaryGenerator:
                     context,
                     tag_guard_names,
                 )
+                if _statement_must_terminate(node):
+                    return
                 continue
 
             if isinstance(node, ast.Try):
@@ -2279,7 +2681,12 @@ class InterfaceBoundaryGenerator:
                     context,
                     tag_guard_names,
                 )
+                if _statement_must_terminate(node):
+                    return
                 continue
+
+            if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                return
 
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 callable_info = CallableInfo(
@@ -2299,10 +2706,7 @@ class InterfaceBoundaryGenerator:
                     scope=(*context.scope, node.name),
                 )
                 self._clear_function_parameter_bindings(node, base_child)
-                helper_name = (
-                    f"{module_info.name}."
-                    f"{'.'.join((*context.scope, node.name))}"
-                )
+                helper_name = self._private_helper_node_identities.get(id(node))
                 invocations = self._private_helper_invocations.get(helper_name)
                 if invocations:
                     for invocation in invocations:
@@ -2459,6 +2863,9 @@ class InterfaceBoundaryGenerator:
             body,
             tag_guard_names,
         )
+        live_branches = []
+        if not _statements_must_terminate(node.body):
+            live_branches.append(body)
         otherwise = context.clone(
             guards=(*context.guards, f"not ({guard})"),
         )
@@ -2468,7 +2875,10 @@ class InterfaceBoundaryGenerator:
             otherwise,
             tag_guard_names,
         )
-        context.merge([body, otherwise])
+        if not _statements_must_terminate(node.orelse):
+            live_branches.append(otherwise)
+        if live_branches:
+            context.merge(live_branches)
 
     def _scan_patch_try(
         self,
@@ -2484,13 +2894,18 @@ class InterfaceBoundaryGenerator:
             success,
             tag_guard_names,
         )
-        self._scan_patch_statements(
-            module_info,
-            node.orelse,
-            success,
-            tag_guard_names,
+        if not _statements_must_terminate(node.body):
+            self._scan_patch_statements(
+                module_info,
+                node.orelse,
+                success,
+                tag_guard_names,
+            )
+        branches = (
+            [success]
+            if not _statements_must_terminate((*node.body, *node.orelse))
+            else []
         )
-        branches = [success]
         for handler in node.handlers:
             exception_name = _expression_name(handler.type) or "Exception"
             branch = context.clone(
@@ -2502,8 +2917,10 @@ class InterfaceBoundaryGenerator:
                 branch,
                 tag_guard_names,
             )
-            branches.append(branch)
-        context.merge(branches)
+            if not _statements_must_terminate(handler.body):
+                branches.append(branch)
+        if branches:
+            context.merge(branches)
         self._scan_patch_statements(
             module_info,
             node.finalbody,
@@ -2651,6 +3068,10 @@ class InterfaceBoundaryGenerator:
         node: ast.AST | None,
         context: PatchScanContext,
     ) -> set[str]:
+        attributes: list[str] = []
+        while isinstance(node, ast.Attribute):
+            attributes.append(node.attr)
+            node = node.value
         module_name: str | None = None
         owner_node: ast.AST | None = None
         if (
@@ -2682,7 +3103,13 @@ class InterfaceBoundaryGenerator:
             owner,
             context,
         )
-        return {module_name} if references == {"sys.modules"} else set()
+        if references != {"sys.modules"}:
+            return set()
+        return {
+            ".".join((module_name, *reversed(attributes)))
+            if attributes
+            else module_name
+        }
 
     def _getattr_references(
         self,
@@ -2869,6 +3296,13 @@ class InterfaceBoundaryGenerator:
             )
             evidence_target = expression
         if not targets:
+            self._record_unresolved_patch_owner(
+                module_info,
+                target_node,
+                replacement_node,
+                context,
+                line,
+            )
             return
         if len(targets) != 1:
             self._append_unresolved_patch(
@@ -2894,6 +3328,52 @@ class InterfaceBoundaryGenerator:
             context,
             line,
             evidence_target=evidence_target,
+        )
+
+    def _record_unresolved_patch_owner(
+        self,
+        module_info: ModuleInfo,
+        target_node: ast.Attribute,
+        replacement_node: ast.AST | None,
+        context: PatchScanContext,
+        line: int,
+    ) -> None:
+        expression = _expression_name(target_node)
+        if expression is None:
+            return
+        parts = expression.split(".")
+        root = parts[0]
+        if (
+            root in context.parameter_names
+            or root not in context.bindings
+            or context.bindings[root]
+        ):
+            return
+        imported_owner = module_info.imports.get(root)
+        if imported_owner is None or not (
+            imported_owner == "vllm" or imported_owner.startswith("vllm.")
+        ):
+            return
+        non_none_guards = {
+            f"{root} is not None",
+            f"None is not {root}",
+        }
+        if not any(guard in non_none_guards for guard in context.guards):
+            return
+        target = ".".join((imported_owner, *parts[1:]))
+        self._append_unresolved_patch(
+            module_info,
+            context,
+            target,
+            replacement_node,
+            line,
+            (
+                "upstream patch owner is path-dependent after branch merge; "
+                "the active non-None path was not resolved"
+            ),
+            status="review",
+            reason_code="unresolved_patch_owner",
+            generator_issue=True,
         )
 
     def _record_resolved_patch(

@@ -4,6 +4,43 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.15.0 - definition-site helper propagation checkpoint
+
+- Starting commit: `b2ffb1e40`.
+- Problem: a conservative branch join, same-name helper redefinition,
+  conditional owner expression, multi-level direct `sys.modules` target, and
+  helper-to-helper forwarding exposed both false edges and silent omissions.
+- Change: distinguish module-level private helpers by module and definition
+  location; retain one guarded invocation per exact call; propagate exact
+  owner bindings through a finite worklist; preserve mutually compatible
+  `IfExp`/`BoolOp` alternatives; treat an unknown branch value as a tombstone;
+  respect simple terminal branches; and peel an arbitrary static attribute
+  suffix from literal `sys.modules` targets.
+- Safety boundary: an exact helper invocation state is processed once, so
+  direct and mutual recursion terminate. Dynamic/star arguments are not
+  guessed. An unresolved optional-import owner under an explicit non-`None`
+  guard is emitted as `review/unresolved_patch_owner` instead of disappearing.
+- Regression evidence: six fixtures first reproduced a bad branch join, a
+  redefinition cross product, two missing conditional-owner edges, a missing
+  deep `sys.modules` edge, missing forwarding, and constant short-circuit false
+  positives. All 53 isolated generator/auditor tests pass; Ruff and
+  `git diff --check` pass.
+- Fixed-source checkpoint: 969 relations and 46 findings. All 969 shared
+  relations and all prior 44 findings are byte-identical to v0.14. Exactly two
+  prior verified patch edges are now honest generator reviews:
+  MiniMax `forward_qk` needs static `hasattr` evaluation, and Qwen3.5 MTP
+  `forward` needs `{exact import | None}` path narrowing. Seven upstream risks
+  remain unchanged. A full run completed in 129.3 seconds.
+- Independent coverage result: 1,018/1,018 known sites are classified. The two
+  orphans are auditor gaps for the already verified HunYuan helper-parameter
+  edge and cached literal `sys.modules.get` edge, not generator regressions.
+- This is an intentionally incomplete rollback checkpoint. Independent review
+  reproduced additional generator work: exact-main selected termination,
+  `try/finally` state, semantic guard negation, removed-upstream owners passed
+  through helpers, global late binding, nested/conditional helper identity,
+  parameter-dependent control flow, and loop `break`/`continue`. These must be
+  fixed or emitted as explicit review before final acceptance.
+
 ## v0.14.0 - preserve lexical scope and per-call patch ownership
 
 - Starting commit: `d9a0c7c7e`.
