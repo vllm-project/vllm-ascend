@@ -4,6 +4,36 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## coverage audit v0.1.0 - add an independent candidate backstop
+
+- Starting commit: `afd2f6794`.
+- Problem: a zero-review generator result proves that every candidate found by
+  the generator was classified, but it cannot prove that the generator did not
+  silently miss a source dependency.
+- Change: add a second AST scanner that does not import the generator. It
+  independently enumerates main-branch patch assignments, direct inheritance,
+  and callable overrides, then checks that every source site has exactly one
+  relation or finding in the schema-v3/v4 JSONL output. It verifies the pinned
+  vLLM and vllm-ascend SHAs and reports missing, conflicting, orphan, and
+  generator-review dispositions separately.
+- Audit corrections made before this checkpoint: strip generic bases such as
+  `Base[T]`, finish alias/re-export collection before deriving class edges, and
+  stop override lookup at a downstream method owner before considering a later
+  upstream method. These were independent-auditor errors, not generator gaps.
+- Fixed-source evidence: the raw first run reported 975 candidates, 22 missing,
+  and 65 orphan sites. After correcting only the three audit rules above, it
+  reports 1,015 candidates, 6 missing, and 9 orphan sites, with no conflicting
+  status and no generator-issue review. The remaining six sites are one
+  external Triton object and five complex multiple-inheritance cases; the nine
+  orphan sites are exact PyTorch-only overrides. They are intentionally not
+  attributed to the generator until the independent scanner has exact external
+  indexing and C3 MRO support.
+- Tests: all 33 isolated generator/auditor tests pass; Ruff passes for the two
+  new Python files.
+- Reason: completeness needs an independent, high-recall source inventory. Its
+  own false positives and false negatives must be fixed before it can be used
+  to justify a generator change.
+
 ## v0.12.0 - resolve exact external inheritance without widening vLLM scope
 
 - Starting commit: `2f0b95b5e`.
