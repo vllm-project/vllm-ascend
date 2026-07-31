@@ -118,10 +118,32 @@ def test_generate_mtp_attention_mask_for_decode(dcp_rank: int) -> None:
     local_visible = (positions + 1 + 1 - dcp_rank) // 2
     expected = torch.arange(local_k_len)[None, :] >= local_visible[:, None]
 
+    assert actual.shape == (1, num_scheduled, local_k_len)
     assert torch.equal(
         actual[0, :num_scheduled, :local_k_len],
         expected,
     )
+
+
+def test_copy_mtp_attention_mask_uses_fia_shape_and_partial_copy() -> None:
+    manager = object.__new__(DCPManager)
+    manager.kernel_block_size = 4
+    manager.dcp_mtp_attn_mask = MagicMock()
+    manager.dcp_mtp_attn_mask.gpu = torch.ones((4, 9, 32), dtype=torch.bool)
+    mask = torch.zeros((2, 1, 5), dtype=torch.bool)
+    block_table = torch.zeros((2, 4), dtype=torch.int32)
+
+    actual = manager._copy_mtp_attention_mask_to_gpu(
+        mask,
+        num_decode_reqs=2,
+        block_table_tensor=block_table,
+    )
+
+    assert actual.shape == (2, 1, 16)
+    assert not torch.any(actual[:, :, :5])
+    # Only the populated local-K prefix is transferred. Values outside each
+    # request's actual KV length are ignored by FIA's actual_seq_lengths_kv.
+    assert torch.all(actual[:, :, 5:])
 
 
 def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
@@ -278,6 +300,12 @@ def test_prepare_spec_decode_drafting_metadata_rebuilds_gqa_mask() -> None:
     manager.dcp_mtp_attn_mask = MagicMock()
     manager.dcp_mtp_attn_mask.np = np.zeros((2, 9, 16), dtype=np.bool_)
     manager.dcp_mtp_attn_mask.gpu = torch.zeros((2, 9, 16), dtype=torch.bool)
+    manager.dcp_mtp_draft_attn_masks = [
+        SimpleNamespace(
+            cpu=torch.zeros((2, 1, 16), dtype=torch.bool),
+            gpu=torch.zeros((2, 1, 16), dtype=torch.bool),
+        )
+    ]
     original_mask = torch.zeros((1, 9, 16), dtype=torch.bool)
     common_attn_metadata = SimpleNamespace(
         context_parallel_metadata=AscendDCPMetadata(
@@ -288,7 +316,9 @@ def test_prepare_spec_decode_drafting_metadata_rebuilds_gqa_mask() -> None:
         ),
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         is_prefilling=torch.tensor([False, True]),
+        block_table_tensor=torch.zeros((2, 4), dtype=torch.int32),
     )
+    manager.kernel_block_size = 4
 
     with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False):
         manager.prepare_spec_decode_drafting_cp_metadata(
@@ -308,8 +338,8 @@ def test_prepare_spec_decode_drafting_metadata_rebuilds_gqa_mask() -> None:
         np.array([1, 1], dtype=np.int32),
     )
     assert manager.generate_mtp_attention_mask_for_decode.call_args.kwargs["num_decode_reqs"] == 2
-    manager.dcp_mtp_attn_mask.copy_to_gpu.assert_called_once_with(2)
-    assert draft_metadata.dcp_mtp_attn_mask.shape[0] == 2
+    assert draft_metadata.dcp_mtp_attn_mask.shape == (2, 1, 16)
+    assert torch.all(draft_metadata.dcp_mtp_attn_mask)
     assert not torch.any(common_attn_metadata.is_prefilling)
 
 
@@ -329,6 +359,12 @@ def test_prepare_spec_decode_drafting_metadata_pads_full_graph_rows() -> None:
     manager.dcp_mtp_attn_mask = MagicMock()
     manager.dcp_mtp_attn_mask.np = np.zeros((4, 9, 16), dtype=np.bool_)
     manager.dcp_mtp_attn_mask.gpu = torch.zeros((4, 9, 16), dtype=torch.bool)
+    manager.dcp_mtp_draft_attn_masks = [
+        SimpleNamespace(
+            cpu=torch.zeros((4, 1, 16), dtype=torch.bool),
+            gpu=torch.zeros((4, 1, 16), dtype=torch.bool),
+        )
+    ]
     common_attn_metadata = SimpleNamespace(
         context_parallel_metadata=AscendDCPMetadata(
             num_computed_tokens_of_dcp=[[3, 2], [5, 4]],
@@ -338,7 +374,9 @@ def test_prepare_spec_decode_drafting_metadata_pads_full_graph_rows() -> None:
         # Two real requests are followed by two FULL graph decode-padding rows.
         query_start_loc_cpu=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32),
         is_prefilling=torch.tensor([False, False, False, False]),
+        block_table_tensor=torch.zeros((4, 4), dtype=torch.int32),
     )
+    manager.kernel_block_size = 4
 
     with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False):
         manager.prepare_spec_decode_drafting_cp_metadata(
@@ -360,9 +398,9 @@ def test_prepare_spec_decode_drafting_metadata_pads_full_graph_rows() -> None:
     assert manager.generate_mtp_attention_mask_for_decode.call_args.kwargs["num_decode_reqs"] == 4
     draft_metadata = common_attn_metadata.context_parallel_metadata
     assert draft_metadata.num_computed_tokens_of_dcp.shape[0] == 4
-    assert draft_metadata.dcp_mtp_attn_mask.shape[0] == 4
+    assert draft_metadata.dcp_mtp_attn_mask.shape == (4, 1, 16)
     assert torch.equal(draft_metadata.query_lens_cpu, torch.ones(4, dtype=torch.int32))
-    manager.dcp_mtp_attn_mask.copy_to_gpu.assert_called_once_with(4)
+    assert torch.all(draft_metadata.dcp_mtp_attn_mask)
 
 
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:

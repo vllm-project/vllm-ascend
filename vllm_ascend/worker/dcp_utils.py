@@ -95,6 +95,9 @@ class DCPManager:
         self.use_sparse = use_sparse
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+        self.kernel_block_size = AscendAttentionBackend.get_supported_kernel_block_sizes()[0]
         self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = max_num_reqs
@@ -112,9 +115,11 @@ class DCPManager:
             pin_memory=pin_memory,
         )
         self.mtp_slot_mapping: torch.Tensor | None = None
+        max_graph_rows = vllm_config.compilation_config.max_cudagraph_capture_size
+        max_mask_rows = max(max_num_reqs, max_graph_rows)
         self.dcp_mtp_attn_mask = CpuGpuBuffer(
             (
-                max_num_reqs,
+                max_mask_rows,
                 self.decode_threshold,
                 vllm_config.model_config.max_model_len,
             ),
@@ -122,6 +127,28 @@ class DCPManager:
             device=device,
             pin_memory=pin_memory,
         )
+        num_followup_drafts = (
+            max(self.speculative_config.num_speculative_tokens - 1, 0)
+            if self.speculative_config is not None and self.speculative_config.method == "mtp"
+            else 0
+        )
+        # Each follow-up MTP pass has one query token per graph row. Keep a
+        # distinct CPU/GPU buffer per pass so building a later pass cannot
+        # overwrite either a mask referenced by an earlier graph node or its
+        # pinned staging memory while a non-blocking H2D copy is in flight.
+        self.dcp_mtp_draft_attn_masks = [
+            CpuGpuBuffer(
+                (
+                    max_mask_rows,
+                    1,
+                    vllm_config.model_config.max_model_len,
+                ),
+                dtype=torch.bool,
+                device=device,
+                pin_memory=pin_memory,
+            )
+            for _ in range(num_followup_drafts)
+        ]
         self.async_rebuild_req_indices: np.ndarray | None = None
         self.async_rebuild_cu_num_tokens: np.ndarray | None = None
         self.async_rebuild_num_tokens = 0
@@ -562,14 +589,25 @@ class DCPManager:
             draft_base_seq_lens = dcp_metadata.draft_base_seq_lens if is_mla else seq_lens_for_dcp
             assert draft_base_seq_lens is not None
             draft_histories = (draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
+            if not 0 < draft_index <= len(self.dcp_mtp_draft_attn_masks):
+                raise ValueError(
+                    "Invalid MTP draft index for DCP attention-mask buffers: "
+                    f"{draft_index}, available follow-up steps: "
+                    f"{len(self.dcp_mtp_draft_attn_masks)}"
+                )
+            draft_mask_buffer = self.dcp_mtp_draft_attn_masks[draft_index - 1]
             mask = self.generate_mtp_attention_mask_for_decode(
                 draft_histories.tolist(),
                 query_lens_cpu[:num_draft_reqs].numpy(),
                 num_decode_reqs=num_draft_reqs,
+                output_buffer=draft_mask_buffer.cpu,
             )
-            self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
-            self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
-            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+            dcp_metadata.dcp_mtp_attn_mask = self._copy_mtp_attention_mask_to_gpu(
+                mask,
+                num_draft_reqs,
+                common_attn_metadata.block_table_tensor,
+                gpu_buffer=draft_mask_buffer.gpu,
+            )
         common_attn_metadata.context_parallel_metadata = dcp_metadata
 
         if common_attn_metadata.is_prefilling is not None:
@@ -665,10 +703,14 @@ class DCPManager:
                 else:
                     decode_computed = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
                 mask = self.generate_mtp_attention_mask_for_decode(decode_computed, decode_scheduled)
-                self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = mask
-                self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
+                metadata.dcp_mtp_attn_mask = self._copy_mtp_attention_mask_to_gpu(
+                    mask,
+                    self.num_decode_reqs,
+                    block_table_tensor,
+                )
             mask_count = self.num_decode_reqs if self.num_decode_reqs > 0 else num_reqs
-            metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:mask_count]
+            if metadata.dcp_mtp_attn_mask is None:
+                metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:mask_count]
 
         self.long_seq_metadata = metadata
         return metadata, block_table_tensor
@@ -678,6 +720,7 @@ class DCPManager:
         decode_num_computed_tokens: list[int],
         decode_num_scheduled_tokens: np.ndarray,
         num_decode_reqs: int | None = None,
+        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build interleave-aware causal masks for DCP speculative decode."""
         if num_decode_reqs is None:
@@ -695,13 +738,21 @@ class DCPManager:
             interleave_size,
         )[:, self.dcp_world_rank]
         valid = k_lens > 0
-        output = self.dcp_mtp_attn_mask.cpu[:num_decode_reqs]
-        output.zero_()
+        if output_buffer is None:
+            output_buffer = self.dcp_mtp_attn_mask.cpu
+        if num_decode_reqs > output_buffer.shape[0]:
+            raise ValueError(
+                "DCP MTP decode rows exceed the CPU attention-mask capacity: "
+                f"{num_decode_reqs} > {output_buffer.shape[0]}"
+            )
+        output = output_buffer[:num_decode_reqs]
         if not valid.any():
-            return output
+            return output[:, :0, :0]
 
         max_q = int(q_lens[valid].max().item())
         max_k = int(k_lens[valid].max().item())
+        output = output[:, :max_q, :max_k]
+        output.zero_()
         q_indices = torch.arange(max_q, dtype=torch.int32)
         k_indices = torch.arange(max_k, dtype=torch.int32)
         valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
@@ -722,3 +773,53 @@ class DCPManager:
         )
         output[:num_decode_reqs, :max_q, :max_k] = full_mask
         return output
+
+    def _copy_mtp_attention_mask_to_gpu(
+        self,
+        mask: torch.Tensor,
+        num_decode_reqs: int,
+        block_table_tensor: torch.Tensor,
+        gpu_buffer: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Copy only the populated mask and expose the FIA-compatible view.
+
+        FIA's BSND mask uses the actual query width, while its key width is
+        determined by the block-table capacity rather than the current
+        sequence length. The backing buffer remains fixed for graph capture,
+        but only the causally relevant prefix is transferred each step.
+        """
+        if gpu_buffer is None:
+            gpu_buffer = self.dcp_mtp_attn_mask.gpu
+        if num_decode_reqs > gpu_buffer.shape[0]:
+            raise ValueError(
+                f"DCP MTP decode rows exceed the attention-mask capacity: {num_decode_reqs} > {gpu_buffer.shape[0]}"
+            )
+        if block_table_tensor.ndim != 2:
+            raise ValueError(f"DCP MTP expects a 2-D block table, got shape {tuple(block_table_tensor.shape)}")
+
+        mask_q_len = mask.shape[1]
+        mask_k_len = block_table_tensor.shape[1] * self.kernel_block_size
+        if mask.shape[2] > mask_k_len:
+            raise ValueError(
+                f"DCP MTP local KV length exceeds the block-table capacity: {mask.shape[2]} > {mask_k_len}"
+            )
+        if mask_q_len > gpu_buffer.shape[1]:
+            raise ValueError(
+                f"DCP MTP query length exceeds the attention-mask buffer: {mask_q_len} > {gpu_buffer.shape[1]}"
+            )
+        if mask_k_len > gpu_buffer.shape[2]:
+            raise ValueError(
+                f"DCP MTP block-table capacity exceeds the attention-mask buffer: {mask_k_len} > {gpu_buffer.shape[2]}"
+            )
+
+        target = gpu_buffer[
+            :num_decode_reqs,
+            :mask_q_len,
+            : mask.shape[2],
+        ]
+        target.copy_(mask, non_blocking=True)
+        return gpu_buffer[
+            :num_decode_reqs,
+            :mask_q_len,
+            :mask_k_len,
+        ]
