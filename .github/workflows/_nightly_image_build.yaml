@@ -23,7 +23,7 @@ on:
       target:
         required: true
         type: string
-        description: "Build target: 'a2' or 'a3'"
+        description: "Build target: 'a2' or 'a3' or 'a5'"
       vllm_ascend_branch:
         required: false
         type: string
