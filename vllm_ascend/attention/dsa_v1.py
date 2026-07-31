@@ -17,6 +17,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.compressor_sp import run_compressor_op
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -1966,7 +1967,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff = 2 if self.compressor_overlap else 1
 
             # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
+            compressed_kv = run_compressor_op(
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
@@ -2259,7 +2260,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff = 2 if self.compressor_overlap else 1
 
             # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
+            compressed_kv = run_compressor_op(
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
@@ -2465,7 +2466,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv_block_table = indexer_state_decode_metadata.block_table
             start_pos = indexer_scale_decode_metadata.start_pos
 
-        kv = torch.ops._C_ascend.compressor(
+        kv = run_compressor_op(
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
@@ -2714,7 +2715,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv_block_table = indexer_state_decode_metadata.block_table
             start_pos = indexer_scale_decode_metadata.start_pos
 
-        kv = torch.ops._C_ascend.compressor(
+        kv = run_compressor_op(
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
