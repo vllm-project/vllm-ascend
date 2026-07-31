@@ -224,3 +224,4 @@ jobs:
             -t "${MANIFEST_TAG}" \
             "${AMD64_TAG}" \
             "${ARM64_TAG}"
+
