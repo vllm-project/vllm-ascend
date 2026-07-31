@@ -3608,7 +3608,13 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDSparkProposer
                 | AscendDraftModelProposer,
             )
-            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+            if isinstance(self.drafter, AscendGemma4Proposer):
+                kbs = [sz if isinstance(sz, int) else sz[0] for sz in self.kernel_block_sizes]
+                self.drafter.initialize_attn_backend(kv_cache_config, kbs)
+            else:
+                block_size = (self.kernel_block_sizes[0] if isinstance(
+                    self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
