@@ -35,12 +35,15 @@ the opposite branch is indexed for main. Top-level imports under the selected br
 An incomplete or ambiguous vLLM/vllm-ascend MRO is reported as unresolved instead of choosing a likely parent.
 
 The generator is consumer-first. A downstream patch or inheritance declaration whose upstream target cannot be resolved
-is written to the unresolved output instead of being silently dropped. It is AST-only and requires neither an NPU nor
-package imports.
+is kept in the main output as a finding instead of being silently dropped. Findings distinguish an upstream risk, an
+expected injection, an excluded inactive branch, and a static-analysis review. The optional unresolved output mirrors
+these findings for convenient review. It is AST-only and requires neither an NPU nor package imports.
 
-Schema version 2 stores the replacement definition file in each consumer and keeps patch evidence separately under
-`e`. Evidence includes the assignment file and line, lexical scope, guards, patch kind, and every statically discovered
-assignment occurrence. Python parse failures stop generation instead of silently reducing coverage.
+Schema version 3 stores verified relations under `u`/`c`, candidate findings under `f`, the replacement definition file
+in each consumer, and patch evidence separately under `e`. Each finding includes `status`, `reason_code`, and whether it
+represents a generator limitation. Evidence includes the assignment file and line, lexical scope, guards, patch kind,
+and every statically discovered assignment occurrence. Python parse failures stop generation instead of silently
+reducing coverage.
 
 Example:
 

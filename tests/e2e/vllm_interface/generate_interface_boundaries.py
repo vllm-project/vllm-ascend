@@ -16,7 +16,8 @@
 
 The collector is intentionally consumer-first: it records patch and inheritance
 intent from vllm-ascend before resolving the target in vLLM. A missing upstream
-target is therefore reported as unresolved instead of silently disappearing.
+target is therefore kept as an explicit risk finding instead of silently
+disappearing.
 
 The first implementation covers:
 
@@ -44,9 +45,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
-GENERATOR_VERSION = "0.3.0"
+SCHEMA_VERSION = 3
+GENERATOR_VERSION = "0.4.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
+FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
 
 
 def _jsonable_signature(node: ast.AST | None) -> list[object] | None:
@@ -430,7 +432,7 @@ class Relation:
 
 
 @dataclass(frozen=True)
-class UnresolvedRelation:
+class CandidateFinding:
     relation: str
     downstream_file: str
     downstream_owner: str | None
@@ -438,10 +440,15 @@ class UnresolvedRelation:
     target_expression: str
     evidence_line: int
     reason: str
+    status: str = "review"
+    reason_code: str = "analysis_gap"
+    generator_issue: bool = True
     evidence_scope: str | None = None
     evidence_guards: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
+        if self.status not in FINDING_STATUSES:
+            raise ValueError(f"unsupported finding status: {self.status}")
         return {
             "relation": self.relation,
             "downstream": {
@@ -464,9 +471,15 @@ class UnresolvedRelation:
                     else {}
                 ),
             },
-            "status": "unresolved",
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "generator_issue": self.generator_issue,
             "reason": self.reason,
         }
+
+
+# Kept as a source-compatible alias for callers of the v0.3 POC.
+UnresolvedRelation = CandidateFinding
 
 
 @dataclass
@@ -764,10 +777,10 @@ class InterfaceBoundaryGenerator:
             )
             raise ValueError(f"Python source parsing failed: {details}")
         self.relations: list[Relation] = []
-        self.unresolved: list[UnresolvedRelation] = []
+        self.findings: list[CandidateFinding] = []
         self._mro_cache: dict[str, MroResult] = {}
 
-    def generate(self) -> tuple[list[Relation], list[UnresolvedRelation]]:
+    def generate(self) -> tuple[list[Relation], list[CandidateFinding]]:
         self._collect_inheritance()
         self._collect_verified_overrides()
         self._collect_monkey_patches()
@@ -818,9 +831,11 @@ class InterfaceBoundaryGenerator:
                 relation.downstream_key(),
             ),
         )
-        self.unresolved = sorted(
-            set(self.unresolved),
+        self.findings = sorted(
+            set(self.findings),
             key=lambda relation: (
+                relation.status,
+                relation.reason_code,
                 relation.relation,
                 relation.downstream_file,
                 relation.downstream_owner or "",
@@ -832,7 +847,7 @@ class InterfaceBoundaryGenerator:
                 relation.reason,
             ),
         )
-        return self.relations, self.unresolved
+        return self.relations, self.findings
 
     def _resolve_downstream_reference(self, module: str, expression: str) -> str:
         qualified = self.downstream.resolve_reference(module, expression)
@@ -992,8 +1007,8 @@ class InterfaceBoundaryGenerator:
                     continue
                 upstream_class = self.upstream.find_class(resolved)
                 if upstream_class is None:
-                    self.unresolved.append(
-                        UnresolvedRelation(
+                    self.findings.append(
+                        CandidateFinding(
                             relation="inheritance",
                             downstream_file=class_info.file,
                             downstream_owner=class_info.name,
@@ -1001,6 +1016,9 @@ class InterfaceBoundaryGenerator:
                             target_expression=resolved,
                             evidence_line=self._class_line(class_info),
                             reason="upstream base class was not found",
+                            status="risk",
+                            reason_code="missing_upstream_base",
+                            generator_issue=False,
                         )
                     )
                     continue
@@ -1046,8 +1064,8 @@ class InterfaceBoundaryGenerator:
                         else ()
                     )
                     if candidates:
-                        self.unresolved.append(
-                            UnresolvedRelation(
+                        self.findings.append(
+                            CandidateFinding(
                                 relation="override",
                                 downstream_file=class_info.file,
                                 downstream_owner=class_info.name,
@@ -1065,6 +1083,9 @@ class InterfaceBoundaryGenerator:
                                     "candidate upstream owner was not "
                                     "selected"
                                 ),
+                                status="review",
+                                reason_code="ambiguous_mro",
+                                generator_issue=False,
                             )
                         )
                     continue
@@ -1670,8 +1691,14 @@ class InterfaceBoundaryGenerator:
 
         upstream_callable = self._find_upstream_patch_target(target)
         if upstream_callable is None:
-            self.unresolved.append(
-                UnresolvedRelation(
+            status, reason_code, generator_issue = (
+                self._missing_patch_target_classification(
+                    target,
+                    context,
+                )
+            )
+            self.findings.append(
+                CandidateFinding(
                     relation="monkey_patch",
                     downstream_file=module_info.file,
                     downstream_owner=replacement.info.owner,
@@ -1679,6 +1706,9 @@ class InterfaceBoundaryGenerator:
                     target_expression=target,
                     evidence_line=line,
                     reason="upstream patch target was not found",
+                    status=status,
+                    reason_code=reason_code,
+                    generator_issue=generator_issue,
                     evidence_scope=self._scope_name(context),
                     evidence_guards=context.guards,
                 )
@@ -1851,12 +1881,27 @@ class InterfaceBoundaryGenerator:
         replacement_node: ast.AST | None,
         line: int,
         reason: str,
+        *,
+        status: str = "review",
+        reason_code: str | None = None,
+        generator_issue: bool = True,
     ) -> None:
         replacement_name = _expression_name(replacement_node)
         if replacement_name is None and isinstance(replacement_node, ast.Lambda):
             replacement_name = f"<lambda>@{line}"
-        self.unresolved.append(
-            UnresolvedRelation(
+        codes = {
+            "ambiguous local replacement callable": "ambiguous_replacement_callable",
+            "ambiguous patch target alias": "ambiguous_patch_target",
+            "ambiguous replacement callable": "ambiguous_replacement_callable",
+            "ambiguous setattr patch target": "ambiguous_patch_target",
+            "dynamic setattr attribute name": "dynamic_setattr_name",
+            "patch replacement is produced by a call or wrapper": "wrapper_factory",
+            "replacement callable was not found": "missing_replacement_callable",
+            "replacement is another upstream callable": "upstream_alias_rebind",
+            "unsupported patch replacement expression": "unsupported_replacement_expression",
+        }
+        self.findings.append(
+            CandidateFinding(
                 relation="monkey_patch",
                 downstream_file=module_info.file,
                 downstream_owner=None,
@@ -1864,10 +1909,33 @@ class InterfaceBoundaryGenerator:
                 target_expression=target_expression,
                 evidence_line=line,
                 reason=reason,
+                status=status,
+                reason_code=reason_code or codes.get(reason, "analysis_gap"),
+                generator_issue=generator_issue,
                 evidence_scope=self._scope_name(context),
                 evidence_guards=context.guards,
             )
         )
+
+    def _missing_patch_target_classification(
+        self,
+        target: str,
+        context: PatchScanContext,
+    ) -> tuple[str, str, bool]:
+        guards = " ".join(context.guards)
+        if "not hasattr(" in guards:
+            return "expected", "inject_missing_member", False
+        if "hasattr(" in guards:
+            return "excluded", "inactive_guard", False
+
+        owner_name = target.rsplit(".", 1)[0]
+        owner_exists = (
+            self.upstream.find_class(owner_name) is not None
+            or owner_name in self.upstream.modules
+        )
+        if owner_exists:
+            return "risk", "missing_upstream_member", False
+        return "review", "unresolved_patch_owner", True
 
     def _scope_name(self, context: PatchScanContext) -> str | None:
         return ".".join(context.scope) if context.scope else None
@@ -1910,6 +1978,7 @@ def _relation_payloads(
     *,
     vllm_sha: str,
     ascend_sha: str,
+    findings: Iterable[CandidateFinding] = (),
 ) -> list[dict[str, Any]]:
     grouped: dict[
         tuple[str, str | None, str, str],
@@ -1985,6 +2054,24 @@ def _relation_payloads(
             }
         )
 
+    finding_payloads = [
+        {"f": finding.as_dict()}
+        for finding in sorted(
+            findings,
+            key=lambda item: (
+                item.status,
+                item.reason_code,
+                item.relation,
+                item.downstream_file,
+                item.evidence_line,
+                item.target_expression,
+            ),
+        )
+    ]
+    finding_statuses = Counter(
+        payload["f"]["status"]
+        for payload in finding_payloads
+    )
     meta = {
         "_meta": {
             "schema": SCHEMA_VERSION,
@@ -1993,10 +2080,12 @@ def _relation_payloads(
             "vllm_ascend": ascend_sha,
             "contracts": len(payloads),
             "relations": relation_count,
+            "findings": len(finding_payloads),
+            "findings_by_status": dict(sorted(finding_statuses.items())),
             "scope": sorted(SUPPORTED_RELATIONS),
         }
     }
-    return [meta, *payloads]
+    return [meta, *payloads, *finding_payloads]
 
 
 def _write_jsonl(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
@@ -2012,7 +2101,7 @@ def _load_compact_relations(path: Path) -> list[Relation]:
     relations = []
     for line in path.read_text(encoding="utf-8").splitlines():
         payload = json.loads(line)
-        if "_meta" in payload:
+        if "_meta" in payload or "f" in payload:
             continue
         upstream_file, upstream_owner, upstream_name, upstream_signature = payload["u"]
         for consumer in payload["c"]:
@@ -2067,8 +2156,9 @@ def _downstream_label(
 def compare_relations(
     generated: Sequence[Relation],
     baseline: Sequence[Relation],
-    unresolved: Sequence[UnresolvedRelation],
+    findings: Sequence[CandidateFinding],
 ) -> dict[str, Any]:
+    finding_statuses = Counter(finding.status for finding in findings)
     generated_exact = {
         relation.exact_key(): relation
         for relation in generated
@@ -2180,7 +2270,15 @@ def compare_relations(
             "same_downstream_different_upstream": len(different_upstream),
             "old_only": len(old_only_keys),
             "new_only": len(new_only_keys),
-            "unresolved": len(unresolved),
+            "findings": len(findings),
+            "unresolved": finding_statuses["review"],
+            "upstream_risks": finding_statuses["risk"],
+            "expected": finding_statuses["expected"],
+            "excluded": finding_statuses["excluded"],
+            "generator_issues": sum(
+                finding.generator_issue
+                for finding in findings
+            ),
             "generated_downstream_endpoints": len(
                 generated_downstream_keys
             ),
@@ -2222,7 +2320,7 @@ def compare_relations(
             _downstream_label(key)
             for key in sorted(new_downstream_keys)
         ],
-        "unresolved": [relation.as_dict() for relation in unresolved],
+        "findings": [finding.as_dict() for finding in findings],
     }
     return report
 
@@ -2266,22 +2364,24 @@ def main() -> None:
     _verify_sha("vllm-ascend", ascend_sha, args.expect_ascend_sha)
 
     generator = InterfaceBoundaryGenerator(args.vllm_root, args.ascend_root)
-    relations, unresolved = generator.generate()
+    relations, findings = generator.generate()
     _write_jsonl(
         args.output,
         _relation_payloads(
             relations,
             vllm_sha=vllm_sha,
             ascend_sha=ascend_sha,
+            findings=findings,
         ),
     )
 
     if args.unresolved_output:
         _write_jsonl(
             args.unresolved_output,
-            (relation.as_dict() for relation in unresolved),
+            (finding.as_dict() for finding in findings),
         )
 
+    finding_statuses = Counter(finding.status for finding in findings)
     report: dict[str, Any] = {
         "inputs": {
             "vllm_sha": vllm_sha,
@@ -2290,7 +2390,16 @@ def main() -> None:
         },
         "generated": {
             "relations": len(relations),
-            "unresolved": len(unresolved),
+            "findings": len(findings),
+            "unresolved": finding_statuses["review"],
+            "upstream_risks": finding_statuses["risk"],
+            "expected": finding_statuses["expected"],
+            "excluded": finding_statuses["excluded"],
+            "generator_issues": sum(
+                finding.generator_issue
+                for finding in findings
+            ),
+            "findings_by_status": dict(sorted(finding_statuses.items())),
             "by_relation": dict(
                 sorted(Counter(relation.relation for relation in relations).items())
             ),
@@ -2299,7 +2408,7 @@ def main() -> None:
     }
     if args.compare_with:
         baseline = _load_compact_relations(args.compare_with)
-        report["comparison"] = compare_relations(relations, baseline, unresolved)
+        report["comparison"] = compare_relations(relations, baseline, findings)
 
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

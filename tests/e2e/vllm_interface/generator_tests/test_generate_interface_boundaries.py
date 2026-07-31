@@ -99,6 +99,10 @@ def patched_hook(self, value):
 
 PatchTarget.hook = patched_hook
 PatchTarget.missing = patched_hook
+if not hasattr(PatchTarget, "injected"):
+    PatchTarget.injected = patched_hook
+if hasattr(PatchTarget, "removed"):
+    PatchTarget.removed = patched_hook
 PatchChild.inherited_hook = patched_hook
 PatchTarget.external_hook = external_hook
 PatchTarget.registry["backend"] = patched_hook
@@ -199,15 +203,36 @@ def test_generates_exact_patch_inheritance_and_override(
         for relation in relations
     )
 
-    assert len(unresolved) == 2
-    assert any(
-        relation.relation == "monkey_patch"
-        and relation.target_expression == "vllm.base.PatchTarget.missing"
+    assert len(unresolved) == 4
+    missing_target = next(
+        relation
         for relation in unresolved
+        if relation.relation == "monkey_patch"
+        and relation.target_expression == "vllm.base.PatchTarget.missing"
     )
+    assert missing_target.status == "risk"
+    assert missing_target.reason_code == "missing_upstream_member"
+    assert not missing_target.generator_issue
+    injected = next(
+        relation
+        for relation in unresolved
+        if relation.target_expression == "vllm.base.PatchTarget.injected"
+    )
+    assert injected.status == "expected"
+    assert injected.reason_code == "inject_missing_member"
+    inactive = next(
+        relation
+        for relation in unresolved
+        if relation.target_expression == "vllm.base.PatchTarget.removed"
+    )
+    assert inactive.status == "excluded"
+    assert inactive.reason_code == "inactive_guard"
     assert any(
         relation.reason == "dynamic setattr attribute name"
         and relation.target_expression == "vllm.base.PatchTarget"
+        and relation.status == "review"
+        and relation.reason_code == "dynamic_setattr_name"
+        and relation.generator_issue
         for relation in unresolved
     )
     assert not any(
@@ -271,11 +296,13 @@ def test_output_is_deterministic(source_pair: tuple[Path, Path]) -> None:
         first,
         vllm_sha="upstream",
         ascend_sha="downstream",
+        findings=first_unresolved,
     )
     second_payload = generator._relation_payloads(
         second,
         vllm_sha="upstream",
         ascend_sha="downstream",
+        findings=second_unresolved,
     )
     assert json.dumps(first_payload, sort_keys=True) == json.dumps(
         second_payload,
@@ -285,6 +312,7 @@ def test_output_is_deterministic(source_pair: tuple[Path, Path]) -> None:
         item.as_dict()
         for item in second_unresolved
     ]
+    assert sum("f" in payload for payload in first_payload) == 4
 
 
 def test_comparison_tracks_downstream_coverage_separately() -> None:
