@@ -1,7 +1,7 @@
 import csv
 from pathlib import Path
 
-from tests.e2e.nightly.scripts.update_good_table import HEADER, load_rows, update_table
+from tests.e2e.nightly.scripts.update_good_table import HEADER, load_rows, resolve_test_path, update_table
 
 
 def _row(*, name: str, path: str, soc: str, scene: str, commit: str) -> dict[str, str]:
@@ -57,3 +57,88 @@ def test_update_migrates_matching_legacy_row(tmp_path: Path):
     assert rows[0]["soc"] == "a2"
     assert rows[0]["scene"] == "single_node"
     assert rows[0]["time"] == "2026-07-29 10:00:00 +08:00"
+
+
+def test_update_creates_table_with_header_and_reports_new(tmp_path: Path):
+    table = tmp_path / "good_table.csv"
+
+    is_new = update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="a2"))
+
+    assert is_new is True
+    with table.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    assert reader.fieldnames == HEADER
+    assert len(rows) == 1
+    assert rows[0]["name"] == "m"
+    assert rows[0]["soc"] == "a2"
+    assert rows[0]["scene"] == "single_node"
+
+
+def test_update_reports_false_when_table_exists(tmp_path: Path):
+    table = tmp_path / "good_table.csv"
+    row = _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="a2")
+
+    assert update_table(str(table), row) is True
+    assert update_table(str(table), row) is False
+
+
+def test_update_keeps_rows_for_different_scene(tmp_path: Path):
+    table = tmp_path / "good_table.csv"
+
+    update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="s"))
+    update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="multi_node", commit="m"))
+
+    rows = load_rows(str(table))
+    assert len(rows) == 2
+    assert {(row["scene"], row["vLLM-Ascend Git information"]) for row in rows} == {
+        ("single_node", "s"),
+        ("multi_node", "m"),
+    }
+
+
+def test_update_preserves_unrelated_rows(tmp_path: Path):
+    table = tmp_path / "good_table.csv"
+    table.write_text(
+        "name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time\n"
+        "other,cases/other.yaml,other,success,vllm-other,asc-other,a2,single_node,2026-07-20 10:00:00 +08:00\n",
+        encoding="utf-8",
+    )
+
+    update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="asc-m"))
+
+    rows = load_rows(str(table))
+    assert len(rows) == 2
+    assert {row["name"] for row in rows} == {"m", "other"}
+
+
+def test_update_normalises_path_separators(tmp_path: Path):
+    table = tmp_path / "good_table.csv"
+    table.write_text(
+        "name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time\n"
+        "m,cases\\model.yaml/,old,success,vllm-old,asc-old,a2,single_node,2026-07-20 10:00:00 +08:00\n",
+        encoding="utf-8",
+    )
+
+    update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="asc-new"))
+
+    rows = load_rows(str(table))
+    assert len(rows) == 1
+    assert rows[0]["yaml/path"] == "cases/model.yaml"
+    assert rows[0]["vLLM-Ascend Git information"] == "asc-new"
+
+
+def test_load_rows_returns_empty_for_missing_file(tmp_path: Path):
+    assert load_rows(str(tmp_path / "no_such_table.csv")) == []
+
+
+def test_resolve_test_path_joins_bare_filename_with_config_base():
+    assert (
+        resolve_test_path("model.yaml", "tests/e2e/weekly/single_node/configs", "single_node")
+        == "tests/e2e/weekly/single_node/configs/model.yaml"
+    )
+
+
+def test_resolve_test_path_keeps_explicit_directory_unchanged():
+    full = "tests/e2e/nightly/multi_node/external_dp/config/model.yaml"
+    assert resolve_test_path(full, "ignored", "multi_node") == full
