@@ -1235,6 +1235,174 @@ def install_patch():
     assert not unresolved
 
 
+def test_private_helper_owner_requires_one_main_binding_at_every_call(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/hunyuan.py",
+        """
+class ProcessingInfo:
+    def load(self, **kwargs):
+        return kwargs
+""",
+    )
+    _write(
+        vllm_root,
+        "vllm/other.py",
+        """
+class ProcessingInfo:
+    def load(self, **kwargs):
+        return kwargs
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm_ascend.utils import vllm_version_is
+
+
+def _patch_processor(owner):
+    def replacement(self, **kwargs):
+        return kwargs
+
+    owner.ProcessingInfo.load = replacement
+
+
+def _release_only(owner):
+    def release_replacement(self, **kwargs):
+        return kwargs
+
+    owner.ProcessingInfo.load = release_replacement
+
+
+def _ambiguous_owner(owner):
+    def ambiguous_replacement(self, **kwargs):
+        return kwargs
+
+    owner.ProcessingInfo.load = ambiguous_replacement
+
+
+def _reassigned_owner(owner):
+    owner = passthrough(owner)
+
+    def reassigned_replacement(self, **kwargs):
+        return kwargs
+
+    owner.ProcessingInfo.load = reassigned_replacement
+
+
+def install():
+    from vllm import hunyuan as main_hunyuan
+    from vllm import other
+
+    _patch_processor(main_hunyuan)
+    _ambiguous_owner(main_hunyuan)
+    _ambiguous_owner(other)
+    _reassigned_owner(main_hunyuan)
+    if vllm_version_is("0.25.1"):
+        _release_only(main_hunyuan)
+
+
+def install_local_shadow():
+    from vllm import other
+
+    def _patch_processor(owner):
+        def local_replacement(self, **kwargs):
+            return kwargs
+
+        owner.ProcessingInfo.load = local_replacement
+
+    _patch_processor(other)
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/utils.py",
+        "def vllm_version_is(_version):\n    return False\n",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(patches) == 1
+    assert patches[0].upstream_owner == "ProcessingInfo"
+    assert patches[0].upstream_name == "load"
+    assert patches[0].downstream_name == "replacement"
+    assert patches[0].evidence[0].line == 9
+    assert not findings
+
+
+def test_literal_sys_modules_binding_preserves_cached_import_target(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/core.py",
+        "def build(value):\n    return value\n",
+    )
+    _write(
+        vllm_root,
+        "vllm/consumer.py",
+        "from vllm.core import build\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+
+
+def replacement(value):
+    return value
+
+
+cached = sys.modules.get("vllm.consumer")
+if cached is not None:
+    cached.build = replacement
+
+required = sys.modules["vllm.consumer"]
+required.build = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(patches) == 1
+    assert patches[0].upstream_file == "vllm/core.py"
+    assert patches[0].upstream_name == "build"
+    assert len(patches[0].evidence) == 2
+    assert {
+        evidence.target_expression
+        for evidence in patches[0].evidence
+    } == {"vllm.consumer.build"}
+    assert not findings
+
+
 def test_patch_scanner_reports_ambiguous_and_unsupported_patches(
     tmp_path: Path,
 ) -> None:

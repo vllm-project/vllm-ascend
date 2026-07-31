@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.12.0"
+GENERATOR_VERSION = "0.13.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -144,6 +144,23 @@ def _function_scope_nodes(
     while stack:
         current = stack.pop()
         yield current
+        if isinstance(
+            current,
+            (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
+        ):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+
+
+def _expression_calls(node: ast.AST | None) -> Iterable[ast.Call]:
+    """Walk one evaluated expression without entering deferred scopes."""
+    if node is None:
+        return
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.Call):
+            yield current
         if isinstance(
             current,
             (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
@@ -571,6 +588,7 @@ class PatchScanContext:
     bindings: dict[str, set[str]] = field(default_factory=dict)
     strings: dict[str, set[str]] = field(default_factory=dict)
     local_callables: dict[str, list[CallableInfo]] = field(default_factory=dict)
+    runtime_modules: dict[str, set[str]] = field(default_factory=dict)
     scope: tuple[str, ...] = ()
     guards: tuple[str, ...] = ()
 
@@ -587,6 +605,10 @@ class PatchScanContext:
                 name: list(values)
                 for name, values in self.local_callables.items()
             },
+            runtime_modules={
+                name: set(values)
+                for name, values in self.runtime_modules.items()
+            },
             scope=self.scope if scope is None else scope,
             guards=self.guards if guards is None else guards,
         )
@@ -599,6 +621,9 @@ class PatchScanContext:
         )
         self.strings = _merge_candidate_maps(
             context.strings for context in contexts
+        )
+        self.runtime_modules = _merge_candidate_maps(
+            context.runtime_modules for context in contexts
         )
         callable_names = {
             name
@@ -1274,6 +1299,9 @@ class InterfaceBoundaryGenerator:
         self.relations: list[Relation] = []
         self.findings: list[CandidateFinding] = []
         self._mro_cache: dict[str, MroResult] = {}
+        self._private_helper_parameter_bindings: dict[
+            tuple[str, str], str
+        ] = {}
 
     def generate(self) -> tuple[list[Relation], list[CandidateFinding]]:
         self._collect_inheritance()
@@ -1733,7 +1761,398 @@ class InterfaceBoundaryGenerator:
             )
         return tuple(sorted(candidates))
 
+    def _prepare_private_helper_parameter_bindings(self) -> None:
+        helpers = {
+            info.qualified_name: info
+            for module_info in self.downstream.modules.values()
+            for name, info in module_info.functions.items()
+            if name.startswith("_") and not name.startswith("__")
+        }
+        calls: dict[
+            str,
+            list[dict[str, set[str] | None]],
+        ] = defaultdict(list)
+        for module_info in self.downstream.modules.values():
+            self._scan_private_helper_calls(
+                module_info,
+                module_info.tree.body,
+                PatchScanContext(),
+                _tag_guard_names(module_info.tree.body),
+                helpers,
+                calls,
+            )
+
+        bindings: dict[tuple[str, str], str] = {}
+        for helper_name, helper_calls in calls.items():
+            helper = helpers[helper_name]
+            if not isinstance(
+                helper.node,
+                (ast.AsyncFunctionDef, ast.FunctionDef),
+            ):
+                continue
+            for parameter in self._callable_parameter_names(helper.node):
+                if self._parameter_is_reassigned(helper.node, parameter):
+                    continue
+                values = [call.get(parameter) for call in helper_calls]
+                if not values or any(
+                    value is None or len(value) != 1
+                    for value in values
+                ):
+                    continue
+                targets = {
+                    next(iter(value))
+                    for value in values
+                    if value is not None
+                }
+                if len(targets) == 1:
+                    bindings[(helper_name, parameter)] = next(iter(targets))
+        self._private_helper_parameter_bindings = bindings
+
+    def _scan_private_helper_calls(
+        self,
+        module_info: ModuleInfo,
+        statements: Sequence[ast.stmt],
+        context: PatchScanContext,
+        tag_guard_names: set[str],
+        helpers: dict[str, CallableInfo],
+        calls: dict[str, list[dict[str, set[str] | None]]],
+    ) -> None:
+        for node in statements:
+            for expression in self._statement_expressions(node):
+                for call in _expression_calls(expression):
+                    self._record_private_helper_call(
+                        module_info,
+                        call,
+                        context,
+                        helpers,
+                        calls,
+                    )
+
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                self._update_import_bindings(module_info, node, context)
+                continue
+            if isinstance(node, ast.If):
+                condition = _main_condition_value(
+                    node.test,
+                    tag_guard_names,
+                )
+                branches: Sequence[Sequence[ast.stmt]]
+                if condition is True:
+                    branches = (node.body,)
+                elif condition is False:
+                    branches = (node.orelse,)
+                else:
+                    branches = (node.body, node.orelse)
+                scanned = []
+                for branch_statements in branches:
+                    branch = context.clone()
+                    self._scan_private_helper_calls(
+                        module_info,
+                        branch_statements,
+                        branch,
+                        tag_guard_names,
+                        helpers,
+                        calls,
+                    )
+                    scanned.append(branch)
+                context.merge(scanned)
+                continue
+            if isinstance(node, ast.Try):
+                branches = []
+                success = context.clone()
+                self._scan_private_helper_calls(
+                    module_info,
+                    (*node.body, *node.orelse),
+                    success,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                branches.append(success)
+                for handler in node.handlers:
+                    branch = context.clone()
+                    self._scan_private_helper_calls(
+                        module_info,
+                        handler.body,
+                        branch,
+                        tag_guard_names,
+                        helpers,
+                        calls,
+                    )
+                    branches.append(branch)
+                context.merge(branches)
+                self._scan_private_helper_calls(
+                    module_info,
+                    node.finalbody,
+                    context,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified_name = (
+                    f"{module_info.name}."
+                    f"{'.'.join((*context.scope, node.name))}"
+                )
+                context.bindings[node.name] = {qualified_name}
+                child = context.clone(scope=(*context.scope, node.name))
+                self._scan_private_helper_calls(
+                    module_info,
+                    node.body,
+                    child,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                continue
+            if isinstance(node, ast.ClassDef):
+                qualified_name = (
+                    f"{module_info.name}."
+                    f"{'.'.join((*context.scope, node.name))}"
+                )
+                context.bindings[node.name] = {qualified_name}
+                child = context.clone(scope=(*context.scope, node.name))
+                self._scan_private_helper_calls(
+                    module_info,
+                    node.body,
+                    child,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                continue
+            if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                branches = [context.clone()]
+                branch = context.clone()
+                self._scan_private_helper_calls(
+                    module_info,
+                    node.body,
+                    branch,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                branches.append(branch)
+                context.merge(branches)
+                self._scan_private_helper_calls(
+                    module_info,
+                    node.orelse,
+                    context,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                continue
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                branch = context.clone()
+                self._scan_private_helper_calls(
+                    module_info,
+                    node.body,
+                    branch,
+                    tag_guard_names,
+                    helpers,
+                    calls,
+                )
+                context.merge([context.clone(), branch])
+                continue
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                self._update_owner_call_bindings(
+                    module_info,
+                    targets,
+                    node.value,
+                    context,
+                )
+
+    def _record_private_helper_call(
+        self,
+        module_info: ModuleInfo,
+        call: ast.Call,
+        context: PatchScanContext,
+        helpers: dict[str, CallableInfo],
+        calls: dict[str, list[dict[str, set[str] | None]]],
+    ) -> None:
+        expression = _expression_name(call.func)
+        if expression is None:
+            return
+        local_name = expression.rsplit(".", 1)[-1]
+        root_name = expression.split(".", 1)[0]
+        imported_private_helper = any(
+            self.downstream.canonical_name(candidate) in helpers
+            for candidate in context.bindings.get(root_name, ())
+        )
+        if not local_name.startswith("_") and not imported_private_helper:
+            return
+        references = self._resolve_patch_references(
+            module_info,
+            expression,
+            context,
+        )
+        candidates = sorted(set(references) & helpers.keys())
+        if not candidates:
+            return
+        for helper_name in candidates:
+            helper = helpers[helper_name]
+            if len(references) != 1 or not isinstance(
+                helper.node,
+                (ast.AsyncFunctionDef, ast.FunctionDef),
+            ):
+                calls[helper_name].append({})
+                continue
+            calls[helper_name].append(
+                self._bound_owner_arguments(
+                    module_info,
+                    helper.node,
+                    call,
+                    context,
+                )
+            )
+
+    def _update_owner_call_bindings(
+        self,
+        module_info: ModuleInfo,
+        targets: Sequence[ast.AST],
+        value: ast.AST | None,
+        context: PatchScanContext,
+    ) -> None:
+        expression = _expression_name(value)
+        references = (
+            self._resolve_patch_references(
+                module_info,
+                expression,
+                context,
+            )
+            if expression
+            else set()
+        )
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if references:
+                context.bindings[target.id] = set(references)
+            else:
+                context.bindings.pop(target.id, None)
+
+    def _bound_owner_arguments(
+        self,
+        module_info: ModuleInfo,
+        function: ast.AsyncFunctionDef | ast.FunctionDef,
+        call: ast.Call,
+        context: PatchScanContext,
+    ) -> dict[str, set[str] | None]:
+        positional = [*function.args.posonlyargs, *function.args.args]
+        explicit_keywords = {
+            keyword.arg: keyword.value
+            for keyword in call.keywords
+            if keyword.arg is not None
+        }
+        has_starred = any(isinstance(argument, ast.Starred) for argument in call.args)
+        has_kwargs = any(keyword.arg is None for keyword in call.keywords)
+        result: dict[str, set[str] | None] = {}
+        for index, parameter in enumerate(positional):
+            actual = explicit_keywords.get(parameter.arg)
+            if actual is None and index < len(call.args) and not has_starred:
+                actual = call.args[index]
+            if actual is None and (has_starred or has_kwargs):
+                result[parameter.arg] = None
+            else:
+                result[parameter.arg] = self._owner_argument_targets(
+                    module_info,
+                    actual,
+                    context,
+                )
+        for parameter in function.args.kwonlyargs:
+            actual = explicit_keywords.get(parameter.arg)
+            result[parameter.arg] = (
+                None
+                if actual is None and has_kwargs
+                else self._owner_argument_targets(
+                    module_info,
+                    actual,
+                    context,
+                )
+            )
+        return result
+
+    def _owner_argument_targets(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+    ) -> set[str] | None:
+        expression = _expression_name(node)
+        if expression is None:
+            return None
+        references = self._resolve_patch_references(
+            module_info,
+            expression,
+            context,
+        )
+        candidates = {
+            reference
+            for reference in references
+            if reference.startswith("vllm.")
+            and (
+                reference in self.upstream.modules
+                or self.upstream.find_class(reference) is not None
+            )
+        }
+        return candidates or None
+
+    def _statement_expressions(
+        self,
+        node: ast.stmt,
+    ) -> tuple[ast.AST | None, ...]:
+        if isinstance(node, ast.Expr):
+            return (node.value,)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            return (node.value,)
+        if isinstance(node, (ast.If, ast.While)):
+            return (node.test,)
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            return (node.iter,)
+        if isinstance(node, ast.Return):
+            return (node.value,)
+        if isinstance(node, ast.Raise):
+            return (node.exc,)
+        if isinstance(node, ast.Assert):
+            return (node.test, node.msg)
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            return tuple(item.context_expr for item in node.items)
+        return ()
+
+    def _callable_parameter_names(
+        self,
+        node: ast.AsyncFunctionDef | ast.FunctionDef,
+    ) -> tuple[str, ...]:
+        return tuple(
+            argument.arg
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        )
+
+    def _parameter_is_reassigned(
+        self,
+        node: ast.AsyncFunctionDef | ast.FunctionDef,
+        parameter: str,
+    ) -> bool:
+        return any(
+            isinstance(child, ast.Name)
+            and child.id == parameter
+            and isinstance(child.ctx, (ast.Del, ast.Store))
+            for child in _function_scope_nodes(node)
+        )
+
     def _collect_monkey_patches(self) -> None:
+        self._prepare_private_helper_parameter_bindings()
         for module_info in self.downstream.modules.values():
             context = PatchScanContext()
             self._scan_patch_statements(
@@ -1790,6 +2209,16 @@ class InterfaceBoundaryGenerator:
                 child = context.clone(
                     scope=(*context.scope, node.name),
                 )
+                helper_name = (
+                    f"{module_info.name}."
+                    f"{'.'.join((*context.scope, node.name))}"
+                )
+                for parameter in self._callable_parameter_names(node):
+                    target = self._private_helper_parameter_bindings.get(
+                        (helper_name, parameter)
+                    )
+                    if target is not None:
+                        child.bindings[parameter] = {target}
                 self._scan_patch_statements(
                     module_info,
                     node.body,
@@ -2038,6 +2467,7 @@ class InterfaceBoundaryGenerator:
                 local_name = alias.asname or alias.name.split(".", 1)[0]
                 target = alias.name if alias.asname else local_name
                 context.bindings[local_name] = {target}
+                context.runtime_modules.pop(local_name, None)
             return
 
         source_module = _relative_import_module(
@@ -2056,6 +2486,7 @@ class InterfaceBoundaryGenerator:
                 else alias.name
             )
             context.bindings[local_name] = {target}
+            context.runtime_modules.pop(local_name, None)
 
     def _update_assignment_bindings(
         self,
@@ -2076,12 +2507,17 @@ class InterfaceBoundaryGenerator:
         )
         string_values = self._string_values(value, context)
         expression = _expression_name(value)
+        runtime_modules = self._runtime_module_references(
+            module_info,
+            value,
+            context,
+        )
         getattr_references = self._getattr_references(
             module_info,
             value,
             context,
         )
-        references = getattr_references or (
+        references = runtime_modules or getattr_references or (
             self._resolve_patch_references(
                 module_info,
                 expression,
@@ -2105,6 +2541,47 @@ class InterfaceBoundaryGenerator:
                 context.bindings[target.id] = set(references)
             else:
                 context.bindings.pop(target.id, None)
+            if runtime_modules:
+                context.runtime_modules[target.id] = set(runtime_modules)
+            else:
+                context.runtime_modules.pop(target.id, None)
+
+    def _runtime_module_references(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+    ) -> set[str]:
+        module_name: str | None = None
+        owner_node: ast.AST | None = None
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            owner_node = node.func.value
+            module_name = node.args[0].value
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            owner_node = node.value
+            module_name = node.slice.value
+        if owner_node is None or not module_name.startswith("vllm."):
+            return set()
+        owner = _expression_name(owner_node)
+        if owner is None:
+            return set()
+        references = self._resolve_patch_references(
+            module_info,
+            owner,
+            context,
+        )
+        return {module_name} if references == {"sys.modules"} else set()
 
     def _getattr_references(
         self,
@@ -2275,13 +2752,20 @@ class InterfaceBoundaryGenerator:
                 "ambiguous patch target alias",
             )
             return
+        evidence_target = expression
+        parts = expression.split(".")
+        runtime_modules = context.runtime_modules.get(parts[0], set())
+        if len(runtime_modules) == 1:
+            evidence_target = ".".join(
+                [next(iter(runtime_modules)), *parts[1:]]
+            )
         self._record_resolved_patch(
             module_info,
             targets[0],
             replacement_node,
             context,
             line,
-            evidence_target=expression,
+            evidence_target=evidence_target,
         )
 
     def _record_resolved_patch(

@@ -4,6 +4,36 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.13.0 - resolve statically exact indirect patch owners
+
+- Starting commit: `0da1dc25c`.
+- Problem: two real patch sites were present in source but were not emitted by
+  the generator. One helper received the target vLLM module through a parameter;
+  the other cached a module returned by literal
+  `sys.modules.get("vllm...")`. These were generator omissions, not upstream
+  incompatibilities.
+- Change: for a private helper parameter, inspect all active-main direct call
+  sites and bind the parameter only when every call resolves to the same exact
+  vLLM module or class. Track literal `sys.modules.get("vllm...")` and
+  `sys.modules["vllm..."]` bindings as exact module provenance.
+- Safety boundary: a parameter assignment, an unknown/missing/indirect call,
+  conflicting call arguments, or a non-literal `sys.modules` key prevents
+  attribution. Release-only `vllm_version_is("...")` calls do not influence
+  the main-branch result. Lexical qualified names keep a nested helper that
+  shadows a module-level helper separate; a full-source rerun after fixing this
+  boundary produced the same intended result.
+- Rejected shortcut: collecting helper arguments by parameter name across the
+  whole module was not used because unrelated local scopes can reuse the same
+  name and would create false owners.
+- Fixed-source effect: relations increase from 970 to 971. The only new edge is
+  `HunYuanVLProcessingInfo.get_hf_processor`; the literal `sys.modules` site
+  adds a second occurrence to the existing `get_kv_cache_coordinator` edge.
+  All 970 prior exact edges remain. The 44 findings are byte-identical, so the
+  seven real upstream risks are unchanged; review and generator issues remain
+  zero.
+- Audited pre-version output SHA-256:
+  `71d130f83609dd0c70dd4777fac5bd6162aede488ff5e76e9efacebc5158a566`.
+
 ## coverage audit v0.1.0 - add an independent candidate backstop
 
 - Starting commit: `afd2f6794`.
