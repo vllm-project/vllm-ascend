@@ -45,7 +45,7 @@ jobs:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-aarch64-a3-0-cn12-001
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: qswr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-a3-ubuntu22.04-py3.12
 
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
