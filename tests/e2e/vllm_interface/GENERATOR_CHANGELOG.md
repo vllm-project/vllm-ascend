@@ -4,6 +4,61 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.16.0 - preserve exact path state through helpers and termination
+
+- Starting commit: `c3643d25f2d9384ec13ef2bb54f92d8435f1449d`.
+- Problem: six generic control-flow forms either lost a real dependency,
+  emitted a dead dependency, or hid a real upstream removal: a helper argument
+  whose exact `vllm.*` owner no longer exists; an exact main/tag branch that
+  returns; a patch in `finally` after a return; semantically opposite guards
+  rendered with different text; a statically true `hasattr`; and an exact
+  import merged with `None` then narrowed by a non-`None` guard.
+- Change: preserve syntactically exact vLLM references until normal target
+  validation classifies them; carry exact-reference and runtime-`None`
+  alternatives separately; normalize guard predicates from their AST; prove
+  only positive `hasattr` results from an exact indexed owner/member; propagate
+  live, return, and raise exits through the helper and patch scanners; execute
+  `finally` once per incoming path while keeping its path-specific bindings;
+  and stop scanning after an exact selected branch terminates.
+- Reason: a removed upstream module, class, or member is a downstream
+  compatibility risk, not a generator failure. Conversely, an unreachable
+  statement or a contradictory path must not create a dependency edge.
+- Safety boundary: absence is never used to prove `hasattr(...) == False`;
+  incomplete MRO remains unknown. A branch merge retains an exact owner only
+  when the alternatives are explicitly known. The optional-owner finding no
+  longer reconstructs a target from a stale module import. Duplicate findings
+  reached through multiple `try` paths are collapsed at the source site.
+- Regression evidence: six new fixtures first failed for the exact cases
+  above and then passed. The existing fixture now proves that the statically
+  selected `PatchTarget.hook` relation contains all three patch occurrences
+  instead of leaving one dynamic-name finding. All 59 isolated generator and
+  auditor tests pass; Ruff, Ruff format, and `git diff --check` pass.
+- Fixed-source effect: vLLM `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`,
+  vllm-ascend `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0` produce 971 relations and
+  44 findings: 7 risk, 9 expected, 22 excluded, and 6 verified. The relation
+  and finding sets are semantically identical to v0.14. Relative to v0.15,
+  all 969 prior relations remain and the MiniMax `forward_qk` and Qwen3.5 MTP
+  `forward` edges are restored; both generator reviews disappear.
+- Audited candidate hashes before the metadata version update: relations
+  `a28a88771972ecdd6b6da6d00a32f6b3f28199ef24908c9f04f50e200436294a`,
+  findings
+  `f83164f52e5319ebb89f4ce5367ce4e511f586ce710cd200056f0f83dba6d6e7`,
+  and report
+  `a00bb2831ecc6121537d2871ce5c239132673bf9d5c2ab6f89311de3ab13e41b`.
+- The final v0.16 JSONL hash is
+  `bfe4903c722d4da30630ba150d739779304f6fb733a54afeecfb049ff755463f`.
+  The independent site audit still classifies all 1,018 candidates and reports
+  the same two known auditor-only orphans: the verified HunYuan helper-owner
+  site and cached literal `sys.modules` site. This checkpoint does not use that
+  site-only audit as proof that dynamic owner endpoints are complete.
+- Independent review found the next path-state boundaries before final
+  acceptance: guard identity across lexical scopes, compound non-`None`
+  narrowing, conditional-definition `hasattr`, explicit-raise state entering
+  a handler, target-specific `hasattr` classification, `with` termination,
+  and loop `break`/`continue`. They remain visible work for the next Git
+  iteration rather than being hidden by the restored fixed-source count.
+
 ## v0.15.0 - definition-site helper propagation checkpoint
 
 - Starting commit: `b2ffb1e40`.

@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.15.0"
+GENERATOR_VERSION = "0.16.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -65,10 +65,7 @@ def _jsonable_signature(node: ast.AST | None) -> list[object] | None:
     required_count = len(positional) - len(arguments.defaults)
     return [
         "async" if isinstance(node, ast.AsyncFunctionDef) else "sync",
-        [
-            [argument.arg, index < required_count]
-            for index, argument in enumerate(arguments.posonlyargs)
-        ],
+        [[argument.arg, index < required_count] for index, argument in enumerate(arguments.posonlyargs)],
         [
             [
                 argument.arg,
@@ -129,11 +126,7 @@ def _relative_import_module(
 
 
 def _method_nodes(node: ast.ClassDef) -> dict[str, ast.AST]:
-    return {
-        child.name: child
-        for child in node.body
-        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
-    }
+    return {child.name: child for child in node.body if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))}
 
 
 def _function_scope_nodes(
@@ -160,20 +153,92 @@ def _statement_must_terminate(node: ast.stmt) -> bool:
     if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
         return True
     if isinstance(node, ast.If):
-        return bool(node.orelse) and _statements_must_terminate(
-            node.body
-        ) and _statements_must_terminate(node.orelse)
+        return bool(node.orelse) and _statements_must_terminate(node.body) and _statements_must_terminate(node.orelse)
     if isinstance(node, ast.Try):
         if _statements_must_terminate(node.finalbody):
             return True
         success = (*node.body, *node.orelse)
-        return bool(node.handlers) and _statements_must_terminate(
-            success
-        ) and all(
-            _statements_must_terminate(handler.body)
-            for handler in node.handlers
+        return (
+            bool(node.handlers)
+            and _statements_must_terminate(success)
+            and all(_statements_must_terminate(handler.body) for handler in node.handlers)
         )
     return False
+
+
+def _none_comparison(
+    node: ast.AST,
+) -> tuple[ast.AST, bool] | None:
+    """Return the compared expression and whether the test means non-None."""
+
+    if not (
+        isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], (ast.Is, ast.IsNot))
+        and len(node.comparators) == 1
+    ):
+        return None
+    left = node.left
+    right = node.comparators[0]
+    if isinstance(left, ast.Constant) and left.value is None:
+        subject = right
+    elif isinstance(right, ast.Constant) and right.value is None:
+        subject = left
+    else:
+        return None
+    return subject, isinstance(node.ops[0], ast.IsNot)
+
+
+def _canonical_guard(
+    node: ast.AST,
+    *,
+    truth: bool = True,
+) -> tuple[str, bool, str]:
+    """Normalize one predicate without relying on its rendered spelling."""
+
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        truth = not truth
+        node = node.operand
+
+    none_check = _none_comparison(node)
+    if none_check is not None:
+        subject, test_means_non_none = none_check
+        means_non_none = test_means_non_none if truth else not test_means_non_none
+        subject_text = " ".join(ast.unparse(subject).split())
+        key = f"none:{ast.dump(subject, include_attributes=False)}"
+        text = f"{subject_text} is not None" if means_non_none else f"{subject_text} is None"
+        return key, means_non_none, text
+
+    expression = " ".join(ast.unparse(node).split())
+    key = f"expr:{ast.dump(node, include_attributes=False)}"
+    text = expression if truth else f"not ({expression})"
+    return key, truth, text
+
+
+def _canonical_guard_text(text: str) -> tuple[str, bool, str]:
+    """Canonicalize a stored guard; keep synthetic flow labels opaque."""
+
+    try:
+        node = ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return f"opaque:{text}", True, text
+    return _canonical_guard(node)
+
+
+def _call_guard_polarity(text: str, call_name: str) -> bool | None:
+    """Return whether a stored guard requires a direct call to be truthy."""
+
+    try:
+        node = ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return None
+    truth = True
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        truth = not truth
+        node = node.operand
+    if isinstance(node, ast.Call) and _expression_name(node.func) == call_name:
+        return truth
+    return None
 
 
 def _main_expression_calls(
@@ -270,16 +335,8 @@ def _tag_guard_names(statements: Sequence[ast.stmt]) -> set[str]:
     names: set[str] = set()
     for node in statements:
         if isinstance(node, ast.Assign) and _is_exact_tag_check(node.value):
-            names.update(
-                target.id
-                for target in node.targets
-                if isinstance(target, ast.Name)
-            )
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and _is_exact_tag_check(node.value)
-        ):
+            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and _is_exact_tag_check(node.value):
             names.add(node.target.id)
     return names
 
@@ -298,10 +355,7 @@ def _main_condition_value(
         value = _main_condition_value(node.operand, tag_guard_names)
         return None if value is None else not value
     if isinstance(node, ast.BoolOp):
-        values = [
-            _main_condition_value(value, tag_guard_names)
-            for value in node.values
-        ]
+        values = [_main_condition_value(value, tag_guard_names) for value in node.values]
         if isinstance(node.op, ast.And):
             if False in values:
                 return False
@@ -324,16 +378,19 @@ def _main_module_statements(
                 tag_guard_names,
             )
             if condition is True:
+                selected = node.body
                 yield from _main_module_statements(
-                    node.body,
+                    selected,
                     tag_guard_names,
                 )
             elif condition is False:
+                selected = node.orelse
                 yield from _main_module_statements(
-                    node.orelse,
+                    selected,
                     tag_guard_names,
                 )
             else:
+                selected = None
                 yield from _main_module_statements(
                     node.body,
                     tag_guard_names,
@@ -342,6 +399,10 @@ def _main_module_statements(
                     node.orelse,
                     tag_guard_names,
                 )
+            if (selected is not None and _statements_must_terminate(selected)) or (
+                selected is None and _statement_must_terminate(node)
+            ):
+                return
             continue
         if isinstance(node, ast.Try):
             yield from _main_module_statements(
@@ -403,11 +464,7 @@ def _string_assignment(
     elif isinstance(node, ast.AnnAssign):
         target = node.target
         value = node.value
-    if (
-        isinstance(target, ast.Name)
-        and isinstance(value, ast.Constant)
-        and isinstance(value.value, str)
-    ):
+    if isinstance(target, ast.Name) and isinstance(value, ast.Constant) and isinstance(value.value, str):
         return target.id, value.value
     return None
 
@@ -582,10 +639,7 @@ class Relation:
         return tuple(sorted(keys))
 
     def comparison_exact_keys(self) -> tuple[tuple[str, ...], ...]:
-        return tuple(
-            (*downstream_key, *self.upstream_key())
-            for downstream_key in self.comparison_downstream_keys()
-        )
+        return tuple((*downstream_key, *self.upstream_key()) for downstream_key in self.comparison_downstream_keys())
 
 
 @dataclass(frozen=True)
@@ -617,16 +671,8 @@ class CandidateFinding:
             "evidence": {
                 "file": self.downstream_file,
                 "line": self.evidence_line,
-                **(
-                    {"scope": self.evidence_scope}
-                    if self.evidence_scope
-                    else {}
-                ),
-                **(
-                    {"guards": list(self.evidence_guards)}
-                    if self.evidence_guards
-                    else {}
-                ),
+                **({"scope": self.evidence_scope} if self.evidence_scope else {}),
+                **({"guards": list(self.evidence_guards)} if self.evidence_guards else {}),
             },
             "status": self.status,
             "reason_code": self.reason_code,
@@ -642,6 +688,7 @@ UnresolvedRelation = CandidateFinding
 @dataclass
 class PatchScanContext:
     bindings: dict[str, set[str]] = field(default_factory=dict)
+    binding_alternatives: dict[str, set[str | None]] = field(default_factory=dict)
     strings: dict[str, set[str]] = field(default_factory=dict)
     local_callables: dict[str, list[CallableInfo]] = field(default_factory=dict)
     runtime_modules: dict[str, set[str]] = field(default_factory=dict)
@@ -657,15 +704,10 @@ class PatchScanContext:
     ) -> PatchScanContext:
         return PatchScanContext(
             bindings={name: set(values) for name, values in self.bindings.items()},
+            binding_alternatives={name: set(values) for name, values in self.binding_alternatives.items()},
             strings={name: set(values) for name, values in self.strings.items()},
-            local_callables={
-                name: list(values)
-                for name, values in self.local_callables.items()
-            },
-            runtime_modules={
-                name: set(values)
-                for name, values in self.runtime_modules.items()
-            },
+            local_callables={name: list(values) for name, values in self.local_callables.items()},
+            runtime_modules={name: set(values) for name, values in self.runtime_modules.items()},
             parameter_names=set(self.parameter_names),
             scope=self.scope if scope is None else scope,
             guards=self.guards if guards is None else guards,
@@ -674,20 +716,13 @@ class PatchScanContext:
     def merge(self, contexts: Sequence[PatchScanContext]) -> None:
         if not contexts:
             return
-        self.bindings = _merge_candidate_maps(
-            context.bindings for context in contexts
+        self.bindings = _merge_candidate_maps(context.bindings for context in contexts)
+        self.binding_alternatives = _merge_binding_alternative_maps(
+            context.binding_alternatives for context in contexts
         )
-        self.strings = _merge_candidate_maps(
-            context.strings for context in contexts
-        )
-        self.runtime_modules = _merge_candidate_maps(
-            context.runtime_modules for context in contexts
-        )
-        callable_names = {
-            name
-            for context in contexts
-            for name in context.local_callables
-        }
+        self.strings = _merge_candidate_maps(context.strings for context in contexts)
+        self.runtime_modules = _merge_candidate_maps(context.runtime_modules for context in contexts)
+        callable_names = {name for context in contexts for name in context.local_callables}
         merged_callables: dict[str, list[CallableInfo]] = {}
         for name in callable_names:
             if any(name not in context.local_callables for context in contexts):
@@ -704,6 +739,18 @@ class PatchScanContext:
                     candidates[key] = candidate
             merged_callables[name] = list(candidates.values())
         self.local_callables = merged_callables
+
+
+@dataclass
+class PatchFlowExit:
+    kind: str
+    context: PatchScanContext
+
+
+@dataclass
+class PatchFlowResult:
+    live: bool = True
+    exits: list[PatchFlowExit] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -744,24 +791,29 @@ def _merge_candidate_maps(
     mappings: Iterable[dict[str, set[str]]],
 ) -> dict[str, set[str]]:
     materialized = list(mappings)
-    names = {
-        name
-        for mapping in materialized
-        for name in mapping
-    }
+    names = {name for mapping in materialized for name in mapping}
     merged: dict[str, set[str]] = {}
     for name in names:
         branch_values = [mapping.get(name) for mapping in materialized]
         if any(not values for values in branch_values):
             merged[name] = set()
         else:
-            merged[name] = {
-                value
-                for values in branch_values
-                if values is not None
-                for value in values
-            }
+            merged[name] = {value for values in branch_values if values is not None for value in values}
     return merged
+
+
+def _merge_binding_alternative_maps(
+    mappings: Iterable[dict[str, set[str | None]]],
+) -> dict[str, set[str | None]]:
+    """Keep alternatives only when every incoming path is fully described."""
+
+    materialized = list(mappings)
+    names = {name for mapping in materialized for name in mapping}
+    return {
+        name: {value for mapping in materialized for value in mapping[name]}
+        for name in names
+        if all(name in mapping and mapping[name] for mapping in materialized)
+    }
 
 
 class RepositoryIndex:
@@ -779,9 +831,7 @@ class RepositoryIndex:
         self.callables: dict[str, CallableInfo] = {}
         self.values: dict[str, ValueInfo] = {}
         self.aliases: dict[str, str] = {}
-        self._pending_method_aliases: list[
-            tuple[str, str, str, str, int]
-        ] = []
+        self._pending_method_aliases: list[tuple[str, str, str, str, int]] = []
         self.parse_errors: list[dict[str, str]] = []
         self._parse()
 
@@ -856,27 +906,13 @@ class RepositoryIndex:
                             star_imports.append(source_module)
                             continue
                         local_name = alias.asname or alias.name
-                        imports[local_name] = (
-                            f"{source_module}.{alias.name}" if source_module else alias.name
-                        )
-                elif (
-                    isinstance(node, ast.AnnAssign)
-                    and isinstance(node.target, ast.Name)
-                ):
+                        imports[local_name] = f"{source_module}.{alias.name}" if source_module else alias.name
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                     annotation = _expression_name(node.annotation)
                     if annotation:
-                        annotated_exports.append(
-                            (node.target.id, annotation)
-                        )
+                        annotated_exports.append((node.target.id, annotation))
                 elif isinstance(node, ast.ClassDef):
-                    bases = tuple(
-                        name
-                        for name in (
-                            _expression_name(base)
-                            for base in node.bases
-                        )
-                        if name
-                    )
+                    bases = tuple(name for name in (_expression_name(base) for base in node.bases) if name)
                     resolved_bases = tuple(
                         _resolve_bound_reference(
                             module,
@@ -919,9 +955,7 @@ class RepositoryIndex:
                         for target in class_targets:
                             if not isinstance(target, ast.Name):
                                 continue
-                            qualified_value = (
-                                f"{qualified_name}.{target.id}"
-                            )
+                            qualified_value = f"{qualified_name}.{target.id}"
                             self.values[qualified_value] = ValueInfo(
                                 qualified_name=qualified_value,
                                 module=module,
@@ -979,8 +1013,7 @@ class RepositoryIndex:
             lazy_names = {
                 name
                 for candidate in module_statements
-                if isinstance(candidate, (ast.AsyncFunctionDef, ast.FunctionDef))
-                and candidate.name == "__getattr__"
+                if isinstance(candidate, (ast.AsyncFunctionDef, ast.FunctionDef)) and candidate.name == "__getattr__"
                 for name in _lazy_getattr_names(candidate)
             }
             typed_lazy_exports = {
@@ -1002,10 +1035,7 @@ class RepositoryIndex:
                 classes=classes,
                 functions=functions,
                 loose_functions=dict(loose_functions),
-                string_constants={
-                    name: tuple(sorted(values))
-                    for name, values in string_constants.items()
-                },
+                string_constants={name: tuple(sorted(values)) for name, values in string_constants.items()},
                 star_imports=tuple(star_imports),
                 typed_lazy_exports=typed_lazy_exports,
             )
@@ -1036,8 +1066,7 @@ class RepositoryIndex:
                         *(
                             alias.rsplit(".", 1)[-1]
                             for alias in self.aliases
-                            if alias.startswith(f"{source_module}.")
-                            and "." not in alias[len(source_module) + 1 :]
+                            if alias.startswith(f"{source_module}.") and "." not in alias[len(source_module) + 1 :]
                         ),
                     }
                     for name in sorted(exported_names):
@@ -1067,22 +1096,10 @@ class RepositoryIndex:
             fields = self._dataclass_fields(class_info, field_cache, frozenset())
             if fields is None:
                 continue
-            self_name = (
-                "__dataclass_self__"
-                if any(name == "self" for name, _, _ in fields)
-                else "self"
-            )
+            self_name = "__dataclass_self__" if any(name == "self" for name, _, _ in fields) else "self"
             positional = [[self_name, True]]
-            positional.extend(
-                [name, required]
-                for name, required, kw_only in fields
-                if not kw_only
-            )
-            keyword_only = [
-                [name, required]
-                for name, required, kw_only in fields
-                if kw_only
-            ]
+            positional.extend([name, required] for name, required, kw_only in fields if not kw_only)
+            keyword_only = [[name, required] for name, required, kw_only in fields if kw_only]
             signature: list[object] = [
                 "sync",
                 [],
@@ -1195,9 +1212,7 @@ class RepositoryIndex:
             expression = _expression_name(call.func if call else decorator)
             if expression is None:
                 continue
-            reference = self.canonical_name(
-                self.resolve_reference(module, expression)
-            )
+            reference = self.canonical_name(self.resolve_reference(module, expression))
             if reference != "dataclasses.dataclass":
                 continue
             init = True
@@ -1302,9 +1317,7 @@ class RepositoryIndex:
                 )
 
     def _materialize_class_callable_aliases(self) -> None:
-        for class_name, member_name, target, kind, line in (
-            self._pending_method_aliases
-        ):
+        for class_name, member_name, target, kind, line in self._pending_method_aliases:
             source = self.find_callable(target)
             if source is None or not isinstance(
                 source.node,
@@ -1348,7 +1361,7 @@ class RepositoryIndex:
             replacement = None
             for alias in sorted(self.aliases, key=len, reverse=True):
                 if result == alias or result.startswith(f"{alias}."):
-                    replacement = f"{self.aliases[alias]}{result[len(alias):]}"
+                    replacement = f"{self.aliases[alias]}{result[len(alias) :]}"
                     break
             if replacement is None or replacement == result:
                 break
@@ -1390,19 +1403,15 @@ class InterfaceBoundaryGenerator:
             [("vLLM", error) for error in self.upstream.parse_errors]
             + [("vllm-ascend", error) for error in self.downstream.parse_errors]
             + [(package, error) for package, index in self.externals.items() for error in index.parse_errors]
-            )
+        )
         if parse_errors:
             details = "; ".join(f"{repository}:{error['file']}: {error['error']}" for repository, error in parse_errors)
             raise ValueError(f"Python source parsing failed: {details}")
         self.relations: list[Relation] = []
         self.findings: list[CandidateFinding] = []
         self._mro_cache: dict[str, MroResult] = {}
-        self._private_helper_invocations: dict[
-            str, tuple[PrivateHelperInvocation, ...]
-        ] = {}
-        self._private_helper_definitions: dict[
-            str, PrivateHelperDefinition
-        ] = {}
+        self._private_helper_invocations: dict[str, tuple[PrivateHelperInvocation, ...]] = {}
+        self._private_helper_definitions: dict[str, PrivateHelperDefinition] = {}
         self._private_helper_exports: dict[str, str] = {}
         self._private_helper_node_identities: dict[int, str] = {}
 
@@ -1570,10 +1579,7 @@ class InterfaceBoundaryGenerator:
                 result = MroResult(
                     owners=(qualified_name,),
                     complete=False,
-                    reason=(
-                        "unresolved base(s): "
-                        f"{', '.join(sorted(missing))}"
-                    ),
+                    reason=(f"unresolved base(s): {', '.join(sorted(missing))}"),
                 )
                 self._mro_cache[qualified_name] = result
                 return result
@@ -1584,10 +1590,7 @@ class InterfaceBoundaryGenerator:
             self._mro_cache[qualified_name] = result
             return result
 
-        base_results = [
-            self._linearized_mro(base, (*stack, qualified_name))
-            for base in bases
-        ]
+        base_results = [self._linearized_mro(base, (*stack, qualified_name)) for base in bases]
         incomplete = next(
             (result for result in base_results if not result.complete),
             None,
@@ -1598,9 +1601,7 @@ class InterfaceBoundaryGenerator:
                 prefix = (*prefix, *base_results[0].owners)
             reason_parts = []
             if missing:
-                reason_parts.append(
-                    f"unresolved base(s): {', '.join(sorted(missing))}"
-                )
+                reason_parts.append(f"unresolved base(s): {', '.join(sorted(missing))}")
             if incomplete is not None and incomplete.reason:
                 reason_parts.append(incomplete.reason)
             result = MroResult(
@@ -1611,20 +1612,13 @@ class InterfaceBoundaryGenerator:
             self._mro_cache[qualified_name] = result
             return result
 
-        sequences = [
-            list(result.owners)
-            for result in base_results
-        ]
+        sequences = [list(result.owners) for result in base_results]
         sequences.append(bases.copy())
         result = [qualified_name]
         while any(sequences):
             sequences = [sequence for sequence in sequences if sequence]
             candidate = next(
-                (
-                    sequence[0]
-                    for sequence in sequences
-                    if not any(sequence[0] in other[1:] for other in sequences)
-                ),
+                (sequence[0] for sequence in sequences if not any(sequence[0] in other[1:] for other in sequences)),
                 None,
             )
             if candidate is None:
@@ -1691,17 +1685,9 @@ class InterfaceBoundaryGenerator:
 
     def _collect_verified_overrides(self) -> None:
         for class_info in self.downstream.classes.values():
-            mro_result = self._linearized_mro(
-                class_info.qualified_name
-            )
+            mro_result = self._linearized_mro(class_info.qualified_name)
             mro = mro_result.owners
-            if (
-                mro_result.complete
-                and not any(
-                    owner.startswith("vllm.")
-                    for owner in mro[1:]
-                )
-            ):
+            if mro_result.complete and not any(owner.startswith("vllm.") for owner in mro[1:]):
                 continue
             for method_name, method_node in class_info.methods.items():
                 effective_owner = self._effective_method_owner(mro[1:], method_name)
@@ -1721,18 +1707,14 @@ class InterfaceBoundaryGenerator:
                                 downstream_file=class_info.file,
                                 downstream_owner=class_info.name,
                                 downstream_name=method_name,
-                                target_expression=", ".join(
-                                    candidates
-                                ),
+                                target_expression=", ".join(candidates),
                                 evidence_line=getattr(
                                     method_node,
                                     "lineno",
                                     0,
                                 ),
                                 reason=(
-                                    f"incomplete MRO ({mro_result.reason}); "
-                                    "candidate upstream owner was not "
-                                    "selected"
+                                    f"incomplete MRO ({mro_result.reason}); candidate upstream owner was not selected"
                                 ),
                                 status="review",
                                 reason_code="ambiguous_mro",
@@ -1784,7 +1766,7 @@ class InterfaceBoundaryGenerator:
                             status="excluded",
                             reason_code=reason_code,
                             generator_issue=False,
-                )
+                        )
                     )
                     continue
                 upstream_callable = self._callable_info(f"{effective_owner}.{method_name}")
@@ -1807,9 +1789,7 @@ class InterfaceBoundaryGenerator:
                         downstream_owner=class_info.name,
                         downstream_name=method_name,
                         downstream_signature=(
-                            downstream_callable.signature
-                            if downstream_callable
-                            else _jsonable_signature(method_node)
+                            downstream_callable.signature if downstream_callable else _jsonable_signature(method_node)
                         ),
                         evidence_file=class_info.file,
                         evidence_line=evidence_line,
@@ -1850,10 +1830,7 @@ class InterfaceBoundaryGenerator:
             base_info = self._class_info(base)
             if base_info is None:
                 continue
-            if (
-                base.startswith("vllm.")
-                and method_name in base_info.methods
-            ):
+            if base.startswith("vllm.") and method_name in base_info.methods:
                 candidates.add(base)
             candidates.update(
                 self._candidate_upstream_method_owners(
@@ -1876,16 +1853,11 @@ class InterfaceBoundaryGenerator:
                 if not isinstance(
                     node,
                     (ast.AsyncFunctionDef, ast.FunctionDef),
-                ) or not (
-                    node.name.startswith("_")
-                    and not node.name.startswith("__")
-                ):
+                ) or not (node.name.startswith("_") and not node.name.startswith("__")):
                     continue
                 qualified_name = f"{module_info.name}.{node.name}"
                 identity = (
-                    f"<private-helper>:{qualified_name}:"
-                    f"{getattr(node, 'lineno', 0)}:"
-                    f"{getattr(node, 'col_offset', 0)}"
+                    f"<private-helper>:{qualified_name}:{getattr(node, 'lineno', 0)}:{getattr(node, 'col_offset', 0)}"
                 )
                 info = CallableInfo(
                     qualified_name=qualified_name,
@@ -1906,9 +1878,7 @@ class InterfaceBoundaryGenerator:
         exports = {}
         for module_info in self.downstream.modules.values():
             for name, info in module_info.functions.items():
-                if not (
-                    name.startswith("_") and not name.startswith("__")
-                ):
+                if not (name.startswith("_") and not name.startswith("__")):
                     continue
                 identity = node_identities.get(id(info.node))
                 if identity is not None:
@@ -1964,6 +1934,7 @@ class InterfaceBoundaryGenerator:
                 context = definition.entry_context.clone(guards=guards)
                 for parameter, target in invocation.bindings:
                     context.bindings[parameter] = {target}
+                    context.binding_alternatives[parameter] = {target}
                 forwarded_calls: dict[
                     str,
                     list[
@@ -1980,11 +1951,9 @@ class InterfaceBoundaryGenerator:
                     set(definition.tag_guard_names),
                     forwarded_calls,
                 )
-                for forwarded_name, forwarded_invocations in (
-                    self._exact_private_helper_invocations(
-                        forwarded_calls
-                    ).items()
-                ):
+                for forwarded_name, forwarded_invocations in self._exact_private_helper_invocations(
+                    forwarded_calls
+                ).items():
                     known[forwarded_name].update(forwarded_invocations)
 
         self._private_helper_invocations = {
@@ -2008,9 +1977,7 @@ class InterfaceBoundaryGenerator:
             list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
         ],
     ) -> defaultdict[str, set[PrivateHelperInvocation]]:
-        invocations: defaultdict[
-            str, set[PrivateHelperInvocation]
-        ] = defaultdict(set)
+        invocations: defaultdict[str, set[PrivateHelperInvocation]] = defaultdict(set)
         for helper_name, helper_calls in calls.items():
             helper = self._private_helper_definitions[helper_name].info
             if not isinstance(
@@ -2020,20 +1987,14 @@ class InterfaceBoundaryGenerator:
                 continue
             parameters = self._callable_parameter_names(helper.node)
             reassigned = {
-                parameter
-                for parameter in parameters
-                if self._parameter_is_reassigned(helper.node, parameter)
+                parameter for parameter in parameters if self._parameter_is_reassigned(helper.node, parameter)
             }
             exact_calls = set()
             for arguments, guards in helper_calls:
                 exact_bindings = []
                 for parameter in parameters:
                     values = arguments.get(parameter)
-                    if (
-                        parameter not in reassigned
-                        and values is not None
-                        and len(values) == 1
-                    ):
+                    if parameter not in reassigned and values is not None and len(values) == 1:
                         exact_bindings.append((parameter, next(iter(values))))
                 if exact_bindings:
                     exact_calls.add(
@@ -2055,7 +2016,8 @@ class InterfaceBoundaryGenerator:
             str,
             list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
         ],
-    ) -> None:
+    ) -> PatchFlowResult:
+        exits: list[PatchFlowExit] = []
         for node in statements:
             for expression in self._statement_expressions(node):
                 for call in _main_expression_calls(expression, tag_guard_names):
@@ -2071,86 +2033,83 @@ class InterfaceBoundaryGenerator:
                 self._update_import_bindings(module_info, node, context)
                 continue
             if isinstance(node, ast.If):
-                condition = _main_condition_value(
+                condition = self._patch_condition_value(
+                    module_info,
                     node.test,
+                    context,
                     tag_guard_names,
                 )
-                branches: Sequence[
-                    tuple[Sequence[ast.stmt], tuple[str, ...]]
-                ]
+                branches: Sequence[tuple[Sequence[ast.stmt], bool]]
                 if condition is True:
-                    branches = ((node.body, context.guards),)
+                    branches = ((node.body, True),)
                 elif condition is False:
-                    branches = ((node.orelse, context.guards),)
+                    branches = ((node.orelse, False),)
                 else:
-                    guard = self._guard_text(node.test)
                     branches = (
-                        (node.body, (*context.guards, guard)),
-                        (node.orelse, (*context.guards, f"not ({guard})")),
+                        (node.body, True),
+                        (node.orelse, False),
                     )
-                scanned = []
-                for branch_statements, guards in branches:
+                live_branches = []
+                for branch_statements, truth in branches:
+                    guards = context.guards
+                    if condition is None:
+                        merged_guards = self._merge_guard_paths(
+                            guards,
+                            (self._guard_text(node.test, truth=truth),),
+                        )
+                        if merged_guards is None:
+                            continue
+                        guards = merged_guards
                     branch = context.clone(guards=guards)
-                    self._scan_private_helper_calls(
+                    if condition is None and not self._refine_none_guard(
+                        branch,
+                        node.test,
+                        truth=truth,
+                    ):
+                        continue
+                    result = self._scan_private_helper_calls(
                         module_info,
                         branch_statements,
                         branch,
                         tag_guard_names,
                         calls,
                     )
-                    if not _statements_must_terminate(branch_statements):
-                        scanned.append(branch)
-                if scanned:
-                    context.merge(scanned)
-                if _statement_must_terminate(node):
-                    return
+                    exits.extend(result.exits)
+                    if result.live:
+                        live_branches.append(branch)
+                if not live_branches:
+                    return PatchFlowResult(live=False, exits=exits)
+                context.merge(live_branches)
                 continue
             if isinstance(node, ast.Try):
-                branches = []
-                success = context.clone()
-                self._scan_private_helper_calls(
+                result = self._scan_private_helper_try(
                     module_info,
-                    (*node.body, *node.orelse),
-                    success,
-                    tag_guard_names,
-                    calls,
-                )
-                if not _statements_must_terminate(
-                    (*node.body, *node.orelse)
-                ):
-                    branches.append(success)
-                for handler in node.handlers:
-                    branch = context.clone()
-                    self._scan_private_helper_calls(
-                        module_info,
-                        handler.body,
-                        branch,
-                        tag_guard_names,
-                        calls,
-                    )
-                    if not _statements_must_terminate(handler.body):
-                        branches.append(branch)
-                if branches:
-                    context.merge(branches)
-                self._scan_private_helper_calls(
-                    module_info,
-                    node.finalbody,
+                    node,
                     context,
                     tag_guard_names,
                     calls,
                 )
-                if _statement_must_terminate(node):
-                    return
+                exits.extend(result.exits)
+                if not result.live:
+                    return PatchFlowResult(live=False, exits=exits)
                 continue
             if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
-                return
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                qualified_name = (
-                    f"{module_info.name}."
-                    f"{'.'.join((*context.scope, node.name))}"
+                return PatchFlowResult(
+                    live=False,
+                    exits=[
+                        *exits,
+                        PatchFlowExit(
+                            kind=type(node).__name__.lower(),
+                            context=context.clone(),
+                        ),
+                    ],
                 )
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified_name = f"{module_info.name}.{'.'.join((*context.scope, node.name))}"
                 identity = self._private_helper_node_identities.get(id(node))
-                context.bindings[node.name] = {identity or qualified_name}
+                bound_name = identity or qualified_name
+                context.bindings[node.name] = {bound_name}
+                context.binding_alternatives[node.name] = {bound_name}
                 child = context.clone(scope=(*context.scope, node.name))
                 self._clear_function_parameter_bindings(node, child)
                 if identity is not None:
@@ -2170,11 +2129,9 @@ class InterfaceBoundaryGenerator:
                 )
                 continue
             if isinstance(node, ast.ClassDef):
-                qualified_name = (
-                    f"{module_info.name}."
-                    f"{'.'.join((*context.scope, node.name))}"
-                )
+                qualified_name = f"{module_info.name}.{'.'.join((*context.scope, node.name))}"
                 context.bindings[node.name] = {qualified_name}
+                context.binding_alternatives[node.name] = {qualified_name}
                 child = context.clone(scope=(*context.scope, node.name))
                 self._scan_private_helper_calls(
                     module_info,
@@ -2216,17 +2173,98 @@ class InterfaceBoundaryGenerator:
                 context.merge([context.clone(), branch])
                 continue
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = (
-                    node.targets
-                    if isinstance(node, ast.Assign)
-                    else [node.target]
-                )
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 self._update_owner_call_bindings(
                     module_info,
                     targets,
                     node.value,
                     context,
                 )
+
+        return PatchFlowResult(live=True, exits=exits)
+
+    def _scan_private_helper_try(
+        self,
+        module_info: ModuleInfo,
+        node: ast.Try,
+        context: PatchScanContext,
+        tag_guard_names: set[str],
+        calls: dict[
+            str,
+            list[tuple[dict[str, set[str] | None], tuple[str, ...]]],
+        ],
+    ) -> PatchFlowResult:
+        outcomes: list[PatchFlowExit] = []
+        success_guards = self._merge_guard_paths(
+            context.guards,
+            ("try-success",),
+        )
+        if success_guards is not None:
+            success = context.clone(guards=success_guards)
+            body_result = self._scan_private_helper_calls(
+                module_info,
+                node.body,
+                success,
+                tag_guard_names,
+                calls,
+            )
+            outcomes.extend(body_result.exits)
+            if body_result.live:
+                else_result = self._scan_private_helper_calls(
+                    module_info,
+                    node.orelse,
+                    success,
+                    tag_guard_names,
+                    calls,
+                )
+                outcomes.extend(else_result.exits)
+                if else_result.live:
+                    outcomes.append(PatchFlowExit("live", success))
+
+        for handler in node.handlers:
+            exception_name = _expression_name(handler.type) or "Exception"
+            handler_guards = self._merge_guard_paths(
+                context.guards,
+                (f"except {exception_name}",),
+            )
+            if handler_guards is None:
+                continue
+            branch = context.clone(guards=handler_guards)
+            handler_result = self._scan_private_helper_calls(
+                module_info,
+                handler.body,
+                branch,
+                tag_guard_names,
+                calls,
+            )
+            outcomes.extend(handler_result.exits)
+            if handler_result.live:
+                outcomes.append(PatchFlowExit("live", branch))
+
+        live_contexts: list[PatchScanContext] = []
+        exits: list[PatchFlowExit] = []
+        for outcome in outcomes:
+            # ``finally`` is unconditional. Keep each branch's value state,
+            # but do not leak synthetic try/except labels into its evidence.
+            final_context = outcome.context.clone(guards=context.guards)
+            final_result = self._scan_private_helper_calls(
+                module_info,
+                node.finalbody,
+                final_context,
+                tag_guard_names,
+                calls,
+            )
+            exits.extend(final_result.exits)
+            if not final_result.live:
+                continue
+            if outcome.kind == "live":
+                live_contexts.append(final_context)
+            else:
+                exits.append(PatchFlowExit(outcome.kind, final_context))
+
+        if live_contexts:
+            context.merge(live_contexts)
+        return PatchFlowResult(live=bool(live_contexts), exits=exits)
 
     def _record_private_helper_call(
         self,
@@ -2246,8 +2284,7 @@ class InterfaceBoundaryGenerator:
         root_name = expression.split(".", 1)[0]
         imported_private_helper = any(
             candidate in self._private_helper_definitions
-            or self.downstream.canonical_name(candidate)
-            in self._private_helper_exports
+            or self.downstream.canonical_name(candidate) in self._private_helper_exports
             for candidate in context.bindings.get(root_name, ())
         )
         if not local_name.startswith("_") and not imported_private_helper:
@@ -2265,9 +2302,7 @@ class InterfaceBoundaryGenerator:
                     (
                         reference
                         if reference in self._private_helper_definitions
-                        else self._private_helper_exports.get(
-                            self.downstream.canonical_name(reference)
-                        )
+                        else self._private_helper_exports.get(self.downstream.canonical_name(reference))
                     ),
                 )
                 if identity is not None
@@ -2315,8 +2350,13 @@ class InterfaceBoundaryGenerator:
                 continue
             if references:
                 context.bindings[target.id] = set(references)
+                context.binding_alternatives[target.id] = set(references)
+            elif isinstance(value, ast.Constant) and value.value is None:
+                context.bindings[target.id] = set()
+                context.binding_alternatives[target.id] = {None}
             else:
                 context.bindings.pop(target.id, None)
+                context.binding_alternatives.pop(target.id, None)
 
     def _bound_owner_arguments(
         self,
@@ -2325,15 +2365,9 @@ class InterfaceBoundaryGenerator:
         call: ast.Call,
         context: PatchScanContext,
         tag_guard_names: set[str],
-    ) -> list[
-        tuple[dict[str, set[str] | None], tuple[str, ...]]
-    ]:
+    ) -> list[tuple[dict[str, set[str] | None], tuple[str, ...]]]:
         positional = [*function.args.posonlyargs, *function.args.args]
-        explicit_keywords = {
-            keyword.arg: keyword.value
-            for keyword in call.keywords
-            if keyword.arg is not None
-        }
+        explicit_keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
         has_starred = any(isinstance(argument, ast.Starred) for argument in call.args)
         has_kwargs = any(keyword.arg is None for keyword in call.keywords)
         actuals: list[tuple[str, ast.AST | None, bool]] = []
@@ -2352,9 +2386,7 @@ class InterfaceBoundaryGenerator:
             actual = explicit_keywords.get(parameter.arg)
             actuals.append((parameter.arg, actual, actual is None and has_kwargs))
 
-        contexts: list[
-            tuple[dict[str, set[str] | None], tuple[str, ...]]
-        ] = [({}, context.guards)]
+        contexts: list[tuple[dict[str, set[str] | None], tuple[str, ...]]] = [({}, context.guards)]
         for parameter, actual, forced_unknown in actuals:
             alternatives = (
                 None
@@ -2402,9 +2434,7 @@ class InterfaceBoundaryGenerator:
             context,
             tag_guard_names,
         )
-        if alternatives is None or any(
-            alternative.target is None for alternative in alternatives
-        ):
+        if alternatives is None or any(alternative.target is None for alternative in alternatives):
             return None
         return tuple(
             sorted(
@@ -2414,6 +2444,124 @@ class InterfaceBoundaryGenerator:
                     if alternative.target is not None
                 }
             )
+        )
+
+    def _patch_condition_value(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST,
+        context: PatchScanContext,
+        tag_guard_names: set[str],
+    ) -> bool | None:
+        main_value = _main_condition_value(node, tag_guard_names)
+        if main_value is not None:
+            return main_value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            value = self._patch_condition_value(
+                module_info,
+                node.operand,
+                context,
+                tag_guard_names,
+            )
+            return None if value is None else not value
+        if isinstance(node, ast.BoolOp):
+            values = [
+                self._patch_condition_value(
+                    module_info,
+                    value,
+                    context,
+                    tag_guard_names,
+                )
+                for value in node.values
+            ]
+            if isinstance(node.op, ast.And):
+                if False in values:
+                    return False
+                return True if all(value is True for value in values) else None
+            if isinstance(node.op, ast.Or):
+                if True in values:
+                    return True
+                return False if all(value is False for value in values) else None
+        if not (
+            isinstance(node, ast.Call)
+            and _expression_name(node.func) == "hasattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            return None
+        owner_expression = _expression_name(node.args[0])
+        if owner_expression is None:
+            return None
+        owners = {
+            self._canonical_reference(owner)
+            for owner in self._resolve_patch_references(
+                module_info,
+                owner_expression,
+                context,
+            )
+            if owner == "vllm" or owner.startswith("vllm.")
+        }
+        if len(owners) != 1:
+            return None
+        owner = next(iter(owners))
+        member = node.args[1].value
+        return True if self._upstream_member_is_proven(owner, member) else None
+
+    def _refine_none_guard(
+        self,
+        context: PatchScanContext,
+        node: ast.AST,
+        *,
+        truth: bool,
+    ) -> bool:
+        """Narrow an exact-value/None join; return False for an impossible path."""
+
+        while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            truth = not truth
+            node = node.operand
+        none_check = _none_comparison(node)
+        if none_check is None:
+            return True
+        subject, test_means_non_none = none_check
+        if not isinstance(subject, ast.Name):
+            return True
+        alternatives = context.binding_alternatives.get(subject.id)
+        if alternatives is None:
+            return True
+        means_non_none = test_means_non_none if truth else not test_means_non_none
+        selected = {target for target in alternatives if (target is not None) == means_non_none}
+        if not selected:
+            return False
+        context.binding_alternatives[subject.id] = selected
+        exact = {target for target in selected if target is not None}
+        context.bindings[subject.id] = exact
+        return True
+
+    def _upstream_member_is_proven(
+        self,
+        owner: str,
+        member: str,
+    ) -> bool:
+        owner = self._canonical_reference(owner)
+        target = self._canonical_reference(f"{owner}.{member}")
+        if (
+            self.upstream.find_callable(target) is not None
+            or self.upstream.find_value(target) is not None
+            or self.upstream.find_class(target) is not None
+            or target in self.upstream.modules
+        ):
+            return True
+        owner_info = self.upstream.find_class(owner)
+        if owner_info is None:
+            return False
+        mro_result = self._linearized_mro(owner_info.qualified_name)
+        if not mro_result.complete:
+            return False
+        return any(
+            self.upstream.find_callable(f"{candidate}.{member}") is not None
+            or self.upstream.find_value(f"{candidate}.{member}") is not None
+            for candidate in mro_result.owners[1:]
         )
 
     def _static_value_alternatives(
@@ -2427,7 +2575,12 @@ class InterfaceBoundaryGenerator:
             return None
 
         if isinstance(node, ast.IfExp):
-            condition = _main_condition_value(node.test, tag_guard_names)
+            condition = self._patch_condition_value(
+                module_info,
+                node.test,
+                context,
+                tag_guard_names,
+            )
             if condition is not None:
                 selected = node.body if condition else node.orelse
                 return self._static_value_alternatives(
@@ -2451,12 +2604,13 @@ class InterfaceBoundaryGenerator:
             if body is None or otherwise is None:
                 return None
             guard = self._guard_text(node.test)
+            opposite = self._guard_text(node.test, truth=False)
             return self._guarded_value_alternatives(
                 body,
                 guard,
             ) + self._guarded_value_alternatives(
                 otherwise,
-                f"not ({guard})",
+                opposite,
             )
 
         if isinstance(node, ast.BoolOp):
@@ -2479,9 +2633,7 @@ class InterfaceBoundaryGenerator:
                     return None
                 combined = []
                 for alternative in alternatives:
-                    short_circuits = (
-                        isinstance(node.op, ast.And) and not alternative.truth
-                    ) or (
+                    short_circuits = (isinstance(node.op, ast.And) and not alternative.truth) or (
                         isinstance(node.op, ast.Or) and alternative.truth
                     )
                     if short_circuits:
@@ -2512,13 +2664,7 @@ class InterfaceBoundaryGenerator:
                 context,
             )
             candidates = {
-                reference
-                for reference in references
-                if (reference == "vllm" or reference.startswith("vllm."))
-                and (
-                    reference in self.upstream.modules
-                    or self.upstream.find_class(reference) is not None
-                )
+                reference for reference in references if (reference == "vllm" or reference.startswith("vllm."))
             }
             if len(candidates) == 1:
                 return (
@@ -2530,10 +2676,16 @@ class InterfaceBoundaryGenerator:
             if len(candidates) > 1:
                 return None
 
-        condition = _main_condition_value(node, tag_guard_names)
+        condition = self._patch_condition_value(
+            module_info,
+            node,
+            context,
+            tag_guard_names,
+        )
         if condition is not None:
             return (StaticValueAlternative(target=None, truth=condition),)
         guard = self._guard_text(node)
+        opposite = self._guard_text(node, truth=False)
         return (
             StaticValueAlternative(
                 target=None,
@@ -2543,7 +2695,7 @@ class InterfaceBoundaryGenerator:
             StaticValueAlternative(
                 target=None,
                 truth=False,
-                guards=(f"not ({guard})",),
+                guards=(opposite,),
             ),
         )
 
@@ -2564,16 +2716,14 @@ class InterfaceBoundaryGenerator:
         self,
         *paths: Sequence[str],
     ) -> tuple[str, ...] | None:
-        guards = {guard for path in paths for guard in path}
-        for guard in tuple(guards):
-            opposite = (
-                guard[5:-1]
-                if guard.startswith("not (") and guard.endswith(")")
-                else f"not ({guard})"
-            )
-            if opposite in guards:
+        predicates: dict[str, tuple[bool, str]] = {}
+        for guard in (guard for path in paths for guard in path):
+            key, polarity, text = _canonical_guard_text(guard)
+            previous = predicates.get(key)
+            if previous is not None and previous[0] != polarity:
                 return None
-        return tuple(sorted(guards))
+            predicates[key] = (polarity, text)
+        return tuple(sorted(text for _polarity, text in predicates.values()))
 
     def _statement_expressions(
         self,
@@ -2623,6 +2773,7 @@ class InterfaceBoundaryGenerator:
             # falls back to the module import index and can reuse a shadowed
             # ``import ... as <parameter>`` value.
             context.bindings[parameter] = set()
+            context.binding_alternatives.pop(parameter, None)
             context.strings.pop(parameter, None)
             context.local_callables.pop(parameter, None)
             context.runtime_modules.pop(parameter, None)
@@ -2634,9 +2785,7 @@ class InterfaceBoundaryGenerator:
         parameter: str,
     ) -> bool:
         return any(
-            isinstance(child, ast.Name)
-            and child.id == parameter
-            and isinstance(child.ctx, (ast.Del, ast.Store))
+            isinstance(child, ast.Name) and child.id == parameter and isinstance(child.ctx, (ast.Del, ast.Store))
             for child in _function_scope_nodes(node)
         )
 
@@ -2657,43 +2806,52 @@ class InterfaceBoundaryGenerator:
         statements: Sequence[ast.stmt],
         context: PatchScanContext,
         tag_guard_names: set[str],
-    ) -> None:
+    ) -> PatchFlowResult:
+        exits: list[PatchFlowExit] = []
         for node in statements:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 self._update_import_bindings(module_info, node, context)
                 continue
 
             if isinstance(node, ast.If):
-                self._scan_patch_if(
+                result = self._scan_patch_if(
                     module_info,
                     node,
                     context,
                     tag_guard_names,
                 )
-                if _statement_must_terminate(node):
-                    return
+                exits.extend(result.exits)
+                if not result.live:
+                    return PatchFlowResult(live=False, exits=exits)
                 continue
 
             if isinstance(node, ast.Try):
-                self._scan_patch_try(
+                result = self._scan_patch_try(
                     module_info,
                     node,
                     context,
                     tag_guard_names,
                 )
-                if _statement_must_terminate(node):
-                    return
+                exits.extend(result.exits)
+                if not result.live:
+                    return PatchFlowResult(live=False, exits=exits)
                 continue
 
             if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
-                return
+                return PatchFlowResult(
+                    live=False,
+                    exits=[
+                        *exits,
+                        PatchFlowExit(
+                            kind=type(node).__name__.lower(),
+                            context=context.clone(),
+                        ),
+                    ],
+                )
 
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 callable_info = CallableInfo(
-                    qualified_name=(
-                        f"{module_info.name}."
-                        f"{'.'.join((*context.scope, node.name))}"
-                    ),
+                    qualified_name=(f"{module_info.name}.{'.'.join((*context.scope, node.name))}"),
                     module=module_info.name,
                     file=module_info.file,
                     owner=None,
@@ -2701,6 +2859,7 @@ class InterfaceBoundaryGenerator:
                     node=node,
                 )
                 context.bindings.pop(node.name, None)
+                context.binding_alternatives.pop(node.name, None)
                 context.local_callables[node.name] = [callable_info]
                 base_child = context.clone(
                     scope=(*context.scope, node.name),
@@ -2710,11 +2869,16 @@ class InterfaceBoundaryGenerator:
                 invocations = self._private_helper_invocations.get(helper_name)
                 if invocations:
                     for invocation in invocations:
-                        child = base_child.clone(
-                            guards=(*base_child.guards, *invocation.guards),
+                        guards = self._merge_guard_paths(
+                            base_child.guards,
+                            invocation.guards,
                         )
+                        if guards is None:
+                            continue
+                        child = base_child.clone(guards=guards)
                         for parameter, target in invocation.bindings:
                             child.bindings[parameter] = {target}
+                            child.binding_alternatives[parameter] = {target}
                         self._scan_patch_statements(
                             module_info,
                             node.body,
@@ -2733,6 +2897,7 @@ class InterfaceBoundaryGenerator:
             if isinstance(node, ast.ClassDef):
                 qualified_name = f"{module_info.name}.{node.name}"
                 context.bindings[node.name] = {qualified_name}
+                context.binding_alternatives[node.name] = {qualified_name}
                 context.local_callables[node.name] = [
                     CallableInfo(
                         qualified_name=qualified_name,
@@ -2800,11 +2965,7 @@ class InterfaceBoundaryGenerator:
 
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 value = node.value
-                targets = (
-                    node.targets
-                    if isinstance(node, ast.Assign)
-                    else [node.target]
-                )
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
                     if isinstance(target, ast.Attribute):
                         self._record_patch_node(
@@ -2835,50 +2996,65 @@ class InterfaceBoundaryGenerator:
                     getattr(node, "lineno", 0),
                 )
 
+        return PatchFlowResult(live=True, exits=exits)
+
     def _scan_patch_if(
         self,
         module_info: ModuleInfo,
         node: ast.If,
         context: PatchScanContext,
         tag_guard_names: set[str],
-    ) -> None:
-        condition = _main_condition_value(node.test, tag_guard_names)
+    ) -> PatchFlowResult:
+        condition = self._patch_condition_value(
+            module_info,
+            node.test,
+            context,
+            tag_guard_names,
+        )
         if condition is not None:
             selected = node.body if condition else node.orelse
             branch = context.clone()
-            self._scan_patch_statements(
+            result = self._scan_patch_statements(
                 module_info,
                 selected,
                 branch,
                 tag_guard_names,
             )
-            context.merge([branch])
-            return
+            if result.live:
+                context.merge([branch])
+            return result
 
-        guard = self._guard_text(node.test)
-        body = context.clone(guards=(*context.guards, guard))
-        self._scan_patch_statements(
-            module_info,
-            node.body,
-            body,
-            tag_guard_names,
-        )
-        live_branches = []
-        if not _statements_must_terminate(node.body):
-            live_branches.append(body)
-        otherwise = context.clone(
-            guards=(*context.guards, f"not ({guard})"),
-        )
-        self._scan_patch_statements(
-            module_info,
-            node.orelse,
-            otherwise,
-            tag_guard_names,
-        )
-        if not _statements_must_terminate(node.orelse):
-            live_branches.append(otherwise)
+        live_branches: list[PatchScanContext] = []
+        exits: list[PatchFlowExit] = []
+        for branch_statements, truth in (
+            (node.body, True),
+            (node.orelse, False),
+        ):
+            guards = self._merge_guard_paths(
+                context.guards,
+                (self._guard_text(node.test, truth=truth),),
+            )
+            if guards is None:
+                continue
+            branch = context.clone(guards=guards)
+            if not self._refine_none_guard(
+                branch,
+                node.test,
+                truth=truth,
+            ):
+                continue
+            result = self._scan_patch_statements(
+                module_info,
+                branch_statements,
+                branch,
+                tag_guard_names,
+            )
+            exits.extend(result.exits)
+            if result.live:
+                live_branches.append(branch)
         if live_branches:
             context.merge(live_branches)
+        return PatchFlowResult(live=bool(live_branches), exits=exits)
 
     def _scan_patch_try(
         self,
@@ -2886,47 +3062,74 @@ class InterfaceBoundaryGenerator:
         node: ast.Try,
         context: PatchScanContext,
         tag_guard_names: set[str],
-    ) -> None:
-        success = context.clone(guards=(*context.guards, "try-success"))
-        self._scan_patch_statements(
-            module_info,
-            node.body,
-            success,
-            tag_guard_names,
+    ) -> PatchFlowResult:
+        outcomes: list[PatchFlowExit] = []
+        success_guards = self._merge_guard_paths(
+            context.guards,
+            ("try-success",),
         )
-        if not _statements_must_terminate(node.body):
-            self._scan_patch_statements(
+        if success_guards is not None:
+            success = context.clone(guards=success_guards)
+            body_result = self._scan_patch_statements(
                 module_info,
-                node.orelse,
+                node.body,
                 success,
                 tag_guard_names,
             )
-        branches = (
-            [success]
-            if not _statements_must_terminate((*node.body, *node.orelse))
-            else []
-        )
+            outcomes.extend(body_result.exits)
+            if body_result.live:
+                else_result = self._scan_patch_statements(
+                    module_info,
+                    node.orelse,
+                    success,
+                    tag_guard_names,
+                )
+                outcomes.extend(else_result.exits)
+                if else_result.live:
+                    outcomes.append(PatchFlowExit("live", success))
+
         for handler in node.handlers:
             exception_name = _expression_name(handler.type) or "Exception"
-            branch = context.clone(
-                guards=(*context.guards, f"except {exception_name}"),
+            handler_guards = self._merge_guard_paths(
+                context.guards,
+                (f"except {exception_name}",),
             )
-            self._scan_patch_statements(
+            if handler_guards is None:
+                continue
+            branch = context.clone(guards=handler_guards)
+            handler_result = self._scan_patch_statements(
                 module_info,
                 handler.body,
                 branch,
                 tag_guard_names,
             )
-            if not _statements_must_terminate(handler.body):
-                branches.append(branch)
-        if branches:
-            context.merge(branches)
-        self._scan_patch_statements(
-            module_info,
-            node.finalbody,
-            context,
-            tag_guard_names,
-        )
+            outcomes.extend(handler_result.exits)
+            if handler_result.live:
+                outcomes.append(PatchFlowExit("live", branch))
+
+        live_contexts: list[PatchScanContext] = []
+        exits: list[PatchFlowExit] = []
+        for outcome in outcomes:
+            # ``finally`` is unconditional. Keep each branch's value state,
+            # but do not leak synthetic try/except labels into its evidence.
+            final_context = outcome.context.clone(guards=context.guards)
+            final_result = self._scan_patch_statements(
+                module_info,
+                node.finalbody,
+                final_context,
+                tag_guard_names,
+            )
+            exits.extend(final_result.exits)
+            if not final_result.live:
+                continue
+            if outcome.kind == "live":
+                live_contexts.append(final_context)
+            else:
+                exits.append(PatchFlowExit(outcome.kind, final_context))
+
+        if live_contexts:
+            context.merge(live_contexts)
+        return PatchFlowResult(live=bool(live_contexts), exits=exits)
 
     def _scan_patch_for(
         self,
@@ -2983,6 +3186,7 @@ class InterfaceBoundaryGenerator:
                 local_name = alias.asname or alias.name.split(".", 1)[0]
                 target = alias.name if alias.asname else local_name
                 context.bindings[local_name] = {target}
+                context.binding_alternatives[local_name] = {target}
                 context.runtime_modules.pop(local_name, None)
             return
 
@@ -2996,12 +3200,9 @@ class InterfaceBoundaryGenerator:
             if alias.name == "*":
                 continue
             local_name = alias.asname or alias.name
-            target = (
-                f"{source_module}.{alias.name}"
-                if source_module
-                else alias.name
-            )
+            target = f"{source_module}.{alias.name}" if source_module else alias.name
             context.bindings[local_name] = {target}
+            context.binding_alternatives[local_name] = {target}
             context.runtime_modules.pop(local_name, None)
 
     def _update_assignment_bindings(
@@ -3033,14 +3234,18 @@ class InterfaceBoundaryGenerator:
             value,
             context,
         )
-        references = runtime_modules or getattr_references or (
-            self._resolve_patch_references(
-                module_info,
-                expression,
-                context,
+        references = (
+            runtime_modules
+            or getattr_references
+            or (
+                self._resolve_patch_references(
+                    module_info,
+                    expression,
+                    context,
+                )
+                if expression
+                else set()
             )
-            if expression
-            else set()
         )
         for target in targets:
             if not isinstance(target, ast.Name):
@@ -3055,8 +3260,13 @@ class InterfaceBoundaryGenerator:
                 context.strings.pop(target.id, None)
             if references:
                 context.bindings[target.id] = set(references)
+                context.binding_alternatives[target.id] = set(references)
+            elif isinstance(value, ast.Constant) and value.value is None:
+                context.bindings[target.id] = set()
+                context.binding_alternatives[target.id] = {None}
             else:
                 context.bindings.pop(target.id, None)
+                context.binding_alternatives.pop(target.id, None)
             if runtime_modules:
                 context.runtime_modules[target.id] = set(runtime_modules)
             else:
@@ -3091,9 +3301,7 @@ class InterfaceBoundaryGenerator:
         ):
             owner_node = node.value
             module_name = node.slice.value
-        if owner_node is None or not (
-            module_name == "vllm" or module_name.startswith("vllm.")
-        ):
+        if owner_node is None or not (module_name == "vllm" or module_name.startswith("vllm.")):
             return set()
         owner = _expression_name(owner_node)
         if owner is None:
@@ -3105,11 +3313,7 @@ class InterfaceBoundaryGenerator:
         )
         if references != {"sys.modules"}:
             return set()
-        return {
-            ".".join((module_name, *reversed(attributes)))
-            if attributes
-            else module_name
-        }
+        return {".".join((module_name, *reversed(attributes))) if attributes else module_name}
 
     def _getattr_references(
         self,
@@ -3117,11 +3321,7 @@ class InterfaceBoundaryGenerator:
         node: ast.AST | None,
         context: PatchScanContext,
     ) -> set[str]:
-        if not (
-            isinstance(node, ast.Call)
-            and _expression_name(node.func) == "getattr"
-            and len(node.args) >= 2
-        ):
+        if not (isinstance(node, ast.Call) and _expression_name(node.func) == "getattr" and len(node.args) >= 2):
             return set()
         owner = _expression_name(node.args[0])
         attributes = self._string_values(node.args[1], context)
@@ -3145,10 +3345,7 @@ class InterfaceBoundaryGenerator:
     ) -> set[str]:
         parts = expression.split(".")
         if parts[0] in context.bindings:
-            candidates = {
-                ".".join([candidate, *parts[1:]])
-                for candidate in context.bindings[parts[0]]
-            }
+            candidates = {".".join([candidate, *parts[1:]]) for candidate in context.bindings[parts[0]]}
         elif expression.startswith(("vllm.", "vllm_ascend.")):
             candidates = {expression}
         else:
@@ -3173,11 +3370,7 @@ class InterfaceBoundaryGenerator:
         if isinstance(node, ast.Name):
             return set(context.strings.get(node.id, ()))
         if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
-            return {
-                value
-                for element in node.elts
-                for value in self._string_values(element, context)
-            }
+            return {value for element in node.elts for value in self._string_values(element, context)}
         if isinstance(node, ast.IfExp):
             return {
                 *self._string_values(node.body, context),
@@ -3201,9 +3394,7 @@ class InterfaceBoundaryGenerator:
             owner,
             context,
         )
-        upstream_owners = sorted(
-            target for target in owner_targets if target.startswith("vllm.")
-        )
+        upstream_owners = sorted(target for target in owner_targets if target.startswith("vllm."))
         if not upstream_owners:
             return
         if not attributes:
@@ -3217,15 +3408,9 @@ class InterfaceBoundaryGenerator:
             )
             return
         target_expressions = {
-            f"{owner_target}.{attribute}"
-            for owner_target in upstream_owners
-            for attribute in attributes
+            f"{owner_target}.{attribute}" for owner_target in upstream_owners for attribute in attributes
         }
-        live_targets = {
-            target
-            for target in target_expressions
-            if self._find_upstream_patch_target(target) is not None
-        }
+        live_targets = {target for target in target_expressions if self._find_upstream_patch_target(target) is not None}
         selected = live_targets or target_expressions
         if len(selected) != 1:
             self._append_unresolved_patch(
@@ -3243,9 +3428,7 @@ class InterfaceBoundaryGenerator:
             call.args[2],
             context,
             line,
-            evidence_target=(
-                f"{owner}.{next(iter(selected)).rsplit('.', 1)[-1]}"
-            ),
+            evidence_target=(f"{owner}.{next(iter(selected)).rsplit('.', 1)[-1]}"),
         )
 
     def _record_patch_node(
@@ -3263,10 +3446,7 @@ class InterfaceBoundaryGenerator:
             context,
         )
         if direct_runtime_modules:
-            target_expressions = {
-                f"{module}.{target_node.attr}"
-                for module in direct_runtime_modules
-            }
+            target_expressions = {f"{module}.{target_node.attr}" for module in direct_runtime_modules}
             targets = sorted(
                 target
                 for target_expression in target_expressions
@@ -3277,11 +3457,7 @@ class InterfaceBoundaryGenerator:
                 )
                 if target.startswith("vllm.")
             )
-            evidence_target = (
-                next(iter(target_expressions))
-                if len(target_expressions) == 1
-                else None
-            )
+            evidence_target = next(iter(target_expressions)) if len(target_expressions) == 1 else None
         else:
             if not expression:
                 return
@@ -3318,9 +3494,7 @@ class InterfaceBoundaryGenerator:
             parts = expression.split(".")
             runtime_modules = context.runtime_modules.get(parts[0], set())
             if len(runtime_modules) == 1:
-                evidence_target = ".".join(
-                    [next(iter(runtime_modules)), *parts[1:]]
-                )
+                evidence_target = ".".join([next(iter(runtime_modules)), *parts[1:]])
         self._record_resolved_patch(
             module_info,
             targets[0],
@@ -3343,34 +3517,27 @@ class InterfaceBoundaryGenerator:
             return
         parts = expression.split(".")
         root = parts[0]
-        if (
-            root in context.parameter_names
-            or root not in context.bindings
-            or context.bindings[root]
-        ):
+        if root in context.parameter_names or root not in context.bindings or context.bindings[root]:
             return
-        imported_owner = module_info.imports.get(root)
-        if imported_owner is None or not (
-            imported_owner == "vllm" or imported_owner.startswith("vllm.")
-        ):
+        alternatives = context.binding_alternatives.get(root)
+        if not alternatives:
             return
-        non_none_guards = {
-            f"{root} is not None",
-            f"None is not {root}",
+        owners = {
+            owner for owner in alternatives if owner is not None and (owner == "vllm" or owner.startswith("vllm."))
         }
-        if not any(guard in non_none_guards for guard in context.guards):
+        if not owners:
             return
-        target = ".".join((imported_owner, *parts[1:]))
+        none_key = f"none:{ast.dump(ast.Name(id=root, ctx=ast.Load()), include_attributes=False)}"
+        if not any(_canonical_guard_text(guard)[:2] == (none_key, True) for guard in context.guards):
+            return
+        targets = {self._canonical_reference(".".join((owner, *parts[1:]))) for owner in owners}
         self._append_unresolved_patch(
             module_info,
             context,
-            target,
+            ", ".join(sorted(targets)),
             replacement_node,
             line,
-            (
-                "upstream patch owner is path-dependent after branch merge; "
-                "the active non-None path was not resolved"
-            ),
+            ("upstream patch owner is path-dependent after branch merge; the active non-None path was not resolved"),
             status="review",
             reason_code="unresolved_patch_owner",
             generator_issue=True,
@@ -3424,10 +3591,7 @@ class InterfaceBoundaryGenerator:
                 target,
                 replacement_node,
                 line,
-                (
-                    "assignment saves the original upstream callable"
-                    f" from {replacement.lifecycle_source}"
-                ),
+                (f"assignment saves the original upstream callable from {replacement.lifecycle_source}"),
                 status="excluded",
                 reason_code="save_original",
                 generator_issue=False,
@@ -3446,12 +3610,10 @@ class InterfaceBoundaryGenerator:
 
         upstream_callable = self._find_upstream_patch_target(target)
         if upstream_callable is None:
-            status, reason_code, generator_issue = (
-                self._missing_patch_target_classification(
-                    target,
-                    context,
-                )
-                )
+            status, reason_code, generator_issue = self._missing_patch_target_classification(
+                target,
+                context,
+            )
             self.findings.append(
                 CandidateFinding(
                     relation="monkey_patch",
@@ -3520,10 +3682,7 @@ class InterfaceBoundaryGenerator:
                 downstream_name=target.rsplit(".", 1)[-1],
                 target_expression=evidence_target or target,
                 evidence_line=line,
-                reason=(
-                    "assignment mutates an existing upstream field declared in "
-                    f"{upstream_value.file}"
-                ),
+                reason=(f"assignment mutates an existing upstream field declared in {upstream_value.file}"),
                 status="verified",
                 reason_code="field_mutation",
                 generator_issue=False,
@@ -3543,11 +3702,14 @@ class InterfaceBoundaryGenerator:
             return None
 
         guards = " ".join(context.guards)
-        if "not hasattr(" in guards or " not in " in guards:
+        hasattr_polarities = {
+            polarity for guard in context.guards if (polarity := _call_guard_polarity(guard, "hasattr")) is not None
+        }
+        if False in hasattr_polarities or " not in " in guards:
             status = "expected"
             reason_code = "inject_missing_field"
             reason = "assignment injects a missing upstream field under a negative guard"
-        elif "hasattr(" in guards:
+        elif True in hasattr_polarities:
             status = "excluded"
             reason_code = "inactive_guard"
             reason = "field assignment is inactive because its positive guard is false"
@@ -3623,9 +3785,7 @@ class InterfaceBoundaryGenerator:
             definition_line = getattr(node, "lineno", line)
             return PatchReplacement(
                 info=CallableInfo(
-                    qualified_name=(
-                        f"{module_info.name}.<lambda>@{definition_line}"
-                    ),
+                    qualified_name=(f"{module_info.name}.<lambda>@{definition_line}"),
                     module=module_info.name,
                     file=module_info.file,
                     owner=None,
@@ -3649,11 +3809,7 @@ class InterfaceBoundaryGenerator:
                 candidate = local_candidates[0]
                 return PatchReplacement(
                     info=candidate,
-                    kind=(
-                        candidate.origin_kind
-                        if candidate.origin_kind != "definition"
-                        else kind
-                    ),
+                    kind=(candidate.origin_kind if candidate.origin_kind != "definition" else kind),
                 )
             if len(local_candidates) > 1:
                 return PatchReplacement(
@@ -3674,11 +3830,7 @@ class InterfaceBoundaryGenerator:
                 is_restore=True,
                 lifecycle_source=target,
             )
-        upstream_references = {
-            reference
-            for reference in references
-            if reference.startswith("vllm.")
-        }
+        upstream_references = {reference for reference in references if reference.startswith("vllm.")}
         if len(upstream_references) == 1:
             source = next(iter(upstream_references))
             target_owner, target_name = target.rsplit(".", 1)
@@ -3719,11 +3871,7 @@ class InterfaceBoundaryGenerator:
         return PatchReplacement(
             info=None,
             kind=kind,
-            reason=(
-                "ambiguous replacement callable"
-                if candidates
-                else "replacement callable was not found"
-            ),
+            reason=("ambiguous replacement callable" if candidates else "replacement callable was not found"),
         )
 
     def _resolve_wrapper_factory_call(
@@ -3740,19 +3888,11 @@ class InterfaceBoundaryGenerator:
             return None
 
         root_name = expression.split(".", 1)[0]
-        local_factory = (
-            expression in context.local_callables
-            or expression in module_info.functions
-        )
+        local_factory = expression in context.local_callables or expression in module_info.functions
         downstream_binding = any(
-            candidate.startswith("vllm_ascend.")
-            for candidate in context.bindings.get(root_name, ())
+            candidate.startswith("vllm_ascend.") for candidate in context.bindings.get(root_name, ())
         )
-        if not (
-            local_factory
-            or downstream_binding
-            or expression.startswith("vllm_ascend.")
-        ):
+        if not (local_factory or downstream_binding or expression.startswith("vllm_ascend.")):
             return None
 
         factories: dict[tuple[str, str | None, str], CallableInfo] = {}
@@ -3781,15 +3921,9 @@ class InterfaceBoundaryGenerator:
             return None
         scope_nodes = list(_function_scope_nodes(factory.node))
         nested = {
-            child.name: child
-            for child in scope_nodes
-            if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
+            child.name: child for child in scope_nodes if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
         }
-        returns = [
-            child
-            for child in scope_nodes
-            if isinstance(child, ast.Return)
-        ]
+        returns = [child for child in scope_nodes if isinstance(child, ast.Return)]
         if not returns:
             return None
 
@@ -3875,9 +4009,7 @@ class InterfaceBoundaryGenerator:
         if effective_owner is None:
             return None
         if effective_owner.startswith("vllm_ascend."):
-            return self.downstream.find_callable(
-                f"{effective_owner}.{method_name}"
-            )
+            return self.downstream.find_callable(f"{effective_owner}.{method_name}")
         return None
 
     def _append_unresolved_patch(
@@ -3932,10 +4064,12 @@ class InterfaceBoundaryGenerator:
         target: str,
         context: PatchScanContext,
     ) -> tuple[str, str, bool]:
-        guards = " ".join(context.guards)
-        if "not hasattr(" in guards:
+        hasattr_polarities = {
+            polarity for guard in context.guards if (polarity := _call_guard_polarity(guard, "hasattr")) is not None
+        }
+        if False in hasattr_polarities:
             return "expected", "inject_missing_member", False
-        if "hasattr(" in guards:
+        if True in hasattr_polarities:
             return "excluded", "inactive_guard", False
 
         owner_name = target.rsplit(".", 1)[0]
@@ -3947,14 +4081,13 @@ class InterfaceBoundaryGenerator:
         )
         if owner_exists:
             return "risk", "possible_stale_patch", False
-        return "review", "unresolved_patch_owner", True
+        return "risk", "possible_stale_patch", False
 
     def _reclassify_missing_patch_members(self) -> None:
         candidate_indexes = [
             index
             for index, finding in enumerate(self.findings)
-            if finding.reason_code == "possible_stale_patch"
-            and finding.relation == "monkey_patch"
+            if finding.reason_code == "possible_stale_patch" and finding.relation == "monkey_patch"
         ]
         grouped: dict[str, list[int]] = defaultdict(list)
         for index in candidate_indexes:
@@ -3975,9 +4108,7 @@ class InterfaceBoundaryGenerator:
                 bindings[member_name].append(index)
                 replacement = self._finding_downstream_callable(finding)
                 if replacement is not None:
-                    binding_dependencies[member_name].update(
-                        self._self_member_references(replacement)
-                    )
+                    binding_dependencies[member_name].update(self._self_member_references(replacement))
 
             reachable = {
                 member
@@ -3985,9 +4116,7 @@ class InterfaceBoundaryGenerator:
                 if relation.relation == "monkey_patch"
                 and relation.upstream_file == owner.file
                 and relation.upstream_owner == owner.name
-                for replacement in [
-                    self._relation_downstream_callable(relation)
-                ]
+                for replacement in [self._relation_downstream_callable(relation)]
                 if replacement is not None
                 for member in self._self_member_references(replacement)
             }
@@ -4009,16 +4138,10 @@ class InterfaceBoundaryGenerator:
                         self.findings[index],
                         status="expected",
                         reason_code="inject_missing_member",
-                        reason=(
-                            "missing member is injected and is reachable from "
-                            "a verified patch replacement"
-                        ),
+                        reason=("missing member is injected and is reachable from a verified patch replacement"),
                     )
 
-            has_external_base = any(
-                not base.startswith(("vllm.", "vllm_ascend."))
-                for base in owner.resolved_bases
-            )
+            has_external_base = any(not base.startswith(("vllm.", "vllm_ascend.")) for base in owner.resolved_bases)
             if has_external_base:
                 for index in indexes:
                     if self.findings[index].reason_code != "possible_stale_patch":
@@ -4075,16 +4198,14 @@ class InterfaceBoundaryGenerator:
         return {
             node.attr
             for node in _function_scope_nodes(callable_info.node)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id in {"cls", "self"}
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in {"cls", "self"}
         }
 
     def _scope_name(self, context: PatchScanContext) -> str | None:
         return ".".join(context.scope) if context.scope else None
 
-    def _guard_text(self, node: ast.AST) -> str:
-        return " ".join(ast.unparse(node).split())
+    def _guard_text(self, node: ast.AST, *, truth: bool = True) -> str:
+        return _canonical_guard(node, truth=truth)[2]
 
     def _find_upstream_patch_target(
         self,
@@ -4184,10 +4305,7 @@ def _relation_payloads(
                         relation.downstream_owner,
                         relation.downstream_name,
                     ],
-                    "occurrences": [
-                        evidence.as_dict()
-                        for evidence in relation.evidence
-                    ],
+                    "occurrences": [evidence.as_dict() for evidence in relation.evidence],
                 }
             )
             relation_count += 1
@@ -4219,10 +4337,7 @@ def _relation_payloads(
             ),
         )
     ]
-    finding_statuses = Counter(
-        payload["f"]["status"]
-        for payload in finding_payloads
-    )
+    finding_statuses = Counter(payload["f"]["status"] for payload in finding_payloads)
     meta = {
         "_meta": {
             "schema": SCHEMA_VERSION,
@@ -4241,10 +4356,7 @@ def _relation_payloads(
 
 
 def _write_jsonl(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
-    text = "\n".join(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        for payload in payloads
-    )
+    text = "\n".join(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) for payload in payloads)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{text}\n", encoding="utf-8")
 
@@ -4313,24 +4425,10 @@ def compare_relations(
     findings: Sequence[CandidateFinding],
 ) -> dict[str, Any]:
     finding_statuses = Counter(finding.status for finding in findings)
-    generated_exact = {
-        relation.exact_key(): relation
-        for relation in generated
-    }
-    baseline_exact = {
-        relation.exact_key(): relation
-        for relation in baseline
-    }
-    generated_exact_aliases = {
-        key: relation
-        for relation in generated
-        for key in relation.comparison_exact_keys()
-    }
-    baseline_exact_aliases = {
-        key: relation
-        for relation in baseline
-        for key in relation.comparison_exact_keys()
-    }
+    generated_exact = {relation.exact_key(): relation for relation in generated}
+    baseline_exact = {relation.exact_key(): relation for relation in baseline}
+    generated_exact_aliases = {key: relation for relation in generated for key in relation.comparison_exact_keys()}
+    baseline_exact_aliases = {key: relation for relation in baseline for key in relation.comparison_exact_keys()}
     generated_downstream: dict[
         tuple[str, str, str, str],
         list[Relation],
@@ -4349,25 +4447,13 @@ def compare_relations(
     exact_matches = {
         key
         for key in baseline_exact
-        if any(
-            alias in generated_exact_aliases
-            for alias in baseline_exact[key].comparison_exact_keys()
-        )
+        if any(alias in generated_exact_aliases for alias in baseline_exact[key].comparison_exact_keys())
     }
     different_upstream = []
-    baseline_downstream_keys = {
-        relation.downstream_key()
-        for relation in baseline
-    }
+    baseline_downstream_keys = {relation.downstream_key() for relation in baseline}
     for key in sorted(baseline_downstream_keys & set(generated_downstream)):
-        generated_targets = sorted(
-            relation.upstream_key()
-            for relation in generated_downstream[key]
-        )
-        baseline_targets = sorted(
-            relation.upstream_key()
-            for relation in baseline_downstream[key]
-        )
+        generated_targets = sorted(relation.upstream_key() for relation in generated_downstream[key])
+        baseline_targets = sorted(relation.upstream_key() for relation in baseline_downstream[key])
         if generated_targets != baseline_targets:
             different_upstream.append(
                 {
@@ -4386,20 +4472,10 @@ def compare_relations(
     new_only_keys = {
         key
         for key, relation in generated_exact.items()
-        if not any(
-            alias in baseline_exact_aliases
-            for alias in relation.comparison_exact_keys()
-        )
+        if not any(alias in baseline_exact_aliases for alias in relation.comparison_exact_keys())
     }
-    generated_downstream_keys = {
-        relation.downstream_key()
-        for relation in generated
-    }
-    covered_downstream_keys = {
-        key
-        for key in baseline_downstream_keys
-        if key in generated_downstream
-    }
+    generated_downstream_keys = {relation.downstream_key() for relation in generated}
+    covered_downstream_keys = {key for key in baseline_downstream_keys if key in generated_downstream}
     missing_downstream_keys = baseline_downstream_keys - covered_downstream_keys
     new_downstream_keys = {
         key
@@ -4412,9 +4488,7 @@ def compare_relations(
         )
     }
     downstream_coverage = (
-        len(covered_downstream_keys) / len(baseline_downstream_keys) * 100
-        if baseline_downstream_keys
-        else 100.0
+        len(covered_downstream_keys) / len(baseline_downstream_keys) * 100 if baseline_downstream_keys else 100.0
     )
     report = {
         "summary": {
@@ -4430,51 +4504,24 @@ def compare_relations(
             "expected": finding_statuses["expected"],
             "excluded": finding_statuses["excluded"],
             "verified_findings": finding_statuses["verified"],
-            "generator_issues": sum(
-                finding.generator_issue
-                for finding in findings
-            ),
-            "generated_downstream_endpoints": len(
-                generated_downstream_keys
-            ),
-            "baseline_downstream_endpoints": len(
-                baseline_downstream_keys
-            ),
-            "covered_downstream_endpoints": len(
-                covered_downstream_keys
-            ),
-            "missing_downstream_endpoints": len(
-                missing_downstream_keys
-            ),
+            "generator_issues": sum(finding.generator_issue for finding in findings),
+            "generated_downstream_endpoints": len(generated_downstream_keys),
+            "baseline_downstream_endpoints": len(baseline_downstream_keys),
+            "covered_downstream_endpoints": len(covered_downstream_keys),
+            "missing_downstream_endpoints": len(missing_downstream_keys),
             "new_downstream_endpoints": len(new_downstream_keys),
             "downstream_coverage_percent": round(
                 downstream_coverage,
                 2,
             ),
-            "generated_by_relation": dict(
-                sorted(Counter(relation.relation for relation in generated).items())
-            ),
-            "baseline_by_relation": dict(
-                sorted(Counter(relation.relation for relation in baseline).items())
-            ),
+            "generated_by_relation": dict(sorted(Counter(relation.relation for relation in generated).items())),
+            "baseline_by_relation": dict(sorted(Counter(relation.relation for relation in baseline).items())),
         },
         "same_downstream_different_upstream": different_upstream,
-        "old_only": [
-            _relation_label(baseline_exact[key])
-            for key in sorted(old_only_keys)
-        ],
-        "new_only": [
-            _relation_label(generated_exact[key])
-            for key in sorted(new_only_keys)
-        ],
-        "missing_downstream": [
-            _downstream_label(key)
-            for key in sorted(missing_downstream_keys)
-        ],
-        "new_downstream": [
-            _downstream_label(key)
-            for key in sorted(new_downstream_keys)
-        ],
+        "old_only": [_relation_label(baseline_exact[key]) for key in sorted(old_only_keys)],
+        "new_only": [_relation_label(generated_exact[key]) for key in sorted(new_only_keys)],
+        "missing_downstream": [_downstream_label(key) for key in sorted(missing_downstream_keys)],
+        "new_downstream": [_downstream_label(key) for key in sorted(new_downstream_keys)],
         "findings": [finding.as_dict() for finding in findings],
     }
     return report
@@ -4492,9 +4539,7 @@ def _git_head(repo_root: Path) -> str:
 
 def _verify_sha(label: str, actual: str, expected: str | None) -> None:
     if expected and actual != expected:
-        raise SystemExit(
-            f"{label} SHA mismatch: expected {expected}, found {actual}"
-        )
+        raise SystemExit(f"{label} SHA mismatch: expected {expected}, found {actual}")
 
 
 def _canonical_digest(path: Path) -> str:
@@ -4657,14 +4702,9 @@ def main() -> None:
             "expected": finding_statuses["expected"],
             "excluded": finding_statuses["excluded"],
             "verified_findings": finding_statuses["verified"],
-            "generator_issues": sum(
-                finding.generator_issue
-                for finding in findings
-            ),
+            "generator_issues": sum(finding.generator_issue for finding in findings),
             "findings_by_status": dict(sorted(finding_statuses.items())),
-            "by_relation": dict(
-                sorted(Counter(relation.relation for relation in relations).items())
-            ),
+            "by_relation": dict(sorted(Counter(relation.relation for relation in relations).items())),
             "sha256": _canonical_digest(args.output),
         },
     }

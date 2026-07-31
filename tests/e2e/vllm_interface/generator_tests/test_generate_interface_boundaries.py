@@ -21,10 +21,7 @@ from pathlib import Path
 
 import pytest
 
-_GENERATOR_PATH = (
-    Path(__file__).parents[1]
-    / "generate_interface_boundaries.py"
-)
+_GENERATOR_PATH = Path(__file__).parents[1] / "generate_interface_boundaries.py"
 _SPEC = importlib.util.spec_from_file_location(
     "interface_boundary_generator",
     _GENERATOR_PATH,
@@ -192,15 +189,20 @@ def test_generates_exact_patch_inheritance_and_override(
         None,
         "patched_hook",
     ) in relation_keys
-    imported_patch = next(
+    hook_patch = next(
         relation
         for relation in relations
         if relation.relation == "monkey_patch"
-        and relation.upstream_name == "external_hook"
+        and relation.upstream_owner == "PatchTarget"
+        and relation.upstream_name == "hook"
     )
-    assert imported_patch.downstream_file == (
-        "vllm_ascend/implementation.py"
+    assert len(hook_patch.evidence) == 3
+    imported_patch = next(
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch" and relation.upstream_name == "external_hook"
     )
+    assert imported_patch.downstream_file == ("vllm_ascend/implementation.py")
     assert imported_patch.downstream_name == "external_hook"
     assert imported_patch.evidence[0].file == "vllm_ascend/plugin.py"
     assert imported_patch.evidence[0].line == imported_patch.evidence_line
@@ -211,54 +213,44 @@ def test_generates_exact_patch_inheritance_and_override(
         None,
         "patched_hook",
     ) in relation_keys
-    assert not any(
-        relation.downstream_name == "local_only"
-        for relation in relations
-    )
+    assert not any(relation.downstream_name == "local_only" for relation in relations)
 
-    assert len(unresolved) == 6
+    assert len(unresolved) == 5
     missing_target = next(
         relation
         for relation in unresolved
-        if relation.relation == "monkey_patch"
-        and relation.target_expression == "vllm.base.PatchTarget.missing"
+        if relation.relation == "monkey_patch" and relation.target_expression == "vllm.base.PatchTarget.missing"
     )
     assert missing_target.status == "risk"
     assert missing_target.reason_code == "possible_stale_patch"
     assert not missing_target.generator_issue
     injected = next(
-        relation
-        for relation in unresolved
-        if relation.target_expression == "vllm.base.PatchTarget.injected"
+        relation for relation in unresolved if relation.target_expression == "vllm.base.PatchTarget.injected"
     )
     assert injected.status == "expected"
     assert injected.reason_code == "inject_missing_member"
     inactive = next(
-        relation
-        for relation in unresolved
-        if relation.target_expression == "vllm.base.PatchTarget.removed"
+        relation for relation in unresolved if relation.target_expression == "vllm.base.PatchTarget.removed"
     )
     assert inactive.status == "excluded"
     assert inactive.reason_code == "inactive_guard"
     reachable_injection = next(
-        relation
-        for relation in unresolved
-        if relation.target_expression == "vllm.base.PatchTarget.helper"
+        relation for relation in unresolved if relation.target_expression == "vllm.base.PatchTarget.helper"
     )
     assert reachable_injection.status == "expected"
     assert reachable_injection.reason_code == "inject_missing_member"
-    assert sum(
-        relation.reason == "dynamic setattr attribute name"
-        and relation.target_expression == "vllm.base.PatchTarget"
-        and relation.status == "review"
-        and relation.reason_code == "dynamic_setattr_name"
-        and relation.generator_issue
-        for relation in unresolved
-    ) == 2
-    assert not any(
-        relation.target_expression == "vllm.base.PatchTarget.registry"
-        for relation in unresolved
+    assert (
+        sum(
+            relation.reason == "dynamic setattr attribute name"
+            and relation.target_expression == "vllm.base.PatchTarget"
+            and relation.status == "review"
+            and relation.reason_code == "dynamic_setattr_name"
+            and relation.generator_issue
+            for relation in unresolved
+        )
+        == 1
     )
+    assert not any(relation.target_expression == "vllm.base.PatchTarget.registry" for relation in unresolved)
 
 
 def test_init_without_super_is_still_a_verified_override(
@@ -294,11 +286,7 @@ class Child(Base):
         vllm_root,
         ascend_root,
     ).generate()
-    assert any(
-        relation.relation == "override"
-        and relation.downstream_name == "__init__"
-        for relation in relations
-    )
+    assert any(relation.relation == "override" and relation.downstream_name == "__init__" for relation in relations)
 
 
 def test_dataclass_generated_init_has_a_field_derived_signature(
@@ -352,11 +340,7 @@ Payload.__init__ = replacement
         ascend_root,
     ).generate()
 
-    patch = next(
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    )
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
     assert patch.upstream_name == "__init__"
     assert patch.upstream_signature == [
         "sync",
@@ -402,11 +386,8 @@ def test_output_is_deterministic(source_pair: tuple[Path, Path]) -> None:
         second_payload,
         sort_keys=True,
     )
-    assert [item.as_dict() for item in first_unresolved] == [
-        item.as_dict()
-        for item in second_unresolved
-    ]
-    assert sum("f" in payload for payload in first_payload) == 6
+    assert [item.as_dict() for item in first_unresolved] == [item.as_dict() for item in second_unresolved]
+    assert sum("f" in payload for payload in first_payload) == 5
 
 
 def test_comparison_tracks_downstream_coverage_separately() -> None:
@@ -508,15 +489,9 @@ class Base(Base):
 
     index = generator.RepositoryIndex(vllm_root, "vllm")
 
-    assert index.canonical_name("vllm.wrapper.Base") == (
-        "vllm.wrapper.Base"
-    )
-    assert index.find_class("vllm.wrapper.Base").file == (
-        "vllm/wrapper.py"
-    )
-    assert index.find_class("vllm.wrapper.Base").resolved_bases == (
-        "vllm.base.Base",
-    )
+    assert index.canonical_name("vllm.wrapper.Base") == ("vllm.wrapper.Base")
+    assert index.find_class("vllm.wrapper.Base").file == ("vllm/wrapper.py")
+    assert index.find_class("vllm.wrapper.Base").resolved_bases == ("vllm.base.Base",)
 
 
 def test_star_reexport_resolves_to_the_defining_callable(tmp_path: Path) -> None:
@@ -549,11 +524,7 @@ vllm.exported = replacement
         ascend_root,
     ).generate()
 
-    patch = next(
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    )
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
     assert patch.upstream_file == "vllm/core.py"
     assert patch.upstream_name == "exported"
     assert not findings
@@ -563,11 +534,15 @@ def test_typed_lazy_export_resolves_to_its_interface_owner(tmp_path: Path) -> No
     vllm_root = tmp_path / "vllm-repo"
     ascend_root = tmp_path / "ascend-repo"
     _write(vllm_root, "vllm/__init__.py", "")
-    _write(vllm_root, "vllm/platforms/interface.py", """
+    _write(
+        vllm_root,
+        "vllm/platforms/interface.py",
+        """
 class Platform:
     def verify(self, value):
         return value
-""")
+""",
+    )
     _write(
         vllm_root,
         "vllm/platforms/__init__.py",
@@ -606,11 +581,7 @@ current_platform.verify = replacement
         ascend_root,
     ).generate()
 
-    patch = next(
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    )
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
     assert patch.upstream_file == "vllm/platforms/interface.py"
     assert patch.upstream_owner == "Platform"
     assert patch.upstream_name == "verify"
@@ -668,16 +639,9 @@ if not is_release:
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 2
-    assert all(
-        relation.downstream_name == "main_patch"
-        for relation in patches
-    )
+    assert all(relation.downstream_name == "main_patch" for relation in patches)
 
 
 def test_main_selects_main_import_branch(tmp_path: Path) -> None:
@@ -715,11 +679,7 @@ class Child(SelectedBase):
         ascend_root,
     ).generate()
 
-    inheritance = next(
-        relation
-        for relation in relations
-        if relation.relation == "inheritance"
-    )
+    inheritance = next(relation for relation in relations if relation.relation == "inheritance")
     assert inheritance.upstream_name == "MainBase"
     assert inheritance.downstream_name == "SelectedBase"
 
@@ -778,14 +738,11 @@ class SafePrefix(Partial):
     ).generate()
 
     assert not any(
-        relation.relation == "override"
-        and relation.downstream_owner in {"Child", "OpaqueFirst"}
+        relation.relation == "override" and relation.downstream_owner in {"Child", "OpaqueFirst"}
         for relation in relations
     )
     assert any(
-        relation.relation == "override"
-        and relation.reason.startswith("incomplete MRO")
-        for relation in unresolved
+        relation.relation == "override" and relation.reason.startswith("incomplete MRO") for relation in unresolved
     )
     assert any(
         relation.relation == "override"
@@ -840,11 +797,7 @@ Model.to = patched_to
         ascend_root,
     ).generate()
 
-    assert not [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(findings) == 1
     assert findings[0].status == "review"
     assert findings[0].reason_code == "external_inherited_method"
@@ -1207,17 +1160,9 @@ def install_patch():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 2
-    imported = next(
-        relation
-        for relation in patches
-        if relation.downstream_name == "imported_patch"
-    )
+    imported = next(relation for relation in patches if relation.downstream_name == "imported_patch")
     assert imported.downstream_file == "vllm_ascend/implementation.py"
     assert len(imported.evidence) == 2
     assert {evidence.guards for evidence in imported.evidence} == {
@@ -1225,11 +1170,7 @@ def install_patch():
         ("not (use_fast_path)",),
     }
 
-    local = next(
-        relation
-        for relation in patches
-        if relation.downstream_name == "local_patch"
-    )
+    local = next(relation for relation in patches if relation.downstream_name == "local_patch")
     assert local.downstream_file == "vllm_ascend/plugin.py"
     assert local.evidence[0].scope == "install_patch"
     assert not unresolved
@@ -1332,11 +1273,7 @@ def install_local_shadow():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 3
     assert {
         (
@@ -1406,19 +1343,12 @@ required.build = replacement
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 1
     assert patches[0].upstream_file == "vllm/core.py"
     assert patches[0].upstream_name == "build"
     assert len(patches[0].evidence) == 2
-    assert {
-        evidence.target_expression
-        for evidence in patches[0].evidence
-    } == {"vllm.consumer.build"}
+    assert {evidence.target_expression for evidence in patches[0].evidence} == {"vllm.consumer.build"}
     assert not findings
 
 
@@ -1478,11 +1408,7 @@ def install(owner, cached):
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert not patches
 
 
@@ -1528,11 +1454,7 @@ if vllm_version_is("0.25.1") and _patch_owner(owner_module):
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert not patches
 
 
@@ -1574,11 +1496,7 @@ def install():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 2
     assert {relation.upstream_file for relation in patches} == {
         "vllm/first.py",
@@ -1624,11 +1542,7 @@ sys.modules["vllm.consumer"].build = replacement
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 1
     assert patches[0].upstream_file == "vllm/core.py"
     assert patches[0].upstream_name == "build"
@@ -1674,11 +1588,7 @@ def install(owner, enabled):
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert not patches
 
 
@@ -1794,11 +1704,7 @@ def install():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert {relation.upstream_file for relation in patches} == {
         "vllm/second.py",
         "vllm/fourth.py",
@@ -1842,19 +1748,12 @@ sys.modules["vllm.consumer"].Service.build = replacement
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 1
     assert patches[0].upstream_file == "vllm/consumer.py"
     assert patches[0].upstream_owner == "Service"
     assert patches[0].upstream_name == "build"
-    assert (
-        patches[0].evidence[0].target_expression
-        == "vllm.consumer.Service.build"
-    )
+    assert patches[0].evidence[0].target_expression == "vllm.consumer.Service.build"
 
 
 def test_private_helper_forwarding_propagates_exact_owner_context(
@@ -1898,11 +1797,7 @@ def install():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 1
     assert patches[0].upstream_file == "vllm/first.py"
     assert patches[0].upstream_owner == "ProcessingInfo"
@@ -1947,16 +1842,324 @@ def install():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert {relation.upstream_file for relation in patches} == {
         "vllm/third.py",
         "vllm/fourth.py",
     }
     assert all(relation.upstream_name == "load" for relation in patches)
+
+
+def test_deleted_upstream_helper_owners_are_reported_as_risks(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/present.py",
+        "class ExistingService:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import present, removed_module
+
+
+def replacement(self):
+    pass
+
+
+def _patch_module(owner):
+    owner.removed = replacement
+
+
+def _patch_class(owner):
+    owner.run = replacement
+
+
+_patch_module(removed_module)
+_patch_class(present.RemovedService)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert not patches
+    by_target = {finding.target_expression: finding for finding in findings}
+    assert set(by_target) == {
+        "vllm.present.RemovedService.run",
+        "vllm.removed_module.removed",
+    }
+    assert all(finding.status == "risk" for finding in by_target.values())
+    assert all(not finding.generator_issue for finding in by_target.values())
+
+
+def test_exact_main_branch_return_stops_following_patch_scan(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def after_tag_return(self):
+        pass
+
+    def after_true_return(self):
+        pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/utils.py",
+        "def vllm_version_is(_version):\n    return False\n",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+from vllm_ascend.utils import vllm_version_is
+
+
+def replacement(self):
+    pass
+
+
+def install_for_main():
+    if vllm_version_is("0.25.1"):
+        pass
+    else:
+        return
+    Target.after_tag_return = replacement
+
+
+def install_for_true():
+    if True:
+        return
+    Target.after_true_return = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert not findings
+
+
+def test_try_finally_uses_state_before_return_and_stops_after_try(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second", "dead"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import dead, first, second
+
+
+def finally_replacement(self):
+    pass
+
+
+def dead_replacement(self):
+    pass
+
+
+def install():
+    owner = first
+    try:
+        owner = second
+        return
+    finally:
+        owner.Target.run = finally_replacement
+    dead.Target.run = dead_replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    }
+    assert patches == {
+        ("vllm/second.py", "Target", "run", "finally_replacement"),
+    }
+    assert not findings
+
+
+def test_equivalent_guard_contradictions_do_not_create_false_edges(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second", "third", "fourth"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, fourth, second, third
+
+
+def replacement(self):
+    pass
+
+
+def _patch_owner(owner):
+    owner.Target.run = replacement
+
+
+def install(enabled, value):
+    if enabled:
+        _patch_owner(first if not enabled else second)
+    if value is None:
+        _patch_owner(third if value is not None else fourth)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {relation.upstream_file for relation in patches} == {
+        "vllm/second.py",
+        "vllm/fourth.py",
+    }
+    assert not findings
+
+
+def test_exact_hasattr_true_selects_literal_setattr_member(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def run(self):
+        pass
+
+    def fallback(self):
+        pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self):
+    pass
+
+
+if hasattr(Target, "run"):
+    selected_name = "run"
+else:
+    selected_name = "fallback"
+setattr(Target, selected_name, replacement)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert patches[0].upstream_file == "vllm/base.py"
+    assert patches[0].upstream_owner == "Target"
+    assert patches[0].upstream_name == "run"
+    assert patches[0].downstream_name == "replacement"
+    assert not findings
+
+
+def test_exact_try_import_and_non_none_guard_restore_patch_target(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/first.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+try:
+    from vllm.first import Target as Selected
+except ImportError:
+    Selected = None
+
+
+def replacement(self):
+    pass
+
+
+if Selected is not None:
+    Selected.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert patches[0].upstream_file == "vllm/first.py"
+    assert patches[0].upstream_owner == "Target"
+    assert patches[0].upstream_name == "run"
+    assert patches[0].downstream_name == "replacement"
+    assert not findings
 
 
 def test_patch_scanner_reports_ambiguous_and_unsupported_patches(
@@ -2002,11 +2205,7 @@ First.run = property(replacement)
         ascend_root,
     ).generate()
 
-    property_patch = next(
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    )
+    property_patch = next(relation for relation in relations if relation.relation == "monkey_patch")
     assert property_patch.upstream_owner == "First"
     assert property_patch.upstream_name == "run"
     assert property_patch.downstream_name == "replacement"
@@ -2017,10 +2216,7 @@ First.run = property(replacement)
         and "vllm.second.Second.run" in relation.target_expression
         for relation in unresolved
     )
-    assert not any(
-        relation.reason == "property patch is outside callable mapping scope"
-        for relation in unresolved
-    )
+    assert not any(relation.reason == "property patch is outside callable mapping scope" for relation in unresolved)
 
 
 def test_class_body_callable_alias_is_a_method_and_patch_replacement(
@@ -2066,18 +2262,13 @@ Base.hook = Child.hook
     alias_relations = [
         relation
         for relation in relations
-        if relation.downstream_owner == "Child"
-        and relation.downstream_name == "hook"
+        if relation.downstream_owner == "Child" and relation.downstream_name == "hook"
     ]
     assert {relation.relation for relation in alias_relations} == {
         "monkey_patch",
         "override",
     }
-    patch = next(
-        relation
-        for relation in alias_relations
-        if relation.relation == "monkey_patch"
-    )
+    patch = next(relation for relation in alias_relations if relation.relation == "monkey_patch")
     assert patch.evidence[0].binding_line is not None
     assert patch.evidence[0].definition_line is not None
     assert not findings
@@ -2153,11 +2344,7 @@ Target.third = ambiguous(flag)
         ascend_root,
     ).generate()
 
-    patches = {
-        relation.upstream_name: relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    }
+    patches = {relation.upstream_name: relation for relation in relations if relation.relation == "monkey_patch"}
     assert set(patches) == {"first", "second"}
     assert patches["first"].downstream_name == "wrapped"
     assert patches["first"].evidence[0].patch_kind == "wrapper_or_identity"
@@ -2209,11 +2396,7 @@ def install():
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 1
     assert patches[0].downstream_name == "replacement"
     assert {finding.reason_code for finding in findings} == {
@@ -2279,24 +2462,12 @@ state.callable_target = replacement
         ascend_root,
     ).generate()
 
-    patches = [
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    ]
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
     assert len(patches) == 1
     assert patches[0].upstream_name == "callable_target"
     assert len(findings) == 3
-    assert sum(
-        finding.status == "verified"
-        and finding.reason_code == "field_mutation"
-        for finding in findings
-    ) == 2
-    injected = next(
-        finding
-        for finding in findings
-        if finding.reason_code == "inject_missing_field"
-    )
+    assert sum(finding.status == "verified" and finding.reason_code == "field_mutation" for finding in findings) == 2
+    injected = next(finding for finding in findings if finding.reason_code == "inject_missing_field")
     assert injected.status == "expected"
     assert not injected.generator_issue
 
@@ -2325,11 +2496,7 @@ Engine.step = lambda self, value: value
         vllm_root,
         ascend_root,
     ).generate()
-    patch = next(
-        relation
-        for relation in relations
-        if relation.relation == "monkey_patch"
-    )
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
     assert patch.downstream_name.startswith("<lambda>@")
     assert patch.downstream_signature == [
         "sync",
@@ -2382,9 +2549,7 @@ Target.hook = replacement
         ascend_root,
     ).generate()
     assert any(
-        relation.relation == "monkey_patch"
-        and relation.upstream_owner == "Target"
-        and relation.upstream_name == "hook"
+        relation.relation == "monkey_patch" and relation.upstream_owner == "Target" and relation.upstream_name == "hook"
         for relation in before_relations
     )
     assert not before_findings
@@ -2403,15 +2568,9 @@ class Target:
     ).generate()
 
     assert not any(
-        relation.relation == "monkey_patch"
-        and relation.upstream_name == "hook"
-        for relation in after_relations
+        relation.relation == "monkey_patch" and relation.upstream_name == "hook" for relation in after_relations
     )
-    risk = next(
-        finding
-        for finding in after_findings
-        if finding.target_expression == "vllm.api.Target.hook"
-    )
+    risk = next(finding for finding in after_findings if finding.target_expression == "vllm.api.Target.hook")
     assert risk.status == "risk"
     assert risk.reason_code == "possible_stale_patch"
     assert not risk.generator_issue
@@ -2458,11 +2617,7 @@ Target.new_hook = added_patch
     ).generate()
 
     assert not after_relations
-    risk = next(
-        finding
-        for finding in after_findings
-        if finding.target_expression == "vllm.api.Target.new_hook"
-    )
+    risk = next(finding for finding in after_findings if finding.target_expression == "vllm.api.Target.new_hook")
     assert risk.downstream_name == "added_patch"
     assert risk.status == "risk"
     assert risk.reason_code == "possible_stale_patch"
@@ -2494,9 +2649,7 @@ class Child(Base):
         ascend_root,
     ).generate()
     assert any(
-        relation.relation == "inheritance"
-        and relation.upstream_name == "Base"
-        and relation.downstream_owner == "Child"
+        relation.relation == "inheritance" and relation.upstream_name == "Base" and relation.downstream_owner == "Child"
         for relation in before_relations
     )
     assert not before_findings
@@ -2508,15 +2661,12 @@ class Child(Base):
     ).generate()
 
     assert not any(
-        relation.relation == "inheritance"
-        and relation.downstream_owner == "Child"
-        for relation in after_relations
+        relation.relation == "inheritance" and relation.downstream_owner == "Child" for relation in after_relations
     )
     risk = next(
         finding
         for finding in after_findings
-        if finding.relation == "inheritance"
-        and finding.downstream_owner == "Child"
+        if finding.relation == "inheritance" and finding.downstream_owner == "Child"
     )
     assert risk.target_expression == "vllm.base.Base"
     assert risk.status == "risk"
@@ -2562,8 +2712,7 @@ Target.hook = replacement
     before = next(
         relation
         for relation in before_relations
-        if relation.relation == "monkey_patch"
-        and relation.upstream_name == "hook"
+        if relation.relation == "monkey_patch" and relation.upstream_name == "hook"
     )
     assert before.upstream_signature == [
         "sync",
@@ -2591,8 +2740,7 @@ class Target:
     after = next(
         relation
         for relation in after_relations
-        if relation.relation == "monkey_patch"
-        and relation.upstream_name == "hook"
+        if relation.relation == "monkey_patch" and relation.upstream_name == "hook"
     )
 
     assert after.downstream_key() == before.downstream_key()
