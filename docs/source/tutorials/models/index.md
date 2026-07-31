@@ -12,9 +12,9 @@ Qwen3-235B-A22B.md
 Qwen3-VL-30B-A3B-Instruct.md
 Qwen3-VL-235B-A22B-Instruct.md
 Qwen3-Coder-30B-A3B.md
-Qwen3_embedding.md
+Qwen3-Embedding.md
 Qwen3-VL-Embedding.md
-Qwen3_reranker.md
+Qwen3-Reranker.md
 Qwen3-VL-Reranker.md
 Qwen3-Next.md
 Qwen3-Omni-30B-A3B-Thinking.md
@@ -34,6 +34,7 @@ GLM5.2.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
 Kimi-K2.6.md
+Kimi-K3.md
 PaddleOCR-VL.md
 MiniMax-M2.md
 Hunyuan-A13B-Instruct.md

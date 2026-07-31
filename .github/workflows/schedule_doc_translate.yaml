@@ -25,8 +25,13 @@ on:
       target_branch:
         description: 'Target branch for the upstream PR'
         required: false
-        default: 'main'
+        default: 'releases/v0.23.0'
         type: string
+      force:
+        description: 'Retranslate all PO files'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: translation-${{ github.ref }}
@@ -46,14 +51,15 @@ jobs:
         with:
           repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
+          # The CI fork only has main; the target release is checked out below.
           ref: main
 
       - name: Setup git and branch
         run: |
-          TARGET_BRANCH="${{ inputs.target_branch || 'main' }}"
-          echo "TARGET_BRANCH=${TARGET_BRANCH}" >> $GITHUB_ENV
+          TARGET_BRANCH="${{ inputs.target_branch || 'releases/v0.23.0' }}"
+          echo "TARGET_BRANCH=${TARGET_BRANCH}" >> "$GITHUB_ENV"
           BRANCH_NAME="auto-pr/doc-translate-$(date +%Y%m%d%H%M%S)"
-          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_ENV"
 
           git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
           git fetch upstream
@@ -61,9 +67,9 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git checkout -B "${BRANCH_NAME}" "upstream/${TARGET_BRANCH}"
 
-          # Use latest translation script from upstream/main
-          git checkout upstream/main -- .github/workflows/scripts/po_translate.py
-          git checkout upstream/main -- docs/requirements-docs.txt
+          # Use the translation script compatible with the v0.23.0 docs
+          git checkout upstream/releases/v0.23.0 -- .github/workflows/scripts/po_translate.py
+          git checkout upstream/releases/v0.23.0 -- docs/requirements-docs.txt
           git restore --staged .github/workflows/scripts/po_translate.py docs/requirements-docs.txt
 
       - name: Setup Python
@@ -76,6 +82,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y make
           pip install -r requirements-docs.txt
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Removing existing PO files before clean regeneration"
+            find source/locale/zh_CN/LC_MESSAGES \
+              -type f -name '*.po' -delete
+          fi
           make clean && make html
           sphinx-build -b gettext source _build/gettext
           sphinx-intl update -p _build/gettext -l zh_CN
@@ -84,17 +95,24 @@ jobs:
         id: detect
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          tracked=$(git diff --name-only --diff-filter=ACMUX || true)
-          untracked=$(git ls-files --others --exclude-standard || true)
-          po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
+          if [ "${{ inputs.force }}" = "true" ]; then
+            po_files=$(find docs/source/locale/zh_CN/LC_MESSAGES \
+              -type f -name '*.po' -print | sort | tr '\n' ',' | sed 's/,$//')
+            echo "Full retranslation requested"
+          else
+            tracked=$(git diff --name-only --diff-filter=ACMUX || true)
+            untracked=$(git ls-files --others --exclude-standard || true)
+            po_files=$(printf "%s\n%s" "$tracked" "$untracked" \
+              | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
+          fi
 
           if [ -z "$po_files" ]; then
             echo "No PO files to translate"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "PO files: $po_files"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "files=$po_files" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "files=$po_files" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Translate PO files
@@ -102,9 +120,22 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
+          RETRANSLATE_ARGS=()
+          if [ "${{ inputs.force }}" = "true" ]; then
+            RETRANSLATE_ARGS+=(--retranslate-all)
+          fi
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
-            --output-json /tmp/translation_results.json
+            --output-json /tmp/translation_results.json \
+            "${RETRANSLATE_ARGS[@]}"
+
+      - name: Validate translated PO files
+        if: steps.detect.outputs.has_changes == 'true'
+        run: |
+          python .github/workflows/scripts/po_translate.py \
+            --files "${{ steps.detect.outputs.files }}" \
+            --validate-only
+          make -C docs intl SPHINXOPTS="-W --keep-going"
 
       - name: Process translated files
         if: steps.detect.outputs.has_changes == 'true'
@@ -122,23 +153,24 @@ jobs:
 
           count=0
           file_list=""
-          mkdir -p /tmp/translated_po_files
           while IFS= read -r file; do
             [ -n "$file" ] && [ -f "$file" ] && {
               count=$((count + 1))
               file_list="${file_list}- <code>${file}</code>"$'\n'
-              git add "$file"
             }
           done <<< "$success_files"
 
           [ $count -eq 0 ] && echo "No files processed" && exit 1
+          # Stage translated files and obsolete PO files removed during a
+          # clean full regeneration.
+          git add -A docs/source/locale/zh_CN/LC_MESSAGES
           echo "Processed $count file(s)"
           {
             echo "file_count=$count"
             echo "file_list<<EOF"
             echo "$file_list"
             echo "EOF"
-          } >> $GITHUB_OUTPUT
+          } >> "$GITHUB_OUTPUT"
 
       - name: Commit and push
         if: steps.detect.outputs.has_changes == 'true'

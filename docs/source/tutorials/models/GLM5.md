@@ -148,7 +148,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ::::{tab-item} A3 series
 :sync: A3
 
-- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
 Run the following script to execute online inference.
 
@@ -185,10 +185,11 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --enable-prefix-caching \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
 
-- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
 Run the following script to execute online inference.
 
@@ -221,6 +222,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
 
@@ -228,7 +230,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 ::::{tab-item} A2 series
 :sync: A2
 
-- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) .
+- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
 
 Run the following script to execute online inference.
 
@@ -262,6 +264,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -285,7 +288,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 ::::{tab-item} A3 series
 :sync: A3
 
-- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × 16).
+- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
 
 Run the following scripts on two nodes respectively.
 
@@ -331,6 +334,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -378,6 +382,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -431,6 +436,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -480,6 +486,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -550,7 +557,7 @@ if __name__ == "__main__":
 ::::{tab-item} A3 series
 :sync: A3
 
-- `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16).
+- `glm-5-w8a8`: require 2 Atlas 800 A3 (64GB × 16).
 
 Run the following scripts on two nodes respectively.
 
@@ -601,6 +608,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -653,6 +661,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --enable-prefix-caching \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
+--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
@@ -826,6 +835,7 @@ Before you start, please
             --enable-chunked-prefill \
             --quantization ascend \
             --gpu-memory-utilization 0.95 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -905,6 +915,7 @@ Before you start, please
             --max-num-seqs 64 \
             --enable-chunked-prefill \
             --gpu-memory-utilization 0.95 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --quantization ascend \
             --enforce-eager \
             --enable-auto-tool-choice \
@@ -987,6 +998,7 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -1067,6 +1079,7 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
+             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1147,6 +1160,7 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
+             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1227,6 +1241,7 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
+             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1381,7 +1396,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -1391,7 +1406,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 
 #### Table 1: Scenario Overview
 
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|---------------|-------------------|
 |High Throughput|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on P nodes and dp8 dp4 on D nodes to balanced latency and throughput|
 |Low Latency|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on both P and D nodes to reduce latency|

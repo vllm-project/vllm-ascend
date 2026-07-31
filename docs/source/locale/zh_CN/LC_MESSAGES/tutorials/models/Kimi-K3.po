@@ -1,0 +1,1446 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1
+msgid "Kimi-K3"
+msgstr "Kimi-K3"
+
+#: ../../source/tutorials/models/Kimi-K3.md:3
+msgid "1 Introduction"
+msgstr "1 引言"
+
+#: ../../source/tutorials/models/Kimi-K3.md:5
+msgid ""
+"Kimi K3 is a native multimodal Mixture-of-Experts (MoE) model. Its language "
+"backbone combines Kimi Delta Attention (KDA) with periodic Gated Multi-head "
+"Latent Attention (MLA), and uses Stable LatentMoE for expert computation. "
+"The model also integrates a MoonViT vision encoder and supports text, image "
+"understanding, reasoning, and tool calling."
+msgstr ""
+"Kimi K3 是一个原生多模态混合专家（MoE）模型。其语言主干结合了 Kimi Delta "
+"注意力（KDA）与周期性门控多头潜在注意力（MLA），并使用 Stable LatentMoE 进行专家计算。该模型还集成了 MoonViT "
+"视觉编码器，支持文本、图像理解、推理和工具调用。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:7
+msgid ""
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, multi-"
+"node deployment on Atlas 800 A3 and Atlas 800 A2, functional verification, "
+"and accuracy and performance evaluation."
+msgstr ""
+"本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、在 Atlas 800 A3 和 Atlas 800 A2 "
+"上的多节点部署、功能验证以及精度和性能评估。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:9
+msgid ""
+"This document is validated and written based on **vLLM-Ascend 0.23.0**. The "
+"current model (Kimi-K3) is first supported in this version."
+msgstr "本文档基于 **vLLM-Ascend 0.23.0** 进行验证和编写。当前模型（Kimi-K3）在此版本中首次获得支持。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:11
+msgid "2 Supported Features"
+msgstr "2 支持的特性"
+
+#: ../../source/tutorials/models/Kimi-K3.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参考[支持的特性](../../user_guide/support_matrix/supported_models.md)获取该模型支持的特性矩阵。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:17
+msgid "3 Prerequisites"
+msgstr "3 前提条件"
+
+#: ../../source/tutorials/models/Kimi-K3.md:19
+msgid "3.1 Model Weight"
+msgstr "3.1 模型权重"
+
+#: ../../source/tutorials/models/Kimi-K3.md:21
+msgid ""
+"Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-"
+"Tech/Kimi-K3-w4a8) ModelSlim W4A8 quantized weight from ModelScope. This "
+"guide includes the following validated deployment configurations:"
+msgstr ""
+"从 ModelScope 下载 [Eco-"
+"Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) "
+"ModelSlim W4A8 量化权重。本指南包含以下已验证的部署配置："
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "Platform"
+msgstr "平台"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "Deployment"
+msgstr "部署方式"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Topology"
+msgstr "拓扑"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "4 × Atlas 800 A3 (64G × 16)"
+msgstr "4 × Atlas 800 A3 (64G × 16)"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "Mixed Prefill/Decode deployment"
+msgstr "混合 Prefill/Decode 部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "DP4/TP16/EP64"
+msgstr "DP4/TP16/EP64"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "16 × Atlas 800 A3 (64G × 16)"
+msgstr "16 × Atlas 800 A3 (64G × 16)"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "Eight Prefill nodes and eight Decode nodes"
+msgstr "八个 Prefill 节点和八个 Decode 节点"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "DP8/TP16/PP1 on each side"
+msgstr "每侧 DP8/TP16/PP1"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "8 × Atlas 800 A2 (64G × 8)"
+msgstr "8 × Atlas 800 A2 (64G × 8)"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "DP8/TP8/EP64"
+msgstr "DP8/TP8/EP64"
+
+#: ../../source/tutorials/models/Kimi-K3.md:29
+msgid ""
+"The local implementation supports Kimi K3 ModelSlim quantization through "
+"`--quantization ascend`. For a checkpoint that already contains a "
+"`compressed-tensors` quantization configuration, omit `--quantization "
+"ascend` and let vLLM discover the quantization method from the checkpoint."
+msgstr ""
+"本地实现通过 `--quantization ascend` 支持 Kimi K3 ModelSlim 量化。对于已包含 `compressed-"
+"tensors` 量化配置的检查点，请省略 `--quantization ascend`，让 vLLM 从检查点自动发现量化方法。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:31
+msgid ""
+"The checkpoint directory must contain the model configuration, tokenizer, "
+"image processor, and model weight files required by the published Kimi K3 "
+"package."
+msgstr "检查点目录必须包含已发布的 Kimi K3 包所需的模型配置、分词器、图像处理器和模型权重文件。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:33
+msgid ""
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点的共享目录，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:35
+msgid "3.2 Verify Multi-node Communication (Optional)"
+msgstr "3.2 验证多节点通信（可选）"
+
+#: ../../source/tutorials/models/Kimi-K3.md:37
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)中的说明验证多节点通信。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:39
+msgid "4 Installation"
+msgstr "4 安装"
+
+#: ../../source/tutorials/models/Kimi-K3.md:41
+msgid "4.1 Docker Image Installation"
+msgstr "4.1 Docker 镜像安装"
+
+#: ../../source/tutorials/models/Kimi-K3.md:43
+msgid "4.1.1 Atlas 800 A3"
+msgstr "4.1.1 Atlas 800 A3"
+
+#: ../../source/tutorials/models/Kimi-K3.md:45
+msgid ""
+"Kimi K3 is validated on Atlas 800 A3 (64G × 16). Select the image that "
+"matches the host operating system and start it on each node, referring to "
+"[using docker](../../installation.md#set-up-using-docker)."
+msgstr ""
+"Kimi K3 在 Atlas 800 A3 (64G × 16) 上验证通过。选择与主机操作系统匹配的镜像，并在每个节点上启动，请参考[使用 "
+"Docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:54
+msgid "Host operating system"
+msgstr "主机操作系统"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:54
+msgid "Image"
+msgstr "镜像"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:54
+msgid "Ubuntu"
+msgstr "Ubuntu"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "`quay.io/ascend/vllm-ascend:kimi-k3-a3`"
+msgstr "`quay.io/ascend/vllm-ascend:kimi-k3-a3`"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:54
+msgid "openEuler"
+msgstr "openEuler"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "`quay.io/ascend/vllm-ascend:kimi-k3-a3-openeuler`"
+msgstr "`quay.io/ascend/vllm-ascend:kimi-k3-a3-openeuler`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:52
+#: ../../source/tutorials/models/Kimi-K3.md:104
+msgid "Run the following command on each node:"
+msgstr "在每个节点上运行以下命令："
+
+#: ../../source/tutorials/models/Kimi-K3.md:93
+#: ../../source/tutorials/models/Kimi-K3.md:137
+msgid ""
+"After a successful docker run, you can verify the running container service "
+"by executing the `docker ps` command."
+msgstr "Docker 运行成功后，可以通过执行 `docker ps` 命令验证正在运行的容器服务。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:95
+msgid "4.1.2 Atlas 800 A2"
+msgstr "4.1.2 Atlas 800 A2"
+
+#: ../../source/tutorials/models/Kimi-K3.md:97
+msgid ""
+"Kimi K3 is validated on Atlas 800 A2 (64G × 8). Select the image that "
+"matches the host operating system and start it on each node, referring to "
+"[using docker](../../installation.md#set-up-using-docker)."
+msgstr ""
+"Kimi K3 在 Atlas 800 A2 (64G × 8) 上验证通过。选择与主机操作系统匹配的镜像，并在每个节点上启动，请参考[使用 "
+"Docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:54
+msgid "`quay.io/ascend/vllm-ascend:kimi-k3`"
+msgstr "`quay.io/ascend/vllm-ascend:kimi-k3`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:54
+msgid "`quay.io/ascend/vllm-ascend:kimi-k3-openeuler`"
+msgstr "`quay.io/ascend/vllm-ascend:kimi-k3-openeuler`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:139
+msgid "4.2 Source Code Installation"
+msgstr "4.2 源码安装"
+
+#: ../../source/tutorials/models/Kimi-K3.md:141
+msgid ""
+"If you don't want to use the docker image as above, you can also build all "
+"from source:"
+msgstr "如果不想使用上述 Docker 镜像，也可以从源码构建所有组件："
+
+#: ../../source/tutorials/models/Kimi-K3.md:143
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:145
+msgid ""
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
+msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:147
+msgid ""
+"Kimi K3 configuration, multimodal processing, reasoning parsing, and tool "
+"parsing are registered by vLLM-Ascend. Use a vLLM and vLLM-Ascend source "
+"revision that matches the validated version in this document."
+msgstr ""
+"Kimi K3 的配置、多模态处理、推理解析和工具解析由 vLLM-Ascend 注册。请使用与本文档验证版本匹配的 vLLM 和 vLLM-"
+"Ascend 源码修订版本。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:149
+msgid "5 Online Service Deployment"
+msgstr "5 在线服务部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:151
+msgid "5.1 Atlas 800 A3 Deployments"
+msgstr "5.1 Atlas 800 A3 部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:153
+msgid "5.1.1 Four-Node Mixed Deployment"
+msgstr "5.1.1 四节点混合部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:155
+msgid ""
+"The validated mixed deployment uses four Atlas 800 A3 (64G × 16) nodes. vLLM"
+" data parallelism spans the four nodes, each node runs one DP rank, and "
+"tensor parallelism uses all 16 NPUs in the node. The resulting topology is "
+"DP4/TP16/EP64."
+msgstr ""
+"已验证的混合部署使用四个 Atlas 800 A3 (64G × 16) 节点。vLLM 数据并行跨越四个节点，每个节点运行一个 DP "
+"rank，张量并行使用节点内的全部 16 个 NPU。最终拓扑为 DP4/TP16/EP64。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:157
+#: ../../source/tutorials/models/Kimi-K3.md:561
+msgid "Before starting the service:"
+msgstr "启动服务前："
+
+#: ../../source/tutorials/models/Kimi-K3.md:159
+#: ../../source/tutorials/models/Kimi-K3.md:563
+msgid ""
+"Replace the model path, local IP address, network interface, service port, "
+"and DP RPC port with values from the target environment."
+msgstr "将模型路径、本地 IP 地址、网络接口、服务端口和 DP RPC 端口替换为目标环境的值。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:160
+#: ../../source/tutorials/models/Kimi-K3.md:564
+msgid "`NIC_NAME` must be the interface that owns `LOCAL_IP`."
+msgstr "`NIC_NAME` 必须是拥有 `LOCAL_IP` 的接口。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:161
+msgid ""
+"Start Node 0 first. The `NODE0_IP` configured on Nodes 1 through 3 must "
+"equal `LOCAL_IP` on Node 0."
+msgstr "先启动节点 0。节点 1 到 3 上配置的 `NODE0_IP` 必须等于节点 0 上的 `LOCAL_IP`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:162
+msgid ""
+"Assign `--data-parallel-start-rank` values `1`, `2`, and `3` to Nodes 1, 2, "
+"and 3 respectively."
+msgstr "分别为节点 1、2、3 分配 `--data-parallel-start-rank` 值 `1`、`2` 和 `3`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Node 0"
+msgstr "节点 0"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Nodes 1-3"
+msgstr "节点 1-3"
+
+#: ../../source/tutorials/models/Kimi-K3.md:222
+msgid ""
+"Run this command on every worker node. Set `LOCAL_IP` and `NIC_NAME` to the "
+"current node and set `DP_START_RANK` to `1`, `2`, or `3`."
+msgstr ""
+"在每个工作节点上运行此命令。将 `LOCAL_IP` 和 `NIC_NAME` 设置为当前节点，并将 `DP_START_RANK` 设置为 "
+"`1`、`2` 或 `3`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:276
+#: ../../source/tutorials/models/Kimi-K3.md:705
+msgid "The following values differ between the master and worker nodes:"
+msgstr "主节点和工作节点之间的以下值不同："
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:445
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Setting"
+msgstr "设置"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:445
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`LOCAL_IP`"
+msgstr "`LOCAL_IP`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Node 0 IP"
+msgstr "节点0 IP"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Current worker IP"
+msgstr "当前工作节点IP"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Each node uses its own IP address."
+msgstr "每个节点使用自身的IP地址。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`NODE0_IP`"
+msgstr "`NODE0_IP`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Not required"
+msgstr "非必需"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Workers use this address to join the DP group."
+msgstr "工作节点使用此地址加入DP组。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`VLLM_ENGINE_READY_TIMEOUT_S`"
+msgstr "`VLLM_ENGINE_READY_TIMEOUT_S`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`7200`"
+msgstr "`7200`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Not set"
+msgstr "未设置"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Only the master waits for all engines to become ready."
+msgstr "仅主节点等待所有引擎就绪。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--headless`"
+msgstr "`--headless`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Omitted"
+msgstr "省略"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Enabled"
+msgstr "启用"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Workers do not expose the API endpoint."
+msgstr "工作节点不暴露API端点。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--data-parallel-address`"
+msgstr "`--data-parallel-address`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`$LOCAL_IP`"
+msgstr "`$LOCAL_IP`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`$NODE0_IP`"
+msgstr "`$NODE0_IP`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Always resolves to Node 0."
+msgstr "始终解析为节点0。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--data-parallel-start-rank`"
+msgstr "`--data-parallel-start-rank`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`0` by default"
+msgstr "默认为`0`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`1`, `2`, or `3`"
+msgstr "`1`、`2`或`3`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Every node must own a unique DP rank."
+msgstr "每个节点必须拥有唯一的DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:287
+msgid "Key deployment parameters:"
+msgstr "关键部署参数："
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--tensor-parallel-size 16`"
+msgstr "`--tensor-parallel-size 16`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Uses all 16 NPUs in one A3 node for tensor parallelism."
+msgstr "使用一个A3节点中的所有16个NPU进行张量并行。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--data-parallel-size 4`"
+msgstr "`--data-parallel-size 4`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Creates four global DP ranks across four nodes."
+msgstr "在四个节点间创建四个全局DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--data-parallel-size-local 1`"
+msgstr "`--data-parallel-size-local 1`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Runs one DP rank on the current node."
+msgstr "在当前节点上运行一个DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Selects the global starting DP rank for a worker node."
+msgstr "为工作节点选择全局起始DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--data-parallel-rpc-port`"
+msgstr "`--data-parallel-rpc-port`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Must be identical and reachable on every node."
+msgstr "必须在每个节点上相同且可达。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--enable-expert-parallel`"
+msgstr "`--enable-expert-parallel`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Enables expert parallelism for the MoE layers."
+msgstr "为MoE层启用专家并行。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--max-model-len 131027`"
+msgstr "`--max-model-len 131027`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Sets the maximum combined input and output length."
+msgstr "设置输入和输出的最大总长度。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--max-num-seqs 16`"
+msgstr "`--max-num-seqs 16`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Sets the maximum active sequences for each DP group."
+msgstr "设置每个DP组的最大活跃序列数。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--max-num-batched-tokens 24576`"
+msgstr "`--max-num-batched-tokens 24576`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Controls the scheduler token budget."
+msgstr "控制调度器的token预算。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`--enable-prefix-caching`"
+msgstr "`--enable-prefix-caching`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Enables automatic prefix caching."
+msgstr "启用自动前缀缓存。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--compilation-config`"
+msgstr "`--compilation-config`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Uses `FULL_DECODE_ONLY` ACL Graph replay."
+msgstr "使用`FULL_DECODE_ONLY` ACL图回放。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--additional-config`"
+msgstr "`--additional-config`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Enables Ascend CPU binding and FlashComm1."
+msgstr "启用昇腾CPU绑定和FlashComm1。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "`HCCL_IF_IP` and socket interface variables"
+msgstr "`HCCL_IF_IP`和套接字接口变量"
+
+#: ../../source/tutorials/models/Kimi-K3.md:218
+msgid "Bind HCCL, Gloo, and TP communication to the selected interface."
+msgstr "将HCCL、Gloo和TP通信绑定到所选接口。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:305
+msgid ""
+"If a worker exits immediately, confirm that Node 0 is already running, "
+"`--data-parallel-address` resolves to Node 0, and every worker uses a unique"
+" `--data-parallel-start-rank`."
+msgstr ""
+"如果工作节点立即退出，请确认节点0已在运行，`--data-parallel-address`解析到节点0，且每个工作节点使用唯一的`--data-"
+"parallel-start-rank`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:307
+msgid "Verify the service through Node 0:"
+msgstr "通过节点0验证服务："
+
+#: ../../source/tutorials/models/Kimi-K3.md:327
+msgid ""
+"The service should return HTTP 200 and a `choices` field containing "
+"generated text."
+msgstr "服务应返回HTTP 200和包含生成文本的`choices`字段。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:329
+msgid "5.1.2 Sixteen-Node PD Separation Deployment"
+msgstr "5.1.2 十六节点PD分离部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:331
+msgid ""
+"The validated PD separation topology uses 16 Atlas 800 A3 (64G × 16) nodes: "
+"eight Prefill nodes and eight Decode nodes. Both sides use DP8/TP16/PP1. "
+"Prefill nodes additionally use a memcache-backed KV pool."
+msgstr ""
+"经验证的PD分离拓扑使用16个Atlas 800 A3（64G × "
+"16）节点：8个Prefill节点和8个Decode节点。两侧均使用DP8/TP16/PP1。Prefill节点额外使用memcache支持的KV池。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:333
+msgid ""
+"Refer to [PD Disaggregation with "
+"Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the "
+"general service workflow and [KV "
+"Pool](../../user_guide/feature_guide/kv_pool.md) for memcache pool concepts."
+msgstr ""
+"有关通用服务工作流，请参阅[使用Mooncake进行PD分离](../features/pd_disaggregation_mooncake_multi_node.md)；有关memcache池概念，请参阅[KV池](../../user_guide/feature_guide/kv_pool.md)。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:335
+msgid "5.1.2.1 Start the memcache MetaService"
+msgstr "5.1.2.1 启动memcache MetaService"
+
+#: ../../source/tutorials/models/Kimi-K3.md:337
+msgid "Start one MetaService instance before the Prefill engines:"
+msgstr "在Prefill引擎之前启动一个MetaService实例："
+
+#: ../../source/tutorials/models/Kimi-K3.md:344
+msgid ""
+"`mmc-meta.conf` configures MetaService and `mmc-local.conf` is loaded by "
+"every Prefill inference process. Run `pip show memcache_hybrid` to locate "
+"the installed package, copy the example files from "
+"`memcache_hybrid/config/`, and adapt them to the target environment."
+msgstr ""
+"`mmc-meta.conf`配置MetaService，`mmc-local.conf`由每个Prefill推理进程加载。运行`pip show "
+"memcache_hybrid`定位已安装的包，从`memcache_hybrid/config/`复制示例文件，并根据目标环境进行调整。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:346
+msgid "5.1.2.2 Create the engine templates"
+msgstr "5.1.2.2 创建引擎模板"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "Prefill"
+msgstr "Prefill"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+msgid "Decode"
+msgstr "Decode"
+
+#: ../../source/tutorials/models/Kimi-K3.md:522
+msgid "5.1.2.3 Start the engines"
+msgstr "5.1.2.3 启动引擎"
+
+#: ../../source/tutorials/models/Kimi-K3.md:524
+msgid ""
+"Deploy `launch_online_dp.py` and the corresponding engine template on every "
+"node. The following example starts one local DP rank in a DP8/TP16/PP1 "
+"group:"
+msgstr ""
+"在每个节点上部署`launch_online_dp.py`和相应的引擎模板。以下示例在DP8/TP16/PP1组中启动一个本地DP rank："
+
+#: ../../source/tutorials/models/Kimi-K3.md:538
+msgid ""
+"Use ranks `0` through `7` for each eight-node side. Configure independent "
+"master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode"
+" groups."
+msgstr "每个八节点侧使用rank `0`到`7`。为Prefill和Decode组配置独立的主地址、RPC端口和vLLM端口范围。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:540
+msgid ""
+"After the engines start, configure and start the load-balancing proxy as "
+"described in [PD Disaggregation with "
+"Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-"
+"service)."
+msgstr ""
+"引擎启动后，按照[使用Mooncake进行PD分离](../features/pd_disaggregation_mooncake_multi_node.md#start-"
+"the-service)中的描述配置并启动负载均衡代理。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:542
+msgid "Key PD settings:"
+msgstr "关键PD设置："
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Value"
+msgstr "值"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "8P8D"
+msgstr "8P8D"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Eight Prefill and eight Decode nodes."
+msgstr "八个Prefill节点和八个Decode节点。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`--dp-size`"
+msgstr "`--dp-size`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`8`"
+msgstr "`8`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Eight DP ranks on each side."
+msgstr "每侧八个DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`--tp-size`"
+msgstr "`--tp-size`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`16`"
+msgstr "`16`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Uses all 16 NPUs in a node."
+msgstr "使用节点中的所有16个NPU。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`--pp-size`"
+msgstr "`--pp-size`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`1`"
+msgstr "`1`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "One pipeline stage per engine."
+msgstr "每个引擎一个流水线阶段。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`--dp-size-local`"
+msgstr "`--dp-size-local`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "One DP rank per node."
+msgstr "每个节点一个DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`KV_PORT`"
+msgstr "`KV_PORT`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`36000` for P, `36200` for D"
+msgstr "P为`36000`，D为`36200`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Separates producer and consumer KV traffic."
+msgstr "分离生产者和消费者的KV流量。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`MMC_LOCAL_CONFIG_PATH`"
+msgstr "`MMC_LOCAL_CONFIG_PATH`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Prefill only"
+msgstr "仅Prefill"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Connects the producer to the memcache KV pool."
+msgstr "将生产者连接到memcache KV池。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "`recompute_scheduler_enable`"
+msgstr "`recompute_scheduler_enable`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`false`"
+msgstr "`false`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:445
+msgid "Matches the validated Prefill and Decode configuration."
+msgstr "匹配经验证的Prefill和Decode配置。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:555
+msgid "5.2 Atlas 800 A2 Deployment"
+msgstr "5.2 Atlas 800 A2部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:557
+msgid "5.2.1 Eight-Node Mixed Deployment"
+msgstr "5.2.1 八节点混合部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:559
+msgid ""
+"The validated Atlas 800 A2 deployment uses eight nodes with eight NPUs per "
+"node. Each node runs one DP rank and uses all eight local NPUs for tensor "
+"parallelism. Every DP rank handles both Prefill and Decode, resulting in a "
+"DP8/TP8/EP64 topology. Node 0 runs the API server and DP rank 0, while Nodes"
+" 1 through 7 run headless DP workers. This baseline serves the language "
+"model only."
+msgstr ""
+"已验证的Atlas 800 A2部署使用八个节点，每个节点配备八个NPU。每个节点运行一个DP rank，并使用所有八个本地NPU进行张量并行。每个DP"
+" rank同时处理Prefill和Decode，形成DP8/TP8/EP64拓扑。节点0运行API服务器和DP rank "
+"0，节点1至7运行无头DP工作节点。此基线仅服务于语言模型。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:565
+msgid ""
+"Start Node 0 first. The `NODE0_IP` configured on Nodes 1 through 7 must "
+"equal `LOCAL_IP` on Node 0."
+msgstr "首先启动节点0。节点1至7上配置的`NODE0_IP`必须等于节点0上的`LOCAL_IP`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:566
+msgid ""
+"Assign a unique `DP_START_RANK` from `1` through `7` to each worker node."
+msgstr "为每个工作节点分配一个从`1`到`7`的唯一`DP_START_RANK`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:567
+msgid ""
+"Ensure proxy bypass settings include all API and communication IP addresses "
+"used by the eight nodes."
+msgstr "确保代理绕过设置包含八个节点使用的所有API和通信IP地址。"
+
+#: ../../source/tutorials/models/Kimi-K3.md
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Nodes 1-7"
+msgstr "节点1-7"
+
+#: ../../source/tutorials/models/Kimi-K3.md:639
+msgid ""
+"Run this command on every worker node. Set `LOCAL_IP` and `NIC_NAME` to the "
+"current node and set `DP_START_RANK` to a unique value from `1` through `7`."
+msgstr ""
+"在每个工作节点上运行此命令。将`LOCAL_IP`和`NIC_NAME`设置为当前节点，并将`DP_START_RANK`设置为从`1`到`7`的唯一值。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Each node uses its own communication IP address."
+msgstr "每个节点使用自己的通信IP地址。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Workers do not expose an API endpoint."
+msgstr "工作节点不暴露API端点。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Unique value from `1` through `7`"
+msgstr "从`1`到`7`的唯一值"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Every node owns one global DP rank."
+msgstr "每个节点拥有一个全局DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:715
+msgid "Key A2 deployment parameters:"
+msgstr "关键A2部署参数："
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--tensor-parallel-size 8`"
+msgstr "`--tensor-parallel-size 8`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Uses all eight NPUs in one A2 node for tensor parallelism."
+msgstr "使用一个A2节点中的所有八个NPU进行张量并行。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--data-parallel-size 8`"
+msgstr "`--data-parallel-size 8`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Creates eight global DP ranks across eight nodes."
+msgstr "在八个节点上创建八个全局DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--language-model-only`"
+msgstr "`--language-model-only`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Disables the multimodal encoder for this validated A2 baseline."
+msgstr "为此已验证的A2基线禁用多模态编码器。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--max-model-len 262144`"
+msgstr "`--max-model-len 262144`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Sets a 256K combined input and output context limit."
+msgstr "设置256K的输入和输出组合上下文限制。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid ""
+"Uses `FULL_DECODE_ONLY` graph replay with capture sizes `1`, `2`, `4`, and "
+"`8`."
+msgstr "使用`FULL_DECODE_ONLY`图回放，捕获大小为`1`、`2`、`4`和`8`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid ""
+"Enables NPU graph execution and CPU binding while keeping FlashComm1 "
+"disabled."
+msgstr "启用NPU图执行和CPU绑定，同时保持FlashComm1禁用。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:727
+msgid ""
+"Do not set `HCCL_OP_EXPANSION_MODE=AIV` for this baseline. Start Node 0 "
+"first, then start Nodes 1 through 7 as soon as possible. If a worker exits "
+"immediately, verify that Node 0 is running, all nodes use the same RPC port,"
+" `--data-parallel-address` resolves to Node 0, and every worker has a unique"
+" DP start rank."
+msgstr ""
+"不要为此基线设置`HCCL_OP_EXPANSION_MODE=AIV`。首先启动节点0，然后尽快启动节点1至7。如果工作节点立即退出，请验证节点0正在运行、所有节点使用相同的RPC端口、`--data-"
+"parallel-address`解析到节点0，并且每个工作节点具有唯一的DP起始rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:729
+msgid "6 Functional Verification"
+msgstr "6 功能验证"
+
+#: ../../source/tutorials/models/Kimi-K3.md:731
+msgid "6.1 Atlas 800 A3"
+msgstr "6.1 Atlas 800 A3"
+
+#: ../../source/tutorials/models/Kimi-K3.md:733
+msgid ""
+"After an A3 mixed or PD service is ready, send a multimodal request to the "
+"API endpoint:"
+msgstr "A3混合或PD服务就绪后，向API端点发送多模态请求："
+
+#: ../../source/tutorials/models/Kimi-K3.md:759
+msgid ""
+"The service should return HTTP 200 and a `choices` field containing the "
+"image description. The current implementation supports image inputs but does"
+" not support video inputs."
+msgstr "服务应返回HTTP 200和包含图像描述的`choices`字段。当前实现支持图像输入，但不支持视频输入。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:761
+msgid "6.2 Atlas 800 A2"
+msgstr "6.2 Atlas 800 A2"
+
+#: ../../source/tutorials/models/Kimi-K3.md:763
+msgid ""
+"The validated A2 deployment uses `--language-model-only`. After all eight DP"
+" ranks are ready, send a text request to the Node 0 API endpoint:"
+msgstr "已验证的A2部署使用`--language-model-only`。所有八个DP rank就绪后，向节点0 API端点发送文本请求："
+
+#: ../../source/tutorials/models/Kimi-K3.md:778
+msgid ""
+"The service should return HTTP 200 and a `choices` field containing "
+"generated text. Nodes 1 through 7 are headless workers and do not accept "
+"HTTP requests directly."
+msgstr "服务应返回HTTP 200和包含生成文本的`choices`字段。节点1至7是无头工作节点，不直接接受HTTP请求。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:780
+msgid ""
+"`X-data-parallel-rank` is an optional HTTP request header that pins a "
+"request to a specific DP rank. Without this header, the internal vLLM load "
+"balancer on Node 0 selects an available rank. For this DP8 deployment, use "
+"an integer from `0` through `7` only when validating one rank, "
+"troubleshooting a worker, or testing rank-local prefix-cache behavior:"
+msgstr ""
+"`X-data-parallel-rank`是一个可选的HTTP请求头，用于将请求固定到特定的DP "
+"rank。没有此头时，节点0上的内部vLLM负载均衡器会选择一个可用rank。对于此DP8部署，仅在验证单个rank、排查工作节点问题或测试rank本地前缀缓存行为时使用从`0`到`7`的整数："
+
+#: ../../source/tutorials/models/Kimi-K3.md:786
+msgid ""
+"Production traffic should normally omit this header so that requests remain "
+"balanced across all DP ranks. The request is always sent to the Node 0 API "
+"endpoint, even when a worker rank is selected."
+msgstr "生产流量通常应省略此头，以便请求在所有DP rank之间保持均衡。即使选择了工作节点rank，请求也始终发送到节点0 API端点。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:788
+msgid "7 Accuracy Evaluation"
+msgstr "7 精度评估"
+
+#: ../../source/tutorials/models/Kimi-K3.md:790
+msgid ""
+"The following evaluation procedure was validated with the four-node "
+"DP4/TP16/EP64 service."
+msgstr "以下评估流程已使用四节点DP4/TP16/EP64服务进行验证。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:792
+msgid "7.1 Prepare the Evaluation Environment"
+msgstr "7.1 准备评估环境"
+
+#: ../../source/tutorials/models/Kimi-K3.md:794
+msgid "The validation toolkit requires Python 3.12 or later:"
+msgstr "验证工具包需要Python 3.12或更高版本："
+
+#: ../../source/tutorials/models/Kimi-K3.md:803
+msgid "Prepare these datasets:"
+msgstr "准备以下数据集："
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Task"
+msgstr "任务"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "MMMU Pro Vision"
+msgstr "MMMU Pro Vision"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Ten-option multimodal visual question answering."
+msgstr "十选一多模态视觉问答。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "[MMMU/MMMU_Pro](https://huggingface.co/datasets/MMMU/MMMU_Pro)"
+msgstr "[MMMU/MMMU_Pro](https://huggingface.co/datasets/MMMU/MMMU_Pro)"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "OCRBench"
+msgstr "OCRBench"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "OCR and text-recognition evaluation."
+msgstr "OCR和文本识别评估。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "[echo840/OCRBench](https://huggingface.co/datasets/echo840/OCRBench)"
+msgstr "[echo840/OCRBench](https://huggingface.co/datasets/echo840/OCRBench)"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "ToolCall/KVVV"
+msgstr "ToolCall/KVVV"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Tool-calling evaluation."
+msgstr "工具调用评估。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`toolcall_benchmark/` in the evaluation toolkit"
+msgstr "评估工具包中的`toolcall_benchmark/`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:811
+msgid ""
+"All recorded evaluations use Thinking mode, preserve the reasoning output, "
+"set `reasoning_effort=max`, `temperature=1.0`, `top_p=1.0`, and run one "
+"epoch."
+msgstr ""
+"所有记录的评估均使用Thinking模式，保留推理输出，设置`reasoning_effort=max`、`temperature=1.0`、`top_p=1.0`，并运行一个epoch。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Benchmark"
+msgstr "基准测试"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Max output tokens"
+msgstr "最大输出token数"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Max connections"
+msgstr "最大连接数"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "8192"
+msgstr "8192"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "16"
+msgstr "16"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "MMMU Pro"
+msgstr "MMMU Pro"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "96000"
+msgstr "96000"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "32768"
+msgstr "32768"
+
+#: ../../source/tutorials/models/Kimi-K3.md:819
+msgid "7.2 Check the Service"
+msgstr "7.2 检查服务"
+
+#: ../../source/tutorials/models/Kimi-K3.md:842
+msgid "All parameter checks must pass before running the benchmarks."
+msgstr "运行基准测试前，所有参数检查必须通过。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:844
+msgid "7.3 Run OCRBench"
+msgstr "7.3 运行OCRBench"
+
+#: ../../source/tutorials/models/Kimi-K3.md:859
+msgid "7.4 Run MMMU Pro"
+msgstr "7.4 运行MMMU Pro"
+
+#: ../../source/tutorials/models/Kimi-K3.md:874
+msgid "7.5 Run ToolCall/KVVV"
+msgstr "7.5 运行ToolCall/KVVV"
+
+#: ../../source/tutorials/models/Kimi-K3.md:876
+msgid ""
+"ToolCall uses the JSONL data in `toolcall_benchmark/`. For the long-context "
+"validation, restart the four-node service with the following master-node "
+"values:"
+msgstr "ToolCall使用`toolcall_benchmark/`中的JSONL数据。对于长上下文验证，使用以下主节点值重启四节点服务："
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Standard mixed deployment"
+msgstr "标准混合部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "ToolCall validation"
+msgstr "ToolCall验证"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--max-num-seqs`"
+msgstr "`--max-num-seqs`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "4"
+msgstr "4"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--max-model-len`"
+msgstr "`--max-model-len`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "131027"
+msgstr "131027"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "286720"
+msgstr "286720"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--max-num-batched-tokens`"
+msgstr "`--max-num-batched-tokens`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "24576"
+msgstr "24576"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--gpu-memory-utilization`"
+msgstr "`--gpu-memory-utilization`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "0.9"
+msgstr "0.9"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "0.97"
+msgstr "0.97"
+
+#: ../../source/tutorials/models/Kimi-K3.md:885
+msgid ""
+"All other options match Section 5.1.1. Worker nodes also use these values "
+"and retain `--headless` plus their unique DP ranks."
+msgstr "所有其他选项与第5.1.1节一致。工作节点也使用这些值，并保留`--headless`及其唯一的DP rank。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:887
+msgid "Run the benchmark:"
+msgstr "运行基准测试："
+
+#: ../../source/tutorials/models/Kimi-K3.md:903
+msgid "7.6 Inspect and Resume Evaluations"
+msgstr "7.6 检查与恢复评估"
+
+#: ../../source/tutorials/models/Kimi-K3.md:911
+msgid ""
+"The evaluation toolkit retries rate-limit and network failures with "
+"exponential backoff. Non-network failures, including invalid model output, "
+"are recorded in the logs without retrying."
+msgstr "评估工具包使用指数退避策略重试速率限制和网络故障。非网络故障（包括无效模型输出）会记录在日志中，不进行重试。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:913
+msgid "8 Performance Evaluation"
+msgstr "8 性能评估"
+
+#: ../../source/tutorials/models/Kimi-K3.md:915
+msgid ""
+"The following performance procedure uses the four-node DP4/TP16/EP64 service"
+" and AISBench."
+msgstr "以下性能测试流程使用四节点 DP4/TP16/EP64 服务与 AISBench。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:917
+msgid "8.1 Install AISBench"
+msgstr "8.1 安装 AISBench"
+
+#: ../../source/tutorials/models/Kimi-K3.md:919
+msgid ""
+"Run AISBench in a separate environment or container on the master node so "
+"the load generator does not affect the serving processes:"
+msgstr "在主节点的独立环境或容器中运行 AISBench，以确保负载生成器不影响服务进程："
+
+#: ../../source/tutorials/models/Kimi-K3.md:930
+msgid "8.2 Performance Service Configuration"
+msgstr "8.2 性能服务配置"
+
+#: ../../source/tutorials/models/Kimi-K3.md:932
+msgid ""
+"Change these values from the standard Section 5.1.1 deployment on all four "
+"nodes:"
+msgstr "在所有四个节点上，将标准 5.1.1 节部署中的以下值进行修改："
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Standard deployment"
+msgstr "标准部署"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Performance test"
+msgstr "性能测试"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "250000"
+msgstr "250000"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "0.95"
+msgstr "0.95"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`torch_profiler_with_stack`"
+msgstr "`torch_profiler_with_stack`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`true`"
+msgstr "`true`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "`--limit-mm-per-prompt`"
+msgstr "`--limit-mm-per-prompt`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+#, python-brace-format
+msgid "`{\"vision_chunk\": 40}`"
+msgstr "`{\"vision_chunk\": 40}`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+#, python-brace-format
+msgid "`{\"vision_chunk\": 2}`"
+msgstr "`{\"vision_chunk\": 2}`"
+
+#: ../../source/tutorials/models/Kimi-K3.md:942
+msgid "The master-node `vllm serve` command is:"
+msgstr "主节点的 `vllm serve` 命令为："
+
+#: ../../source/tutorials/models/Kimi-K3.md:972
+msgid ""
+"Worker nodes use the same performance values and the worker-specific "
+"arguments from Section 5.1.1."
+msgstr "工作节点使用相同的性能值以及 5.1.1 节中特定于工作节点的参数。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:974
+msgid "8.3 Configure the Load Generator"
+msgstr "8.3 配置负载生成器"
+
+#: ../../source/tutorials/models/Kimi-K3.md:976
+msgid ""
+"Before running `aisbench_test.py`, create its dataset directory and "
+"configure the validation helper:"
+msgstr "在运行 `aisbench_test.py` 之前，创建其数据集目录并配置验证辅助工具："
+
+#: ../../source/tutorials/models/Kimi-K3.md:997
+msgid "Disable proxies before the test:"
+msgstr "测试前禁用代理："
+
+#: ../../source/tutorials/models/Kimi-K3.md:1004
+msgid "8.4 Run the Tests"
+msgstr "8.4 运行测试"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1006
+msgid "8K input, 1K output, and no prefix-cache hit:"
+msgstr "8K 输入，1K 输出，无前缀缓存命中："
+
+#: ../../source/tutorials/models/Kimi-K3.md:1019
+msgid "128K input, 1K output, and a 99% prefix-cache hit rate:"
+msgstr "128K 输入，1K 输出，99% 前缀缓存命中率："
+
+#: ../../source/tutorials/models/Kimi-K3.md:1033
+#, python-format
+msgid ""
+"`request_rate=0` sends requests as quickly as the configured concurrency "
+"permits. `repeat_rate=0.99` makes 99% of requests reuse the same prefix."
+msgstr ""
+"`request_rate=0` 表示以配置的并发度允许的最快速度发送请求。`repeat_rate=0.99` 使 99% 的请求复用相同前缀。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1035
+msgid "8.5 Enabled Optimizations"
+msgstr "8.5 已启用的优化"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Feature"
+msgstr "特性"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Chunked Prefill"
+msgstr "分块预填充"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid ""
+"Splits long prefill inputs into chunks to reduce per-step memory peaks."
+msgstr "将长预填充输入拆分为多个块，以降低每步内存峰值。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Asynchronous scheduling"
+msgstr "异步调度"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Decouples scheduling and execution."
+msgstr "解耦调度与执行。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Prefix Cache"
+msgstr "前缀缓存"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Reuses KV state for repeated prefixes."
+msgstr "对重复前缀复用 KV 状态。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "DP + TP + EP"
+msgstr "DP + TP + EP"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Combines data, tensor, and expert parallelism for the MoE model."
+msgstr "为 MoE 模型组合数据、张量和专家并行。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "ACL Graph"
+msgstr "ACL 图"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Uses `FULL_DECODE_ONLY` replay to reduce decode scheduling overhead."
+msgstr "使用 `FULL_DECODE_ONLY` 重放以减少解码调度开销。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "KDA + MLA cache management"
+msgstr "KDA + MLA 缓存管理"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Manages the heterogeneous recurrent and KV states."
+msgstr "管理异构的循环状态和 KV 状态。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "FlashComm1"
+msgstr "FlashComm1"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Enables communication optimization."
+msgstr "启用通信优化。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "CPU Binding"
+msgstr "CPU 绑定"
+
+#: ../../source/tutorials/models/Kimi-K3.md:635
+msgid "Reduces cross-core scheduling overhead."
+msgstr "减少跨核调度开销。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1048
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1050
+msgid ""
+"Use the validated deployment values above as a baseline. Adjust `max-model-"
+"len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization`"
+" together for the target workload."
+msgstr ""
+"以上述已验证的部署值为基准。针对目标工作负载，联合调整 `max-model-len`、`max-num-seqs`、`max-num-batched-"
+"tokens` 和 `gpu-memory-utilization`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1052
+msgid ""
+"Refer to the [performance tuning "
+"guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md)"
+" for additional guidance."
+msgstr ""
+"更多指导请参考[性能调优指南](../../developer_guide/performance_and_debug/optimization_and_tuning.md)和[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1054
+msgid "10 FAQ"
+msgstr "10 常见问题"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1056
+msgid ""
+"For common environment, installation, and general parameter issues, refer to"
+" the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"关于常见环境、安装和通用参数问题，请参考[公共 "
+"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1058
+msgid ""
+"**Q: Which multimodal inputs are supported by the current Kimi K3 "
+"implementation?**"
+msgstr "**问：当前 Kimi K3 实现支持哪些多模态输入？**"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1060
+msgid ""
+"A: The current local processor accepts image inputs. Video inputs are not "
+"supported."
+msgstr "答：当前本地处理器接受图像输入。不支持视频输入。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1062
+msgid ""
+"**Q: Which server options are required for Kimi K3 reasoning and tool "
+"calling?**"
+msgstr "**问：Kimi K3 推理和工具调用需要哪些服务器选项？**"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1064
+msgid ""
+"A: Configure `--enable-auto-tool-choice`, `--reasoning-parser kimi_k3`, and "
+"`--tool-call-parser kimi_k3` together."
+msgstr ""
+"答：同时配置 `--enable-auto-tool-choice`、`--reasoning-parser kimi_k3` 和 `--tool-"
+"call-parser kimi_k3`。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1066
+msgid "**Q: When should `--quantization ascend` be used?**"
+msgstr "**问：何时应使用 `--quantization ascend`？**"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1068
+msgid ""
+"A: Use it for ModelSlim native quantized weights. If the checkpoint declares"
+" a `compressed-tensors` configuration, omit the option and allow vLLM to "
+"load the checkpoint configuration."
+msgstr ""
+"答：用于 ModelSlim 原生量化权重。如果检查点声明了 `compressed-tensors` 配置，则省略该选项，让 vLLM "
+"加载检查点配置。"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1070
+msgid "**Q: How should TP size be selected?**"
+msgstr "**问：如何选择 TP 大小？**"
+
+#: ../../source/tutorials/models/Kimi-K3.md:1072
+msgid ""
+"A: TP size must divide the checkpoint's attention-head count. It also "
+"affects KDA state layout and expert placement, so validate memory capacity "
+"and communication performance together."
+msgstr "答：TP 大小必须能整除检查点的注意力头数。它还会影响 KDA 状态布局和专家放置，因此需同时验证内存容量和通信性能。"

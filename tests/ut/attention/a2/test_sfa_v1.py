@@ -75,6 +75,42 @@ class TestAscendSFABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
 
+class TestAscendSFABytePackedGather(TestBase):
+    @patch("vllm_ascend.attention.sfa_v1.get_tp_group")
+    def test_byte_packed_gather_preserves_mixed_dtype_tensors(self, mock_get_tp_group):
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=1)
+        sfa_kv = torch.arange(12, dtype=torch.float16).view(2, 6)
+        k_li = torch.arange(16, dtype=torch.int8).view(2, 1, 8)
+        k_li_scale = torch.arange(2, dtype=torch.float32).view(2, 1)
+
+        gathered, handle, metadata = AscendSFAImpl._all_gather_byte_packed_async(
+            [
+                ("sfa_kv", sfa_kv),
+                ("k_li", k_li),
+                ("k_li_scale", k_li_scale),
+            ],
+            async_op=True,
+        )
+
+        self.assertIsNone(handle)
+        self.assertEqual(gathered.dtype, torch.int8)
+        restored = AscendSFAImpl._restore_byte_gathered_tensors(gathered, metadata)
+        for name, expected in (("sfa_kv", sfa_kv), ("k_li", k_li), ("k_li_scale", k_li_scale)):
+            self.assertEqual(restored[name].shape, expected.shape)
+            self.assertEqual(restored[name].dtype, expected.dtype)
+            self.assertTrue(torch.equal(restored[name], expected))
+
+    def test_byte_packed_gather_rejects_mismatched_token_counts(self):
+        with self.assertRaisesRegex(RuntimeError, "different token counts"):
+            AscendSFAImpl._all_gather_byte_packed_async(
+                [
+                    ("sfa_kv", torch.zeros(2, 6, dtype=torch.float16)),
+                    ("k_li", torch.zeros(3, 8, dtype=torch.int8)),
+                ],
+                async_op=True,
+            )
+
+
 class TestAscendSFADeviceOperator(TestBase):
     def _make_common_inputs(self):
         ql_nope = torch.randn(3, 4, 8)
@@ -268,7 +304,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 2, 48))
         self.assertEqual(call_kwargs["key_quant_mode"], 2)
         self.assertEqual(call_kwargs["tile_size"], 128)
-        self.assertTrue(call_kwargs["return_softmax_lse"])
+        self.assertEqual(call_kwargs["return_softmax_lse"], False)
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)

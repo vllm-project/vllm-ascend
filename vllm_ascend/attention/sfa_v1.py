@@ -80,6 +80,14 @@ if TYPE_CHECKING:
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
+
+class _ByteGatherPart(NamedTuple):
+    name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    num_bytes_per_row: int
+
+
 O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_scale",
     "aclnn_input_scale_reciprocal",
@@ -592,7 +600,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.vllm_config = get_current_vllm_config()
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
@@ -669,7 +676,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         # PD decode consumers with sparse C8 can use mla_prolog_v3 to write the packed KV cache.
         # TODO: Re-enable after the community CANN baseline upgrades from 9.0 to 9.1.
         # npu_mla_prolog_v3 depends on CANN 9.1 and is not available in the current community CANN 9.0.
-        sfa_prolog_v3_supported = False
+        cann_version = getattr(torch.version, "cann", None)
+        if cann_version is not None:
+            from packaging.version import Version
+
+            sfa_prolog_v3_supported = Version(cann_version) >= Version("9.1.0")
+        else:
+            sfa_prolog_v3_supported = False
         self.enable_sfa_prolog_v3 = (
             sfa_prolog_v3_supported
             and self.is_kv_consumer
@@ -1183,6 +1196,70 @@ class AscendSFAImpl(MLAAttentionImpl):
             torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
 
             return attn_output, True
+
+    @staticmethod
+    def _flatten_for_byte_gather(tensor: torch.Tensor) -> tuple[torch.Tensor, int]:
+        if tensor.dim() == 0:
+            raise RuntimeError("Byte-packed all-gather requires tensors with a token dimension.")
+        tensor = tensor.contiguous()
+        num_rows = tensor.shape[0]
+        num_bytes_per_row = tensor.element_size()
+        for dim in tensor.shape[1:]:
+            num_bytes_per_row *= dim
+        return tensor.view(torch.int8).view(num_rows, num_bytes_per_row), num_bytes_per_row
+
+    @classmethod
+    def _all_gather_byte_packed_async(
+        cls,
+        parts: list[tuple[str, torch.Tensor]],
+        async_op: bool,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[_ByteGatherPart, ...]]:
+        if not parts:
+            raise RuntimeError("Byte-packed all-gather requires at least one tensor.")
+
+        packed_parts = []
+        metadata = []
+        expected_num_rows: int | None = None
+        for name, tensor in parts:
+            num_rows = tensor.shape[0]
+            if expected_num_rows is None:
+                expected_num_rows = num_rows
+            elif num_rows != expected_num_rows:
+                raise RuntimeError(
+                    "Cannot byte-pack KV tensors with different token counts: "
+                    f"expected {expected_num_rows}, got {num_rows} for {name}."
+                )
+
+            packed_tensor, num_bytes_per_row = cls._flatten_for_byte_gather(tensor)
+            packed_parts.append(packed_tensor)
+            metadata.append(
+                _ByteGatherPart(
+                    name=name,
+                    shape=tuple(tensor.shape),
+                    dtype=tensor.dtype,
+                    num_bytes_per_row=num_bytes_per_row,
+                )
+            )
+
+        packed_input = torch.cat(packed_parts, dim=1) if len(packed_parts) > 1 else packed_parts[0]
+        gathered, handle = all_gather_async(
+            packed_input,
+            get_tp_group(),
+            async_op=async_op,
+        )
+        return gathered, handle, tuple(metadata)
+
+    @staticmethod
+    def _restore_byte_gathered_tensors(
+        gathered: torch.Tensor,
+        metadata: tuple[_ByteGatherPart, ...],
+    ) -> dict[str, torch.Tensor]:
+        chunks = torch.split(gathered, [part.num_bytes_per_row for part in metadata], dim=1)
+        num_rows = gathered.shape[0]
+        restored = {}
+        for part, chunk in zip(metadata, chunks):
+            restored[part.name] = chunk.contiguous().view(part.dtype).view(num_rows, *part.shape[1:])
+        return restored
 
     def _get_full_kv(self, k, attn_metadata):
         return k
@@ -1702,7 +1779,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_nope is not None
                 async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
                 kv_ag_handles = []
-                # support all_gather kv async for communication calculation overlap
+                # Pack all KV-related tensors into one byte stream so DSA-CP only
+                # submits one KV all-gather while still preserving original dtypes.
                 if self.enable_sparse_sfa_c8:
                     assert knope_scale is not None
                     fused_kv_parts = [
@@ -1715,37 +1793,25 @@ class AscendSFAImpl(MLAAttentionImpl):
                         k_pe.view(-1, k_pe.shape[-1]),
                         k_nope.view(-1, k_nope.shape[-1]),
                     ]
-                    if self.has_indexer and not self.enable_sparse_li_c8:
-                        assert k_li is not None
-                        fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
 
                 fused_kv_input = torch.cat(fused_kv_parts, dim=1)
-                fused_kv_no_split, kv_ag_handle = all_gather_async(
-                    fused_kv_input,
-                    get_tp_group(),
+                kv_gather_parts = [("sfa_kv", fused_kv_input)]
+                if self.has_indexer:
+                    assert k_li is not None
+                    k_li_gather_input = k_li
+                    if not self.enable_sparse_sfa_c8 and not self.enable_sparse_li_c8:
+                        k_li_gather_input = k_li.view(-1, k_li.shape[-1])
+                    kv_gather_parts.append(("k_li", k_li_gather_input))
+                if self.has_indexer and self.enable_sparse_li_c8:
+                    assert k_li_scale is not None
+                    kv_gather_parts.append(("k_li_scale", k_li_scale))
+
+                kv_gathered_bytes, kv_ag_handle, kv_gather_metadata = self._all_gather_byte_packed_async(
+                    kv_gather_parts,
                     async_op=async_op,
                 )
                 if kv_ag_handle is not None:
                     kv_ag_handles.append(kv_ag_handle)
-
-                if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
-                    assert k_li is not None
-                    k_li, kv_ag_handle = all_gather_async(
-                        k_li,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if kv_ag_handle is not None:
-                        kv_ag_handles.append(kv_ag_handle)
-                if self.has_indexer and self.enable_sparse_li_c8:
-                    assert k_li_scale is not None
-                    k_li_scale, kv_ag_handle = all_gather_async(
-                        k_li_scale,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if kv_ag_handle is not None:
-                        kv_ag_handles.append(kv_ag_handle)
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
@@ -1754,6 +1820,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_dsa_cp:
                 for kv_ag_handle in kv_ag_handles:
                     kv_ag_handle.wait()
+                kv_gather_outputs = self._restore_byte_gathered_tensors(kv_gathered_bytes, kv_gather_metadata)
+                fused_kv_no_split = kv_gather_outputs["sfa_kv"]
+                if self.has_indexer:
+                    k_li = kv_gather_outputs["k_li"]
+                    if self.enable_sparse_li_c8:
+                        k_li_scale = kv_gather_outputs["k_li_scale"]
 
                 if self.enable_dsa_cp_with_layer_shard:
                     for layer in self.layer_sharding_kwargs or []:
@@ -1784,16 +1856,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                         )
                         k_pe = None
                         k_nope = None
-                    elif not self.has_indexer:
-                        k_pe, k_nope = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank],
-                            dim=-1,
-                        )
-                    elif not self.enable_sparse_li_c8:
-                        k_pe, k_nope, k_li = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim],
-                            dim=-1,
-                        )
                     else:
                         k_pe, k_nope = fused_kv_no_split.split(
                             [self.qk_rope_head_dim, self.kv_lora_rank],

@@ -18,12 +18,23 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+)
+# isort: on
 
 
 class TestKVPoolWorkerHelpers(unittest.TestCase):
@@ -106,20 +117,24 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
-    def test_external_coordinator_lookup_disables_eagle_drop(self):
+    def test_external_coordinator_lookup_uses_only_lookup_mask(self):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
         worker.num_kv_cache_groups = 1
         worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.lcm_block_size = 128
+        worker.cache_coordinator.lookup_mask.return_value = ([True],)
+        worker.cache_coordinator.store_mask.return_value = ([False],)
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
 
-        key = MagicMock()
-        key.chunk_hash = "ab" * 32
-        key.to_string.return_value = "key"
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+        worker.token_database.get_block_size.return_value = 128
+        worker.token_database.group_cache_families = {"kv": {0: "default"}}
+        worker.token_database.process_token_key_strings.side_effect = (
+            lambda *args, chunk_filter, **kwargs: [(0, 128, "key", "ab" * 32)] if chunk_filter(0) else []
+        )
 
         hit = worker._lookup_with_coordinator(
             128,
@@ -127,11 +142,57 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             [0],
             use_layerwise=False,
             include_all_ranks=False,
+            grouped_hash_cache={},
         )
 
         self.assertEqual(hit, 128)
+        worker.cache_coordinator.lookup_mask.assert_called_once_with(128)
+        worker.cache_coordinator.store_mask.assert_not_called()
+        worker.m_store.exists.assert_called_once_with(["key"])
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+        worker.token_database.process_tokens.assert_not_called()
+
+    def test_lookup_reuses_grouped_hashes_for_hit_resolution(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = AscendStoreCoordinator(
+            [
+                KVCacheGroupSpec(
+                    ["layer.0"],
+                    FullAttentionSpec(
+                        block_size=16,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+            scheduler_block_size=16,
+            hash_block_size=8,
+            group_block_sizes=[16],
+            group_cache_families=["c1"],
+        )
+        worker.token_database = ChunkedTokenDatabase(
+            [KeyMetadata("model", 0, 0, 0, 0)],
+            block_size=[16],
+            partitions=None,
+            hash_block_size=8,
+        )
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1, 1]
+        block_hashes = [b"h0", b"h1", b"h2", b"h3"]
+
+        with patch.object(
+            config_data,
+            "_rehash_block_hash_group",
+            wraps=config_data._rehash_block_hash_group,
+        ) as rehash:
+            hit = worker.lookup(32, block_hashes, [0])
+
+        self.assertEqual(hit, 32)
+        self.assertEqual(rehash.call_count, 2)
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -522,6 +583,19 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_transfer_threads_use_grouped_block_sizes(self, mock_send_thread, mock_recv_thread, mock_event):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
+        worker.grouped_block_size = [128, 8, 32]
+
+        worker._start_kv_transfer_threads()
+
+        self.assertEqual(mock_send_thread.call_args.args[2], [128, 8, 32])
+        self.assertEqual(mock_recv_thread.call_args.args[2], [128, 8, 32])
+        mock_event.return_value.wait.assert_called()
+
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
         worker.m_store.get = MagicMock()
@@ -577,7 +651,32 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         # No get called since no load_spec
 
-    def test_wait_for_save(self):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    def test_async_recv_thread_shares_invalid_block_state(self, mock_recv_thread_cls):
+        worker = self._make_worker(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "load_async": True},
+        )
+        recv_thread = MagicMock()
+
+        def create_recv_thread(*args, **kwargs):
+            args[6].set()
+            return recv_thread
+
+        mock_recv_thread_cls.side_effect = create_recv_thread
+
+        worker._start_kv_transfer_threads()
+
+        kwargs = mock_recv_thread_cls.call_args.kwargs
+        self.assertIs(kwargs["invalid_block_ids"], worker._invalid_block_ids)
+        self.assertIs(
+            kwargs["invalid_block_ids_lock"],
+            worker._invalid_block_ids_lock,
+        )
+        kwargs["invalid_block_ids"].add(7)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+
+    def test_wait_for_save_waits_for_save(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
 
@@ -593,6 +692,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_called_with("r1")
         worker.kv_send_thread.add_request.assert_called_once()
+        worker.kv_send_thread.request_queue.join.assert_called_once()
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
@@ -609,6 +709,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.wait_for_save(meta)
         worker.kv_send_thread.add_stored_request.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
 
     def test_get_finished_producer(self):
         worker = self._make_worker(kv_role="kv_producer")

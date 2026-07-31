@@ -77,7 +77,7 @@ llm = LLM(
 
 For optimal performance, online calibrate with real data before production:
 
-You can use aisbench to generate fixed-length random datasets. Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+You can use ais_bench to generate fixed-length random datasets. Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 1. Modify `<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:
 
@@ -119,13 +119,13 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long seque
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |
+    | Input length 128k    | TTFT: 22.5s | TTFT: 27.0s |
 
 - Qwen3-235B:
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |
+    | Input length 256k    | TTFT: 53.5s | TTFT: 61.4s |
 
 **Variable-length requests, concurrency=4**:
 

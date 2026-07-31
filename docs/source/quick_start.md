@@ -5,7 +5,7 @@
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](../../docs/source/tutorials/models/Qwen3-30B-A3B.md).
-- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md).
 
 ## Prerequisites
 
@@ -223,7 +223,6 @@ Create and run a simple inference test. The `example.py` can be like:
 
 ```python
 from vllm import LLM, SamplingParams
-
 prompts = [
     "Hello, my name is",
     "The future of AI is",
