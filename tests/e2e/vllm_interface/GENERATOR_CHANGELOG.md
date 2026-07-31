@@ -53,9 +53,21 @@ generator problem.
     installed into a class, while the temporary
     `current_platform.verify_quantization` write is an instance attribute and
     therefore has no installed descriptor kind.
-- Status: implementation tests pass (155 total); the refined fixed-source run,
-  independent audit, consumer UT update, and final output review are still
-  required before this checkpoint can be accepted.
+- Refined fixed-source run: the pinned source set generated in 330.4 seconds
+  with 971 relations and 60 findings.  All 971 edges exactly match v0.23;
+  the only additions are 15 supplemental `descriptor_kind_mismatch` reviews,
+  with no unknown descriptor and no generator issue.  Independent source
+  review confirmed every one of the 15 as a real binding difference (10
+  overrides and 5 patches), not an analyzer error.  The output SHA-256 is
+  `727710aa6c8229c71e3064f28f81764dda1f51e8420eef88da49f2cf5cf3d257`.
+- Independent coverage audit v0.5 still classifies all 1,019 candidates with
+  zero missing, conflicting, or generator-issue records and the same two
+  pre-existing auditor-only patch orphans.
+- Status: implementation tests pass (155 total).  The fixed mapping is exact
+  for the descriptor forms exercised by the pinned source, but broader
+  property accessor, wrapper-shadowing, and conditional descriptor red tests
+  are still required before this checkpoint can be accepted as the general
+  descriptor implementation.
 
 ## v0.23.0 - exact presence and missing-super checkpoint
 
