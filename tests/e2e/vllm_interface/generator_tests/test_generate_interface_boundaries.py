@@ -2162,6 +2162,1037 @@ if Selected is not None:
     assert not findings
 
 
+def test_cross_scope_same_name_guards_do_not_prune_reachable_helper_patch(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import base
+
+
+def replacement(self):
+    pass
+
+
+def _inner(owner, enabled):
+    if enabled:
+        owner.Target.run = replacement
+
+
+def install(enabled):
+    if not enabled:
+        _inner(base, True)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in patches
+    } == {
+        ("vllm/base.py", "Target", "run", "replacement"),
+    }
+    assert not findings
+
+
+def test_compound_non_none_guard_narrows_exact_optional_import(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+try:
+    from vllm.base import Target as Selected
+except ImportError:
+    Selected = None
+
+
+def replacement(self):
+    pass
+
+
+def install(enabled):
+    if Selected is not None and enabled:
+        Selected.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in patches
+    } == {
+        ("vllm/base.py", "Target", "run", "replacement"),
+    }
+    assert not findings
+
+
+def test_hasattr_does_not_prove_callable_defined_under_unknown_guard(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import os
+
+
+if os.getenv("ENABLE_OPTIONAL"):
+    def optional():
+        pass
+
+
+def run():
+    pass
+
+
+def fallback():
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement():
+    pass
+
+
+if hasattr(base, "optional"):
+    base.run = replacement
+else:
+    base.fallback = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 2
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in patches
+    } == {
+        ("vllm/base.py", None, "fallback", "replacement"),
+        ("vllm/base.py", None, "run", "replacement"),
+    }
+    assert all(evidence.guards for relation in patches for evidence in relation.evidence)
+    assert not findings
+
+
+def test_hasattr_does_not_treat_unexported_child_module_as_package_member(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/child.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def run(self):
+        pass
+
+    def fallback(self):
+        pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm
+from vllm.base import Target
+
+
+def replacement(self):
+    pass
+
+
+if hasattr(vllm, "child"):
+    Target.run = replacement
+else:
+    Target.fallback = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 2
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in patches
+    } == {
+        ("vllm/base.py", "Target", "fallback", "replacement"),
+        ("vllm/base.py", "Target", "run", "replacement"),
+    }
+    assert all(evidence.guards for relation in patches for evidence in relation.evidence)
+    assert not findings
+
+
+def test_negative_hasattr_for_different_member_does_not_hide_stale_patch(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/base.py", "class Target:\n    pass\n")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self):
+    pass
+
+
+if not hasattr(Target, "a"):
+    Target.b = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not relations
+    assert len(findings) == 1
+    assert findings[0].target_expression == "vllm.base.Target.b"
+    assert findings[0].status == "risk"
+    assert findings[0].reason_code == "possible_stale_patch"
+    assert not findings[0].generator_issue
+
+
+def test_matching_except_uses_state_at_explicit_raise(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, second
+
+
+def replacement(self):
+    pass
+
+
+def install():
+    owner = first
+    try:
+        owner = second
+        raise ValueError()
+    except ValueError:
+        owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in patches
+    } == {
+        ("vllm/second.py", "Target", "run", "replacement"),
+    }
+    assert not findings
+
+
+def test_with_return_stops_following_patch_scan(tmp_path: Path) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/dead.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from contextlib import nullcontext
+
+from vllm import dead
+
+
+def replacement(self):
+    pass
+
+
+def install():
+    with nullcontext():
+        return
+    dead.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not relations
+    assert not findings
+
+
+def test_unknown_reassignment_tombstones_old_import_owner(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/first.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first as owner
+
+
+def replacement(self):
+    pass
+
+
+def install(make_dynamic):
+    owner = make_dynamic()
+    owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not relations
+    assert len(findings) == 1
+    assert findings[0].status == "review"
+    assert findings[0].reason_code == "dynamic_patch_owner"
+    assert not findings[0].generator_issue
+
+
+def test_implicit_exception_uses_current_state_and_first_matching_handler(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second", "third"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, second, third
+
+
+def replacement(self):
+    pass
+
+
+def install(external_call):
+    owner = first
+    try:
+        owner = second
+        external_call()
+    except Exception:
+        owner.Target.run = replacement
+    except KeyError:
+        third.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.relation,
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "monkey_patch",
+        "vllm/second.py",
+        "Target",
+        "run",
+        "replacement",
+    )
+    guards = {guard for evidence in relation.evidence for guard in evidence.guards}
+    assert "except Exception" in guards
+    assert "except KeyError" not in guards
+    assert not findings
+
+
+def test_implicit_and_explicit_try_exits_reach_their_matching_handlers(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = """
+class Target:
+    def run(self):
+        pass
+
+    def fallback(self):
+        pass
+"""
+    for module in ("first", "second"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, second
+
+
+def replacement(self):
+    pass
+
+
+def install(may_raise):
+    owner = first
+    try:
+        owner = second
+        may_raise()
+        raise ValueError()
+    except TypeError:
+        owner.Target.run = replacement
+    except ValueError:
+        owner.Target.fallback = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 2
+    assert {
+        (
+            relation.upstream_file,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_name,
+        )
+        for relation in relations
+    } == {
+        ("vllm/second.py", "Target", "fallback", "replacement"),
+        ("vllm/second.py", "Target", "run", "replacement"),
+    }
+    guards_by_member = {
+        relation.upstream_name: {guard for evidence in relation.evidence for guard in evidence.guards}
+        for relation in relations
+    }
+    assert "except TypeError" in guards_by_member["run"]
+    assert "except ValueError" in guards_by_member["fallback"]
+    assert not findings
+
+
+def test_explicit_raise_matches_builtin_exception_base_before_exception(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("second", "third"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import second, third
+
+
+def replace_os_error(self):
+    pass
+
+
+def replace_exception(self):
+    pass
+
+
+def install():
+    owner = second
+    try:
+        raise FileNotFoundError()
+    except OSError:
+        owner.Target.run = replace_os_error
+    except Exception:
+        third.Target.run = replace_exception
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "vllm/second.py",
+        "Target",
+        "run",
+        "replace_os_error",
+    )
+    guards = {guard for evidence in relation.evidence for guard in evidence.guards}
+    assert "except OSError" in guards
+    assert "except Exception" not in guards
+    assert not findings
+
+
+def test_conditional_class_method_remains_a_guarded_patch_target(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import os
+
+
+class Target:
+    if os.getenv("ENABLE_OPTIONAL"):
+        def optional(self):
+            pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self):
+    pass
+
+
+if hasattr(Target, "optional"):
+    Target.optional = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.relation,
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "monkey_patch",
+        "vllm/base.py",
+        "Target",
+        "optional",
+        "replacement",
+    )
+    guards = {guard for evidence in relation.evidence for guard in evidence.guards}
+    assert any("hasattr" in guard and "optional" in guard for guard in guards)
+    assert not findings
+
+
+def test_with_nullcontext_as_owner_updates_state_after_with(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from contextlib import nullcontext
+
+from vllm import first, second
+
+
+def replacement(self):
+    pass
+
+
+def install():
+    owner = first
+    with nullcontext(second) as owner:
+        pass
+    owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "vllm/second.py",
+        "Target",
+        "run",
+        "replacement",
+    )
+    assert all(not evidence.guards for evidence in relation.evidence)
+    assert not findings
+
+
+def test_dynamic_with_owner_tombstones_old_import_inside_body(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/first.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first
+
+
+def replacement(self):
+    pass
+
+
+def install(factory):
+    owner = first
+    with factory() as owner:
+        owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not relations
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.target_expression == "vllm.first.Target.run"
+    assert finding.status == "review"
+    assert finding.reason_code == "dynamic_patch_owner"
+    assert not finding.generator_issue
+    assert any("with-context" in guard for guard in finding.evidence_guards)
+
+
+def test_unknown_owner_setattr_emits_dynamic_owner_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/first.py",
+        "class Target:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first
+
+
+def replacement(self):
+    pass
+
+
+def install(make_dynamic):
+    owner = first
+    owner = make_dynamic()
+    setattr(owner.Target, "run", replacement)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not relations
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.target_expression == "vllm.first.Target.run"
+    assert finding.status == "review"
+    assert finding.reason_code == "dynamic_patch_owner"
+    assert not finding.generator_issue
+
+
+def test_symbol_defined_in_both_unknown_if_arms_proves_hasattr_true(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import os
+
+
+if os.getenv("ENABLE_OPTIONAL"):
+    def optional():
+        pass
+else:
+    def optional():
+        pass
+
+
+def run():
+    pass
+
+
+def fallback():
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement():
+    pass
+
+
+if hasattr(base, "optional"):
+    base.run = replacement
+else:
+    base.fallback = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "vllm/base.py",
+        None,
+        "run",
+        "replacement",
+    )
+    assert all(not evidence.guards for evidence in relation.evidence)
+    assert not findings
+
+
+def test_symbol_defined_in_try_finally_proves_hasattr_true(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+try:
+    pass
+finally:
+    def optional():
+        pass
+
+
+def run():
+    pass
+
+
+def fallback():
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement():
+    pass
+
+
+if hasattr(base, "optional"):
+    base.run = replacement
+else:
+    base.fallback = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "vllm/base.py",
+        None,
+        "run",
+        "replacement",
+    )
+    assert all(not evidence.guards for evidence in relation.evidence)
+    assert not findings
+
+
+def test_suppress_restores_live_state_after_matching_raise(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from contextlib import suppress
+
+from vllm import first, second
+
+
+def replacement(self):
+    pass
+
+
+def install():
+    owner = first
+    with suppress(ValueError):
+        owner = second
+        raise ValueError()
+    owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert len(relations) == 1
+    relation = relations[0]
+    assert (
+        relation.upstream_file,
+        relation.upstream_owner,
+        relation.upstream_name,
+        relation.downstream_name,
+    ) == (
+        "vllm/second.py",
+        "Target",
+        "run",
+        "replacement",
+    )
+    assert all(not evidence.guards for evidence in relation.evidence)
+    assert not findings
+
+
+def test_latest_exact_owner_replaces_stale_dynamic_provenance(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    upstream_source = "class Target:\n    def run(self):\n        pass\n"
+    for module in ("first", "second"):
+        _write(vllm_root, f"vllm/{module}.py", upstream_source)
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, second
+
+
+def replacement(self):
+    pass
+
+
+def install(make_dynamic):
+    owner = first
+    owner = make_dynamic()
+    owner = second
+    owner = make_dynamic()
+    owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not relations
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.target_expression == "vllm.second.Target.run"
+    assert finding.status == "review"
+    assert finding.reason_code == "dynamic_patch_owner"
+    assert not finding.generator_issue
+
+
 def test_patch_scanner_reports_ambiguous_and_unsupported_patches(
     tmp_path: Path,
 ) -> None:

@@ -4,6 +4,74 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.17.0 - path-state and conditional-presence checkpoint
+
+- Starting commit: `b9e3cb64c2c80d9a7359fd8b2f6574f602aaf175`.
+- Problem: source dependencies could still disappear, use a stale owner, or
+  take an impossible path when guards crossed helper scopes; an optional
+  import was tested in a compound boolean; an upstream symbol was conditional;
+  a `raise` entered a handler; a `with` body terminated or rebound a name; a
+  dynamic value replaced an imported owner; or `setattr` used that dynamic
+  owner. Negative `hasattr` on one member could also hide a stale patch to a
+  different member.
+- Guard and condition change: replace plain guard strings internally with
+  scoped, activation-specific facts while retaining the same display strings
+  in JSON. Split `and`/`or` conditions in short-circuit order, narrow exact or
+  `None` alternatives on each feasible path, and attach canonical
+  owner/member identity to `hasattr` facts. Only a guard for the exact patched
+  target can classify an expected injection or inactive patch.
+- Presence change: index symbols as possible separately from those present on
+  every normally completing path. A callable below an unknown condition no
+  longer proves `hasattr` true; a child module existing on disk no longer
+  proves that its parent package exports it. Unknown `if` arms are intersected
+  for MUST bindings, `finally` bindings apply to every path, and conditional
+  class methods remain indexable without being labelled unconditional.
+- Flow change: helper and patch scans propagate live, return, raise, break, and
+  continue exits through exact `if`, `try`, `finally`, and `with` paths.
+  Explicit built-in exception inheritance is respected, ordered handlers do
+  not execute after an earlier covering handler, and a possible implicit
+  exception uses the state at the potentially raising statement instead of the
+  pre-`try` state. A known single `contextlib.suppress` restores only an exact
+  matching explicit raise path.
+- Binding change: represent exact, runtime-`None`, and unknown bindings
+  separately. Sequential exact assignment replaces stale provenance; branch
+  merge unions provenance. `nullcontext(value) as owner` binds the exact value,
+  another dynamic `with ... as owner` creates a tombstone, and both attribute
+  assignment and `setattr` emit
+  `review/dynamic_patch_owner` with `generator_issue=false` instead of
+  reverting to an old import or disappearing.
+- Reason: an exact missing upstream owner/member remains a real downstream
+  risk. A runtime-dynamic owner is an explicit manual review. Neither case is
+  rewritten as a generator issue merely to make the result look clean.
+- Regression evidence: nineteen new fixtures were first observed failing and
+  then passed, covering scoped guards, compound optional imports, conditional
+  `hasattr`, package exports, target-specific guards, explicit and implicit
+  exception paths, built-in exception inheritance, `with` termination and
+  bindings, dynamic `setattr`, all-path definitions, `finally`, `suppress`, and
+  latest-owner provenance. All 78 isolated generator/auditor tests pass; Ruff,
+  Ruff format, and `git diff --check` pass.
+- Fixed-source effect: two complete runs against vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`, vllm-ascend
+  `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0` took 149.170 and
+  148.948 seconds. Both produced 971 relations and 44 findings: 7 risk,
+  9 expected, 22 excluded, 6 verified, and zero generator issues. All relation
+  and finding semantics are identical to v0.16; the only relation-file change
+  is generator metadata.
+- Deterministic hashes for both runs: relations
+  `9c558e4d1761803f9f619ba5f24c4d7bb2f3af0e9b8549995ca7ca94de95cee8`,
+  findings
+  `f83164f52e5319ebb89f4ce5367ce4e511f586ce710cd200056f0f83dba6d6e7`,
+  and report
+  `e736a61fd26afc790c70eaa4fa26eafcce7721f38346ffdc33fc0ecc2df871e5`.
+- This remains an explicit rollback checkpoint, not final acceptance. A final
+  independent review reproduced the next boundaries: multiple conditional
+  definitions of the same method can collapse to one arbitrary signature or
+  owner; a statically safe call can create a false implicit-exception handler
+  edge; multi-manager `suppress`, namespaced same-name exceptions, terminal
+  paths in MUST analysis, and provenance after a `None` branch require another
+  iteration. The fixed-source pair does not prove those generic cases absent.
+
 ## v0.16.0 - preserve exact path state through helpers and termination
 
 - Starting commit: `c3643d25f2d9384ec13ef2bb54f92d8435f1449d`.
