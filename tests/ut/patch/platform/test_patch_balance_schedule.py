@@ -349,6 +349,25 @@ def test_balance_deltas_present_in_schedule():
     assert "if request_queue is None:" in src
 
 
+def test_get_computed_blocks_result_is_fully_unpacked():
+    """Keep the copied schedule body aligned with vLLM's 3-tuple API."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(BalanceScheduler.schedule)))
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "get_computed_blocks"
+    ]
+
+    assert len(assignments) == 1
+    target = assignments[0].targets[0]
+    assert isinstance(target, ast.Tuple)
+    assert len(target.elts) == 3
+    assert ast.unparse(target.elts[2]) == "request.shared_prefix_boundary"
+
+
 # ---------------------------------------------------------------------------
 # 1c. copied schedule() body stays verbatim with the pinned release tag
 # ---------------------------------------------------------------------------
