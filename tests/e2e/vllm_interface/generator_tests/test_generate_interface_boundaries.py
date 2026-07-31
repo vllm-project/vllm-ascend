@@ -5390,7 +5390,7 @@ if hasattr(Target, "run"):
         findings,
         target_expression="vllm.base.Target.run",
     )
-    assert any("hasattr" in guard for guard in findings[0].evidence_guards)
+    assert not findings[0].evidence_guards
 
 
 def test_v020_none_shadow_in_mro_does_not_invent_root_override(
