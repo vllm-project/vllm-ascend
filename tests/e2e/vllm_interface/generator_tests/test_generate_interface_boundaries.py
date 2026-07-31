@@ -5100,3 +5100,608 @@ def install():
     assert len(patches) == 1
     assert all(not evidence.guards for evidence in patches[0].evidence)
     assert not findings
+
+
+def _v020_assert_conditional_callable_presence(
+    relations: list[generator.Relation],
+    findings: list[generator.UnresolvedRelation],
+    *,
+    target_expression: str,
+    downstream_owner: str | None = None,
+) -> None:
+    assert not [relation for relation in relations if relation.relation in {"monkey_patch", "override"}]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert (
+        finding.relation,
+        finding.downstream_owner,
+        finding.downstream_name,
+        finding.target_expression,
+        finding.status,
+        finding.reason_code,
+        finding.generator_issue,
+    ) == (
+        "override" if downstream_owner else "monkey_patch",
+        downstream_owner,
+        "run" if downstream_owner else "replacement",
+        target_expression,
+        "review",
+        "conditional_callable_presence",
+        False,
+    )
+
+
+def test_v020_class_callable_or_none_is_presence_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    if feature_enabled():
+        def run(self, value):
+            return value
+    else:
+        run = None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self, value):
+    return value
+
+
+Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    _v020_assert_conditional_callable_presence(
+        relations,
+        findings,
+        target_expression="vllm.base.Target.run",
+    )
+
+
+def test_v020_module_callable_or_none_is_presence_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+if feature_enabled():
+    def run(value):
+        return value
+else:
+    run = None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    _v020_assert_conditional_callable_presence(
+        relations,
+        findings,
+        target_expression="vllm.base.run",
+    )
+
+
+def test_v020_class_callable_or_absent_is_presence_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    if feature_enabled():
+        def run(self, value):
+            return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self, value):
+    return value
+
+
+Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    _v020_assert_conditional_callable_presence(
+        relations,
+        findings,
+        target_expression="vllm.base.Target.run",
+    )
+
+
+def test_v020_module_callable_or_absent_is_presence_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+if feature_enabled():
+    def run(value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    _v020_assert_conditional_callable_presence(
+        relations,
+        findings,
+        target_expression="vllm.base.run",
+    )
+
+
+def test_v020_exact_hasattr_selects_callable_from_absent_module_path(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+if feature_enabled():
+    def run(value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value):
+    return value
+
+
+if hasattr(base, "run"):
+    base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_file,
+        patches[0].upstream_owner,
+        patches[0].upstream_name,
+        patches[0].upstream_signature,
+    ) == (
+        "vllm/base.py",
+        None,
+        "run",
+        _v019_run_signature(("value", True)),
+    )
+    assert any("hasattr" in guard and "run" in guard for evidence in patches[0].evidence for guard in evidence.guards)
+    assert not findings
+
+
+def test_v020_exact_hasattr_does_not_prove_callable_against_none(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    if feature_enabled():
+        def run(self, value):
+            return value
+    else:
+        run = None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self, value):
+    return value
+
+
+if hasattr(Target, "run"):
+    Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    _v020_assert_conditional_callable_presence(
+        relations,
+        findings,
+        target_expression="vllm.base.Target.run",
+    )
+    assert any("hasattr" in guard for guard in findings[0].evidence_guards)
+
+
+def test_v020_none_shadow_in_mro_does_not_invent_root_override(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Root:
+    def run(self, root_value):
+        return root_value
+
+
+class Base(Root):
+    if feature_enabled():
+        def run(self, base_value):
+            return base_value
+    else:
+        run = None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = [relation for relation in relations if relation.relation == "override"]
+    assert not overrides
+    _v020_assert_conditional_callable_presence(
+        relations,
+        findings,
+        target_expression="vllm.base.Base.run",
+        downstream_owner="Child",
+    )
+
+
+def test_v020_plain_definition_does_not_activate_unreachable_handler_variant(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    try:
+        def run(self, value):
+            return value
+    except ValueError:
+        def run(self, value, context):
+            return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(self, value):
+    return value
+
+
+Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert patches[0].upstream_signature == _v019_run_signature(
+        ("self", True),
+        ("value", True),
+    )
+    assert not findings
+
+
+def test_v020_unmatched_raise_makes_later_module_endpoints_unreachable(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/dead.py",
+        """
+try:
+    raise ValueError()
+except ImportError:
+    pass
+
+
+def run(value):
+    return value
+
+
+class Target:
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.dead as dead
+
+
+def replacement(*args):
+    return args
+
+
+dead.run = replacement
+dead.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert {
+        (
+            finding.target_expression,
+            finding.status,
+            finding.reason_code,
+            finding.generator_issue,
+        )
+        for finding in findings
+    } == {
+        (
+            "vllm.dead.run",
+            "risk",
+            "possible_stale_patch",
+            False,
+        ),
+        (
+            "vllm.dead.Target.run",
+            "risk",
+            "possible_stale_patch",
+            False,
+        ),
+    }
+
+
+def test_v020_try_definition_survives_every_normally_completing_path(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Root:
+    def run(self, root_value):
+        return root_value
+
+
+class Base(Root):
+    try:
+        def run(self, base_value):
+            return base_value
+        may_raise()
+    except Exception:
+        pass
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = [relation for relation in relations if relation.relation == "override"]
+    assert len(overrides) == 1
+    assert (
+        overrides[0].upstream_owner,
+        overrides[0].upstream_name,
+        overrides[0].upstream_signature,
+    ) == (
+        "Base",
+        "run",
+        _v019_run_signature(("self", True), ("base_value", True)),
+    )
+    assert not findings
+
+
+def test_v020_handler_uses_state_at_exact_throwing_statement(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    for module in ("first", "second", "third"):
+        _write_run_target(vllm_root, module)
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, second, third
+
+
+def replacement(self):
+    pass
+
+
+def install():
+    owner = first
+    try:
+        owner = second
+        raise ValueError()
+        owner = third
+    except ValueError:
+        owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_file,
+        patches[0].upstream_owner,
+        patches[0].upstream_name,
+    ) == (
+        "vllm/second.py",
+        "Target",
+        "run",
+    )
+    assert {guard for evidence in patches[0].evidence for guard in evidence.guards} == {"except ValueError"}
+    assert not findings
+
+
+def test_v020_first_matching_exception_handler_consumes_exact_raise(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    for module in ("first", "second", "initial"):
+        _write_run_target(vllm_root, module)
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import first, initial, second
+
+
+def replacement(self):
+    pass
+
+
+def install():
+    owner = initial
+    try:
+        raise FileNotFoundError()
+    except OSError:
+        owner = first
+    except Exception:
+        owner = second
+    owner.Target.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert (
+        patches[0].upstream_file,
+        patches[0].upstream_owner,
+        patches[0].upstream_name,
+    ) == (
+        "vllm/first.py",
+        "Target",
+        "run",
+    )
+    assert not findings
