@@ -60,13 +60,13 @@ class LayerBatchBuilder:
         )
         group_block_stride = token_database.group_block_stride.get(group_id, token_database.group_block_len[group_id])
         self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        layer_offsets = token_database.group_layer_offsets.get(group_id)
-        if layer_offsets is None:
+        layer_cache_entry_offsets = token_database.group_layer_cache_entry_offsets.get(group_id)
+        if layer_cache_entry_offsets is None:
             caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
-            layer_offsets = [
+            layer_cache_entry_offsets = [
                 min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)
             ]
-        self._layer_offsets_np = np.asarray(layer_offsets, dtype=np.int64)
+        self._layer_cache_entry_offsets_np = np.asarray(layer_cache_entry_offsets, dtype=np.int64)
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
@@ -105,8 +105,8 @@ class LayerBatchBuilder:
         base_gvas_arr: np.ndarray,
         layer_id: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        base_offset = int(self._layer_offsets_np[layer_id])
-        end_offset = int(self._layer_offsets_np[layer_id + 1])
+        base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
+        end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
         layer_base_addrs = self._kv_caches_base_addr_np[base_offset:end_offset]
         layer_block_len = self._block_len_np[base_offset:end_offset]
         layer_block_stride = self._block_stride_np[base_offset:end_offset]
@@ -240,11 +240,11 @@ class LayerBatchBuilder:
 
             if block_range.partial_block_index is not None:
                 partial_block_gva = None
-                partial_gvas_by_group = (
-                    request.partial_save_gvas_by_group if is_save else request.partial_load_gvas_by_group
+                partial_gva_per_group = (
+                    request.partial_save_gva_per_group if is_save else request.partial_load_gva_per_group
                 )
-                if task.group_id < len(partial_gvas_by_group):
-                    partial_block_gva = partial_gvas_by_group[task.group_id]
+                if task.group_id < len(partial_gva_per_group):
+                    partial_block_gva = partial_gva_per_group[task.group_id]
                 if partial_block_gva is None:
                     partial_block_gva = request.last_block_gva
                 assert partial_block_gva is not None

@@ -733,6 +733,7 @@ class KVPoolScheduler:
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
+            hash_block_size=self.hash_block_size,
         )
 
     def _process_new_request(
@@ -942,6 +943,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
+            hash_block_size=self.hash_block_size,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:

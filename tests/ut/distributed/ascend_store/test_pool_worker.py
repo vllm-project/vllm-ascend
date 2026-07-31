@@ -1703,7 +1703,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         assert save_request.save_keys is not None
         partial_key = save_request.save_keys[0]
         self.assertIn("@partial@r1@0@1@20@", partial_key)
-        self.assertEqual(save_request.partial_save_gvas_by_group, [101])
+        self.assertEqual(save_request.partial_save_gva_per_group, [101])
         save_range = worker.layer_save_tasks[1][0].block_ranges[0]
         self.assertEqual(save_range.partial_block_index, 1)
 
@@ -1741,7 +1741,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertIn(partial_key, queried_keys)
         self.assertNotIn(partial_key, worker._allocated_gvas)
-        self.assertEqual(load_request.partial_load_gvas_by_group, [202])
+        self.assertEqual(load_request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.layer_load_tasks[0], [])
         block_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual(
@@ -1815,7 +1815,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
         sleep.assert_called_once()
         self.assertEqual(request.load_keys, [worker._make_layerwise_gva_key(0, "h0"), partial_key])
-        self.assertEqual(request.partial_load_gvas_by_group, [202])
+        self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
     def test_multi_group_load_failure_stops_before_forward(self):
@@ -1892,8 +1892,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 kvpool_cached_tokens=33,
                 can_load=True,
             ),
-            partial_save_gvas_by_group=[301],
-            partial_load_gvas_by_group=[302],
+            partial_save_gva_per_group=[301],
+            partial_load_gva_per_group=[302],
         )
 
         worker._process_save_for_layer_batch([request], 1)
