@@ -6,7 +6,7 @@ import torch
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
@@ -127,6 +127,28 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
             self.assertRaisesRegex(AssertionError, re.escape(expected_message)),
         ):
             self.method.process_weights_after_loading(layer)
+
+    @patch("torch_npu.npu_format_cast")
+    @patch("torch_npu.npu_convert_weight_to_int4pack")
+    def test_process_per_channel_kimi_shared_expert_weight_to_nz(self, mock_int4pack, mock_format_cast):
+        self.method._uses_kimi_k3_shared_expert_per_channel = True
+        packed_weight = torch.zeros((8, 4), dtype=torch.int32)
+        nz_weight = torch.ones((8, 4), dtype=torch.int32)
+        mock_int4pack.return_value = packed_weight
+        mock_format_cast.return_value = nz_weight
+        layer = torch.nn.Module()
+        layer.prefix = "model.layers.0.mlp.shared_experts.gate_up_proj"
+        layer.weight = torch.nn.Parameter(torch.zeros((32, 8), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.bfloat16), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.bfloat16), requires_grad=False)
+
+        self.method.process_weights_after_loading(layer)
+
+        mock_int4pack.assert_called_once()
+        mock_format_cast.assert_called_once_with(packed_weight, ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(layer.weight.data.data_ptr(), nz_weight.data_ptr())
+        self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
+        self.assertEqual(layer.weight_scale_fp32.shape, torch.Size([32]))
 
 
 class TestAscendW4A8DynamicLinearMethodWithNpu(TestBase):

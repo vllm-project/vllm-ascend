@@ -29,7 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
@@ -95,8 +95,15 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
+        self._uses_kimi_k3_shared_expert_per_channel = (
+            getattr(getattr(getattr(vllm_config, "model_config", None), "hf_config", None), "model_type", None)
+            == "kimi_k3"
+        )
 
         self.tp_size = get_tensor_model_parallel_world_size()
+
+    def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
+        return self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Create weight parameters.
@@ -191,10 +198,29 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
+        uses_per_channel_shared_expert = self._uses_per_channel_shared_expert(layer)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten().to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+
+        if uses_per_channel_shared_expert:
+            # Kimi K3 shared experts use per-channel W4A8. Their overlap path
+            # calls npu_quant_matmul directly, so prepare its packed int4
+            # weight in FRACTAL_NZ once after loading instead of casting on
+            # every forward. The per-group tensors, if allocated by the
+            # generic Linear adapter, are intentionally not consumed here.
+            if self.new_quant_version:
+                assert layer.weight.data.shape[-1] % 4 == 0, (
+                    f"the last dim of weight needs to be divided by 4 but got shape {layer.weight.data.shape}"
+                )
+                layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
+            else:
+                layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
+            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+            return
+
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale_second.data, scale_bias = self.process_scale_second(
             layer.weight.data,
             layer.weight_scale.data,

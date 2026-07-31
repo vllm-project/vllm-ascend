@@ -781,7 +781,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._shared_experts.down_proj, "weight_scale"
             )
             shared_uses_situ = isinstance(self._shared_experts.act_fn, AscendSituAndMul)
-            if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            # Kimi K3 shared experts use per-channel W4A8. Their W4 weights
+            # are int4pack tensors prepared in FRACTAL_NZ during loading and
+            # expose weight_scale_fp32. Keep generic per-group W4A8 Linear
+            # modules on the split fallback path.
+            has_per_channel_w4a8_shared = self.quant_type == QuantType.W4A8 and all(
+                hasattr(proj, "weight_scale_fp32")
+                for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
+            )
+            if has_quantized_shared and (self.quant_type == QuantType.W8A8 or has_per_channel_w4a8_shared):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
