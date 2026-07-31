@@ -81,6 +81,8 @@ jobs:
           UPSTREAM_SHA=$(git rev-parse origin/main)
           USE_BASELINE=false
 
+          # Attempt incremental mode: carry forward previous adaptation commits
+          # by rebasing main2main_baseline onto this run's fixed upstream SHA.
           if git fetch "https://github.com/${HEAD_FORK}.git" \
             "refs/heads/main2main_baseline:refs/remotes/main2main/main2main_baseline" 2>/dev/null; then
             BASELINE_SHA=$(git rev-parse refs/remotes/main2main/main2main_baseline)
@@ -101,6 +103,9 @@ jobs:
             fi
           fi
 
+          # Fresh mode starts directly from the fixed upstream SHA when no
+          # baseline exists, the target vLLM commit predates the baseline's
+          # verified vLLM commit, or the rebase conflicts.
           if [ "$USE_BASELINE" = true ]; then
             {
               echo "source_repository=$HEAD_FORK"
@@ -329,19 +334,26 @@ jobs:
         id: branch
         working-directory: ${{ github.workspace }}
         env:
-          FIXED_BASE_REF: ${{ needs.resolve-source.outputs.base_ref }}
-          FIXED_BASE_SHA: ${{ needs.resolve-source.outputs.base_sha }}
+          # The ref identifies what to fetch; the SHA fixes the exact commit
+          # used as the incremental-mode rebase base.
+          UPSTREAM_FETCH_REF: ${{ needs.resolve-source.outputs.base_ref }}
+          UPSTREAM_REBASE_SHA: ${{ needs.resolve-source.outputs.base_sha }}
+          CHECKOUT_SOURCE_SHA: ${{ needs.resolve-source.outputs.source_ref }}
         run: |
           set -eu
           BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
+          UPSTREAM_BASE_SHA="${UPSTREAM_REBASE_SHA:-$CHECKOUT_SOURCE_SHA}"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
           git checkout -B "$BRANCH"
-          if [ -n "$FIXED_BASE_SHA" ]; then
-            git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
-              git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-            git fetch upstream "$FIXED_BASE_REF"
-            git cat-file -e "${FIXED_BASE_SHA}^{commit}"
-            git rebase "$FIXED_BASE_SHA"
+          if [ -n "$UPSTREAM_REBASE_SHA" ]; then
+            git fetch upstream "$UPSTREAM_FETCH_REF"
+            git rebase "$UPSTREAM_REBASE_SHA"
           fi
+          git cat-file -e "${UPSTREAM_BASE_SHA}^{commit}"
+          # main2main_flow uses upstream/main as its squash baseline. Keep the
+          # ref on the resolved snapshot instead of fetching a moving main.
+          git update-ref refs/remotes/upstream/main "$UPSTREAM_BASE_SHA"
           BASE_SHA=$(git rev-parse HEAD)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"

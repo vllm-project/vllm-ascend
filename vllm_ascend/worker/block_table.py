@@ -8,7 +8,6 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.utils import vllm_version_is
 
 
 class BlockTable:
@@ -163,14 +162,10 @@ class BlockTable:
                 "PAD_ID": PAD_SLOT_ID,
                 "BLOCK_SIZE": 1024,
             }
-            if not vllm_version_is("0.25.1"):
-                # vLLM #40996 split physical KV blocks into kernel blocks in
-                # the slot-mapping kernel. These are required constexprs on
-                # main; the v0.25.1 kernel does not accept them.
-                kernel_kwargs.update(
-                    KV_CACHE_BLOCK_SIZE=self.physical_block_size,
-                    BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
-                )
+            kernel_kwargs.update(
+                KV_CACHE_BLOCK_SIZE=self.physical_block_size,
+                BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
+            )
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
                 num_tokens,
                 self.max_num_batched_tokens,

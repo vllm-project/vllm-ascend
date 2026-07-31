@@ -42,10 +42,10 @@
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
-#include "attention/ngram_spec_decode/ngram_spec_decode_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include <c10/core/Device.h>
@@ -2712,15 +2712,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
-    // N-gram spec decode
-    ops.def(
-        "npu_ngram_spec_decode(Tensor(a!) token_ids, Tensor num_tokens_no_spec, "
-        "Tensor sampled_token_ids, Tensor discard_request_mask, "
-        "int vocab_size, int min_n, int max_n, int k) -> "
-        "(Tensor token_ids, Tensor next_token_ids, Tensor draft_token_ids, Tensor num_valid_draft_tokens)"
-    );
-    ops.impl("npu_ngram_spec_decode", torch::kPrivateUse1,
-             &vllm_ascend::npu_ngram_spec_decode);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
@@ -2743,5 +2734,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
+
+    ops.def(
+        "npu_sparse_attention_score("
+        "Tensor query, Tensor key, Tensor value, Tensor select_idx, "
+        "Tensor block_table, *, "
+        "Tensor? select_num_idx=None, "
+        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
+        "Tensor? v_dequant_scale=None, "
+        "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
+        "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
+        "int num_key_value_heads=1, float scale_value=1.0, "
+        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+    );
+    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_attention_score);
 }
 #endif

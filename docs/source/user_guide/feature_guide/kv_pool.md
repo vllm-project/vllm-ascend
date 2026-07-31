@@ -1,4 +1,4 @@
-# KV Cache Pool（Ascend Store）Deployment Guide
+# KV Cache Pool (Ascend Store) Deployment Guide
 
 ## Contents
 
@@ -38,6 +38,7 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
 | `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
 | `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
+| `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
 | `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
 
@@ -59,6 +60,7 @@ export PYTHONHASHSEED=0
         ```bash
         cat /etc/hccn.conf
         ```
+
         For A5 series, additionally mount:
         * devices: `/dev/ummu`, `/dev/uburma`
         * commands: `/usr/bin/urma_admin`
@@ -111,12 +113,12 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 }
 ```
 
-**metadata_server**: Configured as **P2PHANDSHAKE**.  
+**metadata_server**: Configured as **P2PHANDSHAKE**.
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
-**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.
 **prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
 #### 2. Start mooncake_master
@@ -213,7 +215,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                     "lookup_rpc_port":"0",
                     "backend": "mooncake"
                 }
-            }  
+            }
         ]
     }
     }'
@@ -476,7 +478,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the MemFabric is installed.**
+**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the MemFabric is installed.**
 
 ```shell
 pip install memfabric-hybrid

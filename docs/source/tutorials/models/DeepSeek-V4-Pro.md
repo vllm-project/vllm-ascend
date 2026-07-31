@@ -23,7 +23,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 (128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)
+- `DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -133,7 +133,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Multi-Node Online Deployment
 
-The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 (128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Run the following scripts on each node respectively.
+The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. Run the following scripts on each node respectively.
 
 === "A2 series"
 
@@ -188,7 +188,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
-      --async-scheduling \
       --safetensors-load-strategy 'prefetch' \
       --block-size 128 \
       --speculative-config '{
@@ -265,7 +264,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
-      --async-scheduling \
       --safetensors-load-strategy 'prefetch' \
       --block-size 128 \
       --headless \
@@ -336,7 +334,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --port 8900 \
       --host 0.0.0.0 \
       --block-size 128 \
-      --async-scheduling \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --tokenizer-mode deepseek_v4 \
       --tool-call-parser deepseek_v4 \
@@ -395,7 +392,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --port 8900 \
       --host 0.0.0.0 \
       --block-size 128 \
-      --async-scheduling \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --tokenizer-mode deepseek_v4 \
       --tool-call-parser deepseek_v4 \
@@ -419,7 +415,6 @@ Key Parameter Descriptions:
 - `--max-model-len` specifies the maximum context length. Adjust it according to your actual scenario.
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
@@ -452,11 +447,11 @@ We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggrega
 
 In the standard deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) separation addresses this by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128G × 8) and Atlas 800 A2 (64G × 8) multi-node environments.
+The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 A3 (128G × 8) multi-node environment with 1P1D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 A3 (128GB × 8) multi-node environment with 1P1D for better performance.
 
 Before you start, please:
 
@@ -755,7 +750,6 @@ Before you start, please:
             --max-model-len 131072 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
-            --async-scheduling \
             --block-size 128 \
             --no-enable-prefix-caching \
             --tokenizer-mode deepseek_v4 \
@@ -832,7 +826,7 @@ Before you start, please:
 
 #### 5.2.2 A2 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 A2 (64G × 8) multi-node environment with 1P1D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Pro on Atlas 800 A2 (64GB × 8) multi-node environment with 1P1D for better performance.
 
 Before you start, please:
 
@@ -1061,7 +1055,6 @@ Before you start, please:
             --max-model-len 133072 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
-            --async-scheduling \
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --trust-remote-code \
@@ -1209,8 +1202,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (128G × 8) |
-| GSM8K | - | accuracy | gen | 96.21 | 1 Atlas 800 A3 (128G × 8) |
+| GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 96.21 | 1 Atlas 800 A3 (128GB × 8) |
 
 ## 8 Performance Evaluation
 

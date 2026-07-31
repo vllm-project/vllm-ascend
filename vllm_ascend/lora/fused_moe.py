@@ -181,7 +181,7 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
     if int(envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2) != 0:
         raise AssertionError(
             "Ascend MoE LoRA cannot patch FusedMC2 path "
-            "(dispatch_ffn_combine is a single fused C++ op). "
+            "(dispatch_ffn_combine/mega_moe is a single fused C++ op). "
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:

@@ -2,15 +2,27 @@ import gc
 
 import pytest
 import torch
-from vllm.v1.sample.rejection_sampler import rejection_random_sample_kernel as original_rejection_random_sample_kernel
 
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
+    expand_kernel,
+    rejection_greedy_sample_spec_len_1_triton,
+    rejection_greedy_sample_triton,
     rejection_random_sample_block_verify_kernel,
     rejection_random_sample_kernel,
+    sample_recovered_tokens_kernel,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.sample.rejection_sampler import rejection_random_sample_block_verify_pytorch
+from vllm_ascend.sample.rejection_sampler import (
+    expand_pytorch,
+    rejection_greedy_sample_pytorch,
+    rejection_greedy_sample_spec_len_1_pytorch,
+    rejection_random_sample_block_verify_pytorch,
+    rejection_random_sample_pytorch,
+    sample_recovered_tokens_pytorch,
+)
+
+KERNEL_TEST_ITERS = 1
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -19,12 +31,128 @@ def setup_device_properties():
     yield
 
 
-@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
+@torch.inference_mode()
+def test_expand_kernel():
+    device = "npu"
+    batch_size = 5
+    max_num_tokens = 3
+
+    x = torch.tensor([4.0, -1.0, -1.0, 7.0, 8.0], dtype=torch.float32, device=device)
+    cu_num_tokens = torch.tensor([2, 2, 5, 6, 9], dtype=torch.int32, device=device)
+    output = torch.full((9,), -5.0, dtype=torch.float32, device=device)
+    grid, block_size = cal_grid_and_block_size(batch_size)
+
+    for i in range(KERNEL_TEST_ITERS):
+        output_ref = output.clone()
+        output_triton = output.clone()
+
+        expand_pytorch(
+            output_ref,
+            x,
+            cu_num_tokens,
+            -1.0,
+            99.0,
+            MAX_NUM_TOKENS=max_num_tokens,
+        )
+        expand_kernel[(grid,)](
+            output_triton,
+            x,
+            cu_num_tokens,
+            -1.0,
+            99.0,
+            batch_size,
+            MAX_NUM_TOKENS=max_num_tokens,
+            BLOCK_SIZE=block_size,
+        )
+        torch.npu.synchronize()
+        assert torch.equal(output_ref, output_triton), f"iteration {i}"
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_sample_recovered_tokens_kernel():
+    device = "npu"
+    batch_size = 4
+    max_spec_len = 3
+    vocab_size = 5
+
+    cu_num_draft_tokens = torch.tensor([2, 2, 5, 6], dtype=torch.int32, device=device)
+    draft_token_ids = torch.tensor([1, 3, 0, 2, 4, 1], dtype=torch.int64, device=device)
+    draft_probs = torch.tensor(
+        [
+            [0.05, 0.10, 0.10, 0.10, 0.10],
+            [0.01, 0.01, 0.01, 0.01, 0.01],
+            [0.05, 0.05, 0.05, 0.05, 0.05],
+            [0.10, 0.09, 0.19, 0.29, 0.39],
+            [0.09, 0.10, 0.19, 0.29, 0.39],
+            [0.09, 0.19, 0.29, 0.39, 0.10],
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    target_probs = torch.tensor(
+        [
+            [0.10, 0.20, 0.90, 0.15, 0.12],
+            [0.02, 0.02, 0.02, 0.03, 0.70],
+            [0.10, 0.20, 0.30, 0.80, 0.40],
+            [0.90, 0.10, 0.20, 0.30, 0.40],
+            [0.10, 0.90, 0.20, 0.30, 0.40],
+            [0.10, 0.20, 0.30, 0.40, 0.95],
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    q = torch.ones((batch_size, vocab_size), dtype=torch.float32, device=device)
+    output_token_ids = torch.full_like(draft_token_ids, -1)
+
+    for i in range(KERNEL_TEST_ITERS):
+        output_token_ids_ref = output_token_ids.clone()
+        output_token_ids_triton = output_token_ids.clone()
+
+        sample_recovered_tokens_pytorch(
+            output_token_ids_ref,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            q,
+            vocab_size,
+            IS_NGRAM=False,
+            target_indices=None,
+            enable_reduce_sampling=False,
+        )
+        sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
+            output_token_ids_triton,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            None,
+            q,
+            vocab_size,
+            vocab_size,
+            NO_DRAFT_PROBS=False,
+            ENABLE_REDUCE_SAMPLING=False,
+            SUB_BLOCK=8,
+            VOCAB_BLOCK_SIZE=8,
+        )
+        torch.npu.synchronize()
+        assert torch.equal(output_token_ids_ref, output_token_ids_triton), f"iteration {i}"
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("synthetic_mode", [False, True])
 @pytest.mark.parametrize("max_spec_len", [1, 2, 3])
 @pytest.mark.parametrize("vocab_size", [1024])
 @pytest.mark.parametrize("batch_size", [1, 256, 512, 1024])
 @torch.inference_mode()
-def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
+def test_rejection_random_sample(synthetic_mode, max_spec_len, vocab_size, batch_size):
     device = "npu"
     torch.manual_seed(0)
     draft_probs = torch.rand(batch_size * max_spec_len, vocab_size, dtype=torch.float32, device=device)
@@ -33,8 +161,8 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
     draft_token_ids = torch.randint(
         low=0, high=vocab_size, size=(batch_size * max_spec_len,), dtype=torch.int64, device=device
     )
-    output_token_ids = torch.empty((batch_size, max_spec_len + 1), dtype=torch.int64, device=device)
-    original_output_token_ids = output_token_ids.clone()
+    output_token_ids = torch.full((batch_size, max_spec_len + 1), -1, dtype=torch.int64, device=device)
+    output_token_ids_ref = output_token_ids.clone()
     num_tokens = draft_token_ids.shape[0]
     uniform_probs = torch.rand((num_tokens,), dtype=torch.float32, device=device)
     num_draft_tokens = [max_spec_len] * batch_size
@@ -43,9 +171,19 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
     is_greedy_ptr = torch.full((batch_size,), False, dtype=torch.bool, device=device)
     recovered_ids = torch.zeros_like(draft_token_ids, dtype=torch.int64, device=device)
     grid, block_size = cal_grid_and_block_size(batch_size)
-    synthetic_conditional_rates = None
-    original_rejection_random_sample_kernel[(batch_size,)](
-        original_output_token_ids,
+    # Synthetic mode accepts each draft token at position i with probability
+    # rates[i], bypassing the draft/target prob comparison. The rates must be
+    # length == max_spec_len and (per vLLM config validation) non-increasing.
+    if synthetic_mode:
+        synthetic_conditional_rates = torch.tensor(
+            [0.9 - 0.3 * i for i in range(max_spec_len)],
+            dtype=torch.float32,
+            device=device,
+        )
+    else:
+        synthetic_conditional_rates = None
+    rejection_random_sample_pytorch(
+        output_token_ids_ref,
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
@@ -56,9 +194,9 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
         is_greedy_ptr,
         max_spec_len,
         vocab_size,
-        synthetic_conditional_rates,
-        NO_DRAFT_PROBS=draft_probs is None,
-        SYNTHETIC_MODE=False,
+        IS_NGRAM=draft_probs is None,
+        synthetic_mode=synthetic_mode,
+        synthetic_conditional_rates=synthetic_conditional_rates,
     )
     rejection_random_sample_kernel[(grid,)](
         output_token_ids,
@@ -66,18 +204,154 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
         draft_token_ids,
         draft_probs,
         target_probs,
+        None,  # target_indices
         bonus_token_ids,
         recovered_ids,
         uniform_probs,
         is_greedy_ptr,
         max_spec_len,
         vocab_size,
+        vocab_size,  # global_vocab_size
         batch_size,
+        None,  # ori_target_probs
+        synthetic_conditional_rates,  # synthetic_conditional_rates (None when off)
+        NO_ORI_TARGET_PROBS=True,
         NO_DRAFT_PROBS=draft_probs is None,
+        ENABLE_REDUCE_SAMPLING=False,
+        SYNTHETIC_MODE=synthetic_mode,
+        ENTROPY_VERIFY=False,
         BLOCK_SIZE=block_size,
     )
     torch.npu.synchronize()
-    assert torch.equal(original_output_token_ids, output_token_ids)
+    assert torch.equal(output_token_ids_ref, output_token_ids), f"synthetic_mode={synthetic_mode}"
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("synthetic_mode", [False, True])
+@torch.inference_mode()
+def test_rejection_greedy_sample_spec_len_1_triton_kernel(synthetic_mode):
+    device = "npu"
+    batch_size = 5
+
+    draft_token_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device=device)
+    target_argmax = torch.tensor([1, 0, 3, 7, 5], dtype=torch.int64, device=device)
+    bonus_token_ids = torch.tensor([[11], [12], [13], [14], [15]], dtype=torch.int64, device=device)
+    output_token_ids = torch.full((batch_size, 2), -1, dtype=torch.int64, device=device)
+    grid, block_size = cal_grid_and_block_size(batch_size)
+
+    # Synthetic mode accepts position 0 with prob rates[0] (uniform < rate),
+    # independent of the target match. Mix accept/reject across the batch:
+    # u=[0.3,0.6,0.4,0.7,0.2], rate=0.5 -> accept,reject,accept,reject,accept.
+    if synthetic_mode:
+        uniform_probs_t = torch.tensor([0.3, 0.6, 0.4, 0.7, 0.2], dtype=torch.float32, device=device)
+        rates_t = torch.tensor([0.5], dtype=torch.float32, device=device)
+    else:
+        uniform_probs_t = None
+        rates_t = None
+
+    for i in range(KERNEL_TEST_ITERS):
+        output_token_ids_ref = output_token_ids.clone()
+        output_token_ids_triton = output_token_ids.clone()
+
+        rejection_greedy_sample_spec_len_1_pytorch(
+            output_token_ids_ref,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            uniform_probs=uniform_probs_t,
+            synthetic_conditional_rates=rates_t,
+            synthetic_mode=synthetic_mode,
+        )
+        rejection_greedy_sample_spec_len_1_triton[(grid,)](
+            output_token_ids_triton,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            batch_size,
+            uniform_probs_t,
+            rates_t,
+            SYNTHETIC_MODE=synthetic_mode,
+            BLOCK_SIZE=block_size,
+        )
+        torch.npu.synchronize()
+        assert torch.equal(output_token_ids_ref, output_token_ids_triton), (
+            f"iteration {i}, synthetic_mode={synthetic_mode}"
+        )
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("synthetic_mode", [False, True])
+@torch.inference_mode()
+def test_rejection_greedy_sample_triton_kernel(synthetic_mode):
+    device = "npu"
+    batch_size = 6
+    max_spec_len = 3
+    draft_tokens_per_req = [3, 2, 1, 0, 3, 2]
+
+    cu_num_draft_tokens = torch.tensor([3, 5, 6, 6, 9, 11], dtype=torch.int32, device=device)
+    draft_token_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], dtype=torch.int64, device=device)
+    target_argmax = torch.tensor([1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11], dtype=torch.int64, device=device)
+    bonus_token_ids = torch.tensor([[21], [22], [23], [24], [25], [26]], dtype=torch.int64, device=device)
+    is_greedy = torch.ones(batch_size, dtype=torch.bool, device=device)
+    output_token_ids = torch.full((batch_size, max_spec_len + 1), -1, dtype=torch.int64, device=device)
+    grid, block_size = cal_grid_and_block_size(batch_size)
+
+    # Synthetic: rates = [0.8, 0.5, 0.2] (non-increasing). The 11 uniform
+    # values mix accepts/rejects to exercise first-rejection: a rejected
+    # position emits target_argmax and stops the request; all-accepted
+    # requests append the bonus token.
+    if synthetic_mode:
+        uniform_probs_t = torch.tensor(
+            [0.2, 0.4, 0.1, 0.6, 0.3, 0.9, 0.1, 0.7, 0.3, 0.1, 0.5],
+            dtype=torch.float32,
+            device=device,
+        )
+        rates_t = torch.tensor([0.8, 0.5, 0.2], dtype=torch.float32, device=device)
+    else:
+        uniform_probs_t = None
+        rates_t = None
+
+    for i in range(KERNEL_TEST_ITERS):
+        output_token_ids_ref = output_token_ids.clone()
+        output_token_ids_triton = output_token_ids.clone()
+
+        rejection_greedy_sample_pytorch(
+            output_token_ids_ref,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            draft_tokens_per_req,
+            max_spec_len,
+            is_greedy,
+            uniform_probs=uniform_probs_t,
+            synthetic_conditional_rates=rates_t,
+            synthetic_mode=synthetic_mode,
+        )
+        rejection_greedy_sample_triton[(grid,)](
+            output_token_ids_triton,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            is_greedy,
+            batch_size,
+            max_spec_len,
+            uniform_probs_t,
+            rates_t,
+            SYNTHETIC_MODE=synthetic_mode,
+            BLOCK_SIZE=block_size,
+        )
+        torch.npu.synchronize()
+        assert torch.equal(output_token_ids_ref, output_token_ids_triton), (
+            f"iteration {i}, synthetic_mode={synthetic_mode}"
+        )
+
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
@@ -139,7 +413,6 @@ IS_GREEDY = torch.zeros(BATCH_SIZE, dtype=torch.bool, device=DEVICE)
 IS_GREEDY[4] = True
 
 
-@pytest.mark.skip(reason="Probabilistic failure, #TODO: tracking issue 9852")
 @pytest.mark.parametrize("cu_num_draft_tokens", [CU_NUM_DRAFT_TOKENS])
 @pytest.mark.parametrize("draft_token_ids", [DRAFT_TOKEN_IDS])
 @pytest.mark.parametrize("draft_probs", [DRAFT_PROBS])
@@ -192,15 +465,21 @@ def test_rejection_sampler_block_verify_triton_kernel(
         draft_token_ids_ptr=draft_token_ids,
         draft_probs_ptr=draft_probs,
         target_probs_ptr=target_probs,
+        target_indices_ptr=None,
         bonus_token_ids_ptr=bonus_token_ids,
         recovered_token_ids_ptr=recovered_token_ids,
         uniform_probs_ptr=uniform_probs,
         is_greedy_ptr=is_greedy,
         max_spec_len=max_spec_len,
         vocab_size=vocab_size,
+        global_vocab_size=vocab_size,
         vec_len=batch_size,
+        ori_target_probs_ptr=None,
+        NO_ORI_TARGET_PROBS=True,
         NO_DRAFT_PROBS=draft_probs is None,
+        ENABLE_REDUCE_SAMPLING=False,
         BLOCK_SIZE=block_size,
+        ENTROPY_VERIFY=False,
         SUB_BLOCK=32,
     )
     torch.npu.synchronize()

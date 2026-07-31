@@ -76,6 +76,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
+        self.update_stream: torch.npu.Stream | None = None
+        if cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
         # The attention backend keys its per-size graph params by the actual
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
@@ -90,6 +93,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
+        assert self.update_stream is not None
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
@@ -108,7 +113,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 self.model_runner.attn_groups[0][0].backend,
-                self.model_runner.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,

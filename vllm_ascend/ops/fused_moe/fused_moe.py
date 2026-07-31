@@ -137,9 +137,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
+        # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine operator is updated to support
+        # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
@@ -242,11 +242,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
-        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
+        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine/mega_moe) expects
         # inputs in a list format.
         # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
         # incorrect. The ideal solution is to pass None. However, if the underlying
-        # dispatch_ffn_combine C++ operator does not support None for the scale argument
+        # dispatch_ffn_combine/mega_moe C++ operator does not support None for the scale argument
         # (due to signature constraints), we are forced to use a placeholder empty tensor.
         # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
         # or None for scales in non-quantized scenarios.
