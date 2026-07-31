@@ -8,7 +8,6 @@ from vllm.v1.sample.logits_processor.builtin import (
     MinTokensLogitsProcessor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
@@ -93,58 +92,30 @@ class AscendSampler(Sampler):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool,
     ) -> torch.Tensor:
-        bad_words_token_ids = sampling_metadata.bad_words_token_ids
-        any_penalties_or_bad_words = bool(bad_words_token_ids) or not sampling_metadata.no_penalties
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
+        if not get_ascend_config().enable_reduce_sample:
+            return super().apply_logits_processors(logits, sampling_metadata, predict_bonus_token)
 
-        output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and (any_penalties_or_bad_words or needs_thinking_combine):
-            output_token_ids = self._combine_outputs_with_spec_tokens(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
-            )
+        # When enable_reduce_sample is active, temporarily change the class
+        # of MinTokensLogitsProcessor / LogitBiasLogitsProcessor instances
+        # to their Ascend variants. This routes apply() through the Ascend
+        # override while preserving all instance state (logits_slice, etc.).
+        # The parent apply_logits_processors is called via super(), so any
+        # upstream changes to that method are automatically picked up.
+        procs = sampling_metadata.logitsprocs
+        swaps = []
+        for p in procs.non_argmax_invariant + procs.argmax_invariant:
+            if isinstance(p, MinTokensLogitsProcessor) and not isinstance(p, AscendMinTokensLogitsProcessor):
+                swaps.append((p, p.__class__))
+                p.__class__ = AscendMinTokensLogitsProcessor
+            elif isinstance(p, LogitBiasLogitsProcessor) and not isinstance(p, AscendLogitBiasLogitsProcessor):
+                swaps.append((p, p.__class__))
+                p.__class__ = AscendLogitBiasLogitsProcessor
 
-        # Apply allowed token ids.
-        if sampling_metadata.allowed_token_ids_mask is not None:
-            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
-
-        # Apply bad words exclusion.
-        if bad_words_token_ids:
-            apply_bad_words(logits, bad_words_token_ids, output_token_ids)
-
-        # Apply logits processors which can impact greedy sampling.
-        # When enable_reduce_sample is active, logits are TP-partitioned
-        # [B, V_local] but MinTokensLogitsProcessor and LogitBiasLogitsProcessor
-        # store global token IDs in logits_slice. Convert to local indices first.
-        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            if get_ascend_config().enable_reduce_sample and isinstance(processor, MinTokensLogitsProcessor):
-                if processor.min_toks:
-                    V_local = logits.shape[-1]
-                    local_req, local_tok, _ = _convert_logits_slice_to_local(processor.logits_slice, V_local)
-                    logits.index_put_((local_req, local_tok), processor.neg_inf_tensor)
-            elif get_ascend_config().enable_reduce_sample and isinstance(processor, LogitBiasLogitsProcessor):
-                if processor.biases:
-                    V_local = logits.shape[-1]
-                    local_req, local_tok, in_shard = _convert_logits_slice_to_local(processor.logits_slice, V_local)
-                    logits[local_req, local_tok] += processor.bias_tensor[in_shard]
-            else:
-                logits = processor.apply(logits)
-
-        # Apply penalties (e.g., freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
-        if holder is not None and holder.has_tracked_requests():
-            holder.update_state(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
-                repeat_indices=None,
-            )
-            logits = holder.apply_to_logits(
-                logits,
-                predict_bonus_token,
-                sampling_metadata.spec_token_ids,
-            )
-        return logits
+        try:
+            return super().apply_logits_processors(logits, sampling_metadata, predict_bonus_token)
+        finally:
+            for p, orig_cls in swaps:
+                p.__class__ = orig_cls
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -356,3 +327,33 @@ def _convert_logits_slice_to_local(
     local_tok_ids = (tok_ids - vocab_start)[in_shard_mask]
     local_req_indices = req_indices[in_shard_mask]
     return (local_req_indices, local_tok_ids, in_shard_mask)
+
+
+class AscendMinTokensLogitsProcessor(MinTokensLogitsProcessor):
+    """Ascend variant that handles TP-partitioned logits when
+    enable_reduce_sample is active."""
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.min_toks:
+            return logits
+        if get_ascend_config().enable_reduce_sample:
+            V_local = logits.shape[-1]
+            local_req, local_tok, _ = _convert_logits_slice_to_local(self.logits_slice, V_local)
+            logits.index_put_((local_req, local_tok), self.neg_inf_tensor)
+            return logits
+        return super().apply(logits)
+
+
+class AscendLogitBiasLogitsProcessor(LogitBiasLogitsProcessor):
+    """Ascend variant that handles TP-partitioned logits when
+    enable_reduce_sample is active."""
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.biases:
+            return logits
+        if get_ascend_config().enable_reduce_sample:
+            V_local = logits.shape[-1]
+            local_req, local_tok, in_shard = _convert_logits_slice_to_local(self.logits_slice, V_local)
+            logits[local_req, local_tok] += self.bias_tensor[in_shard]
+            return logits
+        return super().apply(logits)
