@@ -4,6 +4,42 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.20.0 - namespace exception flow checkpoint (rejected)
+
+- Starting commit: `9bd978d14` (the red-test checkpoint); the previous accepted
+  generator checkpoint is `29229bb3e`.
+- Problem addressed: module/class final binding discarded `value` and
+  `unbound` alternatives after retaining callable nodes, and ordinary
+  `try/except` treated every handler as reachable from the try-entry state.
+  This could silently verify a conditionally non-callable endpoint, walk past a
+  `None` MRO shadow, activate an impossible handler signature, or index code
+  after an unmatched explicit raise.
+- Change: preserve final module/class binding alternatives; execute namespace
+  statements as normal and abrupt outcomes; snapshot state at each possible
+  raise; route exact exceptions through handlers in source order with
+  never/maybe/always matching; run `else` only after normal try completion;
+  and apply `finally` independently to normal and abrupt outcomes.  A direct
+  endpoint or effective MRO member that is callable only on some normally
+  completing paths is now a non-generator
+  `review/conditional_callable_presence`, not a verified relation.  Only an
+  unbound MRO path may continue to a later owner; a value blocks lookup.
+- Test evidence: twelve new fixtures started as nine failures and three
+  existing-correct controls.  All twelve now pass; all 114 isolated
+  generator/auditor tests pass, as do Ruff, Ruff format, and
+  `git diff --check`.
+- Fixed-source result: the pinned vLLM, vllm-ascend, and PyTorch sources took
+  233.8 seconds and produced 970 relations plus 45 findings.  Compared with the
+  accepted v0.19 semantics, 970 relations match exactly, one monkey-patch
+  relation disappeared, and six external `forward` findings changed from
+  excluded to review.
+- Rejection reason: all seven differences are generator alias-classification
+  errors, not newly discovered source risks.  The CPU branch aliases
+  `causal_conv1d_update` to the imported callable
+  `causal_conv1d_update_cpu`, while PyTorch declares
+  `Module.forward: Callable = _forward_unimplemented`.  The v0.20 state labels
+  both callable aliases as ordinary values.  This checkpoint is retained only
+  for rollback and must not be used as an accepted mapping baseline.
+
 ## v0.19.0 - final runtime binding checkpoint
 
 - Starting commit: `4b543aaa64daffa373d9ad02ba2ce89e4227c05d`.

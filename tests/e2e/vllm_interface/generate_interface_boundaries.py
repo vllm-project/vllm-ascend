@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.19.0"
+GENERATOR_VERSION = "0.20.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -181,6 +181,594 @@ def _bind_scope_names(
         state[name] = (binding,)
 
 
+@dataclass(frozen=True)
+class _ScopeFlowExit:
+    """One non-local exit from module/class namespace execution."""
+
+    kind: str
+    state: dict[str, tuple[_ScopeBinding, ...]] = field(
+        compare=False,
+        hash=False,
+        repr=False,
+    )
+    exception_name: str | None = None
+
+
+@dataclass
+class _ScopeFlowResult:
+    """Normally completing namespace states and their abrupt exits."""
+
+    normal: list[dict[str, tuple[_ScopeBinding, ...]]] = field(
+        default_factory=list,
+    )
+    exits: list[_ScopeFlowExit] = field(default_factory=list)
+
+
+_HANDLER_NEVER = "never"
+_HANDLER_MAYBE = "maybe"
+_HANDLER_ALWAYS = "always"
+
+
+def _clone_scope_binding_state(
+    state: dict[str, tuple[_ScopeBinding, ...]],
+) -> dict[str, tuple[_ScopeBinding, ...]]:
+    return {name: tuple(values) for name, values in state.items()}
+
+
+def _scope_state_key(
+    state: dict[str, tuple[_ScopeBinding, ...]],
+) -> tuple[tuple[str, tuple[_ScopeBinding, ...]], ...]:
+    return tuple(sorted(state.items()))
+
+
+def _compact_scope_states(
+    states: Iterable[dict[str, tuple[_ScopeBinding, ...]]],
+) -> list[dict[str, tuple[_ScopeBinding, ...]]]:
+    """Merge path states without losing any per-name binding alternative."""
+
+    unique = {_scope_state_key(state): state for state in states}
+    if not unique:
+        return []
+    merged = _merge_scope_binding_states(list(unique.values()))
+    return [merged] if merged is not None else []
+
+
+def _compact_scope_exits(exits: Iterable[_ScopeFlowExit]) -> list[_ScopeFlowExit]:
+    grouped: dict[tuple[str, str | None], list[dict[str, tuple[_ScopeBinding, ...]]]] = defaultdict(list)
+    for flow_exit in exits:
+        grouped[(flow_exit.kind, flow_exit.exception_name)].append(flow_exit.state)
+    compacted: list[_ScopeFlowExit] = []
+    for (kind, exception_name), states in sorted(
+        grouped.items(),
+        key=lambda item: (item[0][0], item[0][1] or ""),
+    ):
+        merged = _merge_scope_binding_states(states)
+        if merged is not None:
+            compacted.append(
+                _ScopeFlowExit(
+                    kind=kind,
+                    state=merged,
+                    exception_name=exception_name,
+                )
+            )
+    return compacted
+
+
+def _compact_scope_flow(result: _ScopeFlowResult) -> _ScopeFlowResult:
+    return _ScopeFlowResult(
+        normal=_compact_scope_states(result.normal),
+        exits=_compact_scope_exits(result.exits),
+    )
+
+
+def _scope_exception_name(
+    node: ast.AST | None,
+    state: dict[str, tuple[_ScopeBinding, ...]],
+) -> str | None:
+    """Resolve a statically named exception without guessing dynamic values."""
+
+    expression = _expression_name(node.func if isinstance(node, ast.Call) else node)
+    if expression is None:
+        return None
+    if "." not in expression:
+        builtin_type = getattr(builtins, expression, None)
+        root_bindings = state.get(expression, (_UNBOUND_SCOPE_BINDING,))
+        if (
+            isinstance(builtin_type, type)
+            and issubclass(builtin_type, BaseException)
+            and all(binding.kind == "unbound" for binding in root_bindings)
+        ):
+            return f"builtins.{expression}"
+    return expression
+
+
+def _scope_exception_is_subclass(child_name: str, parent_name: str) -> bool:
+    if child_name == parent_name:
+        return True
+    child_type = (
+        getattr(builtins, child_name.removeprefix("builtins."), None) if child_name.startswith("builtins.") else None
+    )
+    parent_type = (
+        getattr(builtins, parent_name.removeprefix("builtins."), None) if parent_name.startswith("builtins.") else None
+    )
+    return bool(
+        isinstance(child_type, type)
+        and isinstance(parent_type, type)
+        and issubclass(child_type, BaseException)
+        and issubclass(parent_type, BaseException)
+        and issubclass(child_type, parent_type)
+    )
+
+
+def _scope_handler_names(
+    handler: ast.ExceptHandler,
+    state: dict[str, tuple[_ScopeBinding, ...]],
+) -> tuple[tuple[str, ...], bool] | None:
+    if handler.type is None:
+        return None
+    nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
+    resolved = tuple(_scope_exception_name(node, state) for node in nodes)
+    return (
+        tuple(name for name in resolved if name is not None),
+        any(name is None for name in resolved),
+    )
+
+
+def _scope_handler_match(
+    flow_exit: _ScopeFlowExit,
+    handler: ast.ExceptHandler,
+) -> str:
+    resolution = _scope_handler_names(handler, flow_exit.state)
+    if resolution is None:
+        return _HANDLER_ALWAYS
+    handler_names, has_unknown = resolution
+    if flow_exit.exception_name is None:
+        if any(name == "builtins.BaseException" for name in handler_names):
+            return _HANDLER_ALWAYS
+        return _HANDLER_MAYBE
+    if any(_scope_exception_is_subclass(flow_exit.exception_name, handler_name) for handler_name in handler_names):
+        return _HANDLER_ALWAYS
+    return _HANDLER_MAYBE if has_unknown else _HANDLER_NEVER
+
+
+def _scope_expression_may_raise(node: ast.AST | None) -> bool:
+    if node is None:
+        return False
+    return any(
+        isinstance(candidate, (ast.Await, ast.Call, ast.Subscript, ast.YieldFrom)) for candidate in ast.walk(node)
+    )
+
+
+def _scope_function_header_may_raise(
+    node: ast.AsyncFunctionDef | ast.FunctionDef,
+) -> bool:
+    expressions: list[ast.AST | None] = [
+        *node.decorator_list,
+        *node.args.defaults,
+        *node.args.kw_defaults,
+        *(argument.annotation for argument in node.args.posonlyargs),
+        *(argument.annotation for argument in node.args.args),
+        *(argument.annotation for argument in node.args.kwonlyargs),
+        node.args.vararg.annotation if node.args.vararg else None,
+        node.args.kwarg.annotation if node.args.kwarg else None,
+        node.returns,
+    ]
+    expressions.extend(getattr(node, "type_params", ()))
+    return any(_scope_expression_may_raise(expression) for expression in expressions)
+
+
+def _scope_class_header_may_raise(node: ast.ClassDef) -> bool:
+    expressions: list[ast.AST] = [
+        *node.decorator_list,
+        *node.bases,
+        *(keyword.value for keyword in node.keywords),
+        *getattr(node, "type_params", ()),
+    ]
+    return any(_scope_expression_may_raise(expression) for expression in expressions)
+
+
+def _scope_simple_statement_may_raise(node: ast.stmt) -> bool:
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return True
+    if isinstance(node, ast.Expr):
+        return _scope_expression_may_raise(node.value)
+    if isinstance(node, ast.Assign):
+        return _scope_expression_may_raise(node.value)
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        return _scope_expression_may_raise(node.value)
+    if isinstance(node, ast.Assert):
+        return _scope_expression_may_raise(node.test) or _scope_expression_may_raise(node.msg)
+    if isinstance(node, ast.Delete):
+        return any(not isinstance(target, ast.Name) for target in node.targets)
+    return False
+
+
+def _unbind_handler_name(
+    states: Iterable[dict[str, tuple[_ScopeBinding, ...]]],
+    name: str | None,
+) -> None:
+    if not name:
+        return
+    for state in states:
+        state[name] = (_UNBOUND_SCOPE_BINDING,)
+
+
+def _unbind_handler_name_from_exits(
+    exits: Iterable[_ScopeFlowExit],
+    name: str | None,
+) -> None:
+    if not name:
+        return
+    for flow_exit in exits:
+        flow_exit.state[name] = (_UNBOUND_SCOPE_BINDING,)
+
+
+def _scope_flow_statement(
+    node: ast.stmt,
+    tag_guard_names: set[str],
+    incoming: dict[str, tuple[_ScopeBinding, ...]],
+    *,
+    loop_body: bool,
+    active_exception: str | None,
+) -> _ScopeFlowResult:
+    """Interpret one namespace statement and preserve its exception snapshot."""
+
+    state = _clone_scope_binding_state(incoming)
+
+    if isinstance(node, ast.If):
+        exits: list[_ScopeFlowExit] = []
+        if _scope_expression_may_raise(node.test):
+            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        condition = _main_condition_value(node.test, tag_guard_names)
+        branches: list[Sequence[ast.stmt]]
+        if condition is True:
+            branches = [node.body]
+        elif condition is False:
+            branches = [node.orelse]
+        else:
+            branches = [node.body, node.orelse]
+        normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
+        for statements in branches:
+            branch = _scope_binding_flow(
+                statements,
+                tag_guard_names,
+                state,
+                loop_body=loop_body,
+                active_exception=active_exception,
+            )
+            normal.extend(branch.normal)
+            exits.extend(branch.exits)
+        return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+
+    if isinstance(node, ast.TryStar):
+        # ExceptionGroup routing differs from ordinary try/except.  Preserve
+        # every explicit path conservatively until a dedicated model exists.
+        paths = [
+            _scope_binding_flow(
+                node.body,
+                tag_guard_names,
+                state,
+                loop_body=loop_body,
+                active_exception=active_exception,
+            ),
+            *(
+                _scope_binding_flow(
+                    handler.body,
+                    tag_guard_names,
+                    state,
+                    loop_body=loop_body,
+                    active_exception=None,
+                )
+                for handler in node.handlers
+            ),
+        ]
+        normal = [candidate for path in paths for candidate in path.normal]
+        exits = [candidate for path in paths for candidate in path.exits]
+        if node.orelse:
+            else_flow = _scope_binding_flow(
+                node.orelse,
+                tag_guard_names,
+                _merge_scope_binding_states(normal) or state,
+                loop_body=loop_body,
+                active_exception=active_exception,
+            )
+            normal.extend(else_flow.normal)
+            exits.extend(else_flow.exits)
+        result = _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+        if node.finalbody:
+            return _apply_scope_finally(
+                result,
+                node.finalbody,
+                tag_guard_names,
+                loop_body=loop_body,
+            )
+        return result
+
+    if isinstance(node, ast.Try):
+        body = _scope_binding_flow(
+            node.body,
+            tag_guard_names,
+            state,
+            loop_body=loop_body,
+            active_exception=active_exception,
+        )
+        normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
+        exits: list[_ScopeFlowExit] = [candidate for candidate in body.exits if candidate.kind != "raise"]
+
+        for body_state in body.normal:
+            else_flow = _scope_binding_flow(
+                node.orelse,
+                tag_guard_names,
+                body_state,
+                loop_body=loop_body,
+                active_exception=active_exception,
+            )
+            normal.extend(else_flow.normal)
+            exits.extend(else_flow.exits)
+
+        pending = [candidate for candidate in body.exits if candidate.kind == "raise"]
+        for handler in node.handlers:
+            next_pending: list[_ScopeFlowExit] = []
+            for raised in pending:
+                match = _scope_handler_match(raised, handler)
+                if match in {_HANDLER_MAYBE, _HANDLER_ALWAYS}:
+                    handler_state = _clone_scope_binding_state(raised.state)
+                    if handler.name:
+                        handler_state[handler.name] = (_scope_binding("value", handler),)
+                    handler_flow = _scope_binding_flow(
+                        handler.body,
+                        tag_guard_names,
+                        handler_state,
+                        loop_body=loop_body,
+                        active_exception=raised.exception_name,
+                    )
+                    _unbind_handler_name(handler_flow.normal, handler.name)
+                    _unbind_handler_name_from_exits(handler_flow.exits, handler.name)
+                    normal.extend(handler_flow.normal)
+                    exits.extend(handler_flow.exits)
+                if match in {_HANDLER_NEVER, _HANDLER_MAYBE}:
+                    next_pending.append(raised)
+            pending = next_pending
+        exits.extend(pending)
+        result = _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+        if node.finalbody:
+            result = _apply_scope_finally(
+                result,
+                node.finalbody,
+                tag_guard_names,
+                loop_body=loop_body,
+            )
+        return result
+
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        exits: list[_ScopeFlowExit] = []
+        if any(_scope_expression_may_raise(item.context_expr) for item in node.items):
+            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        for item in node.items:
+            if item.optional_vars is not None:
+                _bind_scope_names(
+                    state,
+                    _bound_target_names(item.optional_vars),
+                    _scope_binding("value", item.optional_vars),
+                )
+        body = _scope_binding_flow(
+            node.body,
+            tag_guard_names,
+            state,
+            loop_body=loop_body,
+            active_exception=active_exception,
+        )
+        return _compact_scope_flow(_ScopeFlowResult(normal=body.normal, exits=[*exits, *body.exits]))
+
+    if isinstance(node, (ast.AsyncFor, ast.For, ast.While)):
+        exits: list[_ScopeFlowExit] = []
+        test = node.iter if isinstance(node, (ast.AsyncFor, ast.For)) else node.test
+        if _scope_expression_may_raise(test):
+            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        body_state = _clone_scope_binding_state(state)
+        if isinstance(node, (ast.AsyncFor, ast.For)):
+            _bind_scope_names(
+                body_state,
+                _bound_target_names(node.target),
+                _scope_binding("value", node.target),
+            )
+        body = _scope_binding_flow(
+            node.body,
+            tag_guard_names,
+            body_state,
+            loop_body=True,
+            active_exception=active_exception,
+        )
+        normal = [state, *body.normal]
+        exits.extend(candidate for candidate in body.exits if candidate.kind not in {"break", "continue"})
+        normal.extend(candidate.state for candidate in body.exits if candidate.kind in {"break", "continue"})
+        if node.orelse:
+            merged = _merge_scope_binding_states(normal)
+            if merged is not None:
+                else_flow = _scope_binding_flow(
+                    node.orelse,
+                    tag_guard_names,
+                    merged,
+                    loop_body=loop_body,
+                    active_exception=active_exception,
+                )
+                normal.extend(else_flow.normal)
+                exits.extend(else_flow.exits)
+        return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+
+    if isinstance(node, ast.Match):
+        exits: list[_ScopeFlowExit] = []
+        if _scope_expression_may_raise(node.subject):
+            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        normal = [state]
+        for case in node.cases:
+            branch = _scope_binding_flow(
+                case.body,
+                tag_guard_names,
+                state,
+                loop_body=loop_body,
+                active_exception=active_exception,
+            )
+            normal.extend(branch.normal)
+            exits.extend(branch.exits)
+        return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+
+    implicit_raise = _scope_simple_statement_may_raise(node)
+    exits = [_ScopeFlowExit("raise", _clone_scope_binding_state(state))] if implicit_raise else []
+
+    if isinstance(node, ast.Raise):
+        exception_name = active_exception if node.exc is None else _scope_exception_name(node.exc, state)
+        return _ScopeFlowResult(exits=[_ScopeFlowExit("raise", state, exception_name)])
+    if isinstance(node, ast.Return):
+        return _ScopeFlowResult(exits=[_ScopeFlowExit("return", state)])
+    if isinstance(node, ast.Break):
+        return _ScopeFlowResult(exits=[_ScopeFlowExit("break", state)])
+    if isinstance(node, ast.Continue):
+        return _ScopeFlowResult(exits=[_ScopeFlowExit("continue", state)])
+
+    if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        if _scope_function_header_may_raise(node):
+            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        state[node.name] = (_scope_binding("function", node),)
+    elif isinstance(node, ast.ClassDef):
+        if _scope_class_header_may_raise(node):
+            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        class_flow = _scope_binding_flow(
+            node.body,
+            tag_guard_names,
+            {},
+            loop_body=False,
+            active_exception=None,
+        )
+        exits.extend(
+            _ScopeFlowExit(
+                kind=candidate.kind,
+                state=_clone_scope_binding_state(state),
+                exception_name=candidate.exception_name,
+            )
+            for candidate in class_flow.exits
+            if candidate.kind == "raise"
+        )
+        if not class_flow.normal:
+            return _compact_scope_flow(_ScopeFlowResult(exits=exits))
+        state[node.name] = (_scope_binding("class", node),)
+    elif isinstance(node, ast.Import):
+        _bind_scope_names(
+            state,
+            (alias.asname or alias.name.split(".", 1)[0] for alias in node.names),
+            _scope_binding("value", node),
+        )
+    elif isinstance(node, ast.ImportFrom):
+        _bind_scope_names(
+            state,
+            (alias.asname or alias.name for alias in node.names if alias.name != "*"),
+            _scope_binding("value", node),
+        )
+    elif isinstance(node, ast.Assign):
+        source_binding = state.get(node.value.id) if isinstance(node.value, ast.Name) else None
+        for target in node.targets:
+            names = _bound_target_names(target)
+            if len(names) == 1 and isinstance(target, ast.Name) and source_binding is not None:
+                state[target.id] = tuple(source_binding)
+            else:
+                _bind_scope_names(state, names, _scope_binding("value", node))
+    elif isinstance(node, ast.AnnAssign):
+        if node.value is not None:
+            source_binding = state.get(node.value.id) if isinstance(node.value, ast.Name) else None
+            if isinstance(node.target, ast.Name) and source_binding is not None:
+                state[node.target.id] = tuple(source_binding)
+            else:
+                _bind_scope_names(
+                    state,
+                    _bound_target_names(node.target),
+                    _scope_binding("value", node),
+                )
+    elif isinstance(node, ast.AugAssign):
+        _bind_scope_names(
+            state,
+            _bound_target_names(node.target),
+            _scope_binding("value", node),
+        )
+    elif isinstance(node, ast.Delete):
+        _bind_scope_names(
+            state,
+            (
+                child.id
+                for target in node.targets
+                for child in ast.walk(target)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Del)
+            ),
+            _UNBOUND_SCOPE_BINDING,
+        )
+
+    return _compact_scope_flow(_ScopeFlowResult(normal=[state], exits=exits))
+
+
+def _scope_binding_flow(
+    statements: Sequence[ast.stmt],
+    tag_guard_names: set[str],
+    incoming: dict[str, tuple[_ScopeBinding, ...]] | None = None,
+    *,
+    loop_body: bool = False,
+    active_exception: str | None = None,
+) -> _ScopeFlowResult:
+    normal = [_clone_scope_binding_state(incoming or {})]
+    exits: list[_ScopeFlowExit] = []
+    for node in statements:
+        next_normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
+        for state in normal:
+            result = _scope_flow_statement(
+                node,
+                tag_guard_names,
+                state,
+                loop_body=loop_body,
+                active_exception=active_exception,
+            )
+            next_normal.extend(result.normal)
+            exits.extend(result.exits)
+        normal = _compact_scope_states(next_normal)
+        exits = _compact_scope_exits(exits)
+        if not normal:
+            break
+    return _ScopeFlowResult(normal=normal, exits=exits)
+
+
+def _apply_scope_finally(
+    incoming: _ScopeFlowResult,
+    statements: Sequence[ast.stmt],
+    tag_guard_names: set[str],
+    *,
+    loop_body: bool,
+) -> _ScopeFlowResult:
+    normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
+    exits: list[_ScopeFlowExit] = []
+    sources = [
+        *(_ScopeFlowExit("normal", state) for state in incoming.normal),
+        *incoming.exits,
+    ]
+    for source in sources:
+        final_flow = _scope_binding_flow(
+            statements,
+            tag_guard_names,
+            source.state,
+            loop_body=loop_body,
+            active_exception=(source.exception_name if source.kind == "raise" else None),
+        )
+        exits.extend(final_flow.exits)
+        if source.kind == "normal":
+            normal.extend(final_flow.normal)
+        else:
+            exits.extend(
+                _ScopeFlowExit(
+                    kind=source.kind,
+                    state=state,
+                    exception_name=source.exception_name,
+                )
+                for state in final_flow.normal
+            )
+    return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+
+
 def _scope_final_binding_state(
     statements: Sequence[ast.stmt],
     tag_guard_names: set[str],
@@ -190,228 +778,13 @@ def _scope_final_binding_state(
 ) -> dict[str, tuple[_ScopeBinding, ...]] | None:
     """Interpret namespace writes and retain only normally completing paths."""
 
-    state = {name: tuple(values) for name, values in (incoming or {}).items()}
-    for node in statements:
-        if isinstance(node, ast.If):
-            condition = _main_condition_value(node.test, tag_guard_names)
-            if condition is True:
-                selected = _scope_final_binding_state(
-                    node.body,
-                    tag_guard_names,
-                    state,
-                    loop_body=loop_body,
-                )
-            elif condition is False:
-                selected = _scope_final_binding_state(
-                    node.orelse,
-                    tag_guard_names,
-                    state,
-                    loop_body=loop_body,
-                )
-            else:
-                selected = _merge_scope_binding_states(
-                    [
-                        _scope_final_binding_state(
-                            node.body,
-                            tag_guard_names,
-                            state,
-                            loop_body=loop_body,
-                        ),
-                        _scope_final_binding_state(
-                            node.orelse,
-                            tag_guard_names,
-                            state,
-                            loop_body=loop_body,
-                        ),
-                    ]
-                )
-            if selected is None:
-                return None
-            state = selected
-            continue
-
-        if isinstance(node, (ast.Try, ast.TryStar)):
-            normal = _scope_final_binding_state(
-                node.body,
-                tag_guard_names,
-                state,
-                loop_body=loop_body,
-            )
-            if normal is not None:
-                normal = _scope_final_binding_state(
-                    node.orelse,
-                    tag_guard_names,
-                    normal,
-                    loop_body=loop_body,
-                )
-            paths: list[dict[str, tuple[_ScopeBinding, ...]] | None] = [normal]
-            for handler in node.handlers:
-                handler_state = {name: tuple(values) for name, values in state.items()}
-                if handler.name:
-                    handler_state[handler.name] = (_scope_binding("value", handler),)
-                handled = _scope_final_binding_state(
-                    handler.body,
-                    tag_guard_names,
-                    handler_state,
-                    loop_body=loop_body,
-                )
-                if handled is not None and handler.name:
-                    handled[handler.name] = (_UNBOUND_SCOPE_BINDING,)
-                paths.append(handled)
-            live_paths = [path for path in paths if path is not None]
-            if node.finalbody:
-                live_paths = [
-                    final
-                    for path in live_paths
-                    if (
-                        final := _scope_final_binding_state(
-                            node.finalbody,
-                            tag_guard_names,
-                            path,
-                            loop_body=loop_body,
-                        )
-                    )
-                    is not None
-                ]
-            selected = _merge_scope_binding_states(live_paths)
-            if selected is None:
-                return None
-            state = selected
-            continue
-
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            child = {name: tuple(values) for name, values in state.items()}
-            for item in node.items:
-                if item.optional_vars is not None:
-                    _bind_scope_names(
-                        child,
-                        _bound_target_names(item.optional_vars),
-                        _scope_binding("value", item.optional_vars),
-                    )
-            selected = _scope_final_binding_state(
-                node.body,
-                tag_guard_names,
-                child,
-                loop_body=loop_body,
-            )
-            if selected is None:
-                return None
-            state = selected
-            continue
-
-        if isinstance(node, (ast.AsyncFor, ast.For, ast.While)):
-            body_state = {name: tuple(values) for name, values in state.items()}
-            if isinstance(node, (ast.AsyncFor, ast.For)):
-                _bind_scope_names(
-                    body_state,
-                    _bound_target_names(node.target),
-                    _scope_binding("value", node.target),
-                )
-            body_result = _scope_final_binding_state(
-                node.body,
-                tag_guard_names,
-                body_state,
-                loop_body=True,
-            )
-            loop_result = _merge_scope_binding_states([state, body_result])
-            if loop_result is None:
-                return None
-            if node.orelse:
-                else_result = _scope_final_binding_state(
-                    node.orelse,
-                    tag_guard_names,
-                    loop_result,
-                    loop_body=loop_body,
-                )
-                loop_result = _merge_scope_binding_states([loop_result, else_result])
-                if loop_result is None:
-                    return None
-            state = loop_result
-            continue
-
-        if isinstance(node, ast.Match):
-            paths = [state]
-            paths.extend(
-                _scope_final_binding_state(
-                    case.body,
-                    tag_guard_names,
-                    state,
-                    loop_body=loop_body,
-                )
-                for case in node.cases
-            )
-            selected = _merge_scope_binding_states(paths)
-            if selected is None:
-                return None
-            state = selected
-            continue
-
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
-            state[node.name] = (_scope_binding("function", node),)
-            continue
-        if isinstance(node, ast.ClassDef):
-            state[node.name] = (_scope_binding("class", node),)
-            continue
-        if isinstance(node, ast.Import):
-            _bind_scope_names(
-                state,
-                (alias.asname or alias.name.split(".", 1)[0] for alias in node.names),
-                _scope_binding("value", node),
-            )
-            continue
-        if isinstance(node, ast.ImportFrom):
-            _bind_scope_names(
-                state,
-                (alias.asname or alias.name for alias in node.names if alias.name != "*"),
-                _scope_binding("value", node),
-            )
-            continue
-        if isinstance(node, ast.Assign):
-            source_binding = state.get(node.value.id) if isinstance(node.value, ast.Name) else None
-            for target in node.targets:
-                names = _bound_target_names(target)
-                if len(names) == 1 and isinstance(target, ast.Name) and source_binding is not None:
-                    state[target.id] = tuple(source_binding)
-                else:
-                    _bind_scope_names(
-                        state,
-                        names,
-                        _scope_binding("value", node),
-                    )
-            continue
-        if isinstance(node, ast.AnnAssign):
-            if node.value is not None:
-                _bind_scope_names(
-                    state,
-                    _bound_target_names(node.target),
-                    _scope_binding("value", node),
-                )
-            continue
-        if isinstance(node, (ast.AugAssign, ast.NamedExpr)):
-            target = node.target
-            _bind_scope_names(
-                state,
-                _bound_target_names(target),
-                _scope_binding("value", node),
-            )
-            continue
-        if isinstance(node, ast.Delete):
-            _bind_scope_names(
-                state,
-                (
-                    child.id
-                    for target in node.targets
-                    for child in ast.walk(target)
-                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Del)
-                ),
-                _UNBOUND_SCOPE_BINDING,
-            )
-            continue
-        if isinstance(node, (ast.Break, ast.Continue)):
-            return state if loop_body else None
-        if isinstance(node, (ast.Raise, ast.Return)):
-            return None
-    return state
+    flow = _scope_binding_flow(
+        statements,
+        tag_guard_names,
+        incoming,
+        loop_body=loop_body,
+    )
+    return _merge_scope_binding_states(flow.normal)
 
 
 def _scope_final_bindings(
@@ -868,98 +1241,26 @@ def _direct_bound_names(node: ast.stmt) -> set[str]:
     return set()
 
 
-def _scope_must_bound_state(
-    statements: Sequence[ast.stmt],
-    tag_guard_names: set[str],
-    incoming: set[str] | None = None,
-) -> set[str] | None:
-    """Return MUST names, or ``None`` when no path completes normally."""
-    state = set(incoming or ())
-    for node in statements:
-        if isinstance(node, ast.If):
-            condition = _main_condition_value(node.test, tag_guard_names)
-            if condition is True:
-                selected = _scope_must_bound_state(node.body, tag_guard_names, state)
-            elif condition is False:
-                selected = _scope_must_bound_state(node.orelse, tag_guard_names, state)
-            else:
-                alternatives = [
-                    branch
-                    for branch in (
-                        _scope_must_bound_state(node.body, tag_guard_names, state),
-                        _scope_must_bound_state(node.orelse, tag_guard_names, state),
-                    )
-                    if branch is not None
-                ]
-                selected = set.intersection(*alternatives) if alternatives else None
-            if selected is None:
-                return None
-            state = selected
-            continue
-        if isinstance(node, ast.Try):
-            normal = _scope_must_bound_state(node.body, tag_guard_names, state)
-            if normal is not None:
-                normal = _scope_must_bound_state(node.orelse, tag_guard_names, normal)
-            paths = [normal] if normal is not None else []
-            paths.extend(
-                handler_state
-                for handler in node.handlers
-                if (
-                    handler_state := _scope_must_bound_state(
-                        handler.body,
-                        tag_guard_names,
-                        state,
-                    )
-                )
-                is not None
-            )
-            if node.finalbody:
-                paths = [
-                    final_state
-                    for path in paths
-                    if (
-                        final_state := _scope_must_bound_state(
-                            node.finalbody,
-                            tag_guard_names,
-                            path,
-                        )
-                    )
-                    is not None
-                ]
-            if not paths:
-                return None
-            state = set.intersection(*paths)
-            continue
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    state.update(_bound_target_names(item.optional_vars))
-            selected = _scope_must_bound_state(node.body, tag_guard_names, state)
-            if selected is None:
-                return None
-            state = selected
-            continue
-        if isinstance(node, ast.Delete):
-            state.difference_update(
-                child.id for target in node.targets for child in ast.walk(target) if isinstance(child, ast.Name)
-            )
-            continue
-        # Loop bodies may execute zero times, so they cannot add a MUST name.
-        if isinstance(node, (ast.AsyncFor, ast.For, ast.While)):
-            continue
-        if isinstance(node, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
-            return None
-        state.update(_direct_bound_names(node))
-    return state
-
-
 def _scope_must_bound_names(
     statements: Sequence[ast.stmt],
     tag_guard_names: set[str],
     incoming: set[str] | None = None,
 ) -> set[str]:
     """Return names present after every normally completing active-main path."""
-    return _scope_must_bound_state(statements, tag_guard_names, incoming) or set()
+
+    initial = {name: (_scope_binding("value", ast.Pass()),) for name in incoming or ()}
+    final = _scope_final_binding_state(
+        statements,
+        tag_guard_names,
+        initial,
+    )
+    if final is None:
+        return set()
+    return {
+        name
+        for name, alternatives in final.items()
+        if alternatives and all(alternative.kind != "unbound" for alternative in alternatives)
+    }
 
 
 def _main_module_statement_records(
@@ -1160,6 +1461,23 @@ class MroResult:
     owners: tuple[str, ...]
     complete: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class EffectiveMethodResolution:
+    """All outcomes of Python attribute lookup for one method name."""
+
+    callable_owners: tuple[str, ...]
+    may_be_missing: bool = False
+    may_be_non_callable: bool = False
+    has_unresolved_value: bool = False
+    blocking_owners: tuple[str, ...] = ()
+
+    @property
+    def is_total_callable(self) -> bool:
+        return bool(self.callable_owners) and not (
+            self.may_be_missing or self.may_be_non_callable or self.has_unresolved_value
+        )
 
 
 @dataclass(frozen=True)
@@ -1530,6 +1848,7 @@ class RepositoryIndex:
         self.classes: dict[str, ClassInfo] = {}
         self.callables: dict[str, CallableInfo] = {}
         self.callable_variants: dict[str, tuple[CallableInfo, ...]] = {}
+        self.final_bindings: dict[str, tuple[_ScopeBinding, ...]] = {}
         self.values: dict[str, ValueInfo] = {}
         self.aliases: dict[str, str] = {}
         self.unconditional_exports: set[str] = set()
@@ -1565,6 +1884,9 @@ class RepositoryIndex:
             module_final_bindings = _scope_final_bindings(
                 tree.body,
                 tag_guard_names,
+            )
+            self.final_bindings.update(
+                {f"{module}.{name}": alternatives for name, alternatives in module_final_bindings.items()}
             )
             module_must_names = _scope_must_bound_names(
                 tree.body,
@@ -1641,6 +1963,11 @@ class RepositoryIndex:
                     if annotation:
                         annotated_exports.append((node.target.id, annotation))
                 elif isinstance(node, ast.ClassDef):
+                    if not any(
+                        binding.kind == "class" and binding.node is node
+                        for binding in module_final_bindings.get(node.name, ())
+                    ):
+                        continue
                     bases = tuple(name for name in (_expression_name(base) for base in node.bases) if name)
                     resolved_bases = tuple(
                         _resolve_bound_reference(
@@ -1657,6 +1984,12 @@ class RepositoryIndex:
                     class_final_bindings = _scope_final_bindings(
                         node.body,
                         tag_guard_names,
+                    )
+                    self.final_bindings.update(
+                        {
+                            f"{qualified_name}.{name}": alternatives
+                            for name, alternatives in class_final_bindings.items()
+                        }
                     )
                     class_must_callable_names = {
                         name
@@ -2201,6 +2534,13 @@ class RepositoryIndex:
         callable_info = self.callables.get(canonical)
         return (callable_info,) if callable_info is not None else ()
 
+    def find_final_bindings(
+        self,
+        qualified_name: str,
+    ) -> tuple[_ScopeBinding, ...]:
+        canonical = self.canonical_name(qualified_name)
+        return self.final_bindings.get(canonical, ())
+
     def find_loose_function(self, module: str, name: str) -> CallableInfo | None:
         candidates = self.modules[module].loose_functions.get(name, [])
         return candidates[0] if len(candidates) == 1 else None
@@ -2357,6 +2697,46 @@ class InterfaceBoundaryGenerator:
             if qualified_name == package or qualified_name.startswith(f"{package}."):
                 return index.find_callable_variants(qualified_name)
         return ()
+
+    def _final_bindings(
+        self,
+        qualified_name: str,
+    ) -> tuple[_ScopeBinding, ...]:
+        qualified_name = self._canonical_reference(qualified_name)
+        if qualified_name.startswith("vllm_ascend."):
+            return self.downstream.find_final_bindings(qualified_name)
+        if qualified_name.startswith("vllm."):
+            return self.upstream.find_final_bindings(qualified_name)
+        for package, index in self.externals.items():
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return index.find_final_bindings(qualified_name)
+        return ()
+
+    def _final_binding_kinds(
+        self,
+        qualified_name: str,
+    ) -> set[str]:
+        return {binding.kind for binding in self._final_bindings(qualified_name)}
+
+    def _final_callable_presence_kinds(
+        self,
+        qualified_name: str,
+        context: PatchScanContext | None = None,
+    ) -> set[str]:
+        """Return final kinds after applying an exact hasattr path guard."""
+
+        kinds = self._final_binding_kinds(qualified_name)
+        if context is None or not kinds:
+            return kinds
+        polarities = self._matching_hasattr_polarities(
+            qualified_name,
+            context,
+        )
+        if polarities == {True}:
+            kinds.discard("unbound")
+        elif polarities == {False}:
+            return {"unbound"} if "unbound" in kinds else set()
+        return kinds
 
     def _member_is_unconditional(
         self,
@@ -2543,8 +2923,36 @@ class InterfaceBoundaryGenerator:
             if mro_result.complete and not any(owner.startswith("vllm.") for owner in mro[1:]):
                 continue
             for method_name, method_node in class_info.methods.items():
-                effective_owners = self._effective_method_owners(mro[1:], method_name)
+                resolution = self._effective_method_resolution(
+                    mro[1:],
+                    method_name,
+                )
+                effective_owners = resolution.callable_owners if resolution.is_total_callable else ()
                 if not effective_owners:
+                    conditional_owners = (
+                        *resolution.callable_owners,
+                        *resolution.blocking_owners,
+                    )
+                    if conditional_owners:
+                        target_owner = conditional_owners[0]
+                        self.findings.append(
+                            CandidateFinding(
+                                relation="override",
+                                downstream_file=class_info.file,
+                                downstream_owner=class_info.name,
+                                downstream_name=method_name,
+                                target_expression=f"{target_owner}.{method_name}",
+                                evidence_line=getattr(method_node, "lineno", 0),
+                                reason=(
+                                    "the effective upstream member is callable only on "
+                                    "some normally completing lookup paths"
+                                ),
+                                status="review",
+                                reason_code="conditional_callable_presence",
+                                generator_issue=False,
+                            )
+                        )
+                        continue
                     candidates = (
                         self._candidate_upstream_method_owners(
                             class_info.qualified_name,
@@ -2697,20 +3105,63 @@ class InterfaceBoundaryGenerator:
             )
         )
 
+    def _effective_method_resolution(
+        self,
+        mro: Sequence[str],
+        method_name: str,
+    ) -> EffectiveMethodResolution:
+        owners: list[str] = []
+        blocking_owners: list[str] = []
+        may_be_non_callable = False
+        has_unresolved_value = False
+        fallthrough = True
+        for owner in mro:
+            if not fallthrough:
+                break
+            class_info = self._class_info(owner)
+            if class_info is None:
+                continue
+            qualified_name = f"{owner}.{method_name}"
+            alternatives = self._final_bindings(qualified_name)
+            if not alternatives:
+                if method_name in class_info.methods:
+                    owners.append(owner)
+                    fallthrough = False
+                continue
+
+            kinds = {alternative.kind for alternative in alternatives}
+            if "function" in kinds:
+                owners.append(owner)
+            bound_non_functions = [
+                alternative for alternative in alternatives if alternative.kind not in {"function", "unbound"}
+            ]
+            if bound_non_functions:
+                blocking_owners.append(owner)
+                for alternative in bound_non_functions:
+                    value_node = alternative.node
+                    if isinstance(value_node, (ast.Assign, ast.AnnAssign)):
+                        value_node = value_node.value
+                    if alternative.kind == "value" and self._definitely_non_callable(value_node):
+                        may_be_non_callable = True
+                    else:
+                        has_unresolved_value = True
+            fallthrough = "unbound" in kinds
+
+        return EffectiveMethodResolution(
+            callable_owners=tuple(dict.fromkeys(owners)),
+            may_be_missing=fallthrough,
+            may_be_non_callable=may_be_non_callable,
+            has_unresolved_value=has_unresolved_value,
+            blocking_owners=tuple(dict.fromkeys(blocking_owners)),
+        )
+
     def _effective_method_owners(
         self,
         mro: Sequence[str],
         method_name: str,
     ) -> tuple[str, ...]:
-        owners: list[str] = []
-        for owner in mro:
-            class_info = self._class_info(owner)
-            if class_info is None or method_name not in class_info.methods:
-                continue
-            owners.append(owner)
-            if self._member_is_unconditional(owner, method_name):
-                break
-        return tuple(owners)
+        resolution = self._effective_method_resolution(mro, method_name)
+        return resolution.callable_owners if resolution.is_total_callable else ()
 
     def _effective_method_owner(
         self,
@@ -5289,6 +5740,34 @@ class InterfaceBoundaryGenerator:
                 replacement_node,
                 line,
                 replacement.reason or "replacement callable was not resolved",
+            )
+            return
+
+        presence_kinds = self._final_callable_presence_kinds(
+            target,
+            context,
+        )
+        callable_kinds = presence_kinds & {"class", "function"}
+        other_kinds = presence_kinds - {"class", "function"}
+        if callable_kinds and other_kinds:
+            self.findings.append(
+                CandidateFinding(
+                    relation="monkey_patch",
+                    downstream_file=replacement.info.file,
+                    downstream_owner=replacement.info.owner,
+                    downstream_name=replacement.info.name,
+                    target_expression=target,
+                    evidence_line=line,
+                    reason=(
+                        "upstream patch target is callable only on some normally "
+                        f"completing paths; other final bindings: {', '.join(sorted(other_kinds))}"
+                    ),
+                    status="review",
+                    reason_code="conditional_callable_presence",
+                    generator_issue=False,
+                    evidence_scope=self._scope_name(context),
+                    evidence_guards=context.guard_texts,
+                )
             )
             return
 
