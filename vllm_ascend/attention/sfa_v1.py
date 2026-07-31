@@ -2392,7 +2392,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     k_li[:attn_metadata.num_actual_tokens].view(
                         -1, k_li.shape[-1]),
                 )
-            else:
+            elif not self._dsa_split_indexer_cache_enabled():
                 if self.enable_sparse_sfa_c8:
                     dsa_k_cache_idx = 1
                     dsa_k_scale_cache_idx = 2
@@ -2497,6 +2497,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(
                     topk_num_tokens
+                )
+            elif dsa_mgr is None and self._dsa_split_indexer_cache_enabled():
+                # MTP draft model in DSA split-cache mode: the draft model
+                # has no DSA worker manager and no split Indexer cache.
+                # Skip top-K selection and run dense (full) sparse attention
+                # so the draft sees all KV tokens.
+                topk_indices = torch.zeros(
+                    (topk_num_tokens, 1, 1),
+                    dtype=torch.int32,
+                    device=ql_nope.device,
                 )
             else:
                 if not self.has_indexer:
