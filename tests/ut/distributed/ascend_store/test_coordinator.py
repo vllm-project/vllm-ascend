@@ -23,7 +23,12 @@ from unittest.mock import patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import get_block_hashes
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    ChunkedTokenDatabase,
+    KeyMetadata,
+    get_block_hashes,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
@@ -90,6 +95,51 @@ class _FakeCompressedManager:
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
+    def test_load_mask_grouped_hashes_are_reused_by_key_build(self):
+        block_hashes = _hashes(4)
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _full_spec(16))],
+            scheduler_block_size=16,
+            hash_block_size=8,
+            group_block_sizes=[16],
+            group_cache_families=["c1"],
+        )
+        db = ChunkedTokenDatabase(
+            [KeyMetadata("model", 0, 0, 0, 0)],
+            block_size=[16],
+            partitions=None,
+            hash_block_size=8,
+        )
+        db.cache_coordinator = coord
+        grouped_hash_cache: config_data.GroupedBlockHashCache = {}
+
+        with patch.object(
+            config_data,
+            "_rehash_block_hash_group",
+            wraps=config_data._rehash_block_hash_group,
+        ) as rehash:
+            self.assertEqual(
+                db.load_mask(
+                    block_hashes,
+                    32,
+                    grouped_hash_cache=grouped_hash_cache,
+                ),
+                ([True, True],),
+            )
+            self.assertEqual(rehash.call_count, 2)
+
+            keys = list(
+                db.process_token_key_strings_with_block_ids(
+                    32,
+                    block_hashes,
+                    [10, 11],
+                    grouped_hash_cache=grouped_hash_cache,
+                )
+            )
+
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(rehash.call_count, 2)
+
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
@@ -172,6 +222,24 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.store_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
+
+    def test_lookup_mask_uses_reachability_without_retention(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
+            scheduler_block_size=512,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            retention_interval=256,
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, False, False, True],
+        ) as reachable:
+            masks = coord.lookup_mask(512)
+
+        self.assertEqual(masks, ([False, False, False, True],))
+        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

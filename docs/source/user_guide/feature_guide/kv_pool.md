@@ -1,4 +1,4 @@
-# KV Cache Pool（Ascend Store）Deployment Guide
+# KV Cache Pool (Ascend Store) Deployment Guide
 
 ## Contents
 
@@ -38,6 +38,7 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
 | `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
 | `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
+| `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
 | `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
 
@@ -476,7 +477,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
+**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
 
 ```shell
 pip install memfabric-hybrid

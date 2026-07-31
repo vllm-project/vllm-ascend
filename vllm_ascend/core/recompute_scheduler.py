@@ -97,6 +97,7 @@ class RecomputeSchedulerOutput(SchedulerOutput):
 
 class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
     running: list[Request]
+    prefill_capacity_bound: bool
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -191,7 +192,8 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
-    def schedule(self) -> RecomputeSchedulerOutput:
+    def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
+        self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -231,6 +233,12 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             # Do not schedule any requests when paused.
             token_budget = 0
 
+        # DP prefill balancing: on a throttled (non-cadence-aligned) step,
+        # defer all prefill compute unless saturated.
+        defer_prefills = (throttle_prefills and not self.prefill_capacity_bound) and any(
+            not request.is_prefill_chunk for request in self.running
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -250,6 +258,18 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
+                req_index += 1
+                continue
+
+            if self.current_step < request.next_decode_eligible_step:
+                # V2+PP+async: enforce `pp_size` steps between same-request
+                # decodes to match the worker-side sampled-token cadence.
+                req_index += 1
+                continue
+
+            if defer_prefills and request.is_prefill_chunk:
+                # Decodes can still fill this throttled step while in-progress
+                # prefill chunks wait for a cadence-aligned step.
                 req_index += 1
                 continue
 
@@ -601,6 +621,10 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
+                elif defer_prefills and request.num_computed_tokens == 0:
+                    # Async KV loads may start on throttled steps, but new local
+                    # prefill compute waits for a cadence-aligned step.
+                    break
                 else:
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
@@ -780,6 +804,9 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
+            if not defer_prefills:
+                self.prefill_capacity_bound = bool(self.waiting)
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -834,6 +861,13 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        # Async scheduling uses this value to create the speculative-token
+        # placeholders for the next step. Leaving it at SchedulerOutput's
+        # default of zero disables speculative decoding after the first step.
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and num_scheduled_tokens:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
+
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -850,6 +884,7 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
