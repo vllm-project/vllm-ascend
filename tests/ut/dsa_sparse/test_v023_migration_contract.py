@@ -903,9 +903,15 @@ class TestV023LifecycleContract(unittest.TestCase):
             "cannot use sparse C8 cache modes",
             "source FP16/BF16 ABI",
             "requires non-chunked prefill",
-            "does not support speculative/MTP decoding",
         ):
             self.assertIn(required_contract, source)
+
+    def test_dsa_mtp_is_supported(self):
+        source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
+        self.assertNotIn(
+            "does not support speculative/MTP decoding", source)
+        self.assertNotIn("remove --speculative-config", source)
+        self.assertIn("MTP is supported in eager mode", source)
 
     def test_dsa_dp_is_supported_and_example_allows_dp(self):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
@@ -1044,28 +1050,16 @@ class TestV023LifecycleContract(unittest.TestCase):
             sfa_forward,
         )
 
-    def test_speculative_decode_is_rejected_and_example_disables_it(self):
+    def test_speculative_mtp_is_supported_not_rejected(self):
         source = _read("vllm_ascend/dsa_sparse/dsa_config.py")
-        start = source.index(
-            'speculative_config = getattr(vllm_config, "speculative_config"'
-        )
-        end = source.index("raw_dsa_config =", start)
-        speculative_guard = source[start:end]
-
-        self.assertIn(
-            "if speculative_config is not None:",
-            speculative_guard,
-        )
-        self.assertIn(
-            "does not support speculative/MTP decoding",
-            speculative_guard,
-        )
-        self.assertIn("--speculative-config", speculative_guard)
-        self.assertNotIn("_is_mtp_config", source)
-        self.assertNotIn("num_speculative_tokens", speculative_guard)
+        # MTP must NOT be rejected.
+        self.assertNotIn(
+            "does not support speculative/MTP decoding", source)
+        self.assertNotIn(
+            "if speculative_config is not None:", source)
+        self.assertIn("MTP is supported in eager mode", source)
 
         example = _read("examples/glm51_dsa_sparse_mtp.sh")
-        self.assertNotIn("--speculative-config", example)
         self.assertNotIn("NUM_SPECULATIVE_TOKENS", example)
         self.assertIn(
             'QUANTIZATION="${QUANTIZATION-ascend}"',

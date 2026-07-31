@@ -353,9 +353,9 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
     """Validate and normalize the supported v0.23 sparse-offload envelope.
 
     The implementation intentionally has a narrow first-class envelope:
-    GLM-5/5.1, decoder-only execution, and TP+DP without speculative
-    decoding. Options which change cache ownership (prefix cache, KV
-    connectors), add speculative tokens, or shard the token domain
+    GLM-5/5.1, decoder-only execution, and TP+DP. MTP is supported in eager
+    mode. Options which change cache ownership (prefix cache, KV
+    connectors) or shard the token domain
     (DCP/PCP/PP) are rejected instead of silently producing an invalid
     resident map.
     """
@@ -507,17 +507,15 @@ def validate_dsa_sparse_runtime_config(vllm_config: Any) -> None:
                 "DSA sparse offload in eager mode requires "
                 "ascend_compilation_config.enable_npugraph_ex=false")
 
-    # The source DSA implementation does not integrate speculative/MTP cache
-    # ownership. Letting a multi-token step enter this migrated sparse path can
-    # return numerically corrupted tokens without raising a device exception,
-    # so keep the unsupported combination fail-closed until it passes
-    # device-side token-accuracy validation.
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is not None:
-        raise ValueError(
-            "DSA sparse offload does not support speculative/MTP decoding "
-            "until device-side token accuracy is validated; remove "
-            "--speculative-config")
+    # MTP is supported in eager mode.  The scheduler patch trims draft tokens
+    # at MLA block boundaries (``_trim_dsa_mtp_drafts_at_block_boundaries``)
+    # so an unverified draft can never complete (and thus trigger a DRAM dump
+    # of) an offloaded MLA block.  In graph mode, the graph gate rejects
+    # multi-token decode (``non_single_token_decode``), so MTP steps fall back
+    # to eager automatically.
+    #
+    # The combination of graph mode + MTP + DSA is therefore safe: graph
+    # captures single-token decode only, and MTP steps run eager.
 
     raw_dsa_config = additional_config.get(
         DSA_SPARSE_ADDITIONAL_CONFIG_KEY, {})
