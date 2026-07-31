@@ -4,6 +4,27 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.9.0 - classify saved and restored original callables
+
+- Starting commit: `ded2d6c6f`.
+- Problem: saving an upstream method into a backup attribute and restoring a
+  temporarily patched method were reported as unresolved replacement calls.
+- Change: preserve provenance for direct callable aliases and literal-name
+  `getattr` snapshots. A write back to the exact source target is classified as
+  `restore_original`; a same-owner missing backup attribute containing
+  `original` is classified as `save_original`.
+- Safety boundary: a different owner, multiple possible sources, a dynamic
+  attribute name, or a non-backup alias remains review rather than being
+  treated as lifecycle evidence.
+- Fixed-source effect: two save-original records and the expected temporary
+  verifier restore became explained exclusions. The same provenance rule also
+  surfaced seven restore assignments that v0.8 silently skipped, matching the
+  independent raw patch-site audit. The final result contains 2 save and 8
+  restore findings; review findings fell from 16 to 13; generator issues fell
+  from 11 to 8. Verified relations remained 966.
+- Reason: these assignments describe patch lifecycle, not independent
+  downstream implementations, and their identity is statically provable.
+
 ## v0.8.0 - resolve typed lazy module exports
 
 - Starting commit: `91f3356f8`.

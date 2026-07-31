@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.8.0"
+GENERATOR_VERSION = "0.9.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
 
@@ -610,6 +610,8 @@ class PatchReplacement:
     kind: str
     reason: str | None = None
     is_restore: bool = False
+    is_save: bool = False
+    lifecycle_source: str | None = None
 
 
 def _merge_candidate_maps(
@@ -1939,7 +1941,12 @@ class InterfaceBoundaryGenerator:
         )
         string_values = self._string_values(value, context)
         expression = _expression_name(value)
-        references = (
+        getattr_references = self._getattr_references(
+            module_info,
+            value,
+            context,
+        )
+        references = getattr_references or (
             self._resolve_patch_references(
                 module_info,
                 expression,
@@ -1963,6 +1970,32 @@ class InterfaceBoundaryGenerator:
                 context.bindings[target.id] = set(references)
             else:
                 context.bindings.pop(target.id, None)
+
+    def _getattr_references(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+    ) -> set[str]:
+        if not (
+            isinstance(node, ast.Call)
+            and _expression_name(node.func) == "getattr"
+            and len(node.args) >= 2
+        ):
+            return set()
+        owner = _expression_name(node.args[0])
+        attributes = self._string_values(node.args[1], context)
+        if owner is None or len(attributes) != 1:
+            return set()
+        attribute = next(iter(attributes))
+        return {
+            f"{candidate}.{attribute}"
+            for candidate in self._resolve_patch_references(
+                module_info,
+                owner,
+                context,
+            )
+        }
 
     def _resolve_patch_references(
         self,
@@ -2134,6 +2167,33 @@ class InterfaceBoundaryGenerator:
             line,
         )
         if replacement.is_restore:
+            self._append_unresolved_patch(
+                module_info,
+                context,
+                target,
+                replacement_node,
+                line,
+                "assignment restores the original upstream callable",
+                status="excluded",
+                reason_code="restore_original",
+                generator_issue=False,
+            )
+            return
+        if replacement.is_save:
+            self._append_unresolved_patch(
+                module_info,
+                context,
+                target,
+                replacement_node,
+                line,
+                (
+                    "assignment saves the original upstream callable"
+                    f" from {replacement.lifecycle_source}"
+                ),
+                status="excluded",
+                reason_code="save_original",
+                generator_issue=False,
+            )
             return
         if replacement.info is None:
             self._append_unresolved_patch(
@@ -2286,8 +2346,29 @@ class InterfaceBoundaryGenerator:
                 info=None,
                 kind="restore_original",
                 is_restore=True,
+                lifecycle_source=target,
             )
-        if any(reference.startswith("vllm.") for reference in references):
+        upstream_references = {
+            reference
+            for reference in references
+            if reference.startswith("vllm.")
+        }
+        if len(upstream_references) == 1:
+            source = next(iter(upstream_references))
+            target_owner, target_name = target.rsplit(".", 1)
+            source_owner = source.rsplit(".", 1)[0]
+            if (
+                target_owner == source_owner
+                and "original" in target_name.lower()
+                and self._find_upstream_patch_target(target) is None
+            ):
+                return PatchReplacement(
+                    info=None,
+                    kind="save_original",
+                    is_save=True,
+                    lifecycle_source=source,
+                )
+        if upstream_references:
             return PatchReplacement(
                 info=None,
                 kind="alias_rebind",

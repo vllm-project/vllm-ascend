@@ -1071,6 +1071,63 @@ Target.third = ambiguous(flag)
     assert findings[0].reason_code == "ambiguous_wrapper_factory"
 
 
+def test_save_and_restore_original_are_lifecycle_findings(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def run(self, value):
+        return value
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def install():
+    original = getattr(Target, "run", None)
+    Target._vllm_ascend_original_run = original
+
+    def replacement(self, value):
+        return value
+
+    try:
+        Target.run = replacement
+    finally:
+        Target.run = original
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(patches) == 1
+    assert patches[0].downstream_name == "replacement"
+    assert {finding.reason_code for finding in findings} == {
+        "restore_original",
+        "save_original",
+    }
+    assert all(finding.status == "excluded" for finding in findings)
+    assert all(not finding.generator_issue for finding in findings)
+
+
 def test_lambda_patch_and_parse_failures_are_explicit(tmp_path: Path) -> None:
     vllm_root = tmp_path / "vllm-repo"
     ascend_root = tmp_path / "ascend-repo"
