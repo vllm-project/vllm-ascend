@@ -1,4 +1,4 @@
-# KV Cache Pool（Ascend Store）Deployment Guide
+# KV Cache Pool (Ascend Store) Deployment Guide
 
 ## Contents
 
@@ -477,7 +477,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
+**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
 
 ```shell
 pip install memfabric-hybrid

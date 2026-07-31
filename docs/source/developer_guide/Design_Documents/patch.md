@@ -17,13 +17,12 @@ We should keep in mind that Patch is not the best way to make vLLM Ascend compat
 In `vllm_ascend/patch`, you can see the code structure as follows:
 
 ```shell
-vllm_ascend
-├── patch
-│   ├── platform
-│   │   ├── patch_xxx.py
-│   ├── worker
-│   │   ├── patch_yyy.py
-└───────────
+vllm_ascend/
+└── patch/
+    ├── platform/
+    │   └── patch_xxx.py
+    └── worker/
+        └── patch_yyy.py
 ```
 
 - **platform**: The patch code in this directory is for patching the code in vLLM Main process. It's called by `vllm_ascend/platform::NPUPlatform::pre_register_and_update` very early when vLLM is initialized.

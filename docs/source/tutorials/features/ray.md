@@ -55,7 +55,7 @@ To ensure a consistent execution environment across all nodes, including the mod
 
 For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the primary and secondary nodes, with the `--net=host` option to enable proper network connectivity.
 
-Below is the example container setup command, which should be executed on **all nodes** :
+Below is the example container setup command, which should be executed on **all nodes**:
 
 ```bash
 # Update the vllm-ascend image
