@@ -52,7 +52,7 @@ docker run -it \
 
 ### Manual Installation
 
-Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have already been installed.
+Assuming your working directory is `/workspace` and vllm/vllm-ascend have already been installed.
 
 1. Install LMCache Repo
 

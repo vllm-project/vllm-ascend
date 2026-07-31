@@ -4,9 +4,9 @@
 
 Kimi-K2-Thinking is a large-scale Mixture-of-Experts (MoE) model developed by Moonshot AI. It features a hybrid thinking architecture that excels in complex reasoning and problem-solving tasks.
 
-This document will demonstrate the main verification steps of the model, including supported features, environment preparation, installation, online service deployment, functional verification, accuracy evaluation, performance evaluation, performance tuning, and FAQ.
+This document will demonstrate the main verification steps and references of the model, including supported features, environment preparation, installation, online service deployment, functional verification, accuracy evaluation, performance evaluation, performance tuning, and FAQ.
 
-This document is recommended to use the latest release candidate or official version.
+This document is validated and written based on **vLLM-Ascend v0.9.0rc1**. The current model (Kimi-K2-Thinking) is first supported in this version, and **v0.9.0rc1 and later versions** can run stably. It is recommended to use the latest release candidate or stable version alongside this document.
 
 ## 2 Supported Features
 
@@ -18,11 +18,11 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64G x 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
 
 It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
 
-After downloading the model weights, please edit the value of `"quantization_config.config_groups.group_0.targets"` from `["Linear"]` to `["MoE"]` in `config.json` of the original model to verify the quantized model.
+After downloading the model weights, please edit the value of `"quantization_config.config_groups.group_0.targets"` from `["Linear"]` to `["MoE"]` in `config.json` of the original model to use the quantized model.
 
 ```json
 {
@@ -170,15 +170,13 @@ Expected Status:
 - The command exits successfully.
 - `vllm and vllm_ascend import ok` is printed.
 
-If you want to deploy a multi-node environment, set up the same software environment on each node.
-
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for online inference scenarios with moderate concurrency requirements.
 
-For an Atlas 800 A3 (64G x 16) node, `tensor-parallel-size` should be at least 16.
+For an Atlas 800 A3 (64G × 16) node, `tensor-parallel-size` should be at least 16.
 
 Run the following script to start the vLLM server:
 
