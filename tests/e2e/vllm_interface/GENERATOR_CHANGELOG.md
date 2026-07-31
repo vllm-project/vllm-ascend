@@ -4,6 +4,32 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.21.0 - callable alias checkpoint (rejected)
+
+- Starting commit: `26b471763`; rollback checkpoint: `c78b06086`.
+- Problem addressed: final binding labelled imported callable aliases and
+  annotated class-body callable aliases as ordinary values.  This produced a
+  false conditional-presence review for vLLM's CPU implementation alias and
+  changed six PyTorch `Module.forward` exclusions into reviews.
+- Change: retain unresolved name assignments as explicit alias bindings;
+  resolve them after the repository index is complete; recover their source
+  callable variants and signatures; and use those variants at every relation
+  consumer.  Two new red tests cover a conditional imported function alias and
+  `run: Callable = implementation`; all 116 isolated generator/auditor tests
+  pass after the change.
+- Fixed-source result: the pinned source set took 260.9 seconds and produced
+  970 relations plus 45 findings.  The six PyTorch external-owner findings are
+  restored exactly.  The remaining difference is
+  `causal_conv1d_update`: the generator now correctly sees that the default and
+  CPU aliases have different signatures and reports
+  `review/conditional_callable_variants`.
+- Rejection reason: vllm-ascend runs on NPU, so the exact
+  `current_platform.is_cpu()` branch is inactive for this dependency map.  The
+  generic main-path condition evaluator still treats it as reachable.  This is
+  a target-platform path-selection defect in the generator, not an upstream
+  interface break.  Keep this commit only as a rollback point before adding
+  exact runtime-platform guard evaluation.
+
 ## v0.20.0 - namespace exception flow checkpoint (rejected)
 
 - Starting commit: `9bd978d14` (the red-test checkpoint); the previous accepted

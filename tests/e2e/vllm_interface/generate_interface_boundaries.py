@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 4
-GENERATOR_VERSION = "0.20.0"
+GENERATOR_VERSION = "0.21.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -668,15 +668,25 @@ def _scope_flow_statement(
         source_binding = state.get(node.value.id) if isinstance(node.value, ast.Name) else None
         for target in node.targets:
             names = _bound_target_names(target)
-            if len(names) == 1 and isinstance(target, ast.Name) and source_binding is not None:
-                state[target.id] = tuple(source_binding)
+            if len(names) == 1 and isinstance(target, ast.Name) and isinstance(node.value, ast.Name):
+                if source_binding is not None and all(
+                    binding.kind in {"class", "function"} for binding in source_binding
+                ):
+                    state[target.id] = tuple(source_binding)
+                else:
+                    state[target.id] = (_scope_binding("alias", node),)
             else:
                 _bind_scope_names(state, names, _scope_binding("value", node))
     elif isinstance(node, ast.AnnAssign):
         if node.value is not None:
             source_binding = state.get(node.value.id) if isinstance(node.value, ast.Name) else None
-            if isinstance(node.target, ast.Name) and source_binding is not None:
-                state[node.target.id] = tuple(source_binding)
+            if isinstance(node.target, ast.Name) and isinstance(node.value, ast.Name):
+                if source_binding is not None and all(
+                    binding.kind in {"class", "function"} for binding in source_binding
+                ):
+                    state[node.target.id] = tuple(source_binding)
+                else:
+                    state[node.target.id] = (_scope_binding("alias", node),)
             else:
                 _bind_scope_names(
                     state,
@@ -2539,7 +2549,129 @@ class RepositoryIndex:
         qualified_name: str,
     ) -> tuple[_ScopeBinding, ...]:
         canonical = self.canonical_name(qualified_name)
-        return self.final_bindings.get(canonical, ())
+        return tuple(
+            self._refine_final_binding(canonical, binding) for binding in self.final_bindings.get(canonical, ())
+        )
+
+    def _final_alias_target(
+        self,
+        qualified_name: str,
+        binding: _ScopeBinding,
+    ) -> str | None:
+        if binding.kind != "alias":
+            return None
+        node = binding.node
+        if isinstance(node, (ast.AnnAssign, ast.Assign)):
+            value = node.value
+        else:
+            return None
+        if isinstance(value, ast.Call):
+            wrapper = _expression_name(value.func)
+            if wrapper not in {"classmethod", "staticmethod"} or len(value.args) != 1:
+                return None
+            value = value.args[0]
+        expression = _expression_name(value)
+        if expression is None:
+            return None
+
+        owner_name = qualified_name.rsplit(".", 1)[0]
+        owner = self.classes.get(owner_name)
+        if owner is not None:
+            same_class = f"{owner_name}.{expression}"
+            if "." not in expression and self.find_callable(same_class) is not None:
+                return self.canonical_name(same_class)
+            module = owner.module
+        else:
+            modules = [name for name in self.modules if qualified_name.startswith(f"{name}.")]
+            if not modules:
+                return None
+            module = max(modules, key=len)
+        return self.canonical_name(
+            self.resolve_reference(
+                module,
+                expression,
+            )
+        )
+
+    def _refine_final_binding(
+        self,
+        qualified_name: str,
+        binding: _ScopeBinding,
+    ) -> _ScopeBinding:
+        target = self._final_alias_target(qualified_name, binding)
+        if target is None:
+            return binding
+        source = self.find_callable(target)
+        if source is not None:
+            return replace(
+                binding,
+                kind="function",
+                node=source.node,
+            )
+        source_class = self.find_class(target)
+        if source_class is not None:
+            return replace(
+                binding,
+                kind="class",
+                node=self.find_callable(source_class.qualified_name).node,
+            )
+        return binding
+
+    def find_final_callable_variants(
+        self,
+        qualified_name: str,
+        seen: frozenset[str] = frozenset(),
+    ) -> tuple[CallableInfo, ...]:
+        canonical = self.canonical_name(qualified_name)
+        if canonical in seen:
+            return ()
+        raw = self.final_bindings.get(canonical, ())
+        if not raw:
+            return self.find_callable_variants(canonical)
+
+        endpoint = self.find_callable(canonical)
+        direct = self.find_callable_variants(canonical)
+        variants: list[CallableInfo] = []
+        for binding in raw:
+            if binding.kind == "function" and binding.node is not None:
+                matching = [candidate for candidate in direct if candidate.node is binding.node]
+                if matching:
+                    variants.extend(matching)
+                elif endpoint is not None:
+                    variants.append(replace(endpoint, node=binding.node))
+                continue
+            target = self._final_alias_target(canonical, binding)
+            if target is None:
+                continue
+            for source in self.find_final_callable_variants(
+                target,
+                frozenset((*seen, canonical)),
+            ):
+                if endpoint is None:
+                    variants.append(source)
+                else:
+                    variants.append(
+                        replace(
+                            endpoint,
+                            node=source.node,
+                            binding_line=binding.line,
+                            origin_kind="callable_alias",
+                            signature_override=source.signature_override,
+                        )
+                    )
+
+        unique: dict[tuple[str, str | None, str, int, int, str], CallableInfo] = {}
+        for candidate in variants:
+            key = (
+                candidate.file,
+                candidate.owner,
+                candidate.name,
+                getattr(candidate.node, "lineno", 0),
+                candidate.binding_line if candidate.binding_line is not None else -1,
+                json.dumps(candidate.signature, ensure_ascii=False, separators=(",", ":")),
+            )
+            unique[key] = candidate
+        return tuple(unique[key] for key in sorted(unique))
 
     def find_loose_function(self, module: str, name: str) -> CallableInfo | None:
         candidates = self.modules[module].loose_functions.get(name, [])
@@ -2690,12 +2822,12 @@ class InterfaceBoundaryGenerator:
         qualified_name: str,
     ) -> tuple[CallableInfo, ...]:
         if qualified_name.startswith("vllm_ascend."):
-            return self.downstream.find_callable_variants(qualified_name)
+            return self.downstream.find_final_callable_variants(qualified_name)
         if qualified_name.startswith("vllm."):
-            return self.upstream.find_callable_variants(qualified_name)
+            return self.upstream.find_final_callable_variants(qualified_name)
         for package, index in self.externals.items():
             if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return index.find_callable_variants(qualified_name)
+                return index.find_final_callable_variants(qualified_name)
         return ()
 
     def _final_bindings(
