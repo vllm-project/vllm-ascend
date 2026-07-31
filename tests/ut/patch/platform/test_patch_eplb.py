@@ -53,6 +53,73 @@ def test_parallel_config_platform_patch_is_idempotent():
     assert parallel_module.current_platform is proxy
 
 
+def test_communicator_factory_maps_tensor_lists_to_hccl(monkeypatch):
+    communicator = object()
+    communicator_cls = MagicMock(return_value=communicator)
+    monkeypatch.setattr(patch_eplb, "HcclEplbCommunicator", communicator_cls)
+    coordinator = MagicMock()
+
+    with _npu_parallel_config_platform():
+        result = patch_eplb._eplb_communicator.create_eplb_communicator(
+            coordinator,
+            "torch_nccl",
+            [[object()]],
+            [object()],
+        )
+
+    assert result is communicator
+    communicator_cls.assert_called_once_with(coordinator.device_group)
+
+
+def test_communicator_factory_forwards_other_backends_and_additive_parameters():
+    sentinel = object()
+    calls = []
+
+    def original_factory(
+        group_coordinator,
+        backend,
+        expert_weights,
+        expert_buffer,
+        *,
+        transport_options=None,
+    ):
+        calls.append(
+            (
+                group_coordinator,
+                backend,
+                expert_weights,
+                expert_buffer,
+                transport_options,
+            )
+        )
+        return sentinel
+
+    wrapped_factory = patch_eplb._wrap_communicator_factory(original_factory)
+    coordinator = object()
+    expert_weights = object()
+    expert_buffer = object()
+
+    with _npu_parallel_config_platform():
+        result = wrapped_factory(
+            coordinator,
+            "torch_gloo",
+            expert_weights,
+            expert_buffer,
+            transport_options={"mode": "future"},
+        )
+
+    assert result is sentinel
+    assert calls == [
+        (
+            coordinator,
+            "torch_gloo",
+            expert_weights,
+            expert_buffer,
+            {"mode": "future"},
+        )
+    ]
+
+
 def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     pending_result = SimpleNamespace(layer_idx=3)
     model_state = SimpleNamespace(pending_result=pending_result)
