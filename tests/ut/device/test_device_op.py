@@ -1,9 +1,59 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+
+
+def test_mla_preprocess_only_decode_passes_none_for_kimi_k3_no_rope():
+    hidden_states = torch.randn(2, 8)
+    kv_cache = (torch.empty(4, 2, 3), torch.empty(4, 2, 2))
+    tensor = torch.empty(1)
+    attention = SimpleNamespace(
+        use_mla_rope=False,
+        fa_quant_layer=False,
+        W_UK_T=torch.empty(2, 1, 3),
+        wd_qkv=tensor,
+        deq_scale_qkv=tensor,
+        gamma1=tensor,
+        beta1=tensor,
+        wu_q=tensor,
+        qb_deq_scl=tensor,
+        gamma2=tensor,
+        quant_scale0=tensor,
+        quant_offset0=tensor,
+        quant_bias_qkv=tensor,
+        quant_scale1=tensor,
+        quant_offset1=tensor,
+        qb_qt_bias=tensor,
+        ctkv_scale=tensor,
+        q_nope_scale=tensor,
+        enable_kv_nz=False,
+        num_heads=2,
+        kv_lora_rank=3,
+        reorg_decode_q=lambda q_nope, q_pe: (q_nope, q_pe),
+    )
+    metadata = SimpleNamespace(
+        num_decode_tokens=2,
+        decode=SimpleNamespace(cos=object(), sin=object()),
+        slot_mapping=torch.arange(2),
+    )
+
+    with mock.patch("vllm_ascend.device.device_op.torch.ops._C_ascend.mla_preprocess") as mock_mlapo:
+        decode_result, prefill_result = BaseDeviceAdaptor.mla_preprocess_only_decode(
+            attention,
+            hidden_states,
+            kv_cache,
+            metadata,
+        )
+
+    assert mock_mlapo.call_args.args[8] is None
+    assert mock_mlapo.call_args.args[9] is None
+    assert decode_result.ql_nope.shape == (2, 2, 3)
+    assert decode_result.q_pe.shape == (2, 2, 2)
+    assert prefill_result is None
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
