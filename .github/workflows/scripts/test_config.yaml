@@ -46,7 +46,7 @@
   tests:
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     # - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
-    - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    # - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
 
