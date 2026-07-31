@@ -401,14 +401,9 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
-            try:
-                tp_group = get_tp_group()
-                tp_size = tp_group.world_size
-                tp_rank = tp_group.rank_in_group
-            except AssertionError:
-                tp_group = None
-                tp_size = 1
-                tp_rank = 0
+            tp_group = get_tp_group()
+            tp_size = tp_group.world_size
+            tp_rank = tp_group.rank_in_group
             decode_iq = iq[:num_decode_tokens]
             if tp_group is not None and tp_size > 1 and index_md.num_prefills == 0:
                 decode_topk = self._decode_topk_tp_sharded(
