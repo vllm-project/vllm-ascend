@@ -34,7 +34,7 @@ which lets us keep vLLM in sync while bisecting vllm-ascend.
 import csv
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -104,11 +104,16 @@ def _norm(row: dict[str | None, object]) -> tuple[dict[str, str], bool]:
 def _parse_time(value: str) -> datetime:
     for fmt in _TIME_FORMATS:
         try:
-            return datetime.strptime(value, fmt)
+            parsed = datetime.strptime(value, fmt)
         except ValueError:
             continue
+        # Normalise to naive UTC so tz-aware and tz-less rows stay comparable;
+        # otherwise ``max()`` below raises on mixed formats.
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     # Unparsable timestamps sort oldest so they never shadow a real success.
-    return datetime.min.replace(tzinfo=None)
+    return datetime.min
 
 
 class GoodTable:
