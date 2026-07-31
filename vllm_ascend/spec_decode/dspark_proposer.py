@@ -209,6 +209,20 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
 
+        # Kimi-K3 MLA dspark: the MLA metadata builder derives use_mla_rope
+        # from the TARGET's hf_text_config (K3 target is NoPE), so the draft
+        # groups' builders would emit identity cos/sin while the draft's
+        # context KV is written with real YaRN rotations -- silently breaking
+        # the draft's positional alignment. The builders created above serve
+        # draft layers only, so flip them to the draft's own RoPE setting.
+        draft_hf_config = self.vllm_config.speculative_config.draft_model_config.hf_config
+        if getattr(draft_hf_config, "model_type", None) == "k3_dspark":
+            draft_use_mla_rope = not bool(getattr(draft_hf_config, "mla_use_nope", False))
+            for attn_group in self.draft_attn_groups:
+                for builder in attn_group.metadata_builders:
+                    if hasattr(builder, "use_mla_rope"):
+                        builder.use_mla_rope = draft_use_mla_rope
+
         name_to_gid = {
             ln: gid
             for gid, group in enumerate(kv_cache_config.kv_cache_groups)
