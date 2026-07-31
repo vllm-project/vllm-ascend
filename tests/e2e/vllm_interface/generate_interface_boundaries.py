@@ -45,12 +45,15 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.11.0"
+SCHEMA_VERSION = 4
+GENERATOR_VERSION = "0.12.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
-FINDING_STATUSES = frozenset(
-    {"expected", "excluded", "review", "risk", "verified"}
-)
+FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
+STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
+    "abc.ABC": (),
+    "typing.Generic": (),
+    "typing.Protocol": ("typing.Generic",),
+}
 
 
 def _jsonable_signature(node: ast.AST | None) -> list[object] | None:
@@ -468,9 +471,11 @@ class Relation:
         compare=False,
         hash=False,
     )
+    upstream_package: str = "vllm"
 
-    def upstream_key(self) -> tuple[str, str, str]:
+    def upstream_key(self) -> tuple[str, str, str, str]:
         return (
+            self.upstream_package,
             self.upstream_file,
             self.upstream_owner or "",
             self.upstream_name,
@@ -1247,21 +1252,24 @@ class RepositoryIndex:
 
 
 class InterfaceBoundaryGenerator:
-    def __init__(self, vllm_root: Path, ascend_root: Path):
+    def __init__(
+        self,
+        vllm_root: Path,
+        ascend_root: Path,
+        external_roots: dict[str, Path] | None = None,
+    ):
         self.upstream = RepositoryIndex(vllm_root, "vllm")
         self.downstream = RepositoryIndex(ascend_root, "vllm_ascend")
-        parse_errors = [
-            ("vLLM", error)
-            for error in self.upstream.parse_errors
-        ] + [
-            ("vllm-ascend", error)
-            for error in self.downstream.parse_errors
-        ]
-        if parse_errors:
-            details = "; ".join(
-                f"{repository}:{error['file']}: {error['error']}"
-                for repository, error in parse_errors
+        self.externals = {
+            package: RepositoryIndex(root, package) for package, root in sorted((external_roots or {}).items())
+        }
+        parse_errors = (
+            [("vLLM", error) for error in self.upstream.parse_errors]
+            + [("vllm-ascend", error) for error in self.downstream.parse_errors]
+            + [(package, error) for package, index in self.externals.items() for error in index.parse_errors]
             )
+        if parse_errors:
+            details = "; ".join(f"{repository}:{error['file']}: {error['error']}" for repository, error in parse_errors)
             raise ValueError(f"Python source parsing failed: {details}")
         self.relations: list[Relation] = []
         self.findings: list[CandidateFinding] = []
@@ -1340,21 +1348,60 @@ class InterfaceBoundaryGenerator:
 
     def _resolve_downstream_reference(self, module: str, expression: str) -> str:
         qualified = self.downstream.resolve_reference(module, expression)
-        if qualified.startswith("vllm."):
-            return self.upstream.canonical_name(qualified)
-        return self.downstream.canonical_name(qualified)
+        return self._canonical_reference(qualified)
+
+    def _canonical_reference(self, qualified_name: str) -> str:
+        if qualified_name.startswith("vllm."):
+            return self.upstream.canonical_name(qualified_name)
+        if qualified_name.startswith("vllm_ascend."):
+            return self.downstream.canonical_name(qualified_name)
+        for package, index in self.externals.items():
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return index.canonical_name(qualified_name)
+        return qualified_name
 
     def _class_info(self, qualified_name: str) -> ClassInfo | None:
         if qualified_name.startswith("vllm_ascend."):
             return self.downstream.find_class(qualified_name)
         if qualified_name.startswith("vllm."):
             return self.upstream.find_class(qualified_name)
+        for package, index in self.externals.items():
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return index.find_class(qualified_name)
         return None
+
+    def _callable_info(self, qualified_name: str) -> CallableInfo | None:
+        if qualified_name.startswith("vllm_ascend."):
+            return self.downstream.find_callable(qualified_name)
+        if qualified_name.startswith("vllm."):
+            return self.upstream.find_callable(qualified_name)
+        for package, index in self.externals.items():
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return index.find_callable(qualified_name)
+        return None
+
+    def _source_package(self, qualified_name: str) -> str:
+        if qualified_name == "vllm" or qualified_name.startswith("vllm."):
+            return "vllm"
+        for package in self.externals:
+            if qualified_name == package or qualified_name.startswith(f"{package}."):
+                return package
+        raise ValueError(f"interface source package was not indexed: {qualified_name}")
+
+    def _class_defines_method(
+        self,
+        qualified_name: str,
+        method_name: str,
+    ) -> bool:
+        class_info = self._class_info(qualified_name)
+        return class_info is not None and method_name in class_info.methods
 
     def _class_bases(
         self,
         qualified_name: str,
     ) -> tuple[list[str], list[str]]:
+        if qualified_name in STDLIB_STRUCTURAL_BASES:
+            return list(STDLIB_STRUCTURAL_BASES[qualified_name]), []
         info = self._class_info(qualified_name)
         if info is None:
             return [], [qualified_name]
@@ -1362,26 +1409,13 @@ class InterfaceBoundaryGenerator:
         missing: list[str] = []
         normalized_bases: list[str] = []
         for candidate in info.resolved_bases:
-            if candidate.startswith("vllm."):
-                candidate = self.upstream.canonical_name(candidate)
-            elif candidate.startswith("vllm_ascend."):
-                candidate = self.downstream.canonical_name(candidate)
-            normalized_bases.append(candidate)
+            normalized_bases.append(self._canonical_reference(candidate))
 
-        known_owned = [
-            self._class_info(candidate) is not None
-            for candidate in normalized_bases
-        ]
-        for index, candidate in enumerate(normalized_bases):
-            if self._class_info(candidate):
+        for candidate in normalized_bases:
+            if self._class_info(candidate) or candidate in STDLIB_STRUCTURAL_BASES:
                 bases.append(candidate)
-            elif candidate.startswith(("vllm.", "vllm_ascend.")):
-                missing.append(candidate)
-                break
-            elif any(known_owned[index + 1 :]):
-                missing.append(
-                    f"opaque base before owned base: {candidate}"
-                )
+            elif candidate not in {"builtins.object", "object"}:
+                missing.append(f"opaque or unresolved base: {candidate}")
                 break
         return bases, missing
 
@@ -1488,10 +1522,7 @@ class InterfaceBoundaryGenerator:
                 class_info.bases,
                 class_info.resolved_bases,
             ):
-                if resolved.startswith("vllm."):
-                    resolved = self.upstream.canonical_name(resolved)
-                elif resolved.startswith("vllm_ascend."):
-                    resolved = self.downstream.canonical_name(resolved)
+                resolved = self._canonical_reference(resolved)
                 if not resolved.startswith("vllm."):
                     continue
                 upstream_class = self.upstream.find_class(resolved)
@@ -1578,20 +1609,60 @@ class InterfaceBoundaryGenerator:
                             )
                         )
                     continue
-                if not effective_owner.startswith("vllm."):
+                is_external = self._is_external_owner(effective_owner)
+                if not effective_owner.startswith("vllm.") and not is_external:
                     continue
-                upstream_callable = self.upstream.find_callable(
-                    f"{effective_owner}.{method_name}"
+                if is_external:
+                    shadowed = next(
+                        (
+                            owner
+                            for owner in mro[1:]
+                            if owner.startswith("vllm.")
+                            and self._class_defines_method(
+                                owner,
+                                method_name,
+                            )
+                        ),
+                        None,
+                    )
+                    target_expression = f"{effective_owner}.{method_name}"
+                    reason = (
+                        "the effective overridden method is owned by external "
+                        f"package class {effective_owner}, not vLLM"
+                    )
+                    reason_code = "external_only_override"
+                    if shadowed is not None:
+                        target_expression = f"{shadowed}.{method_name}"
+                        reason = (
+                            f"external owner {effective_owner} defines the effective method before this vLLM candidate"
+                        )
+                        reason_code = "external_override_owner"
+                    self.findings.append(
+                        CandidateFinding(
+                            relation="override",
+                            downstream_file=class_info.file,
+                            downstream_owner=class_info.name,
+                            downstream_name=method_name,
+                            target_expression=target_expression,
+                            evidence_line=getattr(
+                                method_node,
+                                "lineno",
+                                0,
+                            ),
+                            reason=reason,
+                            status="excluded",
+                            reason_code=reason_code,
+                            generator_issue=False,
                 )
+                    )
+                    continue
+                upstream_callable = self._callable_info(f"{effective_owner}.{method_name}")
                 if upstream_callable is None:
                     continue
-                downstream_callable = self.downstream.find_callable(
-                    f"{class_info.qualified_name}.{method_name}"
-                )
+                downstream_callable = self.downstream.find_callable(f"{class_info.qualified_name}.{method_name}")
                 evidence_line = (
                     downstream_callable.binding_line
-                    if downstream_callable
-                    and downstream_callable.binding_line is not None
+                    if downstream_callable and downstream_callable.binding_line is not None
                     else getattr(method_node, "lineno", 0)
                 )
                 self.relations.append(
@@ -1611,6 +1682,7 @@ class InterfaceBoundaryGenerator:
                         ),
                         evidence_file=class_info.file,
                         evidence_line=evidence_line,
+                        upstream_package=self._source_package(upstream_callable.qualified_name),
                     )
                 )
 
@@ -1624,6 +1696,9 @@ class InterfaceBoundaryGenerator:
             if class_info and method_name in class_info.methods:
                 return owner
         return None
+
+    def _is_external_owner(self, qualified_name: str) -> bool:
+        return any(qualified_name == package or qualified_name.startswith(f"{package}.") for package in self.externals)
 
     def _candidate_upstream_method_owners(
         self,
@@ -1640,10 +1715,7 @@ class InterfaceBoundaryGenerator:
         candidates: set[str] = set()
         next_seen = (*seen, qualified_name)
         for base in class_info.resolved_bases:
-            if base.startswith("vllm."):
-                base = self.upstream.canonical_name(base)
-            elif base.startswith("vllm_ascend."):
-                base = self.downstream.canonical_name(base)
+            base = self._canonical_reference(base)
             base_info = self._class_info(base)
             if base_info is None:
                 continue
@@ -2287,7 +2359,7 @@ class InterfaceBoundaryGenerator:
                     target,
                     context,
                 )
-            )
+                )
             self.findings.append(
                 CandidateFinding(
                     relation="monkey_patch",
@@ -2331,6 +2403,7 @@ class InterfaceBoundaryGenerator:
                 evidence_file=module_info.file,
                 evidence_line=line,
                 evidence=(evidence,),
+                upstream_package=self._source_package(upstream_callable.qualified_name),
             )
         )
 
@@ -2925,14 +2998,15 @@ class InterfaceBoundaryGenerator:
         self,
         qualified_name: str,
     ) -> CallableInfo | None:
-        direct = self.upstream.find_callable(qualified_name)
+        qualified_name = self._canonical_reference(qualified_name)
+        direct = self._callable_info(qualified_name)
         if direct is not None:
             return direct
         if "." not in qualified_name:
             return None
 
         owner_name, method_name = qualified_name.rsplit(".", 1)
-        owner = self.upstream.find_class(owner_name)
+        owner = self._class_info(owner_name)
         if owner is None:
             return None
         mro_result = self._linearized_mro(owner.qualified_name)
@@ -2942,9 +3016,7 @@ class InterfaceBoundaryGenerator:
         )
         if effective_owner is None:
             return None
-        return self.upstream.find_callable(
-            f"{effective_owner}.{method_name}"
-        )
+        return self._callable_info(f"{effective_owner}.{method_name}")
 
     def _class_line(self, class_info: ClassInfo) -> int:
         node = self.downstream.find_callable(class_info.qualified_name)
@@ -2957,9 +3029,10 @@ def _relation_payloads(
     vllm_sha: str,
     ascend_sha: str,
     findings: Iterable[CandidateFinding] = (),
+    external_sources: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     grouped: dict[
-        tuple[str, str | None, str, str],
+        tuple[str, str, str | None, str, str],
         list[Relation],
     ] = defaultdict(list)
     for relation in relations:
@@ -2970,6 +3043,7 @@ def _relation_payloads(
         )
         grouped[
             (
+                relation.upstream_package,
                 relation.upstream_file,
                 relation.upstream_owner,
                 relation.upstream_name,
@@ -2981,9 +3055,15 @@ def _relation_payloads(
     relation_count = 0
     for key in sorted(
         grouped,
-        key=lambda item: (item[0], item[1] or "", item[2], item[3]),
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[2] or "",
+            item[3],
+            item[4],
+        ),
     ):
-        upstream_file, owner, name, signature_key = key
+        source_package, upstream_file, owner, name, signature_key = key
         consumers = []
         evidence_records = []
         for relation in sorted(
@@ -3021,6 +3101,7 @@ def _relation_payloads(
             relation_count += 1
         payloads.append(
             {
+                "p": source_package,
                 "u": [
                     upstream_file,
                     owner,
@@ -3056,6 +3137,7 @@ def _relation_payloads(
             "generator": GENERATOR_VERSION,
             "vllm": vllm_sha,
             "vllm_ascend": ascend_sha,
+            "external_sources": dict(sorted((external_sources or {}).items())),
             "contracts": len(payloads),
             "relations": relation_count,
             "findings": len(finding_payloads),
@@ -3099,6 +3181,7 @@ def _load_compact_relations(path: Path) -> list[Relation]:
                     downstream_signature=downstream_signature,
                     evidence_file=downstream_file,
                     evidence_line=0,
+                    upstream_package=payload.get("p", "vllm"),
                 )
             )
     return relations
@@ -3108,6 +3191,7 @@ def _relation_label(relation: Relation) -> dict[str, Any]:
     return {
         "relation": relation.relation,
         "upstream": {
+            "package": relation.upstream_package,
             "file": relation.upstream_file,
             "owner": relation.upstream_owner,
             "name": relation.upstream_name,
@@ -3325,6 +3409,80 @@ def _canonical_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _named_values(values: Sequence[str], option: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise SystemExit(f"{option} must use PACKAGE=VALUE: {value}")
+        package, item = value.split("=", 1)
+        if not package or not item:
+            raise SystemExit(f"{option} must use PACKAGE=VALUE: {value}")
+        if not package.isidentifier():
+            raise SystemExit(f"invalid package name for {option}: {package}")
+        if package in result:
+            raise SystemExit(f"duplicate {option} package: {package}")
+        result[package] = item
+    return result
+
+
+def _snapshot_source_sha(root: Path, package: str) -> str:
+    manifest_path = root / ".interface-source.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"external source is neither a Git checkout nor a valid snapshot: {package}={root}") from error
+
+    if manifest.get("schema") != 1 or manifest.get("package") != package:
+        raise SystemExit(f"invalid external source manifest identity: {manifest_path}")
+    commit = manifest.get("commit")
+    expected_files = manifest.get("files")
+    if not isinstance(commit, str) or not isinstance(expected_files, dict):
+        raise SystemExit(f"invalid external source manifest: {manifest_path}")
+
+    package_root = root / package
+    actual_files = {path.relative_to(root).as_posix() for path in package_root.rglob("*.py")}
+    if actual_files != set(expected_files):
+        missing = sorted(set(expected_files) - actual_files)
+        extra = sorted(actual_files - set(expected_files))
+        raise SystemExit(f"external source snapshot file set changed for {package}: missing={missing}, extra={extra}")
+
+    for relative_path, expected_digest in sorted(expected_files.items()):
+        if not isinstance(relative_path, str) or not isinstance(
+            expected_digest,
+            str,
+        ):
+            raise SystemExit(f"invalid external source file record: {manifest_path}")
+        path = root / relative_path
+        actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual_digest != expected_digest:
+            raise SystemExit(
+                f"external source snapshot digest mismatch: {relative_path}; "
+                f"expected {expected_digest}, found {actual_digest}"
+            )
+    return commit
+
+
+def _verified_external_sources(
+    roots: dict[str, Path],
+    expected_shas: dict[str, str],
+) -> dict[str, str]:
+    if set(roots) != set(expected_shas):
+        raise SystemExit("--external-root and --expect-external-sha must name the same packages")
+    actual_shas: dict[str, str] = {}
+    for package, root in sorted(roots.items()):
+        try:
+            actual = _git_head(root)
+        except subprocess.CalledProcessError:
+            actual = _snapshot_source_sha(root, package)
+        _verify_sha(
+            f"external package {package}",
+            actual,
+            expected_shas[package],
+        )
+        actual_shas[package] = actual
+    return actual_shas
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vllm-root", type=Path, required=True)
@@ -3335,6 +3493,18 @@ def main() -> None:
     parser.add_argument("--unresolved-output", type=Path)
     parser.add_argument("--compare-with", type=Path)
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--external-root",
+        action="append",
+        default=[],
+        metavar="PACKAGE=PATH",
+    )
+    parser.add_argument(
+        "--expect-external-sha",
+        action="append",
+        default=[],
+        metavar="PACKAGE=SHA",
+    )
     args = parser.parse_args()
 
     vllm_sha = _git_head(args.vllm_root)
@@ -3342,7 +3512,25 @@ def main() -> None:
     _verify_sha("vLLM", vllm_sha, args.expect_vllm_sha)
     _verify_sha("vllm-ascend", ascend_sha, args.expect_ascend_sha)
 
-    generator = InterfaceBoundaryGenerator(args.vllm_root, args.ascend_root)
+    external_root_values = _named_values(
+        args.external_root,
+        "--external-root",
+    )
+    expected_external_shas = _named_values(
+        args.expect_external_sha,
+        "--expect-external-sha",
+    )
+    external_roots = {package: Path(path) for package, path in external_root_values.items()}
+    external_sources = _verified_external_sources(
+        external_roots,
+        expected_external_shas,
+    )
+
+    generator = InterfaceBoundaryGenerator(
+        args.vllm_root,
+        args.ascend_root,
+        external_roots,
+    )
     relations, findings = generator.generate()
     _write_jsonl(
         args.output,
@@ -3351,6 +3539,7 @@ def main() -> None:
             vllm_sha=vllm_sha,
             ascend_sha=ascend_sha,
             findings=findings,
+            external_sources=external_sources,
         ),
     )
 
@@ -3366,6 +3555,7 @@ def main() -> None:
             "vllm_sha": vllm_sha,
             "vllm_ascend_sha": ascend_sha,
             "generator_version": GENERATOR_VERSION,
+            "external_sources": dict(sorted(external_sources.items())),
         },
         "generated": {
             "relations": len(relations),

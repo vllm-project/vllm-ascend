@@ -790,7 +790,7 @@ class SafePrefix(Partial):
     assert any(
         relation.relation == "override"
         and relation.downstream_owner == "OpaqueFirst"
-        and "opaque base before owned base" in relation.reason
+        and "opaque or unresolved base" in relation.reason
         for relation in unresolved
     )
     assert any(
@@ -849,6 +849,309 @@ Model.to = patched_to
     assert findings[0].status == "review"
     assert findings[0].reason_code == "external_inherited_method"
     assert not findings[0].generator_issue
+
+
+def test_exact_external_source_completes_patch_and_override_mro(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    external_root = tmp_path / "external-repo"
+    _write(external_root, "external/__init__.py", "from .module import ExternalBase\n")
+    _write(
+        external_root,
+        "external/module.py",
+        """
+class ExternalBase:
+    def forward(self, value):
+        return value
+
+    def external_only(self, value):
+        return value
+
+    def to(self, *args, **kwargs):
+        return self
+""",
+    )
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        """
+from external import ExternalBase
+
+
+class Protocol:
+    def forward(self, value):
+        return value
+
+    def protocol(self, value):
+        return value
+
+
+class Model(ExternalBase, Protocol):
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.model import Model
+
+
+def patched_to(self, *args, **kwargs):
+    return self
+
+
+Model.to = patched_to
+
+
+class Child(Model):
+    def forward(self, value):
+        return value
+
+    def external_only(self, value):
+        return value
+
+    def protocol(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        {"external": external_root},
+    ).generate()
+    by_endpoint = {
+        (
+            relation.relation,
+            relation.downstream_owner,
+            relation.downstream_name,
+        ): relation
+        for relation in relations
+    }
+
+    patch = by_endpoint[("monkey_patch", None, "patched_to")]
+    assert patch.upstream_package == "external"
+    assert patch.upstream_file == "external/module.py"
+    assert patch.upstream_owner == "ExternalBase"
+    assert patch.upstream_name == "to"
+
+    assert ("override", "Child", "forward") not in by_endpoint
+    assert ("override", "Child", "external_only") not in by_endpoint
+
+    vllm_override = by_endpoint[("override", "Child", "protocol")]
+    assert vllm_override.upstream_package == "vllm"
+    assert vllm_override.upstream_owner == "Protocol"
+    assert any(
+        finding.reason_code == "external_override_owner"
+        and finding.downstream_owner == "Child"
+        and finding.downstream_name == "forward"
+        and finding.target_expression == "vllm.model.Protocol.forward"
+        for finding in findings
+    )
+    assert any(
+        finding.reason_code == "external_only_override"
+        and finding.downstream_owner == "Child"
+        and finding.downstream_name == "external_only"
+        and finding.target_expression == ("external.module.ExternalBase.external_only")
+        for finding in findings
+    )
+
+    payloads = generator._relation_payloads(
+        relations,
+        vllm_sha="vllm-sha",
+        ascend_sha="ascend-sha",
+        findings=findings,
+        external_sources={"external": "external-sha"},
+    )
+    external_records = [payload for payload in payloads if payload.get("p") == "external"]
+    assert len(external_records) == 1
+    assert payloads[0]["_meta"]["external_sources"] == {"external": "external-sha"}
+
+
+def test_unknown_parent_inside_external_source_keeps_mro_in_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    external_root = tmp_path / "external-repo"
+    _write(external_root, "external/__init__.py", "from .module import ExternalBase\n")
+    _write(
+        external_root,
+        "external/module.py",
+        """
+import unknown
+
+
+class ExternalBase(unknown.Parent):
+    pass
+""",
+    )
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        """
+from external import ExternalBase
+
+
+class Protocol:
+    def hook(self):
+        pass
+
+
+class Model(ExternalBase, Protocol):
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.model import Model
+
+
+class Child(Model):
+    def hook(self):
+        pass
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        {"external": external_root},
+    ).generate()
+
+    assert not any(
+        relation.relation == "override" and relation.downstream_owner == "Child" and relation.downstream_name == "hook"
+        for relation in relations
+    )
+    review = next(
+        finding for finding in findings if finding.downstream_owner == "Child" and finding.downstream_name == "hook"
+    )
+    assert review.status == "review"
+    assert review.reason_code == "ambiguous_mro"
+    assert "unknown.Parent" in review.reason
+
+
+def test_structural_stdlib_bases_do_not_hide_verified_overrides(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        """
+from abc import ABC
+from typing import Protocol
+
+
+class AbstractBase(ABC):
+    def hook(self):
+        pass
+
+
+class Interface(Protocol):
+    def protocol_hook(self):
+        pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.model import AbstractBase
+from vllm.model import Interface
+
+
+class Child(AbstractBase, Interface):
+    def hook(self):
+        pass
+
+    def protocol_hook(self):
+        pass
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    endpoints = {
+        (relation.downstream_owner, relation.downstream_name)
+        for relation in relations
+        if relation.relation == "override"
+    }
+    assert ("Child", "hook") in endpoints
+    assert ("Child", "protocol_hook") in endpoints
+    assert not [finding for finding in findings if finding.reason_code == "ambiguous_mro"]
+
+
+def test_external_source_sha_must_match_git_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    external_root = tmp_path / "external-repo"
+    external_root.mkdir()
+    monkeypatch.setattr(generator, "_git_head", lambda root: "actual-sha")
+
+    assert generator._verified_external_sources(
+        {"external": external_root},
+        {"external": "actual-sha"},
+    ) == {"external": "actual-sha"}
+    with pytest.raises(SystemExit, match="SHA mismatch"):
+        generator._verified_external_sources(
+            {"external": external_root},
+            {"external": "claimed-sha"},
+        )
+
+
+def test_external_source_snapshot_verifies_every_python_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    external_root = tmp_path / "external-repo"
+    source = external_root / "external" / "module.py"
+    _write(external_root, "external/module.py", "class ExternalBase:\n    pass\n")
+    digest = generator.hashlib.sha256(source.read_bytes()).hexdigest()
+    (external_root / ".interface-source.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "package": "external",
+                "repository": "https://example.invalid/external",
+                "commit": "source-commit",
+                "files": {"external/module.py": digest},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def no_git_checkout(root: Path) -> str:
+        raise generator.subprocess.CalledProcessError(128, ["git"])
+
+    monkeypatch.setattr(generator, "_git_head", no_git_checkout)
+    assert generator._verified_external_sources(
+        {"external": external_root},
+        {"external": "source-commit"},
+    ) == {"external": "source-commit"}
+
+    source.write_text("class Changed:\n    pass\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="digest mismatch"):
+        generator._verified_external_sources(
+            {"external": external_root},
+            {"external": "source-commit"},
+        )
 
 
 def test_patch_scanner_resolves_local_imports_aliases_and_evidence(

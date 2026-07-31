@@ -40,7 +40,7 @@ def _load_boundaries() -> list[dict[str, Any]]:
     records = []
     for line in _BOUNDARIES_PATH.read_text(encoding="utf-8").splitlines():
         record = json.loads(line)
-        if "_meta" not in record:
+        if "u" in record:
             records.append(record)
     return records
 
@@ -58,6 +58,28 @@ def _vllm_root() -> Path:
     spec = importlib.util.find_spec("vllm")
     assert spec is not None and spec.submodule_search_locations, (
         "Cannot locate the vllm source package. Install vLLM or set VLLM_SOURCE_ROOT."
+    )
+    return Path(next(iter(spec.submodule_search_locations))).resolve().parent
+
+
+@cache
+def _source_root(package: str) -> Path:
+    if package == "vllm":
+        return _vllm_root()
+
+    environment_name = f"INTERFACE_SOURCE_ROOT_{package.upper()}"
+    configured_root = os.getenv(environment_name)
+    if configured_root:
+        candidate = Path(configured_root).resolve()
+        if (candidate / package / "__init__.py").is_file():
+            return candidate
+        if candidate.name == package and (candidate / "__init__.py").is_file():
+            return candidate.parent
+        raise AssertionError(f"{environment_name} does not contain the {package} package: {candidate}")
+
+    spec = importlib.util.find_spec(package)
+    assert spec is not None and spec.submodule_search_locations, (
+        f"Cannot locate the {package} source package. Install it or set {environment_name}."
     )
     return Path(next(iter(spec.submodule_search_locations))).resolve().parent
 
@@ -131,8 +153,9 @@ def _signature(node: ast.AST) -> list[object] | None:
 
 def _boundary_id(boundary: dict[str, Any]) -> str:
     upstream_file, owner, name, _ = boundary["u"]
+    source_package = boundary.get("p", "vllm")
     qualified_name = f"{owner}.{name}" if owner else name
-    return f"{upstream_file}::{qualified_name}"
+    return f"{source_package}:{upstream_file}::{qualified_name}"
 
 
 def _callable_consumers() -> list[tuple[dict[str, Any], list[Any]]]:
@@ -179,7 +202,12 @@ def _consumer_id(item: tuple[dict[str, Any], list[Any]]) -> str:
 @pytest.mark.parametrize("boundary", _load_boundaries(), ids=_boundary_id)
 def test_upstream_callable_boundary(boundary: dict[str, Any]) -> None:
     upstream_file, owner, name, expected_signature = boundary["u"]
-    node = _find_node(_parse(_vllm_root() / upstream_file), owner, name)
+    source_package = boundary.get("p", "vllm")
+    node = _find_node(
+        _parse(_source_root(source_package) / upstream_file),
+        owner,
+        name,
+    )
     assert node is not None, f"Upstream callable was removed or moved: {_boundary_id(boundary)}"
     assert _signature(node) == expected_signature, f"Upstream callable boundary changed: {_boundary_id(boundary)}"
 

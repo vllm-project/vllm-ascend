@@ -4,6 +4,48 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.12.0 - resolve exact external inheritance without widening vLLM scope
+
+- Starting commit: `2f0b95b5e`.
+- Problem: six candidates could not be decided because the combined MRO
+  stopped at `torch.nn.Module`. Guessing a later vLLM owner would be wrong, but
+  leaving the exact runtime dependency unindexed made valid vLLM overrides and
+  the `MoonViT3dPretrainedModel.to` patch invisible.
+- Exact external input: the upstream `vllm-interface` lane installs vLLM with
+  `VLLM_TARGET_DEVICE=empty` and then installs vllm-ascend requirements. The
+  effective PyTorch pin is therefore vllm-ascend's `torch==2.10.0`, official
+  commit `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0`.
+- Change: accept optional external package indexes and include the defining
+  package in schema v4. The CLI requires an expected external SHA and verifies
+  it against either the checkout HEAD or every file digest in a source snapshot
+  manifest. The boundary UT now resolves a record from its declared source
+  package instead of assuming every definition lives below the vLLM root.
+- MRO boundary: exact structural bases `abc.ABC`, `typing.Generic`, and
+  `typing.Protocol` are modelled explicitly. Any other unindexed base still
+  makes the chain incomplete; a regression test proves that an unknown parent
+  inside an indexed external class remains `review/ambiguous_mro`.
+- Scope boundary: a patch whose target is a vLLM class remains a vLLM boundary
+  even when the patched method is inherited from PyTorch. A downstream method
+  whose effective overridden owner is only PyTorch is not added to the vLLM
+  relation table; it is retained as `excluded/external_only_override`. When
+  PyTorch shadows a later vLLM candidate, that candidate is retained as
+  `excluded/external_override_owner`.
+- Rejected intermediate result: the first strict implementation treated every
+  unindexed standard-library base as opaque. It reduced relations from 966 to
+  847 and created 131 reviews, almost all through `abc.ABC`; this was a
+  generator regression, not 125 new source breaks. Explicit standard-library
+  structural bases restored the previously verified edges without relaxing
+  arbitrary external MRO handling.
+- Fixed-source effect: 970 relations (192 inheritance, 123 monkey patch, 655
+  override) and 44 classified findings. Review and generator issues are both
+  zero. The seven real upstream risks are unchanged. Relative to v0.11, the
+  only four new relations are the MoonViT `to` patch plus verified
+  `set_aux_hidden_state_layers`, `get_attn_backend`, and `get_kv_cache_spec`
+  overrides. Nine external-only overrides and two externally shadowed vLLM
+  candidates are explicit exclusions.
+- Audited output SHA-256:
+  `2ebb4f0979eec3e59eaf5d6abee99702a723acadd639e6659a38a27fac36465f`.
+
 ## v0.11.0 - separate live injections from stale patch candidates
 
 - Starting commit: `d22bb2aef`.

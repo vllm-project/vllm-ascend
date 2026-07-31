@@ -26,9 +26,11 @@ vllm-ascend source pair. It currently discovers:
 - patch targets imported at module or function scope;
 - simple target aliases such as `PATCH_TARGET = ImportedVllmClass`;
 - `setattr` names resolved from string constants, string collections, or one live candidate;
-- lambda and direct `property(...)` replacements, while unresolved wrapper factories are reported for review;
+- lambda, direct `property(...)`, class-body callable aliases, and statically provable wrapper factories;
 - direct inheritance from a statically resolved vLLM class;
-- verified overrides whose effective parent implementation is resolved through the combined MRO.
+- verified overrides whose effective parent implementation is resolved through the combined MRO;
+- generated dataclass constructors, typed lazy exports, patch save/restore lifecycle, and field-mutation findings;
+- optional exact external source indexes for methods inherited by a vLLM class, without treating external-only overrides as vLLM edges.
 
 The POC targets vLLM main. Branches guarded by an exact `vllm_version_is("<tag>")` check are treated as release-only;
 the opposite branch is indexed for main. Top-level imports under the selected branch and `try` blocks are included.
@@ -39,11 +41,17 @@ is kept in the main output as a finding instead of being silently dropped. Findi
 expected injection, an excluded inactive branch, and a static-analysis review. The optional unresolved output mirrors
 these findings for convenient review. It is AST-only and requires neither an NPU nor package imports.
 
-Schema version 3 stores verified relations under `u`/`c`, candidate findings under `f`, the replacement definition file
+Schema version 4 stores verified relations under `u`/`c`, candidate findings under `f`, the definition source package
+under `p`, the replacement definition file
 in each consumer, and patch evidence separately under `e`. Each finding includes `status`, `reason_code`, and whether it
 represents a generator limitation. Evidence includes the assignment file and line, lexical scope, guards, patch kind,
 and every statically discovered assignment occurrence. Python parse failures stop generation instead of silently
 reducing coverage.
+
+An external source root must be reproducible. The generator accepts either a Git checkout whose HEAD equals the expected
+SHA or a `.interface-source.json` snapshot manifest that records the exact upstream commit and SHA-256 of every included
+Python file. An unknown external parent keeps the MRO in review; the generator never chooses a later vLLM method through
+an incomplete chain.
 
 Example:
 
@@ -53,6 +61,8 @@ python tests/e2e/vllm_interface/generate_interface_boundaries.py \
   --ascend-root /path/to/vllm-ascend \
   --expect-vllm-sha <vllm-sha> \
   --expect-ascend-sha <vllm-ascend-sha> \
+  --external-root torch=/path/to/pytorch-source \
+  --expect-external-sha torch=<pytorch-sha> \
   --output generated_boundaries.jsonl \
   --unresolved-output unresolved_relations.jsonl \
   --compare-with tests/e2e/vllm_interface/interface_boundaries.jsonl \
