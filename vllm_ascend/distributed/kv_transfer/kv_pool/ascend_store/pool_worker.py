@@ -67,6 +67,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
+    get_layerwise_physical_layer_index,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -696,20 +697,12 @@ class KVPoolWorker:
             return cache.storage().data_ptr()
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        import regex as re
-
-        m = re.search(r"layers\.(\d+)", layer_name)
-        if m:
-            return int(m.group(1))
-        # MTP layers have names like "mtp.0.self_attn.xxx" without "layers."
-        # prefix. Map them after the main model layers.
-        if ".mtp." in f".{layer_name}.":
-            m = re.search(r"mtp\.(\d+)", layer_name)
-            if m:
-                num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
-                return num_hidden_layers + int(m.group(1))
-        m = re.search(r"(\d+)", layer_name)
-        return int(m.group(1)) if m else 0
+        base_layers = getattr(
+            self.hf_config,
+            "num_hidden_layers",
+            self.num_layers,
+        )
+        return get_layerwise_physical_layer_index(layer_name, base_layers)
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
@@ -1508,16 +1501,25 @@ class KVPoolWorker:
                 # failures, as the scheduler cannot handle inconsistent KV
                 # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
-                    if len(request.block_ids_by_group) == 1:
+                    if self.num_kv_cache_groups == 1:
                         with self._invalid_block_ids_lock:
                             self._invalid_block_ids.update(invalid_block_ids)
                     else:
-                        logger.error(
-                            "KV load failed for hybrid request %s. "
-                            "Skip invalid-block fallback to avoid scheduler crash. "
-                            "failed_blocks=%s",
-                            request.req_id,
-                            invalid_block_ids,
+                        leased_keys_to_release = list(
+                            dict.fromkeys(
+                                [
+                                    *all_group_load_keys,
+                                    *leased_keys,
+                                ]
+                            )
+                        )
+                        if leased_keys_to_release:
+                            self.m_store.batch_remove_lease(leased_keys_to_release)
+                        raise RuntimeError(
+                            "Layerwise multi-group KV load failed and cannot "
+                            "safely fall back to per-block recomputation: "
+                            f"request={request.req_id}, "
+                            f"failed_blocks={invalid_block_ids}"
                         )
                 all_group_load_keys.extend(leased_keys)
 
