@@ -11,7 +11,7 @@ from vllm_ascend.ops.triton.triton_utils import (
     get_vectorcore_num,
     init_device_properties_triton,
 )
-from vllm_ascend.spec_decode.dflash_proposer import _COPY_EXPAND_BLOCK_SIZE as BLOCK_SIZE
+from vllm_ascend.spec_decode.dflash_proposer import _COPY_EXPAND_TILE_SIZE as TILE_SIZE
 
 PARALLEL_DRAFTING_TOKEN_ID = 151643
 KV_BLOCK_SIZE = 128
@@ -173,7 +173,10 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     out_query_slot_mapping = torch.empty(num_query_total, dtype=torch.int32, device=device)
     out_token_indices = torch.zeros(num_sample_total, dtype=torch.int32, device=device)
 
-    num_blocks_needed = triton.cdiv(total_ctx + num_query_total, BLOCK_SIZE)
+    # Mirrors _compute_num_programs: the kernel's two grid-stride loops
+    # are each covered for any program count, so only the larger bound decides
+    # how many programs do real work.
+    num_blocks_needed = triton.cdiv(max(total_ctx, num_query_total), TILE_SIZE)
     grid = (min(num_blocks_needed, get_vectorcore_num()),)
 
     copy_and_expand_dflash_and_dspark_inputs_kernel[grid](
@@ -199,7 +202,7 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         batch_size=batch_size,
         HAS_NUM_REJECTED=has_num_rejected,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
-        BLOCK_SIZE=BLOCK_SIZE,
+        TILE_SIZE=TILE_SIZE,
     )
 
     torch.testing.assert_close(out_input_ids, ref["out_input_ids"])
