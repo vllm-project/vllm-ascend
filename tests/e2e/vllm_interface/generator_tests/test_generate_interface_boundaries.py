@@ -539,6 +539,65 @@ vllm.exported = replacement
     assert not findings
 
 
+def test_typed_lazy_export_resolves_to_its_interface_owner(tmp_path: Path) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/platforms/interface.py", """
+class Platform:
+    def verify(self, value):
+        return value
+""")
+    _write(
+        vllm_root,
+        "vllm/platforms/__init__.py",
+        """
+from typing import TYPE_CHECKING
+from .interface import Platform
+
+if TYPE_CHECKING:
+    current_platform: Platform
+
+
+def __getattr__(name):
+    if name == "current_platform":
+        return Platform()
+    raise AttributeError(name)
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.platforms import current_platform
+
+
+def replacement(value):
+    return value
+
+
+current_platform.verify = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    )
+    assert patch.upstream_file == "vllm/platforms/interface.py"
+    assert patch.upstream_owner == "Platform"
+    assert patch.upstream_name == "verify"
+    assert patch.evidence[0].target_expression == "current_platform.verify"
+    assert not findings
+
+
 def test_main_skips_exact_tag_patch_branches(tmp_path: Path) -> None:
     vllm_root = tmp_path / "vllm-repo"
     ascend_root = tmp_path / "ascend-repo"

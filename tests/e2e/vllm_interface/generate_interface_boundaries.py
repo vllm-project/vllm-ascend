@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.7.0"
+GENERATOR_VERSION = "0.8.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
 
@@ -145,6 +145,39 @@ def _function_scope_nodes(
         ):
             continue
         stack.extend(reversed(list(ast.iter_child_nodes(current))))
+
+
+def _lazy_getattr_names(node: ast.AST) -> set[str]:
+    if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        return set()
+    parameters = [*node.args.posonlyargs, *node.args.args]
+    if not parameters:
+        return set()
+    parameter = parameters[0].arg
+    names: set[str] = set()
+    for child in _function_scope_nodes(node):
+        if not isinstance(child, ast.If):
+            continue
+        test = child.test
+        if not (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and len(test.comparators) == 1
+        ):
+            continue
+        left, right = test.left, test.comparators[0]
+        candidates = ((left, right), (right, left))
+        for name_node, value_node in candidates:
+            if (
+                isinstance(name_node, ast.Name)
+                and name_node.id == parameter
+                and isinstance(value_node, ast.Constant)
+                and isinstance(value_node.value, str)
+                and any(isinstance(item, ast.Return) for item in child.body)
+            ):
+                names.add(value_node.value)
+    return names
 
 
 def _is_exact_tag_check(node: ast.AST) -> bool:
@@ -364,6 +397,7 @@ class ModuleInfo:
     loose_functions: dict[str, list[CallableInfo]]
     string_constants: dict[str, tuple[str, ...]]
     star_imports: tuple[str, ...]
+    typed_lazy_exports: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -382,6 +416,7 @@ class RelationEvidence:
     patch_kind: str | None = None
     definition_line: int | None = None
     binding_line: int | None = None
+    target_expression: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -398,6 +433,8 @@ class RelationEvidence:
             payload["definition_line"] = self.definition_line
         if self.binding_line is not None:
             payload["binding_line"] = self.binding_line
+        if self.target_expression is not None:
+            payload["target_expression"] = self.target_expression
         return payload
 
 
@@ -626,6 +663,7 @@ class RepositoryIndex:
             loose_functions: dict[str, list[CallableInfo]] = defaultdict(list)
             string_constants: dict[str, set[str]] = defaultdict(set)
             star_imports: list[str] = []
+            annotated_exports: list[tuple[str, str]] = []
             tag_guard_names = _tag_guard_names(tree.body)
             module_statements = list(
                 _main_module_statements(
@@ -657,6 +695,15 @@ class RepositoryIndex:
                         local_name = alias.asname or alias.name
                         imports[local_name] = (
                             f"{source_module}.{alias.name}" if source_module else alias.name
+                        )
+                elif (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                ):
+                    annotation = _expression_name(node.annotation)
+                    if annotation:
+                        annotated_exports.append(
+                            (node.target.id, annotation)
                         )
                 elif isinstance(node, ast.ClassDef):
                     bases = tuple(
@@ -743,6 +790,23 @@ class RepositoryIndex:
                     )
                 )
 
+            lazy_names = {
+                name
+                for candidate in module_statements
+                if isinstance(candidate, (ast.AsyncFunctionDef, ast.FunctionDef))
+                and candidate.name == "__getattr__"
+                for name in _lazy_getattr_names(candidate)
+            }
+            typed_lazy_exports = {
+                name: _resolve_bound_reference(
+                    module,
+                    annotation,
+                    imports,
+                    {*classes, *functions},
+                )
+                for name, annotation in annotated_exports
+                if name in lazy_names
+            }
             module_info = ModuleInfo(
                 name=module,
                 file=relative_file,
@@ -757,10 +821,13 @@ class RepositoryIndex:
                     for name, values in string_constants.items()
                 },
                 star_imports=tuple(star_imports),
+                typed_lazy_exports=typed_lazy_exports,
             )
             self.modules[module] = module_info
             for local_name, target in imports.items():
                 self.aliases[f"{module}.{local_name}"] = target
+            for export_name, target in typed_lazy_exports.items():
+                self.aliases[f"{module}.{export_name}"] = target
 
         self._materialize_star_import_aliases()
         self._materialize_dataclass_initializers()
@@ -1176,6 +1243,7 @@ class InterfaceBoundaryGenerator:
                             item.scope or "",
                             item.guards,
                             item.patch_kind or "",
+                            item.target_expression or "",
                         ),
                     )
                 ),
@@ -2002,6 +2070,9 @@ class InterfaceBoundaryGenerator:
             call.args[2],
             context,
             line,
+            evidence_target=(
+                f"{owner}.{next(iter(selected)).rsplit('.', 1)[-1]}"
+            ),
         )
 
     def _record_patch_node(
@@ -2042,6 +2113,7 @@ class InterfaceBoundaryGenerator:
             replacement_node,
             context,
             line,
+            evidence_target=expression,
         )
 
     def _record_resolved_patch(
@@ -2051,6 +2123,8 @@ class InterfaceBoundaryGenerator:
         replacement_node: ast.AST | None,
         context: PatchScanContext,
         line: int,
+        *,
+        evidence_target: str | None = None,
     ) -> None:
         replacement = self._resolve_patch_replacement(
             module_info,
@@ -2107,6 +2181,7 @@ class InterfaceBoundaryGenerator:
             patch_kind=replacement.kind,
             definition_line=definition_line,
             binding_line=replacement.info.binding_line,
+            target_expression=evidence_target or target,
         )
         self.relations.append(
             Relation(

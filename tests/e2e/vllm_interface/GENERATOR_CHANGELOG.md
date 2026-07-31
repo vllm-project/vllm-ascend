@@ -4,6 +4,29 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.8.0 - resolve typed lazy module exports
+
+- Starting commit: `91f3356f8`.
+- Problem: `vllm.platforms.current_platform` is created by module
+  `__getattr__`, so the index could not find
+  `current_platform.verify_quantization` even though its interface is declared
+  as `Platform`.
+- Change: bind a lazy export to its annotated class only when the module both
+  annotates the exact export name and handles that fixed string in
+  `__getattr__`. Patch evidence also retains the source target expression in
+  addition to the canonical definition owner.
+- Safety boundary: an annotation alone, a dynamic name, or an unresolved type
+  does not create an alias.
+- Fixed-source effect: the temporary platform verifier patch became one
+  verified relation to `Platform.verify_quantization`, retaining
+  `current_platform.verify_quantization` as source evidence. Relations
+  increased from 965 to 966; findings fell from 33 to 32; generator issues
+  fell from 12 to 11. Its restore assignment remains a separate
+  lifecycle-classification task.
+- Reason: the annotation and literal lazy-export branch jointly prove the
+  runtime interface owner; the earlier missing-owner result was a generator
+  error.
+
 ## v0.7.0 - synthesize provable dataclass constructors
 
 - Starting commit: `92e942be8`.
