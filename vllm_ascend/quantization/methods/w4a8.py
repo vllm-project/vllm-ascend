@@ -103,23 +103,23 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             getattr(getattr(getattr(vllm_config, "model_config", None), "hf_config", None), "model_type", None)
             == "kimi_k3"
         )
-        self._force_weight_nz = False
+        self._force_kimi_shared_expert_weight_only = False
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
-        return self._force_weight_nz or (
+        return self._force_kimi_shared_expert_weight_only or (
             self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
         )
 
     def enable_per_channel_for_kimi_shared_expert(self) -> None:
-        """Select the per-channel layout for a Kimi K3 shared-expert Linear."""
+        """Select the per-channel weight-only path for a Kimi shared expert."""
         self.group_size = 0
         self.is_per_channel_weight = True
         # This scheme instance is attached to one shared-expert projection.
         # Retain that selection through weight loading, where layer.prefix is
         # not a reliable discriminator for every vLLM Linear wrapper.
-        self._force_weight_nz = True
+        self._force_kimi_shared_expert_weight_only = True
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Create weight parameters.
@@ -209,6 +209,18 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = None,
     ) -> torch.Tensor:
         if self.is_per_channel_weight:
+            if self._uses_per_channel_shared_expert(layer):
+                # K3 shared experts use W4 INT4Pack weights. The generic
+                # QuantMatmul WeightNZ path cannot consume that representation
+                # on A3, so use the W4-native weight-only kernel as a
+                # functional fallback. It consumes BF16 activations and a
+                # per-channel antiquant scale directly.
+                return torch_npu.npu_weight_quant_batchmatmul(
+                    x,
+                    layer.weight,
+                    antiquant_scale=layer.weight_scale.to(x.dtype),
+                    antiquant_group_size=0,
+                )
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
             need_unsqueeze = pertoken_scale.dim() == 2
             if need_unsqueeze:
@@ -236,13 +248,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         uses_per_channel_shared_expert = self._uses_per_channel_shared_expert(layer)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        if uses_per_channel_shared_expert:
-            # WeightNZ is a layout of the unpacked INT8 tensor. For a W4
-            # checkpoint its internal format must be established before
-            # reinterpreting every four bytes as INT32; casting the packed
-            # result later leaves x2 as ND for aclnnQuantMatmulWeightNz.
-            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-        else:
+        # Keep K3 shared-expert INT4Pack weights in ND. The weight-only
+        # fallback accepts ND INT32 INT4Pack, while a per-channel INT4
+        # WeightNZ operand has a different transpose contract and cannot be
+        # passed to the generic QuantMatmul WeightNZ path.
+        if not uses_per_channel_shared_expert:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()
