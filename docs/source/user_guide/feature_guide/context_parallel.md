@@ -24,6 +24,11 @@ CP(Context Parallel) supports eager and graph execution, prefix caching, chunked
 | Ascend 950 | MLA/GQA | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental (MLA)<br>— Not applicable (GQA) | 🔵 P/D disaggregation<br>🔴 PD-mixed deployment |
 | Ascend 950 | SFA | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported |
 
+- 🟢 **Supported**: Combining the feature with DCP is supported.
+- 🔵 **Experimental**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
+- 🔴 **Not supported**: Combining the feature with DCP is not supported.
+- **Not applicable**: The feature does not apply to this attention backend.
+
 ## How to use Context Parallel
 
 You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and `decode_context_parallel_size`, refer to the following example:
