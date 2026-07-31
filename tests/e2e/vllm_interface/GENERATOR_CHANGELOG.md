@@ -4,6 +4,24 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.7.0 - synthesize provable dataclass constructors
+
+- Starting commit: `92e942be8`.
+- Problem: `ModelRunnerOutput.__init__` exists at runtime because the class is
+  decorated with `@dataclass`, but the source has no explicit method node.
+- Change: synthesize `__init__` for statically resolved dataclasses and derive
+  the parameter contract from annotated fields, inherited dataclass fields,
+  defaults, `default_factory`, `init=False`, `kw_only`, `KW_ONLY`, and
+  `ClassVar` exclusions.
+- Safety boundary: dynamic decorator/field options, unresolved external bases,
+  or an unprovable dataclass field graph do not produce a synthetic method.
+- Fixed-source effect: the `ModelRunnerOutput.__init__` patch moved from a
+  missing-member risk to one verified patch relation with a synthesized
+  12-parameter constructor contract. Relations increased from 964 to 965;
+  findings fell from 34 to 33; upstream risks fell from 14 to 13.
+- Reason: Python generates this callable deterministically from the class
+  definition; treating it as absent was a generator error.
+
 ## v0.6.0 - resolve statically provable wrapper factories
 
 - Starting commit: `944a5b924`.

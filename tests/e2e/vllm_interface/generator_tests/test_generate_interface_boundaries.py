@@ -281,6 +281,80 @@ class Child(Base):
     )
 
 
+def test_dataclass_generated_init_has_a_field_derived_signature(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/data.py",
+        """
+from dataclasses import KW_ONLY, dataclass, field
+from typing import ClassVar
+
+
+@dataclass
+class Base:
+    required: int
+    optional: int = 1
+    _: KW_ONLY
+    keyed: int
+
+
+@dataclass
+class Payload(Base):
+    local: int = 2
+    factory: list = field(default_factory=list)
+    ignored: int = field(init=False)
+    class_value: ClassVar[int] = 3
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.data import Payload
+
+
+def replacement(self, *args, **kwargs):
+    return None
+
+
+Payload.__init__ = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    )
+    assert patch.upstream_name == "__init__"
+    assert patch.upstream_signature == [
+        "sync",
+        [],
+        [
+            ["self", True],
+            ["required", True],
+            ["optional", False],
+            ["local", False],
+            ["factory", False],
+        ],
+        None,
+        [["keyed", True]],
+        None,
+    ]
+    assert not findings
+
+
 def test_output_is_deterministic(source_pair: tuple[Path, Path]) -> None:
     vllm_root, ascend_root = source_pair
     first, first_unresolved = generator.InterfaceBoundaryGenerator(

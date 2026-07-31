@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.6.0"
+GENERATOR_VERSION = "0.7.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
 
@@ -338,9 +338,17 @@ class CallableInfo:
     node: ast.AST | None = field(compare=False, hash=False, repr=False)
     binding_line: int | None = None
     origin_kind: str = "definition"
+    signature_override: list[object] | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+        repr=False,
+    )
 
     @property
     def signature(self) -> list[object] | None:
+        if self.signature_override is not None:
+            return self.signature_override
         return _jsonable_signature(self.node)
 
 
@@ -755,6 +763,7 @@ class RepositoryIndex:
                 self.aliases[f"{module}.{local_name}"] = target
 
         self._materialize_star_import_aliases()
+        self._materialize_dataclass_initializers()
         self._materialize_class_callable_aliases()
 
     def _materialize_star_import_aliases(self) -> None:
@@ -789,6 +798,201 @@ class RepositoryIndex:
                         continue
                     self.aliases[alias] = target
                     changed = True
+
+    def _materialize_dataclass_initializers(self) -> None:
+        field_cache: dict[
+            str,
+            list[tuple[str, bool, bool]],
+        ] = {}
+        for class_info in self.classes.values():
+            if "__init__" in class_info.methods:
+                continue
+            class_node = self.callables[class_info.qualified_name].node
+            config = self._dataclass_config(class_info.module, class_node)
+            if config is None or not config[0]:
+                continue
+            fields = self._dataclass_fields(class_info, field_cache, frozenset())
+            if fields is None:
+                continue
+            self_name = (
+                "__dataclass_self__"
+                if any(name == "self" for name, _, _ in fields)
+                else "self"
+            )
+            positional = [[self_name, True]]
+            positional.extend(
+                [name, required]
+                for name, required, kw_only in fields
+                if not kw_only
+            )
+            keyword_only = [
+                [name, required]
+                for name, required, kw_only in fields
+                if kw_only
+            ]
+            signature: list[object] = [
+                "sync",
+                [],
+                positional,
+                None,
+                keyword_only,
+                None,
+            ]
+            class_info.methods["__init__"] = class_node or ast.Pass()
+            self.callables[f"{class_info.qualified_name}.__init__"] = CallableInfo(
+                qualified_name=f"{class_info.qualified_name}.__init__",
+                module=class_info.module,
+                file=class_info.file,
+                owner=class_info.name,
+                name="__init__",
+                node=None,
+                binding_line=getattr(class_node, "lineno", 0),
+                origin_kind="generated_dataclass_method",
+                signature_override=signature,
+            )
+
+    def _dataclass_fields(
+        self,
+        class_info: ClassInfo,
+        cache: dict[str, list[tuple[str, bool, bool]]],
+        visiting: frozenset[str],
+    ) -> list[tuple[str, bool, bool]] | None:
+        if class_info.qualified_name in cache:
+            return list(cache[class_info.qualified_name])
+        if class_info.qualified_name in visiting:
+            return None
+        class_node = self.callables[class_info.qualified_name].node
+        if not isinstance(class_node, ast.ClassDef):
+            return None
+        config = self._dataclass_config(class_info.module, class_node)
+        if config is None:
+            return None
+        _, default_kw_only = config
+
+        fields: list[tuple[str, bool, bool]] = []
+        positions: dict[str, int] = {}
+        next_visiting = frozenset((*visiting, class_info.qualified_name))
+        for base_name in class_info.resolved_bases:
+            if base_name in {"builtins.object", "object"}:
+                continue
+            base = self.find_class(base_name)
+            if base is None:
+                return None
+            base_config = self._dataclass_config(
+                base.module,
+                self.callables[base.qualified_name].node,
+            )
+            if base_config is None:
+                continue
+            base_fields = self._dataclass_fields(
+                base,
+                cache,
+                next_visiting,
+            )
+            if base_fields is None:
+                return None
+            for field_info in base_fields:
+                positions[field_info[0]] = len(fields)
+                fields.append(field_info)
+
+        kw_only = default_kw_only
+        for statement in class_node.body:
+            if not isinstance(statement, ast.AnnAssign):
+                continue
+            if not isinstance(statement.target, ast.Name):
+                continue
+            annotation = "".join(ast.unparse(statement.annotation).split())
+            if annotation.rsplit(".", 1)[-1] == "KW_ONLY":
+                kw_only = True
+                continue
+            if "ClassVar" in annotation:
+                continue
+            field_config = self._dataclass_field_config(
+                statement.value,
+                kw_only,
+            )
+            if field_config is None:
+                return None
+            include, required, field_kw_only = field_config
+            if not include:
+                continue
+            field_info = (
+                statement.target.id,
+                required,
+                field_kw_only,
+            )
+            if statement.target.id in positions:
+                fields[positions[statement.target.id]] = field_info
+            else:
+                positions[statement.target.id] = len(fields)
+                fields.append(field_info)
+
+        cache[class_info.qualified_name] = list(fields)
+        return fields
+
+    def _dataclass_config(
+        self,
+        module: str,
+        node: ast.AST | None,
+    ) -> tuple[bool, bool] | None:
+        if not isinstance(node, ast.ClassDef):
+            return None
+        for decorator in node.decorator_list:
+            call = decorator if isinstance(decorator, ast.Call) else None
+            expression = _expression_name(call.func if call else decorator)
+            if expression is None:
+                continue
+            reference = self.canonical_name(
+                self.resolve_reference(module, expression)
+            )
+            if reference != "dataclasses.dataclass":
+                continue
+            init = True
+            kw_only = False
+            if call:
+                for keyword in call.keywords:
+                    if keyword.arg not in {"init", "kw_only"}:
+                        continue
+                    if not isinstance(keyword.value, ast.Constant) or not isinstance(
+                        keyword.value.value,
+                        bool,
+                    ):
+                        return None
+                    if keyword.arg == "init":
+                        init = keyword.value.value
+                    else:
+                        kw_only = keyword.value.value
+            return init, kw_only
+        return None
+
+    def _dataclass_field_config(
+        self,
+        value: ast.AST | None,
+        default_kw_only: bool,
+    ) -> tuple[bool, bool, bool] | None:
+        if not isinstance(value, ast.Call):
+            return True, value is None, default_kw_only
+        function_name = _expression_name(value.func)
+        if not function_name or function_name.rsplit(".", 1)[-1] != "field":
+            return True, False, default_kw_only
+
+        include = True
+        kw_only = default_kw_only
+        has_default = bool(value.args)
+        for keyword in value.keywords:
+            if keyword.arg in {"default", "default_factory"}:
+                has_default = True
+            elif keyword.arg in {"init", "kw_only"}:
+                if not isinstance(keyword.value, ast.Constant) or not isinstance(
+                    keyword.value.value,
+                    bool,
+                ):
+                    return None
+                if keyword.arg == "init":
+                    include = keyword.value.value
+                else:
+                    kw_only = keyword.value.value
+        return include, not has_default, kw_only
 
     def _collect_class_callable_aliases(
         self,
