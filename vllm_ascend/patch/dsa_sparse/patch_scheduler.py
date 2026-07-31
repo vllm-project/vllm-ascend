@@ -399,6 +399,23 @@ if not getattr(Scheduler, "_dsa_sparse_scheduler_patched", False):
     scheduler_mod.NewRequestData = sched_output.NewRequestData
     scheduler_mod.CachedRequestData = sched_output.CachedRequestData
     scheduler_mod.SchedulerOutput = sched_output.SchedulerOutput
+    # patch_balance_schedule imports NewRequestData by value at module load time,
+    # before DSA patches are installed.  Re-bind its reference so the balanced
+    # scheduler also produces DSA-extended NewRequestData with block_hashes.
+    # Other scheduler variants (dynamic_batch, recompute, profiling_chunk)
+    # have the same by-value import and must be re-bound too.
+    import vllm_ascend.patch.platform.patch_balance_schedule as balance_mod
+    balance_mod.NewRequestData = sched_output.NewRequestData
+    balance_mod.SchedulerOutput = sched_output.SchedulerOutput
+    import vllm_ascend.core.scheduler_dynamic_batch as dyn_batch_mod
+    dyn_batch_mod.NewRequestData = sched_output.NewRequestData
+    dyn_batch_mod.SchedulerOutput = sched_output.SchedulerOutput
+    import vllm_ascend.core.recompute_scheduler as recompute_mod
+    recompute_mod.NewRequestData = sched_output.NewRequestData
+    recompute_mod.SchedulerOutput = sched_output.SchedulerOutput
+    import vllm_ascend.core.scheduler_profiling_chunk as profiling_mod
+    profiling_mod.NewRequestData = sched_output.NewRequestData
+    profiling_mod.SchedulerOutput = sched_output.SchedulerOutput
 
     _original_init = Scheduler.__init__
     _original_schedule = Scheduler.schedule
