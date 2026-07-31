@@ -4,6 +4,31 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.10.0 - classify non-callable field mutations
+
+- Starting commit: `03f03957c`.
+- Problem: module fields, class fields, dataclass-field injections, and global
+  state swaps entered callable replacement resolution and were reported as
+  generator failures.
+- Change: index module/class values separately from callables. Existing field
+  writes are retained in the main output as `verified/field_mutation`; fields
+  added under a negative `hasattr` or field-membership guard are retained as
+  `expected/inject_missing_field`.
+- Safety boundary: an unguarded missing field is a risk; a dynamic owner or a
+  right-hand side that may be callable does not receive field classification.
+- Fixed-source effect: six existing field mutations and two guarded field
+  injections left generator review without disappearing from the main result.
+  Review findings fell from 13 to 5 and generator issues from 8 to 0; relations
+  remained 966.
+- The first full run incorrectly treated
+  `causal_conv1d_update = causal_conv1d_update_cpu` as a data field and hid one
+  callable patch. Callable resolution now takes precedence when a symbol has
+  both a function definition and a later assignment; a regression fixture
+  covers this exact boundary case.
+- Reason: these are real downstream dependencies on upstream state, but they
+  are not callable signature relations. Keeping a separate verified finding
+  preserves variable-change visibility without corrupting the method table.
+
 ## v0.9.0 - classify saved and restored original callables
 
 - Starting commit: `ded2d6c6f`.

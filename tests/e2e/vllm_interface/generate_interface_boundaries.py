@@ -46,9 +46,11 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.9.0"
+GENERATOR_VERSION = "0.10.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
-FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk"})
+FINDING_STATUSES = frozenset(
+    {"expected", "excluded", "review", "risk", "verified"}
+)
 
 
 def _jsonable_signature(node: ast.AST | None) -> list[object] | None:
@@ -385,6 +387,16 @@ class CallableInfo:
         return _jsonable_signature(self.node)
 
 
+@dataclass(frozen=True)
+class ValueInfo:
+    qualified_name: str
+    module: str
+    file: str
+    owner: str | None
+    name: str
+    node: ast.AST | None = field(compare=False, hash=False, repr=False)
+
+
 @dataclass
 class ModuleInfo:
     name: str
@@ -637,6 +649,7 @@ class RepositoryIndex:
         self.modules: dict[str, ModuleInfo] = {}
         self.classes: dict[str, ClassInfo] = {}
         self.callables: dict[str, CallableInfo] = {}
+        self.values: dict[str, ValueInfo] = {}
         self.aliases: dict[str, str] = {}
         self._pending_method_aliases: list[
             tuple[str, str, str, str, int]
@@ -675,6 +688,26 @@ class RepositoryIndex:
             )
 
             for node in module_statements:
+                assignment_targets: Sequence[ast.AST] = ()
+                assignment_value: ast.AST | None = None
+                if isinstance(node, ast.Assign):
+                    assignment_targets = node.targets
+                    assignment_value = node.value
+                elif isinstance(node, ast.AnnAssign):
+                    assignment_targets = (node.target,)
+                    assignment_value = node.value
+                for target in assignment_targets:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    qualified_value = f"{module}.{target.id}"
+                    self.values[qualified_value] = ValueInfo(
+                        qualified_name=qualified_value,
+                        module=module,
+                        file=relative_file,
+                        owner=None,
+                        name=target.id,
+                        node=assignment_value,
+                    )
                 string_assignment = _string_assignment(node)
                 if string_assignment:
                     name, value = string_assignment
@@ -746,6 +779,29 @@ class RepositoryIndex:
                         name=node.name,
                         node=node,
                     )
+                    for class_statement in node.body:
+                        class_targets: Sequence[ast.AST] = ()
+                        class_value: ast.AST | None = None
+                        if isinstance(class_statement, ast.Assign):
+                            class_targets = class_statement.targets
+                            class_value = class_statement.value
+                        elif isinstance(class_statement, ast.AnnAssign):
+                            class_targets = (class_statement.target,)
+                            class_value = class_statement.value
+                        for target in class_targets:
+                            if not isinstance(target, ast.Name):
+                                continue
+                            qualified_value = (
+                                f"{qualified_name}.{target.id}"
+                            )
+                            self.values[qualified_value] = ValueInfo(
+                                qualified_name=qualified_value,
+                                module=module,
+                                file=relative_file,
+                                owner=node.name,
+                                name=target.id,
+                                node=class_value,
+                            )
                     for method_name, method_node in info.methods.items():
                         method_qualified_name = f"{qualified_name}.{method_name}"
                         self.callables[method_qualified_name] = CallableInfo(
@@ -1182,6 +1238,12 @@ class RepositoryIndex:
     def find_loose_function(self, module: str, name: str) -> CallableInfo | None:
         candidates = self.modules[module].loose_functions.get(name, [])
         return candidates[0] if len(candidates) == 1 else None
+
+    def find_value(self, qualified_name: str) -> ValueInfo | None:
+        direct = self.values.get(qualified_name)
+        if direct is not None:
+            return direct
+        return self.values.get(self.canonical_name(qualified_name))
 
 
 class InterfaceBoundaryGenerator:
@@ -2159,6 +2221,17 @@ class InterfaceBoundaryGenerator:
         *,
         evidence_target: str | None = None,
     ) -> None:
+        field_finding = self._field_patch_finding(
+            module_info,
+            target,
+            replacement_node,
+            context,
+            line,
+            evidence_target=evidence_target,
+        )
+        if field_finding is not None:
+            self.findings.append(field_finding)
+            return
         replacement = self._resolve_patch_replacement(
             module_info,
             replacement_node,
@@ -2258,6 +2331,93 @@ class InterfaceBoundaryGenerator:
                 evidence_line=line,
                 evidence=(evidence,),
             )
+        )
+
+    def _field_patch_finding(
+        self,
+        module_info: ModuleInfo,
+        target: str,
+        replacement_node: ast.AST | None,
+        context: PatchScanContext,
+        line: int,
+        *,
+        evidence_target: str | None,
+    ) -> CandidateFinding | None:
+        if self._find_upstream_patch_target(target) is not None:
+            return None
+        upstream_value = self.upstream.find_value(target)
+        if upstream_value is not None:
+            return CandidateFinding(
+                relation="monkey_patch",
+                downstream_file=module_info.file,
+                downstream_owner=None,
+                downstream_name=target.rsplit(".", 1)[-1],
+                target_expression=evidence_target or target,
+                evidence_line=line,
+                reason=(
+                    "assignment mutates an existing upstream field declared in "
+                    f"{upstream_value.file}"
+                ),
+                status="verified",
+                reason_code="field_mutation",
+                generator_issue=False,
+                evidence_scope=self._scope_name(context),
+                evidence_guards=context.guards,
+            )
+        if not self._definitely_non_callable(replacement_node):
+            return None
+
+        owner_name = target.rsplit(".", 1)[0]
+        owner_exists = (
+            self.upstream.find_class(owner_name) is not None
+            or owner_name in self.upstream.modules
+            or self.upstream.find_value(owner_name) is not None
+        )
+        if not owner_exists:
+            return None
+
+        guards = " ".join(context.guards)
+        if "not hasattr(" in guards or " not in " in guards:
+            status = "expected"
+            reason_code = "inject_missing_field"
+            reason = "assignment injects a missing upstream field under a negative guard"
+        elif "hasattr(" in guards:
+            status = "excluded"
+            reason_code = "inactive_guard"
+            reason = "field assignment is inactive because its positive guard is false"
+        else:
+            status = "risk"
+            reason_code = "missing_upstream_field"
+            reason = "assignment injects an unguarded field missing from the upstream owner"
+        return CandidateFinding(
+            relation="monkey_patch",
+            downstream_file=module_info.file,
+            downstream_owner=None,
+            downstream_name=target.rsplit(".", 1)[-1],
+            target_expression=evidence_target or target,
+            evidence_line=line,
+            reason=reason,
+            status=status,
+            reason_code=reason_code,
+            generator_issue=False,
+            evidence_scope=self._scope_name(context),
+            evidence_guards=context.guards,
+        )
+
+    def _definitely_non_callable(self, node: ast.AST | None) -> bool:
+        return isinstance(
+            node,
+            (
+                ast.Constant,
+                ast.Dict,
+                ast.DictComp,
+                ast.JoinedStr,
+                ast.List,
+                ast.ListComp,
+                ast.Set,
+                ast.SetComp,
+                ast.Tuple,
+            ),
         )
 
     def _resolve_patch_replacement(
@@ -2616,6 +2776,7 @@ class InterfaceBoundaryGenerator:
         owner_exists = (
             self.upstream.find_class(owner_name) is not None
             or owner_name in self.upstream.modules
+            or self.upstream.find_value(owner_name) is not None
         )
         if owner_exists:
             return "risk", "missing_upstream_member", False
@@ -2959,6 +3120,7 @@ def compare_relations(
             "upstream_risks": finding_statuses["risk"],
             "expected": finding_statuses["expected"],
             "excluded": finding_statuses["excluded"],
+            "verified_findings": finding_statuses["verified"],
             "generator_issues": sum(
                 finding.generator_issue
                 for finding in findings
@@ -3079,6 +3241,7 @@ def main() -> None:
             "upstream_risks": finding_statuses["risk"],
             "expected": finding_statuses["expected"],
             "excluded": finding_statuses["excluded"],
+            "verified_findings": finding_statuses["verified"],
             "generator_issues": sum(
                 finding.generator_issue
                 for finding in findings

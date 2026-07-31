@@ -1128,6 +1128,83 @@ def install():
     assert all(not finding.generator_issue for finding in findings)
 
 
+def test_field_writes_are_classified_without_callable_resolution(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/state.py",
+        """
+module_flag: bool = True
+
+
+class State:
+    class_flag: bool = True
+
+
+singleton = State()
+
+
+def callable_target(value):
+    return value
+
+
+callable_target = callable_target
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm import state
+
+state.module_flag = False
+state.State.class_flag = False
+
+item = state.singleton
+if not hasattr(item, "extra"):
+    item.extra = None
+
+
+def replacement(value):
+    return value
+
+
+state.callable_target = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(patches) == 1
+    assert patches[0].upstream_name == "callable_target"
+    assert len(findings) == 3
+    assert sum(
+        finding.status == "verified"
+        and finding.reason_code == "field_mutation"
+        for finding in findings
+    ) == 2
+    injected = next(
+        finding
+        for finding in findings
+        if finding.reason_code == "inject_missing_field"
+    )
+    assert injected.status == "expected"
+    assert not injected.generator_issue
+
+
 def test_lambda_patch_and_parse_failures_are_explicit(tmp_path: Path) -> None:
     vllm_root = tmp_path / "vllm-repo"
     ascend_root = tmp_path / "ascend-repo"
