@@ -1068,7 +1068,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    def test_kimi_k3_no_rope_disables_fused_rotary_preprocess(
+    def test_kimi_k3_no_rope_keeps_mlapo_enabled(
         self,
         mock_get_current_vllm_config,
         mock_enabling_mlapo,
@@ -1109,7 +1109,7 @@ class TestAscendMLAImpl(TestBase):
         )
 
         self.assertFalse(impl.fa_quant_layer)
-        self.assertFalse(impl.enable_mlapo)
+        self.assertTrue(impl.enable_mlapo)
 
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
@@ -1628,6 +1628,17 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "deq_scale_qkv"))
         self.assertTrue(hasattr(self.impl, "quant_bias_qkv"))
         self.assertTrue(hasattr(self.impl, "wu_q"))
+
+    @patch("vllm_ascend.attention.mla_v1.trans_rope_weight")
+    def test_prepare_mlapo_weight_preserves_kimi_k3_no_rope_order(self, mock_trans_rope_weight):
+        weight = torch.arange(24).view(3, 8).transpose(0, 1)
+        self.impl.use_mla_rope = False
+
+        actual = self.impl._prepare_mlapo_rope_weight(weight)
+
+        mock_trans_rope_weight.assert_not_called()
+        self.assertTrue(actual.is_contiguous())
+        torch.testing.assert_close(actual, weight)
 
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_for_fused_mlapo_a5(self, mock_format_cast):
