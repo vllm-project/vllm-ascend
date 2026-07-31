@@ -31,6 +31,9 @@ a2:
       - name: MiniMax-M2.5-w8a8-QuaRot-A2
         os: linux-aarch64-a2b3-8
         config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
+      - name: rejection-sample
+        os: linux-aarch64-a2b3-1
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
   multi_node:
     test_config:
       - name: multi-node-qwen3-235b-dp
@@ -120,9 +123,12 @@ a3:
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
-      - name: MiniMax-M2.5-w8a8-QuaRot-A3
+      - name: MiniMax-M3-BF16-A3
         os: linux-aarch64-nightly-a3-16
-        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+        config_file_path: MiniMax-M3-BF16-A3.yaml
+      - name: MiniMax-M3-W8A8-A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MiniMax-M3-W8A8-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
@@ -175,6 +181,9 @@ a3:
       - name: qwen3-30b-a3b-w8a8
         os: linux-aarch64-nightly-a3-4
         config_file_path: Qwen3-30B-A3B-W8A8.yaml
+      - name: Qwen3-32B-W8A8C8-A3
+        os: linux-aarch64-nightly-a3-4
+        config_file_path: Qwen3-32B-W8A8C8-A3.yaml
       - name: qwen3-32b-int8-prefix-cache
         os: linux-aarch64-nightly-a3-4
         config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
@@ -225,9 +234,6 @@ a3-560t:
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
-      - name: MiniMax-M2.5-w8a8-QuaRot-A3
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
@@ -280,6 +286,9 @@ a3-560t:
       - name: qwen3-30b-a3b-w8a8
         os: linux-aarch64-a3-4-cn12-001
         config_file_path: Qwen3-30B-A3B-W8A8.yaml
+      - name: Qwen3-32B-W8A8C8-A3
+        os: linux-aarch64-a3-4-cn12-001
+        config_file_path: Qwen3-32B-W8A8C8-A3.yaml
       - name: qwen3-32b-int8-prefix-cache
         os: linux-aarch64-a3-4-cn12-001
         config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
@@ -289,3 +298,16 @@ a3-560t:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
+
+310p:
+  single_node:
+    test_config:
+      - name: Qwen3-8B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-8B-w8a8sc-310p.yaml
+      - name: Qwen3-14B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-14B-w8a8sc-310p.yaml
+      - name: Qwen3-32B-w8a8sc-310p
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3-32B-w8a8sc-310p.yaml

@@ -35,6 +35,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_b
 )
 
 
+def _format_log_call(call):
+    args = call.args
+    return args[0] % args[1:]
+
+
 # =========================================================================
 # Backend ABC
 # =========================================================================
@@ -374,8 +379,14 @@ class TestMooncakeBackendMethods(unittest.TestCase):
 
     def test_put_exception(self):
         b = self._make_backend()
-        b.store.batch_put_from_multi_buffers.side_effect = Exception("fail")
-        b.put(["k1"], [[100]], [[10]])  # Should log error but not raise
+        b.store.batch_put_from_multi_buffers.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
+        ) as mock_logger:
+            b.put(["k1"], [[100]], [[10]])  # Should log error but not raise
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_get(self):
         b = self._make_backend()
@@ -390,8 +401,14 @@ class TestMooncakeBackendMethods(unittest.TestCase):
 
     def test_get_exception(self):
         b = self._make_backend()
-        b.store.batch_get_into_multi_buffers.side_effect = Exception("fail")
-        b.get(["k1"], [[100]], [[10]])
+        b.store.batch_get_into_multi_buffers.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
+        ) as mock_logger:
+            b.get(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_register_buffer(self):
         b = self._make_backend()
@@ -475,9 +492,15 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_get_exception(self):
         b = self._make_backend()
-        b._hetero_client.mget_h2d.side_effect = Exception("fail")
-        result = b.get(["k1"], [[100]], [[10]])
+        b._hetero_client.mget_h2d.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.logger"
+        ) as mock_logger:
+            result = b.get(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIsNone(result)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_put_empty(self):
         b = self._make_backend()
@@ -491,8 +514,14 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_put_exception(self):
         b = self._make_backend()
-        b._hetero_client.mset_d2h.side_effect = Exception("fail")
-        b.put(["k1"], [[100]], [[10]])
+        b._hetero_client.mset_d2h.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.logger"
+        ) as mock_logger:
+            b.put(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_register_buffer_noop_when_remote_h2d_disabled(self):
         b = self._make_backend()
@@ -571,9 +600,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
-            backend._is_a2 = False
-            backend._registered_buffers = None
-            backend._buffers_registered = False
+            backend._pending_buffers = None
             return backend
 
     def test_exists(self):
@@ -583,7 +610,6 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        b._is_a2 = True
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 
@@ -600,8 +626,14 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_get_exception(self):
         b = self._make_backend()
-        b.store.batch_get_into_layers.side_effect = Exception("fail")
-        b.get(["k1"], [[100]], [[10]])
+        b.store.batch_get_into_layers.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            b.get(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
     def test_put(self):
         b = self._make_backend()
@@ -616,8 +648,14 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_put_exception(self):
         b = self._make_backend()
-        b.store.batch_put_from_layers.side_effect = Exception("fail")
-        b.put(["k1"], [[100]], [[10]])
+        b.store.batch_put_from_layers.side_effect = RuntimeError("backend fail")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            b.put(["k1"], [[100]], [[10]])
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("RuntimeError", error_log)
+        self.assertIn("backend fail", error_log)
 
 
 if __name__ == "__main__":

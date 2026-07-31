@@ -23,7 +23,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
+- `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -78,14 +78,18 @@ Select an image based on your machine type and start the docker image on your no
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-
+    
 === "A2 series"
 
     Start the docker image on each node.
 
     ```bash
-
+    # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    
+    # deepseek-v4-flash-dspark uses the following image
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -133,7 +137,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128G × 8) or 1 Atlas 800 A2 (64G × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8).
 
 === "A2 series"
 
@@ -170,7 +174,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --block-size 128 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --async-scheduling \
         --additional-config '
         {"ascend_compilation_config":{
             "enable_npugraph_ex":true,
@@ -180,6 +183,41 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         "enable_dsa_cp": true,
         "multistream_overlap_shared_expert":true}'
     ```
+
+=== "A2 series with dspark"
+
+    Run the following script to execute online inference.
+
+    ```shell
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=AIV
+
+    vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
+        --max-model-len 800000 \
+        --max-num-batched-tokens 8192 \
+        --served-model-name dsv4-dspark \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs 32 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --no-disable-hybrid-kv-cache-manager \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+        --quantization ascend \
+        --port 8000 \
+        --block-size 128 \
+        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
 
 === "A3 series"
 
@@ -216,7 +254,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --block-size 128 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --async-scheduling \
         --additional-config '
         {"ascend_compilation_config":{
             "enable_npugraph_ex":true,
@@ -232,7 +269,6 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
@@ -270,11 +306,11 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128G × 8) and Atlas 800 A2 (64G × 8) multi-node environments.
+The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3 (128G × 8) multi-node environment with 1P1D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3 (128GB × 8) multi-node environment with 1P1D for better performance.
 
 Before you start, please:
 
@@ -502,7 +538,6 @@ Before you start, please:
             --max-model-len 1048576 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
-            --async-scheduling \
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
@@ -566,7 +601,7 @@ Before you start, please:
 
 #### 5.2.2 A2 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2 (64G × 8) multi-node environment with 4\*1P 1\*4D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2 (64GB × 8) multi-node environment with 4\*1P 1\*4D for better performance.
 
 Before you start, please:
 
@@ -686,7 +721,6 @@ Before you start, please:
             --max-num-seqs 16 \
             --block-size 128 \
             --enforce-eager \
-            --async-scheduling \
             --no-disable-hybrid-kv-cache-manager \
             --enable-prefix-caching \
             --trust-remote-code \
@@ -762,7 +796,6 @@ Before you start, please:
             --max-model-len 135000 \
             --max-num-batched-tokens 60 \
             --max-num-seqs 30 \
-            --async-scheduling \
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
@@ -873,7 +906,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
+Here is the accuracy evaluation method using AISBench.
 
 ### Using AISBench
 
@@ -883,8 +916,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800 A3 (128G × 8) |
-| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128G × 8) |
+| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800 A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128GB × 8) |
 
 ## 8 Performance Evaluation
 
@@ -928,7 +961,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the [Deployment](#5-online-service-deployment) chapter.
 
-Currently, we support 4K prefix cache hit in an experimental manner. You only need to change the value of --block-size from 128 to 32 in the service.
+Currently, we support 4k prefix cache hit in an experimental manner. You only need to change the value of --block-size from 128 to 32 in the service.
 
 ### 9.2 Tuning Guidelines
 

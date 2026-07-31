@@ -22,21 +22,15 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
-**Quantized Versions for Atlas inference products:**
-
-| Model | Quantization | Hardware Requirement | Download |
-|-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
-
-**Quantized Versions for Atlas inference products:**
+**Quantized Versions for Atlas 300I DUO:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (TP2)                                                                                               | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas 300I DUO (TP2)                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -132,7 +126,7 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     **Docker Run:**
 
@@ -201,11 +195,11 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
 !!! note
 
-    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
     ```bash
     pip uninstall -y triton-ascend triton
-    ```   
+    ```
 
 **Installation Verification:**
 
@@ -250,15 +244,14 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --quantization ascend \
         --distributed_executor_backend "mp" \
         --no-enable-prefix-caching \
-        --async-scheduling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
         --gpu-memory-utilization 0.95 \
         --port 8000 \
-        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
+        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     ```bash
     export VLLM_USE_MODELSCOPE=True
@@ -281,13 +274,13 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     **Key parameters:**
 
     - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
-    - `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
-    - `--max-model-len 16384` is intentionally conservative. On Atlas inference products, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
-    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
+    - `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
+    - `--max-model-len 16384` is intentionally conservative. On Atlas 300I DUO, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
+    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
-    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
-    - `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
+    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas 300I DUO serving path.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
 
@@ -542,7 +535,6 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
@@ -578,7 +570,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -615,7 +606,6 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
