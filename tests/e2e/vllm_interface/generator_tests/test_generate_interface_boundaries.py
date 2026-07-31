@@ -5705,3 +5705,121 @@ def install():
         "run",
     )
     assert not findings
+
+
+def test_v021_conditional_imported_callable_alias_stays_callable(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/cpu.py",
+        """
+def run_cpu(value, *, mode=None):
+    return value
+""",
+    )
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def run(value, *, mode=None):
+    return value
+
+
+if current_platform.is_cpu():
+    from vllm.cpu import run_cpu
+
+    run = run_cpu
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value, *, mode=None):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    assert patches[0].upstream_signature == _v019_run_signature(
+        ("value", True),
+        keyword_only=(("mode", False),),
+    )
+    assert not findings
+
+
+def test_v021_annotated_class_callable_alias_is_a_method(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+from collections.abc import Callable
+
+
+def default_run(self, value):
+    return value
+
+
+class Base:
+    run: Callable[..., object] = default_run
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+def replacement(self, value):
+    return value
+
+
+Base.run = replacement
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    method_relations = [relation for relation in relations if relation.relation in {"monkey_patch", "override"}]
+    assert {
+        (
+            relation.relation,
+            relation.upstream_owner,
+            relation.upstream_name,
+            relation.downstream_owner,
+            relation.downstream_name,
+        )
+        for relation in method_relations
+    } == {
+        ("monkey_patch", "Base", "run", None, "replacement"),
+        ("override", "Base", "run", "Child", "run"),
+    }
+    expected = _v019_run_signature(("self", True), ("value", True))
+    assert all(relation.upstream_signature == expected for relation in method_relations)
+    assert not findings
