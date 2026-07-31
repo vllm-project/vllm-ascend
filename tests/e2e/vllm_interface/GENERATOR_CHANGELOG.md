@@ -4,6 +4,32 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.11.0 - separate live injections from stale patch candidates
+
+- Starting commit: `d22bb2aef`.
+- Problem: every unguarded assignment to a missing upstream member was labelled
+  as the same upstream risk, even though some members are intentionally added
+  and used by verified replacement methods while others are no longer read by
+  current upstream code.
+- Change: build a member-use closure per upstream owner. Verified patch
+  replacements are roots; `self.<member>` references reach injected
+  replacements transitively. Reachable missing members become
+  `expected/inject_missing_member`; unreachable ones remain
+  `risk/possible_stale_patch`.
+- External boundary: an unreachable missing method on a class with a direct
+  external base becomes `review/external_inherited_method`, not an asserted
+  vLLM removal.
+- Safety boundary: a dead helper merely present in the same module is not
+  enough; it must be reachable from a verified patch binding. Incomplete
+  external inheritance is still not guessed.
+- Fixed-source effect: two `_split_ba_for_tp` occurrences and three MiniMax
+  helper injections became expected; the two guarded Qwen properties remain
+  expected. Five obsolete Triton/sample patches are now explicit stale risks;
+  `MoonViT3dPretrainedModel.to` is external review. Total risk findings fell
+  from 13 to 7; expected findings rose from 4 to 9; review findings are the
+  five incomplete MRO cases plus this one external method. Generator issues
+  remain zero and verified relations remain 966.
+
 ## v0.10.0 - classify non-callable field mutations
 
 - Starting commit: `03f03957c`.

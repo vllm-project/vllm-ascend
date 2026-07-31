@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 3
-GENERATOR_VERSION = "0.10.0"
+GENERATOR_VERSION = "0.11.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset(
     {"expected", "excluded", "review", "risk", "verified"}
@@ -1271,6 +1271,7 @@ class InterfaceBoundaryGenerator:
         self._collect_inheritance()
         self._collect_verified_overrides()
         self._collect_monkey_patches()
+        self._reclassify_missing_patch_members()
         grouped: dict[tuple[str, ...], list[Relation]] = defaultdict(list)
         for relation in self.relations:
             grouped[relation.exact_key()].append(relation)
@@ -2773,14 +2774,146 @@ class InterfaceBoundaryGenerator:
             return "excluded", "inactive_guard", False
 
         owner_name = target.rsplit(".", 1)[0]
+        owner_class = self.upstream.find_class(owner_name)
         owner_exists = (
-            self.upstream.find_class(owner_name) is not None
+            owner_class is not None
             or owner_name in self.upstream.modules
             or self.upstream.find_value(owner_name) is not None
         )
         if owner_exists:
-            return "risk", "missing_upstream_member", False
+            return "risk", "possible_stale_patch", False
         return "review", "unresolved_patch_owner", True
+
+    def _reclassify_missing_patch_members(self) -> None:
+        candidate_indexes = [
+            index
+            for index, finding in enumerate(self.findings)
+            if finding.reason_code == "possible_stale_patch"
+            and finding.relation == "monkey_patch"
+        ]
+        grouped: dict[str, list[int]] = defaultdict(list)
+        for index in candidate_indexes:
+            target = self.findings[index].target_expression
+            if "." not in target:
+                continue
+            grouped[target.rsplit(".", 1)[0]].append(index)
+
+        for owner_name, indexes in grouped.items():
+            owner = self.upstream.find_class(owner_name)
+            if owner is None:
+                continue
+            bindings: dict[str, list[int]] = defaultdict(list)
+            binding_dependencies: dict[str, set[str]] = defaultdict(set)
+            for index in indexes:
+                finding = self.findings[index]
+                member_name = finding.target_expression.rsplit(".", 1)[-1]
+                bindings[member_name].append(index)
+                replacement = self._finding_downstream_callable(finding)
+                if replacement is not None:
+                    binding_dependencies[member_name].update(
+                        self._self_member_references(replacement)
+                    )
+
+            reachable = {
+                member
+                for relation in self.relations
+                if relation.relation == "monkey_patch"
+                and relation.upstream_file == owner.file
+                and relation.upstream_owner == owner.name
+                for replacement in [
+                    self._relation_downstream_callable(relation)
+                ]
+                if replacement is not None
+                for member in self._self_member_references(replacement)
+            }
+            queue = list(reachable)
+            promoted: set[str] = set()
+            while queue:
+                member = queue.pop()
+                if member not in bindings or member in promoted:
+                    continue
+                promoted.add(member)
+                for dependency in binding_dependencies.get(member, ()):
+                    if dependency not in reachable:
+                        reachable.add(dependency)
+                        queue.append(dependency)
+
+            for member in promoted:
+                for index in bindings[member]:
+                    self.findings[index] = replace(
+                        self.findings[index],
+                        status="expected",
+                        reason_code="inject_missing_member",
+                        reason=(
+                            "missing member is injected and is reachable from "
+                            "a verified patch replacement"
+                        ),
+                    )
+
+            has_external_base = any(
+                not base.startswith(("vllm.", "vllm_ascend."))
+                for base in owner.resolved_bases
+            )
+            if has_external_base:
+                for index in indexes:
+                    if self.findings[index].reason_code != "possible_stale_patch":
+                        continue
+                    self.findings[index] = replace(
+                        self.findings[index],
+                        status="review",
+                        reason_code="external_inherited_method",
+                        reason=(
+                            "member may be inherited from an external base; "
+                            "the pinned source pair cannot prove its owner"
+                        ),
+                    )
+
+    def _finding_downstream_callable(
+        self,
+        finding: CandidateFinding,
+    ) -> CallableInfo | None:
+        return next(
+            (
+                candidate
+                for candidate in self.downstream.callables.values()
+                if candidate.file == finding.downstream_file
+                and candidate.owner == finding.downstream_owner
+                and candidate.name == finding.downstream_name
+            ),
+            None,
+        )
+
+    def _relation_downstream_callable(
+        self,
+        relation: Relation,
+    ) -> CallableInfo | None:
+        return next(
+            (
+                candidate
+                for candidate in self.downstream.callables.values()
+                if candidate.file == relation.downstream_file
+                and candidate.owner == relation.downstream_owner
+                and candidate.name == relation.downstream_name
+            ),
+            None,
+        )
+
+    def _self_member_references(
+        self,
+        callable_info: CallableInfo,
+    ) -> set[str]:
+        if not isinstance(
+            callable_info.node,
+            (ast.AsyncFunctionDef, ast.FunctionDef),
+        ):
+            return set()
+        return {
+            node.attr
+            for node in _function_scope_nodes(callable_info.node)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {"cls", "self"}
+        }
 
     def _scope_name(self, context: PatchScanContext) -> str | None:
         return ".".join(context.scope) if context.scope else None

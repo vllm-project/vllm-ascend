@@ -68,6 +68,9 @@ class PatchTarget:
     def external_hook(self, value):
         return value
 
+    def run(self, value):
+        return value
+
 
 class PatchChild(PatchTarget):
     pass
@@ -97,8 +100,18 @@ def patched_hook(self, value):
     return value
 
 
+def injected_helper(self):
+    return 1
+
+
+def patched_run(self, value):
+    return value + self.helper()
+
+
 PatchTarget.hook = patched_hook
 PatchTarget.missing = patched_hook
+PatchTarget.helper = injected_helper
+PatchTarget.run = patched_run
 if not hasattr(PatchTarget, "injected"):
     PatchTarget.injected = patched_hook
 if hasattr(PatchTarget, "removed"):
@@ -203,7 +216,7 @@ def test_generates_exact_patch_inheritance_and_override(
         for relation in relations
     )
 
-    assert len(unresolved) == 4
+    assert len(unresolved) == 5
     missing_target = next(
         relation
         for relation in unresolved
@@ -211,7 +224,7 @@ def test_generates_exact_patch_inheritance_and_override(
         and relation.target_expression == "vllm.base.PatchTarget.missing"
     )
     assert missing_target.status == "risk"
-    assert missing_target.reason_code == "missing_upstream_member"
+    assert missing_target.reason_code == "possible_stale_patch"
     assert not missing_target.generator_issue
     injected = next(
         relation
@@ -227,6 +240,13 @@ def test_generates_exact_patch_inheritance_and_override(
     )
     assert inactive.status == "excluded"
     assert inactive.reason_code == "inactive_guard"
+    reachable_injection = next(
+        relation
+        for relation in unresolved
+        if relation.target_expression == "vllm.base.PatchTarget.helper"
+    )
+    assert reachable_injection.status == "expected"
+    assert reachable_injection.reason_code == "inject_missing_member"
     assert any(
         relation.reason == "dynamic setattr attribute name"
         and relation.target_expression == "vllm.base.PatchTarget"
@@ -386,7 +406,7 @@ def test_output_is_deterministic(source_pair: tuple[Path, Path]) -> None:
         item.as_dict()
         for item in second_unresolved
     ]
-    assert sum("f" in payload for payload in first_payload) == 4
+    assert sum("f" in payload for payload in first_payload) == 5
 
 
 def test_comparison_tracks_downstream_coverage_separately() -> None:
@@ -780,6 +800,55 @@ class SafePrefix(Partial):
         and relation.downstream_name == "run"
         for relation in relations
     )
+
+
+def test_missing_method_on_external_base_is_review_not_upstream_risk(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        """
+from external import ExternalBase
+
+
+class Model(ExternalBase):
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.model import Model
+
+
+def patched_to(self, *args, **kwargs):
+    return self
+
+
+Model.to = patched_to
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not [
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch"
+    ]
+    assert len(findings) == 1
+    assert findings[0].status == "review"
+    assert findings[0].reason_code == "external_inherited_method"
+    assert not findings[0].generator_issue
 
 
 def test_patch_scanner_resolves_local_imports_aliases_and_evidence(
