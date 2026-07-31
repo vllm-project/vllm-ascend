@@ -11,8 +11,10 @@ enable_custom_op()
 
 @pytest.mark.skip(reason="Failure of an individual operator use case causes failures of other operators.")
 @pytest.mark.parametrize("cache_mode", ["krope_ctkv", "nzcache"])
+@pytest.mark.parametrize("enable_rope", [True, False])
 @torch.inference_mode()
-def test_mla_preprocess_kernel(cache_mode: str):
+def test_mla_preprocess_kernel(cache_mode: str, enable_rope: bool):
+    """Exercise MLA preprocess cache modes with RoPE enabled and disabled."""
     token_num = 1
     head_num = 2
     N_7168 = 7168
@@ -72,6 +74,7 @@ def test_mla_preprocess_kernel(cache_mode: str):
     )
     q_nope_old = q_nope_out.clone()
     q_rope_old = q_rope_out.clone()
+    kv_cache_rope_old = kv_cache_rope.clone()
 
     torch.ops._C_ascend.mla_preprocess(
         hidden_states,
@@ -82,8 +85,8 @@ def test_mla_preprocess_kernel(cache_mode: str):
         wuq,
         de_scale1,
         gamma2,
-        cos,
-        sin,
+        cos if enable_rope else None,
+        sin if enable_rope else None,
         wuk,
         kv_cache,
         kv_cache_rope,
@@ -107,6 +110,7 @@ def test_mla_preprocess_kernel(cache_mode: str):
     )
     assert not torch.equal(q_nope_out, q_nope_old)
     assert not torch.equal(q_rope_out, q_rope_old)
+    assert not torch.equal(kv_cache_rope, kv_cache_rope_old)
 
     gc.collect()
     torch.npu.empty_cache()
