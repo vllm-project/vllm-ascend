@@ -1252,8 +1252,8 @@ class NPUPlatform(Platform):
                 vllm_config.compilation_config.use_inductor_graph_partition = False
 
         # ==================== 11. VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS ====================
-        if int(os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")) < 1836:
-            os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = "3000"
+        if envs_vllm.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS < 1836:
+            envs_vllm.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS = 3000
             logger.info(
                 "The timeout interval of the HCCL operator is 1836s. Timeout in "
                 "seconds for execute_model RPC calls in multiprocessing must be "
