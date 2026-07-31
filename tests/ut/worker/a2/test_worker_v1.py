@@ -590,6 +590,7 @@ class TestNPUWorker(TestBase):
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             mock_model_runner = MagicMock()
             worker.model_runner = mock_model_runner
 
