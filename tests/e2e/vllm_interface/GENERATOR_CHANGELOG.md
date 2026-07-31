@@ -34,6 +34,43 @@ generator problem.
   own false positives and false negatives must be fixed before it can be used
   to justify a generator change.
 
+## coverage audit v0.3.0 - exact external source and C3 site audit
+
+- Starting commit: `c1ba0c59a`.
+- Problem: the first independent audit lost Python base order, used DFS instead
+  of C3, and did not index the pinned external source. That produced five false
+  override candidates, one external Triton false patch, and nine PyTorch-only
+  orphan dispositions.
+- Change: retain each AST base in source order, resolve aliases and star
+  re-exports, and calculate strict C3 over vLLM, vllm-ascend, and explicitly
+  supplied external package indexes. An unknown base, alias ambiguity, cycle,
+  or failed C3 merge remains incomplete and never selects an owner. Exact
+  structural nodes for `abc.ABC`, `typing.Generic`, and `typing.Protocol` are
+  modelled without treating arbitrary standard-library or external classes as
+  complete.
+- Ownership boundary: a value imported through a vLLM module is followed to its
+  defining package before it can become a patch candidate. This removes the
+  Triton re-export false positive generically rather than by file or symbol
+  allowlist. External effective override owners remain auditable candidates.
+- Source provenance: the audit now verifies both mapping metadata and the actual
+  source input. vLLM and vllm-ascend must be exact Git checkout roots at the
+  requested HEAD. Each external package must be an exact Git checkout or a
+  manifest snapshot whose complete Python file set and every SHA-256 digest
+  match. This also fixes Git output decoding for non-ASCII Windows paths.
+- Rejected intermediate result: strict external C3 initially reported 23
+  `incomplete_mro` candidates (15 through `abc.ABC`, eight through
+  `typing.Generic`). They were auditor modelling gaps, not generator omissions;
+  the three exact structural nodes removed them without relaxing other bases.
+- Fixed-source result: 1,018 candidates and 1,018 classified sites: 185
+  inheritance, 167 patch, and 666 override. Missing, conflicting, orphan, and
+  generator-issue review counts are all zero against vLLM `88402a41...`,
+  vllm-ascend `81d3450...`, and PyTorch `449b176...`.
+- Tests: 12 dedicated auditor tests pass; Ruff check, Ruff format check, and
+  `git diff --check` pass.
+- Reason: a site can be accepted only after a second implementation reaches the
+  same source inventory under the exact dependency versions. Upstream or
+  downstream source risk is not rewritten merely to make the audit pass.
+
 ## v0.12.0 - resolve exact external inheritance without widening vLLM scope
 
 - Starting commit: `2f0b95b5e`.

@@ -14,8 +14,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,6 +41,52 @@ def _write_jsonl(path: Path, payloads: list[dict]) -> None:
     path.write_text(
         "\n".join(json.dumps(payload, separators=(",", ":")) for payload in payloads) + "\n",
         encoding="utf-8",
+    )
+
+
+def _commit_fixture_repo(root: Path) -> str:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Interface Auditor",
+            "-c",
+            "user.email=interface-auditor@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _write_snapshot_manifest(root: Path, package: str, commit: str) -> None:
+    package_root = root.joinpath(*package.split("."))
+    files = {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(package_root.rglob("*.py"))
+    }
+    _write(
+        root,
+        ".interface-source.json",
+        json.dumps(
+            {
+                "schema": 1,
+                "package": package,
+                "commit": commit,
+                "files": files,
+            }
+        ),
     )
 
 
@@ -164,8 +212,6 @@ def test_clean_mapping_classifies_every_candidate_once(
         vllm_root,
         ascend_root,
         mapping,
-        expect_vllm_sha="upstream",
-        expect_ascend_sha="downstream",
     )
 
     assert report["summary"] == {
@@ -266,4 +312,415 @@ def test_sha_mismatch_fails_before_reporting(
             ascend_root,
             mapping,
             expect_vllm_sha="expected",
+        )
+
+
+def test_expected_shas_verify_mapping_and_exact_git_source_roots(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-源码"
+    ascend_root = tmp_path / "ascend-源码"
+    external_root = tmp_path / "external-源码"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(external_root, "external/__init__.py", "")
+    vllm_sha = _commit_fixture_repo(vllm_root)
+    ascend_sha = _commit_fixture_repo(ascend_root)
+    external_sha = _commit_fixture_repo(external_root)
+    mapping = tmp_path / "mapping.jsonl"
+    _write_jsonl(
+        mapping,
+        [
+            {
+                "_meta": {
+                    "vllm": vllm_sha,
+                    "vllm_ascend": ascend_sha,
+                    "external_sources": {"external": external_sha},
+                }
+            }
+        ],
+    )
+
+    report = auditor.audit_mapping_coverage(
+        vllm_root,
+        ascend_root,
+        mapping,
+        external_roots={"external": external_root},
+        expect_vllm_sha=vllm_sha,
+        expect_ascend_sha=ascend_sha,
+        expect_external_shas={"external": external_sha},
+    )
+
+    assert report["_meta"]["verified_sources"] == {
+        "vllm": vllm_sha,
+        "vllm_ascend": ascend_sha,
+        "external_sources": {"external": external_sha},
+    }
+
+    claimed_sha = "claimed-by-mapping"
+    _write_jsonl(
+        mapping,
+        [
+            {
+                "_meta": {
+                    "vllm": claimed_sha,
+                    "vllm_ascend": ascend_sha,
+                    "external_sources": {"external": external_sha},
+                }
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="vLLM source SHA mismatch"):
+        auditor.audit_mapping_coverage(
+            vllm_root,
+            ascend_root,
+            mapping,
+            external_roots={"external": external_root},
+            expect_vllm_sha=claimed_sha,
+            expect_ascend_sha=ascend_sha,
+            expect_external_shas={"external": external_sha},
+        )
+
+
+def test_external_snapshot_verifies_mapping_file_list_and_digests(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    external_root = tmp_path / "external-snapshot"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    source = external_root / "external" / "base.py"
+    _write(external_root, "external/base.py", "class ExternalBase:\n    pass\n")
+    external_sha = "external-source-sha"
+    _write_snapshot_manifest(external_root, "external", external_sha)
+    mapping = tmp_path / "mapping.jsonl"
+    _write_jsonl(
+        mapping,
+        [{"_meta": {"external_sources": {"external": external_sha}}}],
+    )
+
+    report = auditor.audit_mapping_coverage(
+        vllm_root,
+        ascend_root,
+        mapping,
+        external_roots={"external": external_root},
+        expect_external_shas={"external": external_sha},
+    )
+    assert report["_meta"]["verified_sources"]["external_sources"] == {"external": external_sha}
+
+    _write_jsonl(
+        mapping,
+        [{"_meta": {"external_sources": {"external": "wrong-source"}}}],
+    )
+    with pytest.raises(ValueError, match="mapping external source SHA mismatch"):
+        auditor.audit_mapping_coverage(
+            vllm_root,
+            ascend_root,
+            mapping,
+            external_roots={"external": external_root},
+            expect_external_shas={"external": external_sha},
+        )
+    _write_jsonl(
+        mapping,
+        [{"_meta": {"external_sources": {"external": external_sha}}}],
+    )
+
+    source.write_text("class Changed:\n    pass\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="snapshot digest mismatch"):
+        auditor.audit_mapping_coverage(
+            vllm_root,
+            ascend_root,
+            mapping,
+            external_roots={"external": external_root},
+            expect_external_shas={"external": external_sha},
+        )
+
+    source.write_text("class ExternalBase:\n    pass\n", encoding="utf-8")
+    _write(external_root, "external/extra.py", "")
+    with pytest.raises(ValueError, match="file set changed"):
+        auditor.audit_mapping_coverage(
+            vllm_root,
+            ascend_root,
+            mapping,
+            external_roots={"external": external_root},
+            expect_external_shas={"external": external_sha},
+        )
+
+
+def test_external_root_enables_strict_external_override_resolution(
+    tmp_path: Path,
+) -> None:
+    torch_root = tmp_path / "pytorch"
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(torch_root, "torch/__init__.py", "")
+    _write(torch_root, "torch/nn/__init__.py", "from .modules import *\n")
+    _write(
+        torch_root,
+        "torch/nn/modules/__init__.py",
+        "from .module import Module\n",
+    )
+    _write(
+        torch_root,
+        "torch/nn/modules/module.py",
+        """
+class Module:
+    def forward(self, value):
+        return value
+""",
+    )
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        """
+import torch.nn as nn
+
+
+class Interface:
+    pass
+
+
+class Model(nn.Module, Interface):
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.model import Model
+
+
+class Child(Model):
+    def forward(self, value):
+        return value
+""",
+    )
+
+    without_external = auditor.IndependentCandidateScanner(
+        vllm_root,
+        ascend_root,
+    )
+    assert not [candidate for candidate in without_external.scan() if candidate.relation == "override"]
+    assert not without_external._strict_mro("vllm_ascend.plugin.Child").complete
+
+    with_external = auditor.IndependentCandidateScanner(
+        vllm_root,
+        ascend_root,
+        external_roots={"torch": torch_root},
+    )
+    overrides = [candidate for candidate in with_external.scan() if candidate.relation == "override"]
+
+    assert with_external._strict_mro("vllm_ascend.plugin.Child").complete
+    assert len(overrides) == 1
+    assert overrides[0].targets == ("torch.nn.modules.module.Module.forward",)
+    assert overrides[0].kinds == ("external_override",)
+
+
+def test_known_stdlib_structural_bases_complete_c3_without_guessing(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        """
+from abc import ABC
+from typing import Generic, Protocol, TypeVar
+
+
+T = TypeVar("T")
+
+
+class Base(ABC, Generic[T]):
+    def hook(self):
+        pass
+
+
+class Contract(Protocol[T]):
+    def protocol_hook(self):
+        pass
+
+
+class Combined(Base[T], Contract[T]):
+    pass
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.model import Combined
+
+
+class Child(Combined):
+    def hook(self):
+        pass
+
+    def protocol_hook(self):
+        pass
+""",
+    )
+
+    scanner = auditor.IndependentCandidateScanner(vllm_root, ascend_root)
+    overrides = [candidate for candidate in scanner.scan() if candidate.relation == "override"]
+    mro = scanner._strict_mro("vllm_ascend.plugin.Child")
+
+    assert mro.complete
+    assert mro.owners == (
+        "vllm_ascend.plugin.Child",
+        "vllm.model.Combined",
+        "vllm.model.Base",
+        "abc.ABC",
+        "vllm.model.Contract",
+        "typing.Protocol",
+        "typing.Generic",
+    )
+    assert {candidate.targets for candidate in overrides} == {
+        ("vllm.model.Base.hook",),
+        ("vllm.model.Contract.protocol_hook",),
+    }
+
+
+def test_strict_c3_does_not_skip_a_downstream_effective_owner(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(self, value):
+        return value
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Mid(Base):
+    def run(self, value):
+        return value
+
+
+class Child(Mid):
+    def run(self, value):
+        return value
+""",
+    )
+
+    scanner = auditor.IndependentCandidateScanner(vllm_root, ascend_root)
+    overrides = [candidate for candidate in scanner.scan() if candidate.relation == "override"]
+
+    assert scanner._strict_mro("vllm_ascend.plugin.Child").owners == (
+        "vllm_ascend.plugin.Child",
+        "vllm_ascend.plugin.Mid",
+        "vllm.base.Base",
+    )
+    assert len(overrides) == 1
+    assert overrides[0].line == 6
+    assert overrides[0].targets == ("vllm.base.Base.run",)
+
+
+def test_incomplete_mro_is_reported_without_selecting_an_owner(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        "class Base:\n    def run(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from unknown_package import Mixin
+from vllm.base import Base
+
+
+class Child(Mixin, Base):
+    def run(self):
+        pass
+""",
+    )
+
+    scanner = auditor.IndependentCandidateScanner(vllm_root, ascend_root)
+    overrides = [candidate for candidate in scanner.scan() if candidate.relation == "override"]
+    mro = scanner._strict_mro("vllm_ascend.plugin.Child")
+
+    assert not mro.complete
+    assert "not indexed" in mro.reason
+    assert len(overrides) == 1
+    assert overrides[0].kinds == ("incomplete_mro",)
+    assert overrides[0].targets == ("vllm.base.Base.run",)
+
+
+def test_external_reexport_is_not_a_vllm_owned_patch(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/reexport.py",
+        "import third_party_runtime as runtime\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.reexport import runtime
+
+
+def replacement():
+    pass
+
+
+runtime.hook = replacement
+""",
+    )
+
+    candidates = auditor.IndependentCandidateScanner(
+        vllm_root,
+        ascend_root,
+    ).scan()
+
+    assert not [candidate for candidate in candidates if candidate.relation == "monkey_patch"]
+
+
+def test_external_root_cli_values_are_validated(tmp_path: Path) -> None:
+    roots = auditor._parse_external_roots([f"torch={tmp_path / 'torch'}", f"external={tmp_path / 'external'}"])
+    assert set(roots) == {"torch", "external"}
+    assert auditor._parse_external_shas(["torch=source-sha"]) == {"torch": "source-sha"}
+    with pytest.raises(ValueError, match="expected PACKAGE=VALUE"):
+        auditor._parse_external_roots(["torch"])
+    with pytest.raises(ValueError, match="duplicate"):
+        auditor._parse_external_roots(["torch=first", "torch=second"])
+    with pytest.raises(ValueError, match="same packages"):
+        auditor._verify_source_inputs(
+            tmp_path,
+            tmp_path,
+            {"torch": tmp_path / "torch"},
+            expect_vllm_sha=None,
+            expect_ascend_sha=None,
+            expect_external_shas={},
         )

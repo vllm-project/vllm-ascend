@@ -30,15 +30,21 @@ import argparse
 import ast
 import hashlib
 import json
+import subprocess
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-AUDIT_VERSION = "0.1.0"
+AUDIT_VERSION = "0.3.0"
 RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 STATUSES = frozenset({"verified", "risk", "expected", "excluded", "review"})
+STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
+    "abc.ABC": (),
+    "typing.Generic": (),
+    "typing.Protocol": ("typing.Generic",),
+}
 
 
 def _expression_name(node: ast.AST | None) -> str | None:
@@ -164,16 +170,29 @@ class MethodSlot:
 
 
 @dataclass(frozen=True)
+class BaseReference:
+    raw_expression: str
+    targets: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ClassRecord:
     qualified_name: str
     module: str
     file: str
     line: int
-    bases: tuple[str, ...]
+    bases: tuple[BaseReference, ...]
     methods: tuple[MethodSlot, ...]
 
     def method(self, name: str) -> MethodSlot | None:
         return next((method for method in self.methods if method.name == name), None)
+
+
+@dataclass(frozen=True)
+class MroResult:
+    owners: tuple[str, ...]
+    complete: bool
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -243,20 +262,62 @@ class Disposition:
 class IndependentCandidateScanner:
     """High-recall AST scanner with no dependency on the mapping generator."""
 
-    def __init__(self, vllm_root: Path, ascend_root: Path):
+    def __init__(
+        self,
+        vllm_root: Path,
+        ascend_root: Path,
+        *,
+        external_roots: dict[str, Path] | None = None,
+    ):
         self.vllm_root = vllm_root.resolve()
         self.ascend_root = ascend_root.resolve()
+        self.external_roots = {package: root.resolve() for package, root in (external_roots or {}).items()}
+        invalid_packages = {
+            package
+            for package in self.external_roots
+            if not package or any(not part.isidentifier() for part in package.split("."))
+        }
+        if invalid_packages:
+            raise ValueError("invalid external package name(s): " + ", ".join(sorted(invalid_packages)))
+        reserved = {"vllm", "vllm_ascend"} & set(self.external_roots)
+        reserved.update(
+            package
+            for package in self.external_roots
+            if package in {name.split(".", 1)[0] for name in STDLIB_STRUCTURAL_BASES}
+        )
+        if reserved:
+            raise ValueError("external package name conflicts with an owned package: " + ", ".join(sorted(reserved)))
+        self._package_roles = {
+            "vllm": "upstream",
+            "vllm_ascend": "downstream",
+            **{package: "external" for package in self.external_roots},
+        }
         self._candidate_parts: dict[tuple[str, str, int, str], dict[str, set[str]]] = {}
-        self._classes: dict[str, ClassRecord] = {}
+        self._classes: dict[str, ClassRecord] = {
+            qualified_name: ClassRecord(
+                qualified_name=qualified_name,
+                module=qualified_name.rsplit(".", 1)[0],
+                file="<stdlib-structural>",
+                line=0,
+                bases=tuple(BaseReference(raw_expression=base, targets=(base,)) for base in bases),
+                methods=(),
+            )
+            for qualified_name, bases in STDLIB_STRUCTURAL_BASES.items()
+        }
         self._callables: set[str] = set()
         self._aliases: dict[str, set[str]] = {}
+        self._star_imports: dict[str, set[str]] = {}
         self._parse_errors: list[str] = []
+        self._mro_cache: dict[str, MroResult] = {}
 
     def scan(self) -> list[CandidateSite]:
+        for package, root in sorted(self.external_roots.items()):
+            self._scan_repository(root, package, collect_candidates=False)
         self._scan_repository(self.vllm_root, "vllm", collect_candidates=False)
         self._scan_repository(self.ascend_root, "vllm_ascend", collect_candidates=True)
         if self._parse_errors:
             raise ValueError("Python source parsing failed: " + "; ".join(self._parse_errors))
+        self._drop_non_upstream_patch_candidates()
         self._collect_inheritance_candidates()
         self._collect_override_candidates()
         return [
@@ -272,7 +333,7 @@ class IndependentCandidateScanner:
         ]
 
     def _scan_repository(self, root: Path, package_name: str, *, collect_candidates: bool) -> None:
-        package_root = root / package_name
+        package_root = root.joinpath(*package_name.split("."))
         if not package_root.is_dir():
             raise ValueError(f"package directory not found: {package_root}")
         for path in sorted(package_root.rglob("*.py")):
@@ -410,31 +471,23 @@ class IndependentCandidateScanner:
                 continue
 
             if isinstance(node, ast.ClassDef):
-                resolved_bases = tuple(
-                    sorted(
-                        {
-                            target
-                            for base in node.bases
-                            for target in self._resolve_expression(module, _expression_name(base), current)
-                        }
-                    )
-                )
-                if collect_candidates:
-                    upstream_bases = {
-                        target
-                        for base in node.bases
-                        for target in self._resolve_expression(module, _expression_name(base), current)
-                        if target.startswith("vllm.")
-                    }
-                    if upstream_bases:
-                        self._add_candidate(
-                            "inheritance",
-                            relative_file,
-                            node.lineno,
-                            None,
-                            upstream_bases,
-                            "class_base",
+                resolved_bases = []
+                for base in node.bases:
+                    raw_base = _expression_name(base) or _normalized_expression(base) or "<dynamic>"
+                    resolved_bases.append(
+                        BaseReference(
+                            raw_expression=raw_base,
+                            targets=tuple(
+                                sorted(
+                                    self._resolve_expression(
+                                        module,
+                                        raw_base,
+                                        current,
+                                    )
+                                )
+                            ),
                         )
+                    )
 
                 qualified = f"{module}.{'.'.join((*scope, node.name))}"
                 methods = self._class_methods(module, node, current)
@@ -443,7 +496,7 @@ class IndependentCandidateScanner:
                     module=module,
                     file=relative_file,
                     line=node.lineno,
-                    bases=resolved_bases,
+                    bases=tuple(resolved_bases),
                     methods=tuple(methods),
                 )
                 self._callables.add(qualified)
@@ -597,6 +650,8 @@ class IndependentCandidateScanner:
         source = _relative_import_module(module, is_package, node.level, node.module)
         for alias in node.names:
             if alias.name == "*":
+                if source:
+                    self._star_imports.setdefault(module, set()).add(source)
                 continue
             local_name = alias.asname or alias.name
             state.bindings[local_name] = {f"{source}.{alias.name}" if source else alias.name}
@@ -681,6 +736,16 @@ class IndependentCandidateScanner:
                 continue
             seen.add(current)
             matching = [alias for alias in self._aliases if current == alias or current.startswith(f"{alias}.")]
+            if not matching:
+                star_modules = [module for module in self._star_imports if current.startswith(f"{module}.")]
+                if star_modules:
+                    longest_module = max(star_modules, key=len)
+                    replacements = {
+                        f"{source}{current[len(longest_module) :]}" for source in self._star_imports[longest_module]
+                    }
+                    if replacements != {current}:
+                        pending.extend(replacements)
+                        continue
             if not matching or limit <= 0:
                 results.add(current)
                 continue
@@ -700,31 +765,135 @@ class IndependentCandidateScanner:
     def _class_candidates(self, qualified_name: str) -> list[ClassRecord]:
         return [self._classes[target] for target in self._expand_alias(qualified_name) if target in self._classes]
 
-    def _ordered_ancestors(self, record: ClassRecord) -> tuple[list[str], bool]:
-        result: list[str] = []
-        complete = True
-        seen: set[str] = set()
+    def _package_name(self, qualified_name: str) -> str | None:
+        matches = [
+            package
+            for package in self._package_roles
+            if qualified_name == package or qualified_name.startswith(f"{package}.")
+        ]
+        return max(matches, key=len) if matches else None
 
-        def visit(base_expression: str) -> None:
-            nonlocal complete
-            expanded = self._expand_alias(base_expression)
-            if len(expanded) != 1:
-                complete = False
-            for target in sorted(expanded):
-                if target in seen:
-                    continue
-                seen.add(target)
-                result.append(target)
-                candidates = self._class_candidates(target)
-                if len(candidates) != 1:
-                    complete = False
-                    continue
-                for base in candidates[0].bases:
-                    visit(base)
+    def _package_role(self, qualified_name: str) -> str | None:
+        package = self._package_name(qualified_name)
+        return self._package_roles.get(package) if package else None
 
+    def _drop_non_upstream_patch_candidates(self) -> None:
+        """Drop writes whose canonical owner is only an external package.
+
+        A symbol imported through a vLLM module is not automatically owned by
+        vLLM.  Following the alias to its defining package prevents re-exported
+        objects such as a third-party module from becoming vLLM patch edges.
+        """
+
+        for key in list(self._candidate_parts):
+            if key[0] != "monkey_patch":
+                continue
+            targets = self._candidate_parts[key]["targets"]
+            canonical_targets = {canonical for target in targets for canonical in self._expand_alias(target)}
+            if not any(self._package_role(target) == "upstream" for target in canonical_targets):
+                del self._candidate_parts[key]
+
+    def _resolved_base_name(
+        self,
+        base: BaseReference,
+    ) -> tuple[str | None, str | None]:
+        expanded = {canonical for target in base.targets for canonical in self._expand_alias(target)}
+        if len(expanded) != 1:
+            return None, (f"base {base.raw_expression!r} resolves to {', '.join(sorted(expanded)) or '<nothing>'}")
+        target = next(iter(expanded))
+        if target not in self._classes:
+            return None, f"base {target} is not indexed"
+        return target, None
+
+    def _strict_mro(
+        self,
+        qualified_name: str,
+        stack: tuple[str, ...] = (),
+    ) -> MroResult:
+        if qualified_name in self._mro_cache:
+            return self._mro_cache[qualified_name]
+        if qualified_name in stack:
+            return MroResult(
+                owners=(qualified_name,),
+                complete=False,
+                reason=f"inheritance cycle at {qualified_name}",
+            )
+        record = self._classes.get(qualified_name)
+        if record is None:
+            return MroResult(
+                owners=(qualified_name,),
+                complete=False,
+                reason=f"class {qualified_name} is not indexed",
+            )
+
+        base_names: list[str] = []
         for base in record.bases:
-            visit(base)
-        return result, complete
+            base_name, reason = self._resolved_base_name(base)
+            if base_name is None:
+                result = MroResult(
+                    owners=(qualified_name,),
+                    complete=False,
+                    reason=reason,
+                )
+                self._mro_cache[qualified_name] = result
+                return result
+            base_names.append(base_name)
+
+        base_results = [self._strict_mro(base, (*stack, qualified_name)) for base in base_names]
+        incomplete = next(
+            (result for result in base_results if not result.complete),
+            None,
+        )
+        if incomplete is not None:
+            result = MroResult(
+                owners=(qualified_name,),
+                complete=False,
+                reason=incomplete.reason,
+            )
+            self._mro_cache[qualified_name] = result
+            return result
+
+        sequences = [list(result.owners) for result in base_results]
+        sequences.append(base_names.copy())
+        owners = [qualified_name]
+        while any(sequences):
+            sequences = [sequence for sequence in sequences if sequence]
+            candidate = next(
+                (sequence[0] for sequence in sequences if not any(sequence[0] in other[1:] for other in sequences)),
+                None,
+            )
+            if candidate is None:
+                result = MroResult(
+                    owners=(qualified_name,),
+                    complete=False,
+                    reason=f"C3 merge failed at {qualified_name}",
+                )
+                self._mro_cache[qualified_name] = result
+                return result
+            owners.append(candidate)
+            for sequence in sequences:
+                if sequence and sequence[0] == candidate:
+                    sequence.pop(0)
+
+        result = MroResult(owners=tuple(owners), complete=True)
+        self._mro_cache[qualified_name] = result
+        return result
+
+    def _possible_known_ancestors(self, record: ClassRecord) -> set[str]:
+        result: set[str] = set()
+        pending = deque(record.bases)
+        while pending:
+            base = pending.popleft()
+            for target in base.targets:
+                for canonical in self._expand_alias(target):
+                    if canonical in result:
+                        continue
+                    owner = self._classes.get(canonical)
+                    if owner is None:
+                        continue
+                    result.add(canonical)
+                    pending.extend(owner.bases)
+        return result
 
     def _alias_slot_is_callable(self, slot: MethodSlot) -> bool:
         if slot.kind != "callable_alias":
@@ -741,7 +910,11 @@ class IndependentCandidateScanner:
             if not record.qualified_name.startswith("vllm_ascend."):
                 continue
             upstream_bases = {
-                target for base in record.bases for target in self._expand_alias(base) if target.startswith("vllm.")
+                target
+                for base in record.bases
+                for reference in base.targets
+                for target in self._expand_alias(reference)
+                if self._package_role(target) == "upstream"
             }
             if upstream_bases:
                 self._add_candidate(
@@ -757,41 +930,47 @@ class IndependentCandidateScanner:
         for record in self._classes.values():
             if not record.qualified_name.startswith("vllm_ascend."):
                 continue
-            ancestors, complete = self._ordered_ancestors(record)
-            if not any(owner.startswith("vllm.") for owner in ancestors):
+            possible_ancestors = self._possible_known_ancestors(record)
+            if not any(self._package_role(owner) == "upstream" for owner in possible_ancestors):
                 continue
+            mro = self._strict_mro(record.qualified_name)
             for method in record.methods:
                 if not self._alias_slot_is_callable(method):
                     continue
-                first_known_owner: str | None = None
-                possible_upstream: set[str] = set()
-                opaque_before_candidate = False
-                for owner in ancestors:
-                    candidates = self._class_candidates(owner)
-                    if len(candidates) != 1:
-                        if first_known_owner is None:
-                            opaque_before_candidate = True
+                if mro.complete:
+                    effective_owner = next(
+                        (owner for owner in mro.owners[1:] if self._classes[owner].method(method.name)),
+                        None,
+                    )
+                    if effective_owner is None:
                         continue
-                    owner_record = candidates[0]
-                    if owner_record.method(method.name) is None:
+                    role = self._package_role(effective_owner)
+                    if role not in {"upstream", "external"}:
                         continue
-                    if first_known_owner is None:
-                        first_known_owner = owner_record.qualified_name
-                    if owner_record.qualified_name.startswith("vllm."):
-                        possible_upstream.add(f"{owner_record.qualified_name}.{method.name}")
-
-                if first_known_owner is not None:
-                    candidate = not first_known_owner.startswith("vllm_ascend.")
-                else:
-                    candidate = bool(possible_upstream and (opaque_before_candidate or not complete))
-                if candidate:
                     self._add_candidate(
                         "override",
                         record.file,
                         method.line,
                         None,
-                        possible_upstream or {f"{first_known_owner}.{method.name}"},
-                        method.kind,
+                        {f"{effective_owner}.{method.name}"},
+                        ("external_override" if role == "external" else method.kind),
+                    )
+                    continue
+
+                possible_owners = {
+                    owner
+                    for owner in possible_ancestors
+                    if self._classes[owner].method(method.name)
+                    and self._package_role(owner) in {"upstream", "external"}
+                }
+                if possible_owners:
+                    self._add_candidate(
+                        "override",
+                        record.file,
+                        method.line,
+                        None,
+                        {f"{owner}.{method.name}" for owner in possible_owners},
+                        "incomplete_mro",
                     )
 
     def _add_candidate(
@@ -865,22 +1044,172 @@ def _load_dispositions(path: Path) -> tuple[dict[str, Any], list[Disposition]]:
     return meta, dispositions
 
 
-def audit_mapping_coverage(
+def _git_checkout_head(root: Path) -> str | None:
+    """Return HEAD only when ``root`` is the checkout's exact top level."""
+
+    resolved_root = root.resolve()
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_root),
+                "rev-parse",
+                "--show-toplevel",
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    lines = result.stdout.splitlines()
+    if len(lines) != 2 or Path(lines[0]).resolve() != resolved_root:
+        return None
+    return lines[1].strip()
+
+
+def _snapshot_source_sha(root: Path, package: str) -> str:
+    manifest_path = root.resolve() / ".interface-source.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"external source is neither an exact Git checkout nor a valid snapshot: {package}={root}"
+        ) from error
+
+    if manifest.get("schema") != 1 or manifest.get("package") != package:
+        raise ValueError(f"invalid external source manifest identity: {manifest_path}")
+    commit = manifest.get("commit")
+    expected_files = manifest.get("files")
+    if not isinstance(commit, str) or not commit or not isinstance(expected_files, dict):
+        raise ValueError(f"invalid external source manifest: {manifest_path}")
+
+    package_root = root.resolve().joinpath(*package.split("."))
+    actual_files = {path.relative_to(root.resolve()).as_posix() for path in package_root.rglob("*.py")}
+    expected_names: set[str] = set()
+    package_prefix = tuple(package.split("."))
+    for relative_path, expected_digest in expected_files.items():
+        if not isinstance(relative_path, str) or not isinstance(expected_digest, str):
+            raise ValueError(f"invalid external source file record: {manifest_path}")
+        parts = tuple(relative_path.split("/"))
+        if (
+            not relative_path.endswith(".py")
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
+            or parts[: len(package_prefix)] != package_prefix
+            or len(expected_digest) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in expected_digest)
+        ):
+            raise ValueError(f"invalid external source file record: {manifest_path}")
+        expected_names.add(relative_path)
+
+    if actual_files != expected_names:
+        missing = sorted(expected_names - actual_files)
+        extra = sorted(actual_files - expected_names)
+        raise ValueError(f"external source snapshot file set changed for {package}: missing={missing}, extra={extra}")
+    for relative_path, expected_digest in sorted(expected_files.items()):
+        actual_digest = hashlib.sha256((root.resolve() / relative_path).read_bytes()).hexdigest()
+        if actual_digest != expected_digest.lower():
+            raise ValueError(
+                f"external source snapshot digest mismatch: {relative_path}; "
+                f"expected {expected_digest}, found {actual_digest}"
+            )
+    return commit
+
+
+def _verify_source_inputs(
     vllm_root: Path,
     ascend_root: Path,
-    mapping_path: Path,
+    external_roots: dict[str, Path],
     *,
-    expect_vllm_sha: str | None = None,
-    expect_ascend_sha: str | None = None,
+    expect_vllm_sha: str | None,
+    expect_ascend_sha: str | None,
+    expect_external_shas: dict[str, str],
 ) -> dict[str, Any]:
-    candidates = IndependentCandidateScanner(vllm_root, ascend_root).scan()
-    mapping_meta, dispositions = _load_dispositions(mapping_path)
+    if set(external_roots) != set(expect_external_shas):
+        raise ValueError("--external-root and --expect-external-sha must name the same packages")
+
+    verified: dict[str, Any] = {"external_sources": {}}
+    for label, root, expected in (
+        ("vLLM", vllm_root, expect_vllm_sha),
+        ("vllm-ascend", ascend_root, expect_ascend_sha),
+    ):
+        if expected is None:
+            continue
+        actual = _git_checkout_head(root)
+        if actual is None:
+            raise ValueError(f"{label} source root is not an exact Git checkout: {root.resolve()}")
+        if actual != expected:
+            raise ValueError(f"{label} source SHA mismatch: expected {expected}, found {actual}")
+        verified["vllm" if label == "vLLM" else "vllm_ascend"] = actual
+
+    for package, root in sorted(external_roots.items()):
+        actual = _git_checkout_head(root)
+        if actual is None:
+            actual = _snapshot_source_sha(root, package)
+        expected = expect_external_shas[package]
+        if actual != expected:
+            raise ValueError(f"external package {package} SHA mismatch: expected {expected}, found {actual}")
+        verified["external_sources"][package] = actual
+    return verified
+
+
+def _verify_mapping_sources(
+    mapping_meta: dict[str, Any],
+    *,
+    expect_vllm_sha: str | None,
+    expect_ascend_sha: str | None,
+    expect_external_shas: dict[str, str],
+) -> None:
     if expect_vllm_sha and mapping_meta.get("vllm") != expect_vllm_sha:
         raise ValueError(f"mapping vLLM SHA mismatch: expected {expect_vllm_sha}, got {mapping_meta.get('vllm')}")
     if expect_ascend_sha and mapping_meta.get("vllm_ascend") != expect_ascend_sha:
         raise ValueError(
             f"mapping vllm-ascend SHA mismatch: expected {expect_ascend_sha}, got {mapping_meta.get('vllm_ascend')}"
         )
+    actual_external = mapping_meta.get("external_sources", {})
+    if actual_external != expect_external_shas:
+        raise ValueError(
+            "mapping external source SHA mismatch: "
+            f"expected {dict(sorted(expect_external_shas.items()))}, got {actual_external}"
+        )
+
+
+def audit_mapping_coverage(
+    vllm_root: Path,
+    ascend_root: Path,
+    mapping_path: Path,
+    *,
+    external_roots: dict[str, Path] | None = None,
+    expect_vllm_sha: str | None = None,
+    expect_ascend_sha: str | None = None,
+    expect_external_shas: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    external_roots = external_roots or {}
+    expect_external_shas = expect_external_shas or {}
+    mapping_meta, dispositions = _load_dispositions(mapping_path)
+    _verify_mapping_sources(
+        mapping_meta,
+        expect_vllm_sha=expect_vllm_sha,
+        expect_ascend_sha=expect_ascend_sha,
+        expect_external_shas=expect_external_shas,
+    )
+    verified_sources = _verify_source_inputs(
+        vllm_root,
+        ascend_root,
+        external_roots,
+        expect_vllm_sha=expect_vllm_sha,
+        expect_ascend_sha=expect_ascend_sha,
+        expect_external_shas=expect_external_shas,
+    )
+    candidates = IndependentCandidateScanner(
+        vllm_root,
+        ascend_root,
+        external_roots=external_roots,
+    ).scan()
 
     candidates_by_site = {candidate.site_key: candidate for candidate in candidates}
     dispositions_by_site: dict[tuple[str, str, int, str], list[Disposition]] = defaultdict(list)
@@ -927,6 +1256,8 @@ def audit_mapping_coverage(
             "audit_version": AUDIT_VERSION,
             "mapping": str(mapping_path),
             "mapping_meta": mapping_meta,
+            "external_roots": {package: str(root.resolve()) for package, root in sorted(external_roots.items())},
+            "verified_sources": verified_sources,
         },
         "summary": {
             "candidates": len(candidates),
@@ -948,21 +1279,59 @@ def audit_mapping_coverage(
     }
 
 
+def _parse_named_values(values: Sequence[str], option: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values:
+        package, separator, item = value.partition("=")
+        if not separator or not package or not item or any(not part.isidentifier() for part in package.split(".")):
+            raise ValueError(f"invalid {option} {value!r}; expected PACKAGE=VALUE")
+        if package in parsed:
+            raise ValueError(f"duplicate {option} package: {package}")
+        parsed[package] = item
+    return parsed
+
+
+def _parse_external_roots(values: Sequence[str]) -> dict[str, Path]:
+    return {package: Path(path_text) for package, path_text in _parse_named_values(values, "--external-root").items()}
+
+
+def _parse_external_shas(values: Sequence[str]) -> dict[str, str]:
+    return _parse_named_values(values, "--expect-external-sha")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vllm-root", required=True, type=Path)
     parser.add_argument("--ascend-root", required=True, type=Path)
     parser.add_argument("--mapping", required=True, type=Path)
+    parser.add_argument(
+        "--external-root",
+        action="append",
+        default=[],
+        metavar="PACKAGE=PATH",
+        help="indexed external package source; may be repeated",
+    )
+    parser.add_argument(
+        "--expect-external-sha",
+        action="append",
+        default=[],
+        metavar="PACKAGE=SHA",
+        help="required identity for each external source; may be repeated",
+    )
     parser.add_argument("--expect-vllm-sha")
     parser.add_argument("--expect-ascend-sha")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
+    external_roots = _parse_external_roots(args.external_root)
+    external_shas = _parse_external_shas(args.expect_external_sha)
     report = audit_mapping_coverage(
         args.vllm_root,
         args.ascend_root,
         args.mapping,
+        external_roots=external_roots,
         expect_vllm_sha=args.expect_vllm_sha,
         expect_ascend_sha=args.expect_ascend_sha,
+        expect_external_shas=external_shas,
     )
     rendered = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
     if args.report:
