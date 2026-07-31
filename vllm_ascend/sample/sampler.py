@@ -157,9 +157,9 @@ class AscendSampler(Sampler):
         if get_ascend_config().enable_reduce_sample:
             logger.warning_once("[force_topk] fallback: enable_reduce_sample=True")  # TODO: remove after debugging
             return False
-        # D7: CompactDist semantics (topv - LSE(z)) only match raw_logprobs
-        if self.logprobs_mode != "raw_logprobs":
-            logger.warning_once("[force_topk] fallback: logprobs_mode=%s != raw_logprobs", self.logprobs_mode)  # TODO: remove after debugging
+        # D7: CompactDist semantics only match raw_logprobs or processed_logprobs
+        if self.logprobs_mode not in ("raw_logprobs", "processed_logprobs"):
+            logger.warning_once("[force_topk] fallback: logprobs_mode=%s not in (raw_logprobs, processed_logprobs)", self.logprobs_mode)  # TODO: remove after debugging
             return False
         # D4/D5: top-n must fit in k; -1 means full-vocab logprobs request
         num_lp = sampling_metadata.max_num_logprobs
@@ -172,12 +172,14 @@ class AscendSampler(Sampler):
             logger.warning_once("[force_topk] fallback: logprob_token_ids non-empty")  # TODO: remove after debugging
             return False
         # D8: penalties change LSE, breaking I3 (raw vs post-penalty logprobs).
-        # Only matters when logprobs are actually requested (design §4.6).
+        # Only matters for raw_logprobs mode (raw requires pre-penalty LSE).
+        # processed_logprobs mode uses post-penalty distribution directly.
         wants_logprobs = num_lp is not None or bool(
             sampling_metadata.logprob_token_ids
         )
-        if not sampling_metadata.no_penalties and wants_logprobs:
-            logger.warning_once("[force_topk] fallback: penalties + logprobs requested")  # TODO: remove after debugging
+        if (not sampling_metadata.no_penalties and wants_logprobs
+                and self.logprobs_mode == "raw_logprobs"):
+            logger.warning_once("[force_topk] fallback: penalties + raw_logprobs requested")  # TODO: remove after debugging
             return False
         # Decision B: if there are argmax_invariant processors other than
         # MinP, we cannot cover their logic in force_topk_sample → fall back.
@@ -242,6 +244,11 @@ class AscendSampler(Sampler):
 
         assert sampling_metadata.temperature is not None
 
+        # Determine logprobs mode: raw_logprobs → return_raw_logprobs=True,
+        # processed_logprobs → return_raw_logprobs=False (skip full-vocab LSE).
+        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        return_raw_logprobs = (logprobs_mode == "raw_logprobs")
+
         # Greedy for mixed batches (computed but only used via torch.where)
         greedy_sampled = None
         if not sampling_metadata.all_random:
@@ -260,11 +267,12 @@ class AscendSampler(Sampler):
         min_p = self._extract_min_p(sampling_metadata)
 
         logger.warning(  # TODO: remove after debugging
-            "[force_topk] random branch: top_p=%s, top_k=%s, min_p=%s, generators=%d",
+            "[force_topk] random branch: top_p=%s, top_k=%s, min_p=%s, generators=%d, mode=%s",
             "None" if sampling_metadata.top_p is None else f"{top_p.shape}",
             "None" if sampling_metadata.top_k is None else f"{top_k.shape}",
             "None" if min_p is None else f"{min_p.shape}",
             len(sampling_metadata.generators),
+            logprobs_mode,
         )
         sampled, cdist = force_topk_sample(
             logits,
@@ -274,6 +282,7 @@ class AscendSampler(Sampler):
             min_p,
             sampling_metadata.generators,
             k,
+            return_raw_logprobs=return_raw_logprobs,
         )
 
         # Mixed batch: select greedy for temperature < eps rows
