@@ -13,11 +13,11 @@ from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuild
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     maybe_save_kv_layer_to_connector,
