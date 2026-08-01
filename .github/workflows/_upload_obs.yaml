@@ -110,7 +110,7 @@ jobs:
                           if not (member.isfile() or member.isdir()):
                               warn(f"Unsupported archive entry: {member.name}; skipping OBS archival.")
                               return False
-                      archive.extractall(destination)
+                      archive.extractall(destination, filter="data")
                   return True
               except Exception as exc:
                   warn(f"Failed to extract existing OBS archive: {exc}")
