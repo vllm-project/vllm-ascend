@@ -601,8 +601,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # the current batch's data.  FA3 is invisible to the CANN task-group
         # update mechanism, so we copy fresh seq_lens/query_start_loc into the
         # tensors whose addresses were captured during torch.npu.graph().
+        # Only refresh for DECODE graphs — prefill uses CANN V1 and must not
+        # touch the FA3 buffers (its num_tokens can collide with a decode size).
         global _FA3_GRAPH_TENSORS
-        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens)
+        first_meta = next(iter(forward_context.attn_metadata.values()), None)
+        is_decode_replay = first_meta is not None and (
+            first_meta.attn_state == AscendAttentionState.DecodeOnly
+        )
+        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens) if is_decode_replay else None
         if fa3_tensors is not None:
             cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
             for meta in forward_context.attn_metadata.values():
