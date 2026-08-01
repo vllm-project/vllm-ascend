@@ -451,17 +451,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         except (ImportError, AttributeError):
             return False
 
-    def _get_or_build_fa3_scheduler_metadata(
+    def _build_fa3_scheduler_metadata(
         self,
-        num_tokens: int,
         attn_metadata: "AscendMetadata",
         block_size: int,
         query: torch.Tensor,
     ):
-        """Return cached FA3 scheduler metadata for *num_tokens*, building it
-        on first access during eager warmup (outside graph).  Reused during
-        graph capture so no H2D copy is needed on the captured stream.
+        """Build FA3 scheduler metadata for the CURRENT batch (eager path).
 
+        Called fresh each iteration — the eager batch changes every forward.
         Returns ``None`` for non-cache attention states (PrefillNoCache).
         """
         from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
@@ -470,11 +468,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
-        # Cache keyed by num_tokens so graph capture reuses metadata built
-        # during eager warmup — no H2D copy needed inside torch.npu.graph().
-        if num_tokens in self._fa3_scheduler_metadata:
-            return self._fa3_scheduler_metadata[num_tokens]
-
         cache_seqlens = attn_metadata.seq_lens
         if cache_seqlens.device != query.device:
             cache_seqlens = cache_seqlens.to(device=query.device)
@@ -482,7 +475,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if cu_seqlens_q.device != query.device:
             cu_seqlens_q = cu_seqlens_q.to(device=query.device)
 
-        meta = get_scheduler_metadata(
+        return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
             max_seqlen_q=attn_metadata.max_query_len,
             max_seqlen_k=max(attn_metadata.seq_lens_list),
@@ -495,11 +488,77 @@ class AscendAttentionBackendImpl(AttentionImpl):
             page_size=block_size,
             causal=attn_metadata.causal,
         )
-        self._fa3_scheduler_metadata[num_tokens] = (meta, cache_seqlens, cu_seqlens_q)
-        # Register NPU tensors for pre-replay data refresh in update_graph_params.
+
+    def _get_fa3_graph_params(
+        self,
+        num_tokens: int,
+        attn_metadata: "AscendMetadata",
+        block_size: int,
+        query: torch.Tensor,
+    ):
+        """Return cached FA3 graph params for *num_tokens*.
+
+        Pre-allocates MAX-configuration NPU buffers (fixed shapes) so that:
+          1. ``scheduler_metadata`` is valid for any batch padded up to the
+             graph's maximum size — the schedule is fixed at capture time.
+          2. The buffers' data is refreshed before each replay via
+             ``update_graph_params`` (no H2D inside ``torch.npu.graph()``).
+          3. The ``block_table`` buffer is zero-padded so padding sequences
+             point to block 0 (valid memory), never stale freed blocks.
+
+        Returns ``None`` for non-cache attention states (PrefillNoCache).
+        """
+        if num_tokens in self._fa3_scheduler_metadata:
+            return self._fa3_scheduler_metadata[num_tokens]
+
+        is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
+        if not is_cache:
+            self._fa3_scheduler_metadata[num_tokens] = None
+            return None
+
+        from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
+
+        device = query.device
+        # Worst-case config for this graph size: up to num_tokens sequences,
+        # one of which may hold all num_tokens query tokens, and KV length up
+        # to the model's max sequence length.
+        max_batch_size = num_tokens
+        max_seqlen_q = num_tokens
+        max_seqlen_k = max(
+            num_tokens,
+            getattr(self.vllm_config.model_config, "max_model_len", num_tokens),
+        )
+        max_blocks_per_seq = (max_seqlen_k + block_size - 1) // block_size + 1
+
+        # Fixed-size NPU buffers whose addresses are captured by NPUGraph.
+        cache_seqlens_buf = torch.zeros(max_batch_size, dtype=torch.int32, device=device)
+        cu_seqlens_q_buf = torch.zeros(max_batch_size + 1, dtype=torch.int32, device=device)
+        block_table_buf = torch.zeros(
+            max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
+        )
+
+        # Scheduler metadata for the MAX config — valid for any padded batch.
+        meta = get_scheduler_metadata(
+            batch_size=max_batch_size,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            num_heads_q=self.num_heads,
+            num_heads_kv=self.num_kv_heads,
+            headdim=self.head_size,
+            cache_seqlens=cache_seqlens_buf,
+            qkv_dtype=query.dtype,
+            cu_seqlens_q=cu_seqlens_q_buf,
+            page_size=block_size,
+            causal=attn_metadata.causal,
+        )
+
+        fa3_graph = (meta, cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf)
+        self._fa3_scheduler_metadata[num_tokens] = fa3_graph
         global _FA3_GRAPH_TENSORS
-        _FA3_GRAPH_TENSORS[num_tokens] = (cache_seqlens, cu_seqlens_q)
-        return meta, cache_seqlens, cu_seqlens_q
+        _FA3_GRAPH_TENSORS[num_tokens] = (
+            cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
+        )
+        return fa3_graph
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -526,36 +585,40 @@ class AscendAttentionBackendImpl(AttentionImpl):
         global _FA3_GRAPH_TENSORS
         fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens)
         if fa3_tensors is not None:
-            cache_seqlens, cu_seqlens_q = fa3_tensors
+            cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
             for meta in forward_context.attn_metadata.values():
                 if meta.seq_lens is not None:
                     with torch.npu.stream(update_stream):
-                        # Pad/truncate to the captured graph size so .copy_()
-                        # succeeds even when the actual batch differs from the
-                        # warmup batch that sized the cached tensors.
-                        src_seqlens = meta.seq_lens
-                        n_cache = cache_seqlens.numel()
-                        if src_seqlens.numel() != n_cache:
-                            if src_seqlens.numel() < n_cache:
-                                src_seqlens = torch.cat(
-                                    [src_seqlens, src_seqlens.new_ones(n_cache - src_seqlens.numel())]
-                                )
-                            else:
-                                src_seqlens = src_seqlens[:n_cache]
-                        cache_seqlens.copy_(
-                            src_seqlens.to(device=cache_seqlens.device, non_blocking=True)
-                        )
+                        n_batch = cache_seqlens.numel()
+                        n_actual = meta.seq_lens.numel()
+                        n_pad = n_batch - n_actual
 
-                        src_qsl = meta.query_start_loc
+                        # cache_seqlens: real lengths first, padding requests
+                        # get KV length 1 (dummy, reads block 0 via zero rows).
+                        cache_seqlens[:n_actual].copy_(
+                            meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                        )
+                        if n_pad > 0:
+                            cache_seqlens[n_actual:].fill_(1)
+
+                        # cu_seqlens_q: real cumulative first, then one query
+                        # token per padding request.
                         n_cu = cu_seqlens_q.numel()
-                        if src_qsl.numel() != n_cu:
-                            if src_qsl.numel() < n_cu:
-                                src_qsl = torch.cat(
-                                    [src_qsl, src_qsl.new_full((n_cu - src_qsl.numel(),), src_qsl[-1])]
-                                )
-                            else:
-                                src_qsl = src_qsl[:n_cu]
-                        cu_seqlens_q.copy_(src_qsl)
+                        n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
+                        cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
+                        if n_cu_actual < n_cu:
+                            last = int(cu_seqlens_q[n_cu_actual - 1].item())
+                            for i in range(n_cu_actual, n_cu):
+                                last += 1
+                                cu_seqlens_q[i] = last
+
+                        # block_table: real rows first, padding rows zeroed so
+                        # padding requests point to block 0 (valid memory).
+                        if meta.block_tables is not None:
+                            n_bt = min(meta.block_tables.shape[0], block_table_buf.shape[0])
+                            block_table_buf[:n_bt].copy_(meta.block_tables[:n_bt])
+                            if n_bt < block_table_buf.shape[0]:
+                                block_table_buf[n_bt:].zero_()
                 break
 
         if using_paged_attention(num_tokens, vllm_config):
@@ -1292,9 +1355,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_size: int,
         block_table: torch.Tensor | None,
         actual_seq_lengths_kv: list[int] | torch.Tensor,
-        scheduler_metadata=None,
-        cache_seqlens: torch.Tensor | None = None,
-        cu_seqlens_q: torch.Tensor | None = None,
+        fa3_graph_params: tuple | None = None,
     ):
         """FA3 graph capture — NPUGraph driver-level recording.
 
@@ -1303,6 +1364,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ``graph_task_group_begin/End`` during capture; the wrappers are added
         here to keep the stream state consistent for subsequent CANN layers,
         even though the returned handle is empty and never used for update.
+
+        ``fa3_graph_params`` is the cached (scheduler_metadata, cache_seqlens,
+        cu_seqlens_q, block_table) tuple from ``_get_fa3_graph_params``.  All
+        are fixed-size NPU buffers whose addresses are captured and whose data
+        is refreshed before each replay by ``update_graph_params``.
         """
         stream = torch_npu.npu.current_stream()
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -1319,11 +1385,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
             v_fa = value.view(num_blocks, bs, self.num_kv_heads, self.head_size)
 
-            # Use NPU tensors from cache (pre-created during warmup) — no
-            # H2D copy or torch.tensor(... device=device) inside the graph.
-            cache_seqlens = cache_seqlens
-            cu_seqlens_q = cu_seqlens_q
-            max_seqlen_q = attn_metadata.max_query_len
+            # Use fixed-size NPU buffers from the cached graph params — no
+            # H2D copy or tensor creation inside the graph capture stream.
+            scheduler_metadata, cache_seqlens, cu_seqlens_q, block_table_buf = fa3_graph_params
+            max_seqlen_q = num_tokens  # max config: worst-case query length
 
             causal = attn_metadata.causal
             window_size = (
@@ -1337,7 +1402,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 k_fa,
                 v_fa,
                 cache_seqlens=cache_seqlens,
-                page_table=block_table.contiguous(),
+                page_table=block_table_buf,
                 cu_seqlens_q=cu_seqlens_q,
                 max_seqlen_q=max_seqlen_q,
                 softmax_scale=self.scale,
@@ -1458,7 +1523,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key, value, attn_metadata, kv_cache,
                 )
                 num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-                scheduler_metadata, cache_seqlens, cu_seqlens_q = self._get_or_build_fa3_scheduler_metadata(
+                fa3_graph_params = self._get_fa3_graph_params(
                     num_tokens, attn_metadata, block_size, query,
                 )
                 attn_output, num_tokens = self.full_graph_fa3(
@@ -1466,9 +1531,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_size=block_size,
                     block_table=block_table,
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    scheduler_metadata=scheduler_metadata,
-                    cache_seqlens=cache_seqlens,
-                    cu_seqlens_q=cu_seqlens_q,
+                    fa3_graph_params=fa3_graph_params,
                 )
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
@@ -1525,10 +1588,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                 is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
                 try:
-                    # Build FA3 scheduler metadata (cached per num_tokens for
-                    # reuse in the graph path during capture).
-                    scheduler_metadata, _, _ = self._get_or_build_fa3_scheduler_metadata(
-                        num_tokens, attn_metadata, block_size, query,
+                    # Build FA3 scheduler metadata for the current batch
+                    # (eager path — fresh each iteration).
+                    scheduler_metadata = self._build_fa3_scheduler_metadata(
+                        attn_metadata, block_size, query,
                     )
                     attn_output = fa3_forward(
                         query, key, value,
