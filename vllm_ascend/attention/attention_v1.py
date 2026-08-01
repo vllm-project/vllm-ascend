@@ -468,6 +468,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
+        # Seed the graph-cache during eager (warmup) so graph capture never
+        # calls get_scheduler_metadata inside torch.npu.graph() — FA3's
+        # get_scheduler_metadata performs an aclrtSynchronizeStream which is
+        # illegal on the captured stream.
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        self._get_fa3_graph_params(num_tokens, attn_metadata, block_size, query)
+
         cache_seqlens = attn_metadata.seq_lens
         if cache_seqlens.device != query.device:
             cache_seqlens = cache_seqlens.to(device=query.device)
@@ -536,6 +543,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_table_buf = torch.zeros(
             max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
         )
+
+        # Populate buffers with the current (warmup) batch data so that
+        # get_scheduler_metadata sees valid seq_lens rather than zeros.
+        n = min(attn_metadata.seq_lens.numel(), max_batch_size)
+        cache_seqlens_buf[:n].copy_(attn_metadata.seq_lens[:n].to(device=device))
+        n_cu = min(attn_metadata.query_start_loc.numel(), max_batch_size + 1)
+        cu_seqlens_q_buf[:n_cu].copy_(attn_metadata.query_start_loc[:n_cu])
 
         # Scheduler metadata for the MAX config — valid for any padded batch.
         meta = get_scheduler_metadata(
