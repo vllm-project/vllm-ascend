@@ -125,61 +125,18 @@ jobs:
               return;
             }
             
-            // pull_request 事件（labeled / synchronize）
             if (eventName === 'pull_request') {
-              const labels = context.payload.pull_request.labels.map(l => l.name);
-              const prNumber = context.payload.pull_request.number;
-              core.setOutput('ref', context.payload.pull_request.head.sha);
-              core.setOutput('request_id', 'pr-' + prNumber);
-              core.setOutput('vllm_ascend_branch', 'main');
-              core.setOutput('is_pr_event', 'true');
-            
-              // 识别标签 nightly-test
-              if (!labels.includes('nightly-test')) {
-                core.info('nightly-test label not found; skipping.');
-                core.setOutput('run', 'false');
-                core.setOutput('filter', '');
-                return;
-              }
-            
-              // 查找最新 /nightly-pr 评论
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                per_page: 100,
-              });
-              let testFilter = null;
-              for (let i = comments.length - 1; i >= 0; i--) {
-                const body = comments[i].body;
-                if (!body) continue;
-                const match = body.trim().match(/^\/nightly-pr(?:\s+(.+))?$/m);
-                if (match) {
-                  const args = (match[1] || '').trim();
-                  if (!args) {
-                    core.info('/nightly-pr without arguments; skipping all tests.');
-                    testFilter = 'none';
-                  } else {
-                    testFilter = ',' + args.split(/\s+/).map(s => s.trim()).join(',') + ',';
-                  }
-                  break;
+                const hasNightlyLabel = pullRequest.labels.some(label => label.name === 'nightly-test');
+                if (!hasNightlyLabel) {
+                    core.info('PR missing nightly-test label, skip nightly jobs');
+                    core.setOutput('run', 'false');
+                    core.setOutput('filter', '');
+                    return;
                 }
-              }
             
-              if (testFilter === null) {
-                core.info('nightly-test label present but no /nightly-pr comment found; skipping.');
-                core.setOutput('run', 'false');
-                core.setOutput('filter', '');
-                return;
-              }
-              if (testFilter === 'none') {
-                core.setOutput('run', 'false');
-                core.setOutput('filter', '');
-                return;
-              }
-              core.setOutput('run', 'true');
-              core.setOutput('filter', testFilter);
-              return;
+                // 只要带有nightly-test标签，直接执行全部用例，等价 test_cases=all
+                core.info('Detect nightly-test label, run all nightly test cases');
+                testFilter = 'all';
             }
             
             // fallback
