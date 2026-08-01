@@ -15,6 +15,7 @@
 
 import pytest
 import torch
+import torch_npu
 from torch import nn
 
 from vllm_ascend.ops.attn_res import apply_attn_res
@@ -24,7 +25,9 @@ from vllm_ascend.ops.attn_res import apply_attn_res
     ("num_tokens", "num_block_residuals"),
     [
         pytest.param(1, 1, id="decode-min-streams"),
-        pytest.param(32, 8, id="decode-max-streams"),
+        pytest.param(1, 8, id="decode-max-streams"),
+        pytest.param(16, 8, id="aclgraph-padded-decode"),
+        pytest.param(32, 8, id="multi-token-max-streams"),
         pytest.param(129, 8, id="prefill-multiple-tokens-per-core"),
     ],
 )
@@ -51,10 +54,15 @@ def test_kimi_k3_attn_res(num_tokens: int, num_block_residuals: int):
 
     actual = apply_attn_res(prefix_sum, block_residual, projection, norm)
 
-    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1).float()
-    normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + epsilon)
-    score_weight = norm.weight.float() * projection.weight.squeeze(0).float()
-    probabilities = (normalized * score_weight).sum(-1).softmax(-1).unsqueeze(1)
-    expected = torch.matmul(probabilities, values).squeeze(1).to(prefix_sum.dtype)
+    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
+    values_fp32 = values.float()
+    normalized, _ = torch_npu.npu_rms_norm(
+        values_fp32,
+        norm.weight.float(),
+        epsilon,
+    )
+    scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
+    probabilities = scores.softmax(-1).unsqueeze(1)
+    expected = torch.matmul(probabilities, values_fp32).squeeze(1).to(prefix_sum.dtype)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
