@@ -31,7 +31,7 @@ def cal_grid_and_block_size(batch_size: int):
     return grid, block_size
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["vec_len"])
 def rejection_greedy_sample_spec_len_1_triton(
     output_token_ids_ptr,  # [batch_size, 2]
     draft_token_ids_ptr,  # [num_tokens]
@@ -162,7 +162,7 @@ def rejection_greedy_sample_triton(
             )
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["max_spec_len", "vec_len", ])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -567,7 +567,7 @@ def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replac
     )
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["max_spec_len", "vec_len"])
 def rejection_random_sample_block_verify_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
