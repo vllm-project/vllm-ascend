@@ -73,32 +73,56 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
     and needs no per-step mirroring.
     """
 
-    def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
-        step: int = 1,
-        num_query_per_req: int = 1,
-        causal: bool = True,
-    ) -> dict[str, Any] | None:
-        # Flat MTP reuses the flat super() build (positions are not needed).
-        # MLA: rotary positions must reach build_attn_metadata, but the flat
-        # super() path does not forward them. Wrap build_attn_metadata to inject
-        # positions[:num_tokens_padded] and reuse super() (no arg duplication).
-        with build_position_wrapper(self.input_buffers.positions, num_tokens_padded):
-            if vllm_version_is("0.25.1"):
-                return super()._build_draft_attn_metadata(
-                    num_reqs, num_reqs_padded, num_tokens_padded, num_query_per_req, causal
-                )
-            else:
+    # The signature is split on vllm_version_is: v0.26.0's
+    # _build_draft_attn_metadata does not accept seq_lens_cpu_upper_bound /
+    # step; d02df748bf+ does.
+    if vllm_version_is("0.26.0"):
+
+        def _build_draft_attn_metadata(  # type: ignore[misc, override]
+            self,
+            num_reqs: int,
+            num_reqs_padded: int,
+            num_tokens_padded: int,
+            num_query_per_req: int = 1,
+            causal: bool = True,
+        ) -> dict[str, Any] | None:
+            # Flat MTP reuses the flat super() build (positions are not needed).
+            # MLA: rotary positions must reach build_attn_metadata, but the flat
+            # super() path does not forward them. Wrap build_attn_metadata to
+            # inject positions[:num_tokens_padded] and reuse super() (no arg
+            # duplication).
+            with build_position_wrapper(self.input_buffers.positions, num_tokens_padded):
                 return super()._build_draft_attn_metadata(
                     num_reqs,
                     num_reqs_padded,
                     num_tokens_padded,
-                    seq_lens_cpu_upper_bound,
-                    step,
+                    num_query_per_req=num_query_per_req,
+                    causal=causal,
+                )
+    else:
+
+        def _build_draft_attn_metadata(  # type: ignore[misc, override]
+            self,
+            num_reqs: int,
+            num_reqs_padded: int,
+            num_tokens_padded: int,
+            seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+            step: int = 1,
+            num_query_per_req: int = 1,
+            causal: bool = True,
+        ) -> dict[str, Any] | None:
+            # Flat MTP reuses the flat super() build (positions are not needed).
+            # MLA: rotary positions must reach build_attn_metadata, but the flat
+            # super() path does not forward them. Wrap build_attn_metadata to
+            # inject positions[:num_tokens_padded] and reuse super() (no arg
+            # duplication).
+            with build_position_wrapper(self.input_buffers.positions, num_tokens_padded):
+                return super()._build_draft_attn_metadata(  # type: ignore[call-arg]
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    seq_lens_cpu_upper_bound,  # type: ignore[arg-type]
+                    step,  # type: ignore[arg-type]
                     num_query_per_req,
                     causal,
                 )

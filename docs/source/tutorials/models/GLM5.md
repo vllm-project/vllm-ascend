@@ -21,7 +21,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 3.1 Model Weight
 
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
-- `GLM-5-w4a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
+- `GLM-5-w4a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
 - `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
 - `GLM-5.1`(BF16 version): [Download model weight](https://huggingface.co/zai-org/GLM-5.1).
 - `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
@@ -41,7 +41,7 @@ You can use our official docker image to run GLM-5/5.1 directly.
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
 
@@ -85,7 +85,7 @@ You can use our official docker image to run GLM-5/5.1 directly.
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
 
@@ -133,7 +133,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A3 series"
 
-    - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
     Run the following script to execute online inference.
 
@@ -169,10 +169,10 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-prefix-caching \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
-    - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
     Run the following script to execute online inference.
 
@@ -204,12 +204,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-prefix-caching \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 === "A2 series"
 
-    - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64G × 8) .
+    - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -258,7 +258,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 === "A3 series"
 
-    - `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64G × 16).
+    - `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
 
     Run the following scripts on two nodes respectively.
 
@@ -508,7 +508,7 @@ if __name__ == "__main__":
          json.dump(json_data, f, indent=2)
 ```
 
-- `glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16).
+- `glm-5-w8a8`: require 2 Atlas 800 A3 (64GB × 16).
 
 Run the following scripts on two nodes respectively.
 
@@ -750,7 +750,7 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-          
+
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -830,7 +830,7 @@ Before you start, please
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-       
+
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -885,37 +885,37 @@ Before you start, please
         ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
-    
+
         export HCCL_OP_EXPANSION_MODE="AIV"
-    
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-    
+
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
-    
+
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-    
-    
+
+
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-    
+
         export TASK_QUEUE_ENABLE=1
-    
+
         export ASCEND_RT_VISIBLE_DEVICES=$1
-          
+
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-    
+
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -966,36 +966,36 @@ Before you start, please
          ```shell
          nic_name="xxxx" # change to your own nic name
          local_ip="xxxx" # change to your own ip
-            
+
          export HCCL_OP_EXPANSION_MODE="AIV"
-            
+
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-            
+
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-            
+
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-            
+
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
+
          export TASK_QUEUE_ENABLE=1
-            
+
          export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
+
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
+
          vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
@@ -1046,36 +1046,36 @@ Before you start, please
          ```shell
          nic_name="xxxx" # change to your own nic name
          local_ip="xxxx" # change to your own ip
-            
+
          export HCCL_OP_EXPANSION_MODE="AIV"
-            
+
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-            
+
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-            
+
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-            
+
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
+
          export TASK_QUEUE_ENABLE=1
-            
+
          export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
+
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
+
          vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
@@ -1126,36 +1126,36 @@ Before you start, please
          ```shell
          nic_name="xxxx" # change to your own nic name
          local_ip="xxxx" # change to your own ip
-            
+
          export HCCL_OP_EXPANSION_MODE="AIV"
-            
+
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-            
+
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-            
+
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-            
+
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
+
          export TASK_QUEUE_ENABLE=1
-            
+
          export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
+
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
+
          vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
@@ -1283,7 +1283,7 @@ python load_balance_proxy_server_example.py \
       6721 6722 6723 6724 \
       6721 6722 6723 6724 \
       6721 6722 6723 6724 \
-      6721 6722 6723 6724      
+      6721 6722 6723 6724
 ```
 
 **Notice:**
@@ -1333,7 +1333,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -1343,7 +1343,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 
 #### Table 1: Scenario Overview
 
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|---------------|-------------------|
 |High Throughput|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on P nodes and dp8 dp4 on D nodes to balanced latency and throughput|
 |Low Latency|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on both P and D nodes to reduce latency|
