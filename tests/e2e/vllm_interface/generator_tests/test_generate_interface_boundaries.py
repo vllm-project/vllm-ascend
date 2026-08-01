@@ -8238,3 +8238,253 @@ Target.run = bind(replacement)
     assert patch.upstream_descriptor_kind == "classmethod"
     assert patch.installed_descriptor_kind == "classmethod"
     assert not findings
+
+
+def test_v025_wraps_signature_contract_keeps_all_signature_views(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(self, value, *, mode=None):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from functools import wraps
+
+from vllm.base import Base
+
+
+class Child(Base):
+    @wraps(Base.run)
+    def run(self, *args, extra=None, **kwargs):
+        return Base.run(self, *args, **kwargs)
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    upstream = override.upstream_signature_contract
+    downstream = override.downstream_signature_contract
+    installed = override.installed_signature_contract
+    assert upstream.definition_signature == override.upstream_signature
+    assert downstream.definition_signature == override.downstream_signature
+    assert downstream.runtime_entry_signature == override.downstream_signature
+    assert downstream.reported_signature == override.upstream_signature
+    assert downstream.forwarded_targets == ("vllm.base.Base.run",)
+    assert downstream.protocol == "python_call"
+    assert downstream.status == "exact"
+    assert any("functools.wraps" in item for item in downstream.provenance)
+    assert installed == downstream
+
+
+def test_v025_outer_classmethod_keeps_descriptor_when_inner_signature_is_unknown(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @classmethod
+    @runtime_decorator
+    def run(cls, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @classmethod
+    def run(cls, value):
+        return value
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    contract = override.upstream_signature_contract
+    assert override.upstream_descriptor_kind == "classmethod"
+    assert contract.definition_signature == override.upstream_signature
+    assert contract.runtime_entry_signature is None
+    assert contract.reported_signature is None
+    assert contract.bound_call_signature is None
+    assert contract.status == "unknown"
+    assert any("runtime_decorator" in item for item in contract.provenance)
+
+
+def test_v025_signature_decorator_adapter_is_sha_pinned_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import torch
+
+
+class Base:
+    @torch.inference_mode()
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    torch_sha = "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0"
+    pinned_relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"torch": torch_sha},
+    ).generate()
+    unknown_relations, unknown_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"torch": "unregistered-version"},
+    ).generate()
+
+    pinned = next(relation for relation in pinned_relations if relation.relation == "override")
+    unknown = next(relation for relation in unknown_relations if relation.relation == "override")
+    assert pinned.upstream_signature_contract.status == "exact"
+    assert any(
+        "torch.inference_mode" in item and torch_sha in item
+        for item in pinned.upstream_signature_contract.provenance
+    )
+    assert unknown.upstream_signature_contract.status == "unknown"
+    assert unknown.upstream_signature_contract.runtime_entry_signature is None
+    assert any(
+        finding.reason_code == "unknown_signature_transform"
+        and finding.supplemental
+        for finding in unknown_findings
+    )
+
+
+def test_v025_signature_contract_separates_definition_and_bound_receiver(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @classmethod
+    def run(upstream_receiver, value, *, mode=None):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @classmethod
+    def run(downstream_receiver, value, *, mode=None):
+        return value
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    upstream = override.upstream_signature_contract
+    downstream = override.downstream_signature_contract
+    bound = ["sync", [], [["value", True]], None, [["mode", False]], None]
+    assert upstream.definition_signature == override.upstream_signature
+    assert downstream.definition_signature == override.downstream_signature
+    assert upstream.definition_signature != downstream.definition_signature
+    assert upstream.bound_call_signature == bound
+    assert downstream.bound_call_signature == bound
+    assert override.installed_signature_contract.bound_call_signature == bound
+
+
+def test_v025_unknown_module_decorator_emits_supplemental_signature_review(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+@runtime_decorator
+def run(value):
+    return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(value):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
+    contract = patch.upstream_signature_contract
+    assert patch.upstream_descriptor_kind is None
+    assert contract.definition_signature == patch.upstream_signature
+    assert contract.runtime_entry_signature is None
+    assert contract.reported_signature is None
+    assert contract.status == "unknown"
+    signature_findings = [
+        finding
+        for finding in findings
+        if finding.reason_code == "unknown_signature_transform"
+    ]
+    assert len(signature_findings) == 1
+    assert (
+        signature_findings[0].status,
+        signature_findings[0].generator_issue,
+        signature_findings[0].supplemental,
+    ) == ("review", False, True)
