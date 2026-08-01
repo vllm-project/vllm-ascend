@@ -235,24 +235,24 @@ jobs:
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
-  build-image:
-    name: Build nightly-a5 image
-    if: false
-    # if: >-
-    #   (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
-    #   || github.event_name == 'pull_request'
-    strategy:
-      matrix:
-        vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' && needs['parse-trigger'].outputs.vllm_ascend_branch || inputs.vllm_ascend_branch)) }}
-    uses: ./.github/workflows/_nightly_image_build.yaml
-    with:
-      target: a5
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-    secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+  # build-image:
+  #   name: Build nightly-a5 image
+  #   if: false
+  #   # if: >-
+  #   #   (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
+  #   #   || github.event_name == 'pull_request'
+  #   strategy:
+  #     matrix:
+  #       vllm_ascend_branch: >-
+  #         ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' && needs['parse-trigger'].outputs.vllm_ascend_branch || inputs.vllm_ascend_branch)) }}
+  #   uses: ./.github/workflows/_nightly_image_build.yaml
+  #   with:
+  #     target: a5
+  #     vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+  #   secrets:
+  #     HW_USERNAME: ${{ secrets.HW_USERNAME }}
+  #     HW_TOKEN: ${{ secrets.HW_TOKEN }}
+  #     GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
   multi-node-tests:
     name: multi-node
