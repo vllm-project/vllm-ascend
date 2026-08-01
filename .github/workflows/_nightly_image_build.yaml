@@ -86,7 +86,7 @@ jobs:
 
       - name: Login to Huawei Cloud SWR (Release)
         id: login-swr
-        if: ${{ inputs.build_type != 'daily' }}
+        if: ${{ inputs.build_type != 'daily' && secrets.HW_USERNAME && secrets.HW_TOKEN }}
         env:
           HW_USERNAME: ${{ secrets.HW_USERNAME }}
           HW_TOKEN: ${{ secrets.HW_TOKEN }}
