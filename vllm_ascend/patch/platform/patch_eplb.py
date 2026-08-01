@@ -50,17 +50,13 @@ def _wrap_communicator_factory(original_factory):
         "expert_buffer",
     }
     if not required_parameters.issubset(factory_signature.parameters):
-        raise RuntimeError(
-            "Unsupported vLLM EPLB contract: communicator factory signature changed."
-        )
+        raise RuntimeError("Unsupported vLLM EPLB contract: communicator factory signature changed.")
 
     @wraps(original_factory)
     def _create_eplb_communicator(*args, **kwargs):
         bound = factory_signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        if bound.arguments["backend"] == "torch_nccl" and _is_npu_platform(
-            _parallel_config.current_platform
-        ):
+        if bound.arguments["backend"] == "torch_nccl" and _is_npu_platform(_parallel_config.current_platform):
             group_coordinator = bound.arguments["group_coordinator"]
             return HcclEplbCommunicator(group_coordinator.device_group)
         return original_factory(*args, **kwargs)
