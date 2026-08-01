@@ -317,6 +317,13 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_minicpm.py
 
+- name: ops_attn_res
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/ops/attn_res.py
+  tests:
+    - tests/ut/models/test_kimi_k3.py
+
 - name: ops_moe
   optional: false
   base: ops_basic
