@@ -62,19 +62,19 @@ jobs:
   build:
     name: Build nightly-${{ inputs.target }}-${{ matrix.arch.name }}
     runs-on: ${{ matrix.arch.runner }}
-    strategy:
-      matrix:
-        vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
     # strategy:
     #   matrix:
-    #     arch:
-    #       - name: amd64
-    #         runner: ubuntu-latest
-    #         platform: linux/amd64
-    #       - name: arm64
-    #         runner: ubuntu-22.04-arm
-    #         platform: linux/arm64
+    #     vllm_ascend_branch: >-
+    #       ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
+    strategy:
+      matrix:
+        arch:
+          - name: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - name: arm64
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
     outputs:
       swr_registry: ${{ steps.build.outputs.swr_registry }}
       swr_temp_registry: ${{ steps.build.outputs.swr_temp_registry }}
