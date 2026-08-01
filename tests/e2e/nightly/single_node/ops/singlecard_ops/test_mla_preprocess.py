@@ -72,6 +72,9 @@ def _build_mode_caches(
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.dtype, float | int]:
     """Build caches in the layout each cache_mode expects."""
+    # ND modes use 3-D shapes; NZ modes use 4-D shapes.
+    ctkv_shape: tuple[int, ...]
+    rope_shape: tuple[int, ...]
     if cache_mode == "kvcache":
         # Fused ND cache: [block, block_size, kv_lora_rank + rope_dim].
         ctkv_shape = (block_num, block_size, kv_lora_rank + rope_dim)
