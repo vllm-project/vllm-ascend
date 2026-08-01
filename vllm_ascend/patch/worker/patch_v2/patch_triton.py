@@ -1,4 +1,6 @@
+from vllm.triton_utils import triton
 from vllm.v1.worker.gpu import input_batch, model_runner, structured_outputs
+from vllm.v1.worker.gpu.metrics import logits as metrics_logits
 from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
@@ -35,3 +37,4 @@ structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
 dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
+metrics_logits.libdevice = triton.language.extra.cann.libdevice
