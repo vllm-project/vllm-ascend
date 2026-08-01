@@ -30,6 +30,13 @@ from vllm_ascend.distributed.utils import all_gather_async
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
+@dataclass
+class AscendSFACPMetadata(AscendSFAMetadata):
+    """SFA metadata with the full PCP cache-write slot mapping."""
+
+    pcp_slot_mapping: torch.Tensor | None = None
+
+
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
     """Metadata builder for SFA under MRV2 Prefill Context Parallelism.
 
@@ -54,16 +61,33 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             layer_names,
             vllm_config,
             device,
-            metadata_cls,
+            metadata_cls if metadata_cls is not None else AscendSFACPMetadata,
             supports_dcp_with_varlen,
         )
+
+    def _build_with_metadata_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        build_metadata: Callable[[], AscendSFAMetadata],
+    ) -> AscendSFAMetadata:
+        """Keep PCPManager's gathered slots beside the local SFA view."""
+        pcp_slot_mapping = common_attn_metadata.slot_mapping
+        metadata = super()._build_with_metadata_view(
+            common_attn_metadata,
+            build_metadata,
+        )
+        assert isinstance(metadata, AscendSFACPMetadata)
+        metadata.pcp_slot_mapping = pcp_slot_mapping
+        return metadata
 
     def build_for_cudagraph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
-    ) -> AscendSFAMetadata:
+    ) -> AscendSFACPMetadata:
         '''Capture PCP FULL-decode graphs with decode-shaped cache inputs.'''
         metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        assert isinstance(metadata, AscendSFACPMetadata)
+        metadata.pcp_slot_mapping = common_attn_metadata.slot_mapping
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.num_decodes = common_attn_metadata.num_reqs
         metadata.num_decode_tokens = common_attn_metadata.num_input_tokens
@@ -146,8 +170,17 @@ class AscendSFACPImpl(AscendSFAImpl):
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
             (kv_no_split, cos, sin), slots, num_decode_tokens
         )
+        assert slots.numel() == kv_no_split.shape[0], (
+            "SFA PCP cache write requires one slot per gathered token: "
+            f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
+        )
 
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    def _get_sfa_kv_slot_mapping(self, attn_metadata: M) -> torch.Tensor:
+        assert isinstance(attn_metadata, AscendSFACPMetadata)
+        assert attn_metadata.pcp_slot_mapping is not None
+        return attn_metadata.pcp_slot_mapping
 
     def _write_indexer_cache(
         self,
@@ -164,11 +197,16 @@ class AscendSFACPImpl(AscendSFAImpl):
         # replicated indexer cache. Same pattern as exec_kv: decode tokens
         # stay local (replicated), only the prefill partition is gathered.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
         tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
         gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
             tensors, slot_mapping, num_decode_tokens
         )
         k_li = gathered_tensors[0]
+        assert gathered_slot_mapping.numel() == k_li.shape[0], (
+            "SFA PCP indexer cache write requires one slot per gathered token: "
+            f"tokens={k_li.shape[0]}, slots={gathered_slot_mapping.numel()}."
+        )
         if k_li_scale is not None:
             k_li_scale = gathered_tensors[1]
         super()._write_indexer_cache(

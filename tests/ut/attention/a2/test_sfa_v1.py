@@ -6,6 +6,7 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.v1.attention.backend import AttentionCGSupport
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
@@ -527,6 +528,36 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.stop()
         self.ascend_config_patcher.stop()
         self.parent_init_patcher.stop()
+
+    @patch(
+        "vllm_ascend.attention.sfa_v1.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        True,
+    )
+    def test_glm_moe_dsa_v2_disables_full_cudagraph(self):
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_text_config.model_type = "glm_moe_dsa"
+
+        support = AscendSFAMetadataBuilder.get_cudagraph_support(
+            vllm_config,
+            MagicMock(),
+        )
+
+        self.assertEqual(support, AttentionCGSupport.NEVER)
+
+    @patch(
+        "vllm_ascend.attention.sfa_v1.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        True,
+    )
+    def test_other_sfa_models_keep_uniform_batch_cudagraph_support(self):
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_text_config.model_type = "deepseek_v3"
+
+        support = AscendSFAMetadataBuilder.get_cudagraph_support(
+            vllm_config,
+            MagicMock(),
+        )
+
+        self.assertEqual(support, AttentionCGSupport.UNIFORM_BATCH)
 
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_default(self):
