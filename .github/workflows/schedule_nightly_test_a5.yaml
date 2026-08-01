@@ -186,7 +186,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [parse-trigger, setup-vars, debug-matrix]
+    needs: [parse-trigger, setup-vars]
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
