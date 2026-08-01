@@ -611,6 +611,12 @@ class NPUWorker(WorkerBase):
             all_gather_group=all_gather_group,
         )
 
+        # Align with upstream GPUWorker: Model Runner V2 has no
+        # kv_connector_output to propagate from non-last PP ranks. Model Runner
+        # V1 must continue below to handle the PP + KV connector path.
+        if self.use_v2_model_runner:
+            return None
+
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
             return None
