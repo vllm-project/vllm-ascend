@@ -134,9 +134,9 @@ jobs:
               core.setOutput('vllm_ascend_branch', 'main');
               core.setOutput('is_pr_event', 'true');
             
-              // 识别标签 nightly-test-a5
-              if (!labels.includes('nightly-test-a5')) {
-                core.info('nightly-test-a5 label not found; skipping.');
+              // 识别标签 nightly-test
+              if (!labels.includes('nightly-test')) {
+                core.info('nightly-test label not found; skipping.');
                 core.setOutput('run', 'false');
                 core.setOutput('filter', '');
                 return;
@@ -167,7 +167,7 @@ jobs:
               }
             
               if (testFilter === null) {
-                core.info('nightly-test-a5 label present but no /nightly-pr comment found; skipping.');
+                core.info('nightly-test label present but no /nightly-pr comment found; skipping.');
                 core.setOutput('run', 'false');
                 core.setOutput('filter', '');
                 return;
