@@ -295,7 +295,16 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
-    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+    def kv_cache_load(
+        cache_kv_c,
+        cache_k_pe,
+        block_table,
+        context_seq_len_npu,
+        seq_starts,
+        key,
+        value,
+        cache_mode: str = "Norm",
+    ):
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -304,6 +313,7 @@ class BaseDeviceAdaptor:
             seq_offset=seq_starts,
             key=key,
             value=value,
+            cache_mode=cache_mode,
         )
 
     @staticmethod
@@ -1385,7 +1395,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
     @staticmethod
-    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+    def kv_cache_load(
+        cache_kv_c,
+        cache_k_pe,
+        block_table,
+        context_seq_len_npu,
+        seq_offset,
+        key,
+        value,
+        cache_mode: str = "Norm",
+    ):
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
@@ -1394,6 +1413,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             seq_offset=seq_offset,
             key=key,
             value=value,
+            cache_mode=cache_mode,
         )
 
     @staticmethod

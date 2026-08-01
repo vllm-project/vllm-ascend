@@ -2119,17 +2119,17 @@ class TestAscendMLAImpl(TestBase):
         self.impl.fa_quant_layer = True
         self.impl.num_heads = 2
         self.impl.num_kv_heads = 1
-        self.impl.kv_lora_rank = 4
-        self.impl.qk_nope_head_dim = 4
-        self.impl.qk_rope_head_dim = 2
+        self.impl.kv_lora_rank = 32
+        self.impl.qk_nope_head_dim = 32
+        self.impl.qk_rope_head_dim = 16
         self.impl.v_head_dim = 3
         self.impl.vllm_config.model_config.dtype = torch.bfloat16
         self.impl.fak_descale_float = torch.tensor([0.25])
 
-        quantized_kv = torch.tensor([[[4, -8, 12, -16]]], dtype=torch.int8)
-        loaded_k_pe = torch.ones(1, 1, self.impl.qk_rope_head_dim, dtype=torch.bfloat16)
+        quantized_kv = torch.arange(32, dtype=torch.int8).view(1, 32)
+        loaded_k_pe = torch.ones(1, self.impl.qk_rope_head_dim, dtype=torch.bfloat16)
 
-        def load_cache(*args, key, value):
+        def load_cache(*args, key, value, **_):
             key.copy_(quantized_kv)
             value.copy_(loaded_k_pe)
 
@@ -2177,6 +2177,10 @@ class TestAscendMLAImpl(TestBase):
             prefix_lse,
         )
 
+        cache_load_args = mock_cache_load.call_args
+        self.assertEqual(cache_load_args.args[0].shape, (1, 1, 1, 32))
+        self.assertEqual(cache_load_args.args[1].shape, (1, 1, 1, 16))
+        self.assertEqual(cache_load_args.kwargs["cache_mode"], "PA_NZ")
         expected = (quantized_kv.squeeze().to(torch.float32) * self.impl.fak_descale_float).to(torch.bfloat16)
         torch.testing.assert_close(captured_kv_b_inputs[0], expected)
 

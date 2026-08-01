@@ -1398,18 +1398,62 @@ class AscendMLAImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
-            k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
+            cache_mode = "Norm"
+            cache_kv_c_for_load = cache_kv_c
+            cache_k_pe_for_load = cache_k_pe
+            if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A3:
+                # A3 C8 decode writes PA_NZ cache. Gather must receive the
+                # same layout; after gathering, restore the normal TND shape
+                # consumed by dequantization and kv_b_proj below.
+                block_size = cache_kv_c.shape[1]
+                cache_mode = "PA_NZ"
+                cache_kv_c_for_load = cache_kv_c.view(
+                    -1,
+                    num_heads * latent_kv_dim // 32,
+                    block_size,
+                    32,
+                )
+                cache_k_pe_for_load = cache_k_pe.view(
+                    -1,
+                    num_heads * rope_dim // 16,
+                    block_size,
+                    16,
+                )
+                kv_c_normed = torch.empty(
+                    toks,
+                    num_heads * latent_kv_dim,
+                    dtype=cache_kv_c.dtype,
+                    device=cache_kv_c.device,
+                )
+                k_pe = torch.empty(
+                    toks,
+                    num_heads * rope_dim,
+                    dtype=q_pe.dtype,
+                    device=q_pe.device,
+                )
+            else:
+                kv_c_normed = torch.empty(
+                    toks,
+                    num_heads,
+                    latent_kv_dim,
+                    dtype=cache_kv_c.dtype,
+                    device=cache_kv_c.device,
+                )
+                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
             DeviceOperator.kv_cache_load(
-                cache_kv_c,
-                cache_k_pe,
+                cache_kv_c_for_load,
+                cache_k_pe_for_load,
                 prefill_metadata.block_table,
                 context_seq_len_npu,
                 prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
+                cache_mode=cache_mode,
             )
+            if cache_mode == "PA_NZ":
+                kv_c_normed = kv_c_normed.view(toks, num_heads, latent_kv_dim)
+                k_pe = k_pe.view(toks, num_heads, rope_dim)
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
