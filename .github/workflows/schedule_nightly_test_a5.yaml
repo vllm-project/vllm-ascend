@@ -194,7 +194,7 @@ jobs:
       matrix:
         # vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
