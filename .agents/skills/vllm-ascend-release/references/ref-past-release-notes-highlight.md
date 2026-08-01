@@ -61,7 +61,7 @@ We mainly focus on quality and performance improvement in this release. The spec
 - Eagle spec decode feature now works with full graph mode. [#5118](https://github.com/vllm-project/vllm-ascend/pull/5118)
 - Context Parallel(PCP&DCP) feature is more stable now. And it works for most case. Please try it out.
 - MTP and eagle spec decode feature now works in most cases. And it's suggested to use them in most cases.
-- EPLB feature more stable now. Many bugs have been fixed. Mix placement works now [#6086](https://github.com/vllm-project/vllm-ascend/pull/6086)
+- EPLB feature more stable now. Many bugs have been fixed.
 - Support kv nz feature for DeepSeek decode node in disagg-prefill scenario [#3072](https://github.com/vllm-project/vllm-ascend/pull/3072)
 
 ### Model Support

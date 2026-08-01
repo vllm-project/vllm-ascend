@@ -43,41 +43,24 @@ def expert_file_to_tensor(expert_map_path, layer_id):
     return global_placement, physical_count
 
 
-def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts):
-    n_expert -= num_shared_experts
+def generate_global_placement(n_expert, ep_size, n_redundant):
     if (n_expert + n_redundant) % ep_size != 0:
         raise ValueError("(n_expert + n_redundant) % ep_size must be 0")
-    if num_shared_experts == 0:
-        # Match vLLM's checkpoint-loading physical layout exactly:
-        # [all logical experts, redundant copies of logical experts 0..N].
-        # The flattened position is the global physical expert ID and must
-        # agree with RoutedExperts.make_expert_params_mapping.
-        physical_to_logical = np.concatenate((np.arange(n_expert), np.arange(n_redundant) % n_expert))
-        return torch.tensor(physical_to_logical.reshape(ep_size, -1), dtype=torch.int32)
-
-    # Shared-expert mix placement has a separate Ascend-only layout.
-    all_experts = np.arange(n_expert)
-    groups = np.array_split(all_experts, ep_size)
-    for i in range(n_redundant):
-        j = i % ep_size + 1
-        if len(groups[-j]) == 0:
-            groups[-j] = np.append(groups[-j], j)
-        else:
-            groups[-j] = np.append(groups[-j], (groups[-j][-1] + 1) % n_expert)
-    if num_shared_experts > 0:
-        for i, group in enumerate(groups):
-            groups[i] = np.append(group, n_expert + i % num_shared_experts)
-    return torch.tensor(groups, dtype=torch.int32)
+    # Match vLLM's checkpoint-loading physical layout exactly:
+    # [all logical experts, redundant copies of logical experts 0..N].
+    # The flattened position is the global physical expert ID and must
+    # agree with RoutedExperts.make_expert_params_mapping.
+    physical_to_logical = np.concatenate((np.arange(n_expert), np.arange(n_redundant) % n_expert))
+    return torch.tensor(physical_to_logical.reshape(ep_size, -1), dtype=torch.int32)
 
 
-def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1, tp_size=None):
+def init_eplb_config(eplb_config, layer_id, moe_config, tp_size=None):
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
     global_placement = None
     eplb_enable = eplb_config.dynamic_eplb
     n_redundant = eplb_config.num_redundant_experts if eplb_enable else 0
-    num_shared_experts = num_shared_experts if mix_placement else 0
 
     if ep_size == 1:
         assert not eplb_enable, "EPLB must used in expert parallelism."
@@ -92,9 +75,7 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         return None, expert_map, None, 0
 
     if global_placement is None:
-        global_placement = generate_global_placement(n_experts, ep_size, n_redundant, num_shared_experts)
-        if mix_placement:
-            n_redundant += ep_size - 1
+        global_placement = generate_global_placement(n_experts, ep_size, n_redundant)
     global_expert_map = []
     for rankid in range(ep_size):
         expert_map = torch.full((n_experts,), -1, dtype=torch.int32)

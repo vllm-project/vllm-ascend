@@ -166,14 +166,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         mc2_mask: torch.Tensor | None = None,
         tid2eid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
         num_logical_experts = get_moe_num_logical_experts(
             layer,
             num_experts,
             global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
         )
         assert router_logits.shape[1] == num_logical_experts, "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(

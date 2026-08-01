@@ -184,14 +184,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         input_ids = getattr(get_forward_context(), "input_ids", None)
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
         num_logical_experts = get_moe_num_logical_experts(
             layer,
             num_experts,
             global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
         )
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -398,8 +394,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self.multistream_overlap_shared_expert = (
             ascend_config.multistream_overlap_shared_expert and shared_experts is not None
         )
-        mix_placement = getattr(ascend_config, "mix_placement", False)
-
         # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
         AscendMoERunner.moe_counter += 1
         self.moe_instance_id = AscendMoERunner.moe_counter
@@ -411,7 +405,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Ascend's placement builder operates on logical expert IDs, so give it
         # a shallow config view with the logical count.
         placement_moe_config = copy(moe_config)
-        placement_moe_config.num_experts = moe_config.num_logical_experts + (n_shared_experts if mix_placement else 0)
+        placement_moe_config.num_experts = moe_config.num_logical_experts
         allocated_redundancy = moe_config.num_experts - moe_config.num_logical_experts
         if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
             raise ValueError(
@@ -429,8 +423,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             placement_eplb_config,
             AscendMoERunner.moe_counter,
             placement_moe_config,
-            mix_placement,
-            n_shared_experts,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
 

@@ -284,9 +284,6 @@ class AscendConfig:
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 
-        self.mix_placement = additional_config.get("mix_placement", False)
-        self._check_mix_placement()
-
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
@@ -330,11 +327,6 @@ class AscendConfig:
             "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
         )
-
-    def _check_mix_placement(self):
-        if self.mix_placement:
-            if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
-                raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
