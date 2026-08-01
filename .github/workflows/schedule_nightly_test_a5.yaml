@@ -170,9 +170,23 @@ jobs:
           echo "::notice title=double_node::${{ steps.set-matrix.outputs.double_node }}"
           echo "::notice title=multi_card::${{ steps.set-matrix.outputs.multi_card }}"
 
+    debug-matrix:
+    name: Debug Matrix Output
+    needs: [parse-trigger, setup-vars]
+    runs-on: linux-amd64-cpu-8-hk
+    if: always()
+    steps:
+      - run: |
+          echo "==== multi_node raw ===="
+          echo "${{ needs.setup-vars.outputs.multi_node }}"
+          echo "==== single_node raw ===="
+          echo "${{ needs.setup-vars.outputs.single_node }}"
+          echo "==== run flag ===="
+          echo "${{ needs['parse-trigger'].outputs.run }}"
+
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger]
+    needs: [parse-trigger, setup-vars, debug-matrix]
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
@@ -180,8 +194,8 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        vllm_ascend_branch: ${{ fromJson(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
@@ -207,7 +221,6 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
   double-node-tests:
     name: double-node
     needs: [setup-vars, parse-trigger]
