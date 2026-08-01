@@ -210,7 +210,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'pull_request' ? needs.parse-trigger.outputs.ref : inputs.vllm_ascend_branch }}
+          ref: >-
+            ${{ github.event_name == 'pull_request' && needs.parse-trigger.outputs.ref || inputs.vllm_ascend_branch }}
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
