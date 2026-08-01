@@ -161,9 +161,20 @@ jobs:
         run: |
           echo "Test filter value: ${{ needs.parse-trigger.outputs.filter }}"
           python3 -m pip install pyyaml -q
-          python3 .github/workflows/scripts/resolve_nightly_tests.py \
-            --soc a5 \
-            --filter "${{ needs.parse-trigger.outputs.filter }}"
+          python3 - <<PY
+import yaml
+import os
+cfg_path = ".github/workflows/configs/nightly_config.yaml"
+if os.path.exists(cfg_path):
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    a5_cfg = data.get("a5", {})
+    print("===== Raw a5 config from yaml =====")
+    print(yaml.dump(a5_cfg))
+else:
+    print("ERROR: nightly_config.yaml not found!")
+PY
+
             
       - name: Read A5 test matrix config
         id: set-matrix
