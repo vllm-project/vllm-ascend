@@ -51,7 +51,12 @@ class TestAscendSFABackend(TestBase):
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
 
+        self.ascend_config_patcher = patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+        mock_ascend_config = self.ascend_config_patcher.start()
+        mock_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+
     def tearDown(self):
+        self.ascend_config_patcher.stop()
         self.utils_patcher.stop()
         self.config_context.__exit__(None, None, None)
 

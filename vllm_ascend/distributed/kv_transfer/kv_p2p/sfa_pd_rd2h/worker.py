@@ -240,7 +240,7 @@ class SFAPDRD2HConsumerWorker:
             self._terminal_ext_ids.update(local_done | local_failed)
 
         tp_status = self._gather_tp_read_status(
-            self._terminal_ext_ids,
+            set(self._terminal_ext_ids),
             local_failed,
         )
         finished_on_all = set.intersection(*(terminal for terminal, _ in tp_status)) if tp_status else set()
