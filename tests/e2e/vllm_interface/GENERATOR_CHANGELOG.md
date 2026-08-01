@@ -74,6 +74,10 @@ generator problem.
 - Independent coverage audit v0.5 still classifies all 1,019 candidates with
   zero missing, conflicting, or generator-issue records and the same two
   pre-existing auditor-only patch orphans.
+- Scope-aware regression run: checkpoint `259df81a8` regenerated the same
+  pinned sources in 373.7 seconds.  It retained all 971 exact edges, all 60
+  finding dispositions, all 15 real descriptor reviews, and the identical
+  output SHA-256 `727710aa6c8229c71e3064f28f81764dda1f51e8420eef88da49f2cf5cf3d257`.
 - Status: implementation tests pass (163 total).  The fixed mapping is exact
   for the descriptor forms exercised by the pinned source, but broader
   property accessor, wrapper-shadowing, and conditional descriptor red tests
