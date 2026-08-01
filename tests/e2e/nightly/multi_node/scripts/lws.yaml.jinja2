@@ -65,11 +65,6 @@ spec:
                 cpu: 125
             ports:
               - containerPort: 8080
-            # readinessProbe:
-            #   tcpSocket:
-            #     port: 8080
-            #   initialDelaySeconds: 15
-            #   periodSeconds: 10
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
@@ -77,6 +72,10 @@ spec:
                 name: driver-tools
               - mountPath: /dev/shm
                 name: dshm
+              {{- if nfs_name }}
+              - mountPath: /mnt/share/modelscope
+                name: modelscope-nfs
+              {{- end }}
         volumes:
         - name: dshm
           emptyDir:
@@ -88,6 +87,11 @@ spec:
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
+        {{- if nfs_name }}
+        - name: modelscope-nfs
+          persistentVolumeClaim:
+            claimName: {{ nfs_name }}
+        {{- end }}
     workerTemplate:
       spec:
         tolerations:
@@ -145,6 +149,10 @@ spec:
                 name: driver-tools
               - mountPath: /dev/shm
                 name: dshm
+              {{- if nfs_name }}
+              - mountPath: /mnt/share/modelscope
+                name: modelscope-nfs
+              {{- end }}
         volumes:
         - name: dshm
           emptyDir:
@@ -156,6 +164,11 @@ spec:
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
+        {{- if nfs_name }}
+        - name: modelscope-nfs
+          persistentVolumeClaim:
+            claimName: {{ nfs_name }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
