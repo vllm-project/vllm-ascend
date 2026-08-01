@@ -1531,11 +1531,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # A fresh one-token causal prefill has exactly one valid attention
         # score, so its attention result is mathematically the current value.
         # Avoid the FIA TND length-one edge case for K3's explicit no-RoPE A3
-        # C8 path. Do not use this shortcut when chunked context exists: that
-        # case has historical KV and must still attend over it.
+        # path. This is independent of KV-cache quantization. Do not use this
+        # shortcut when chunked context exists: that case has historical KV
+        # and must still attend over it.
         if (
-            self.fa_quant_layer
-            and not self.use_mla_rope
+            not self.use_mla_rope
             and get_ascend_device_type() == AscendDeviceType.A3
             and num_tokens == 1
             and actual_seq_lengths_q == [1]

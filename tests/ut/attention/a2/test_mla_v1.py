@@ -1764,9 +1764,9 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("torch_npu.npu_fused_infer_attention_score")
-    def test_kimi_k3_a3_c8_single_token_prefill_returns_value(self, mock_fia, mock_get_device_type):
+    def test_kimi_k3_a3_single_token_prefill_returns_value(self, mock_fia, mock_get_device_type):
         """A causal one-token prefill has no attention reduction to perform."""
-        self.impl.fa_quant_layer = True
+        self.impl.fa_quant_layer = False
         self.impl.use_mla_rope = False
         q_nope = torch.randn(1, self.impl.num_heads, self.impl.qk_nope_head_dim)
         q_pe = torch.randn(1, self.impl.num_heads, self.impl.qk_rope_head_dim)
