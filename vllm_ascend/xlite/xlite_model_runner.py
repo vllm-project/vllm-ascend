@@ -29,7 +29,7 @@ class XliteModelRunner(NPUModelRunner):
             return super().get_model()
         return self.xlite_model.unwrap()
 
-    def load_model(self) -> None:
+    def load_model(self, load_dummy_weights=False) -> None:
         from vllm_ascend.xlite.xlite import XliteWrapper
 
         super().load_model()
