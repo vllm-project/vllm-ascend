@@ -213,8 +213,7 @@ def _dspark_post_init(self):
             # acceptance).
             if self.num_speculative_tokens != 7:
                 raise ValueError(
-                    "K3 dspark requires num_speculative_tokens=7 "
-                    f"(block_size=7); got {self.num_speculative_tokens}."
+                    f"K3 dspark requires num_speculative_tokens=7 (block_size=7); got {self.num_speculative_tokens}."
                 )
 
 
