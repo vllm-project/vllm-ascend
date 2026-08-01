@@ -66,6 +66,9 @@ from vllm_ascend.utils import weak_ref_tensors
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+# FA3 captured NPU tensors keyed by num_tokens, updated before each replay
+# with the current batch data (cache_seqlens, cu_seqlens_q).
+_FA3_GRAPH_TENSORS: dict = {}
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -493,6 +496,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             causal=attn_metadata.causal,
         )
         self._fa3_scheduler_metadata[num_tokens] = (meta, cache_seqlens, cu_seqlens_q)
+        # Register NPU tensors for pre-replay data refresh in update_graph_params.
+        global _FA3_GRAPH_TENSORS
+        _FA3_GRAPH_TENSORS[num_tokens] = (cache_seqlens, cu_seqlens_q)
         return meta, cache_seqlens, cu_seqlens_q
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
@@ -512,6 +518,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
         draft_attn_metadatas=None,
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
+
+        # FA3 graph replay: refresh the captured NPU seq-length tensors with
+        # the current batch's data.  FA3 is invisible to the CANN task-group
+        # update mechanism, so we copy fresh seq_lens/query_start_loc into the
+        # tensors whose addresses were captured during torch.npu.graph().
+        global _FA3_GRAPH_TENSORS
+        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens)
+        if fa3_tensors is not None:
+            cache_seqlens, cu_seqlens_q = fa3_tensors
+            for meta in forward_context.attn_metadata.values():
+                if meta.seq_lens is not None:
+                    with torch.npu.stream(update_stream):
+                        cache_seqlens.copy_(
+                            meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                        )
+                        cu_seqlens_q.copy_(meta.query_start_loc)
+                break
+
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
