@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import regex as re
@@ -109,6 +110,28 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertIs(call.args[1], layer.weight)
         torch.testing.assert_close(call.kwargs["antiquant_scale"], layer.weight_scale)
         self.assertEqual(call.kwargs["antiquant_group_size"], 0)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
+    def test_kimi_k3_text_config_marks_only_shared_expert(self, mock_get_current_vllm_config, _mock_get_tp_world_size):
+        """Text-only K3 loading exposes kimi_linear as its immediate config."""
+        mock_get_current_vllm_config.return_value = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={"group_size": 256}),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="kimi_linear"),
+                hf_text_config=SimpleNamespace(
+                    model_type="kimi_linear",
+                    mla_use_output_gate=True,
+                    routed_expert_hidden_size=3584,
+                ),
+            ),
+        )
+        method = AscendW4A8DynamicLinearMethod()
+        shared_layer = SimpleNamespace(prefix="model.layers.0.block_sparse_moe.shared_experts.gate_up_proj")
+        routed_layer = SimpleNamespace(prefix="model.layers.0.block_sparse_moe.experts")
+
+        self.assertTrue(method._uses_per_channel_shared_expert(shared_layer))
+        self.assertFalse(method._uses_per_channel_shared_expert(routed_layer))
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
     def test_process_per_channel_weight_without_second_level_scale(self, _mock_maybe_trans_nz):

@@ -35,6 +35,28 @@ from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_lo
 from .registry import register_scheme
 
 
+def _is_kimi_k3_model(vllm_config: Any) -> bool:
+    """Identify K3 from either its outer multimodal or inner text config.
+
+    The full K3 checkpoint has ``hf_config.model_type == "kimi_k3"``. Some
+    text-only loading paths expose the nested K3 text config instead, whose
+    inherited model type is ``"kimi_linear"``. The latter is distinguished
+    from a regular Kimi Linear model by the K3 MLA/output-gate and routed-MoE
+    fields.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) == "kimi_k3":
+        return True
+
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    return (
+        getattr(hf_text_config, "model_type", None) == "kimi_linear"
+        and bool(getattr(hf_text_config, "mla_use_output_gate", False))
+        and getattr(hf_text_config, "routed_expert_hidden_size", None) is not None
+    )
+
+
 @register_scheme("W4A8_DYNAMIC", "linear")
 class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_DYNAMIC.
@@ -99,15 +121,14 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         self.is_per_channel_weight = self.group_size == 0
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-        self._uses_kimi_k3_shared_expert_per_channel = (
-            getattr(getattr(getattr(vllm_config, "model_config", None), "hf_config", None), "model_type", None)
-            == "kimi_k3"
-        )
+        self._uses_kimi_k3_shared_expert_per_channel = _is_kimi_k3_model(vllm_config)
         self._force_kimi_shared_expert_weight_only = False
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
+        # This is deliberately not a model-wide K3 flag: only K3 shared
+        # experts have per-channel W4A8 scales. Routed experts stay per-group.
         return self._force_kimi_shared_expert_weight_only or (
             self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
         )
