@@ -307,9 +307,14 @@ a3-560t:
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
 
 a5:
+  multi_node:
+    test_config: []
+  double_node:
+    test_config: []
   single_node:
     test_config:
-      # YAML-driven tests
       - name: deepSeek-V3.2-W8A8-DCP
-        config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml 
-        size: 8
+        os: linux-aarch64-a5-8 
+        config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
+  multi_card:
+    test_config: []
