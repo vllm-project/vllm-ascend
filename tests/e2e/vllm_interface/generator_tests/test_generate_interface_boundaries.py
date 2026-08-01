@@ -7071,6 +7071,356 @@ def test_v024_schema_v5_round_trips_descriptor_kinds(
     ) == ("property", "ordinary", "property")
 
 
+def _expected_signature_contract_payload(
+    contract: generator.SignatureContract,
+) -> list[object]:
+    return [
+        contract.definition_signature,
+        contract.runtime_entry_signature,
+        contract.reported_signature,
+        contract.bound_call_signature,
+        list(contract.forwarded_targets),
+        contract.protocol,
+        contract.status,
+        list(contract.provenance),
+    ]
+
+
+def test_v026_schema_v6_round_trips_all_three_signature_contracts(
+    tmp_path: Path,
+) -> None:
+    upstream_signature = [
+        "sync",
+        [],
+        [["self", True], ["value", True]],
+        None,
+        [["mode", False]],
+        None,
+    ]
+    downstream_signature = [
+        "sync",
+        [],
+        [["self", True]],
+        "args",
+        [["extra", False]],
+        "kwargs",
+    ]
+    bound_upstream_signature = [
+        "sync",
+        [],
+        [["value", True]],
+        None,
+        [["mode", False]],
+        None,
+    ]
+    upstream_contract = generator.SignatureContract(
+        definition_signature=upstream_signature,
+        runtime_entry_signature=upstream_signature,
+        reported_signature=upstream_signature,
+        bound_call_signature=bound_upstream_signature,
+        forwarded_targets=("vllm.base.Target.run",),
+        protocol="python_call",
+        status="exact",
+        provenance=("ast_definition", "functools.wraps:vllm.base.Target.run"),
+    )
+    downstream_contract = generator.SignatureContract(
+        definition_signature=downstream_signature,
+        runtime_entry_signature=downstream_signature,
+        reported_signature=upstream_signature,
+        bound_call_signature=[
+            "sync",
+            [],
+            [],
+            "args",
+            [["extra", False]],
+            "kwargs",
+        ],
+        forwarded_targets=("vllm.base.Target.run",),
+        protocol="python_call",
+        status="exact",
+        provenance=("ast_definition", "functools.wraps:vllm.base.Target.run"),
+    )
+    installed_contract = generator.SignatureContract(
+        definition_signature=downstream_signature,
+        runtime_entry_signature=None,
+        reported_signature=None,
+        bound_call_signature=None,
+        forwarded_targets=(),
+        protocol="property_access",
+        status="unknown",
+        provenance=("ast_definition", "runtime_descriptor"),
+    )
+    relation = generator.Relation(
+        relation="monkey_patch",
+        upstream_file="vllm/base.py",
+        upstream_owner="Target",
+        upstream_name="run",
+        upstream_signature=upstream_signature,
+        downstream_file="vllm_ascend/plugin.py",
+        downstream_owner=None,
+        downstream_name="replacement",
+        downstream_signature=downstream_signature,
+        evidence_file="vllm_ascend/plugin.py",
+        evidence_line=8,
+        upstream_descriptor_kind="ordinary",
+        downstream_descriptor_kind="ordinary",
+        installed_descriptor_kind="property",
+        upstream_signature_contract=upstream_contract,
+        downstream_signature_contract=downstream_contract,
+        installed_signature_contract=installed_contract,
+    )
+
+    payloads = generator._relation_payloads(
+        [relation],
+        vllm_sha="upstream",
+        ascend_sha="downstream",
+    )
+
+    assert payloads[0]["_meta"]["schema"] == 6
+    assert payloads[1]["u"] == [
+        "vllm/base.py",
+        "Target",
+        "run",
+        upstream_signature,
+        "ordinary",
+        _expected_signature_contract_payload(upstream_contract),
+    ]
+    assert payloads[1]["c"][0] == [
+        "monkey_patch",
+        "vllm_ascend/plugin.py",
+        None,
+        "replacement",
+        downstream_signature,
+        "ordinary",
+        "property",
+        _expected_signature_contract_payload(downstream_contract),
+        _expected_signature_contract_payload(installed_contract),
+    ]
+
+    mapping = tmp_path / "v6.jsonl"
+    generator._write_jsonl(mapping, payloads)
+    loaded = generator._load_compact_relations(mapping)
+
+    assert len(loaded) == 1
+    assert loaded[0].upstream_signature_contract == upstream_contract
+    assert loaded[0].downstream_signature_contract == downstream_contract
+    assert loaded[0].installed_signature_contract == installed_contract
+    assert isinstance(loaded[0].upstream_signature_contract.forwarded_targets, tuple)
+    assert isinstance(loaded[0].upstream_signature_contract.provenance, tuple)
+    assert isinstance(loaded[0].upstream_signature_contract.definition_signature, list)
+
+
+def test_v026_schema_v5_loads_signature_contracts_as_unknown(
+    tmp_path: Path,
+) -> None:
+    mapping = tmp_path / "v5-without-signature-contracts.jsonl"
+    generator._write_jsonl(
+        mapping,
+        [
+            {"_meta": {"schema": 5}},
+            {
+                "u": [
+                    "vllm/base.py",
+                    "Base",
+                    "run",
+                    ["sync", [], [["self", True]], None, [], None],
+                    "ordinary",
+                ],
+                "c": [
+                    [
+                        "override",
+                        "vllm_ascend/plugin.py",
+                        "Child",
+                        "run",
+                        ["sync", [], [["self", True]], None, [], None],
+                        "ordinary",
+                        "ordinary",
+                    ]
+                ],
+                "e": [],
+            },
+        ],
+    )
+
+    loaded = generator._load_compact_relations(mapping)
+
+    assert len(loaded) == 1
+    assert (
+        loaded[0].upstream_signature_contract,
+        loaded[0].downstream_signature_contract,
+        loaded[0].installed_signature_contract,
+    ) == (None, None, None)
+
+
+def test_v026_schema_v6_does_not_group_different_upstream_contracts() -> None:
+    signature = ["sync", [], [["self", True], ["value", True]], None, [], None]
+    first_contract = generator.SignatureContract(
+        definition_signature=signature,
+        runtime_entry_signature=signature,
+        reported_signature=signature,
+        bound_call_signature=["sync", [], [["value", True]], None, [], None],
+    )
+    second_contract = generator.SignatureContract(
+        definition_signature=signature,
+        runtime_entry_signature=None,
+        reported_signature=None,
+        bound_call_signature=None,
+        status="unknown",
+        provenance=("ast_definition", "runtime_decorator"),
+    )
+
+    def relation(
+        downstream_name: str,
+        contract: generator.SignatureContract,
+    ) -> generator.Relation:
+        return generator.Relation(
+            relation="override",
+            upstream_file="vllm/base.py",
+            upstream_owner="Base",
+            upstream_name="run",
+            upstream_signature=signature,
+            downstream_file="vllm_ascend/plugin.py",
+            downstream_owner="Child",
+            downstream_name=downstream_name,
+            downstream_signature=signature,
+            evidence_file="vllm_ascend/plugin.py",
+            evidence_line=5,
+            upstream_descriptor_kind="ordinary",
+            downstream_descriptor_kind="ordinary",
+            installed_descriptor_kind="ordinary",
+            upstream_signature_contract=contract,
+        )
+
+    payloads = generator._relation_payloads(
+        [relation("run", first_contract), relation("run_alias", second_contract)],
+        vllm_sha="upstream",
+        ascend_sha="downstream",
+    )
+    boundaries = [payload for payload in payloads if "u" in payload]
+
+    assert len(boundaries) == 2
+    assert {json.dumps(boundary["u"][5], sort_keys=True) for boundary in boundaries} == {
+        json.dumps(_expected_signature_contract_payload(first_contract), sort_keys=True),
+        json.dumps(_expected_signature_contract_payload(second_contract), sort_keys=True),
+    }
+
+
+def test_v026_comparison_reports_signature_contract_changes_separately() -> None:
+    signature = ["sync", [], [["self", True], ["value", True]], None, [], None]
+    old_contract = generator.SignatureContract(
+        definition_signature=signature,
+        runtime_entry_signature=signature,
+        reported_signature=signature,
+        bound_call_signature=["sync", [], [["value", True]], None, [], None],
+    )
+    new_contract = generator.SignatureContract(
+        definition_signature=signature,
+        runtime_entry_signature=signature,
+        reported_signature=signature,
+        bound_call_signature=[
+            "sync",
+            [],
+            [["value", True]],
+            None,
+            [["mode", True]],
+            None,
+        ],
+    )
+    common = {
+        "relation": "override",
+        "upstream_file": "vllm/base.py",
+        "upstream_owner": "Base",
+        "upstream_name": "run",
+        "upstream_signature": signature,
+        "downstream_file": "vllm_ascend/plugin.py",
+        "downstream_owner": "Child",
+        "downstream_name": "run",
+        "downstream_signature": signature,
+        "evidence_file": "vllm_ascend/plugin.py",
+        "evidence_line": 5,
+        "upstream_descriptor_kind": "ordinary",
+        "downstream_descriptor_kind": "ordinary",
+        "installed_descriptor_kind": "ordinary",
+    }
+    baseline = generator.Relation(
+        upstream_signature_contract=old_contract,
+        downstream_signature_contract=old_contract,
+        installed_signature_contract=old_contract,
+        **common,
+    )
+    generated = generator.Relation(
+        upstream_signature_contract=new_contract,
+        downstream_signature_contract=old_contract,
+        installed_signature_contract=old_contract,
+        **common,
+    )
+
+    report = generator.compare_relations([generated], [baseline], [])
+
+    assert report["summary"]["exact_matches"] == 1
+    assert report["summary"]["signature_contract_changes"] == 1
+    assert report["summary"]["old_only"] == 0
+    assert report["summary"]["new_only"] == 0
+    assert report["signature_contract_changes"] == [
+        {
+            "relation": generator._relation_label(generated),
+            "baseline": {
+                "upstream": _expected_signature_contract_payload(old_contract),
+                "downstream": _expected_signature_contract_payload(old_contract),
+                "installed": _expected_signature_contract_payload(old_contract),
+            },
+            "generated": {
+                "upstream": _expected_signature_contract_payload(new_contract),
+                "downstream": _expected_signature_contract_payload(old_contract),
+                "installed": _expected_signature_contract_payload(old_contract),
+            },
+        }
+    ]
+
+
+def test_v026_comparison_ignores_contract_migration_from_schema_v5() -> None:
+    signature = ["sync", [], [["self", True], ["value", True]], None, [], None]
+    contract = generator.SignatureContract(
+        definition_signature=signature,
+        runtime_entry_signature=signature,
+        reported_signature=signature,
+        bound_call_signature=["sync", [], [["value", True]], None, [], None],
+    )
+    common = {
+        "relation": "override",
+        "upstream_file": "vllm/base.py",
+        "upstream_owner": "Base",
+        "upstream_name": "run",
+        "upstream_signature": signature,
+        "downstream_file": "vllm_ascend/plugin.py",
+        "downstream_owner": "Child",
+        "downstream_name": "run",
+        "downstream_signature": signature,
+        "evidence_file": "vllm_ascend/plugin.py",
+        "evidence_line": 5,
+        "upstream_descriptor_kind": "ordinary",
+        "downstream_descriptor_kind": "ordinary",
+        "installed_descriptor_kind": "ordinary",
+    }
+    schema_v5_baseline = generator.Relation(**common)
+    generated = generator.Relation(
+        upstream_signature_contract=contract,
+        downstream_signature_contract=contract,
+        installed_signature_contract=contract,
+        **common,
+    )
+
+    report = generator.compare_relations(
+        [generated],
+        [schema_v5_baseline],
+        [],
+    )
+
+    assert report["summary"]["exact_matches"] == 1
+    assert report["summary"]["signature_contract_changes"] == 0
+    assert report["signature_contract_changes"] == []
+
+
 def test_v024_comparison_reports_descriptor_kind_changes_separately() -> None:
     common = {
         "relation": "override",
@@ -8544,8 +8894,7 @@ class Child(Base):
     assert override.upstream_signature_contract.status == "unknown"
     assert override.upstream_signature_contract.runtime_entry_signature is None
     assert any(
-        finding.reason_code == "unknown_signature_transform"
-        and finding.downstream_owner == "Child"
+        finding.reason_code == "unknown_signature_transform" and finding.downstream_owner == "Child"
         for finding in findings
     )
 
@@ -8722,11 +9071,7 @@ class WideChild(Base):
         and relation.installed_signature_contract.status == "exact"
         for relation in overrides
     )
-    incompatibilities = [
-        finding
-        for finding in findings
-        if finding.reason_code == "signature_incompatible"
-    ]
+    incompatibilities = [finding for finding in findings if finding.reason_code == "signature_incompatible"]
     assert len(incompatibilities) == 1
     assert (
         incompatibilities[0].downstream_owner,
