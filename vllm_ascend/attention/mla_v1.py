@@ -1641,6 +1641,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     key_cache=latent_cache_nz,
                     value_cache=latent_cache_nz,
                     slot_mapping=slots.contiguous(),
+                    cache_mode="PA_NZ",
                 )
                 torch_npu.npu_scatter_pa_kv_cache(
                     key=k_pe.contiguous(),
@@ -1648,6 +1649,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     key_cache=rope_cache_nz,
                     value_cache=rope_cache_nz,
                     slot_mapping=slots.contiguous(),
+                    cache_mode="PA_NZ",
                 )
             else:
                 # reshape_and_cache requires key and value to have the same dtype.

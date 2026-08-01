@@ -2477,6 +2477,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(latent_call["value_cache"]._base, kv_cache[0])
         torch.testing.assert_close(latent_call["slot_mapping"], slots)
         self.assertEqual(latent_call["key"].dtype, latent_call["value"].dtype)
+        self.assertEqual(latent_call["cache_mode"], "PA_NZ")
 
         torch.testing.assert_close(position_call["key"], raw_k_pe)
         torch.testing.assert_close(position_call["value"], raw_k_pe)
@@ -2485,6 +2486,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(position_call["value_cache"]._base, kv_cache[1])
         torch.testing.assert_close(position_call["slot_mapping"], slots)
         self.assertEqual(position_call["key"].dtype, position_call["value"].dtype)
+        self.assertEqual(position_call["cache_mode"], "PA_NZ")
 
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
