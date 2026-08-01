@@ -237,9 +237,10 @@ jobs:
 
   build-image:
     name: Build nightly-a5 image
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
-      || github.event_name == 'pull_request'
+    if: false
+    # if: >-
+    #   (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
+    #   || github.event_name == 'pull_request'
     strategy:
       matrix:
         vllm_ascend_branch: >-
