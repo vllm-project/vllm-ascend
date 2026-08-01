@@ -125,6 +125,10 @@ jobs:
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
+          # 兜底，如果为空赋值main
+          if [[ -z "${BRANCH_TAG}" ]]; then
+            BRANCH_TAG="main"
+          fi
 
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             SWR_REGISTRY="swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend"
