@@ -16,6 +16,8 @@
 #
 name: Upload OBS
 
+run-name: "Upload OBS — PR #${{ github.event.workflow_run.pull_requests[0].number }} (${{ github.event.workflow_run.pull_requests[0].title }})"
+
 on:
   workflow_run:
     workflows: ["E2E"]
