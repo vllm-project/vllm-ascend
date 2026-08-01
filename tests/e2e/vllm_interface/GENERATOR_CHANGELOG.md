@@ -11,7 +11,9 @@ generator problem.
   installation tests; the typed lazy instance case initially failed).
   Checkpoint `2f3f910cf` adds eight failing scope/property cases; the ambiguous
   wrapper fixture was then replaced by an exactly provable classmethod alias
-  in `83d7f5781`.
+  in `83d7f5781`.  Checkpoint `5b38bb57b` adds nine alias/assignment tests;
+  eight initially failed and the imported builtin alias control already
+  passed.
 - Problem: signature-only contracts could not see a change between an
   ordinary method, `property`, `classmethod`, and `staticmethod`.  In the
   pinned source pair this hid ten real override differences, including
@@ -50,6 +52,14 @@ generator problem.
     separate callable contracts.  The getter remains the read signature after
     a later setter/deleter definition, and an accessor is accepted only when
     the preceding normal-path binding is proved to be a property.
+  - class assignment aliases are materialized from every active control-flow
+    branch and keep distinct descriptor variants.  A staticmethod read through
+    another class becomes an ordinary method when installed, a property stays
+    a property, and a bound classmethod object remains unknown instead of
+    being copied as a new classmethod;
+  - `property(getter)` assignments now seed the same accessor state used by
+    `@name.setter`, and patch wrappers resolve the live module/function binding
+    rather than trusting the wrapper's spelling or stale import entry.
 - First fixed-source run (before class/module/instance refinement): 971
   relations, exactly matching all v0.23 edges, plus 67 supplemental reviews
   (52 unknown and 15 known mismatches).  Manual review proved that the 15
@@ -78,7 +88,7 @@ generator problem.
   pinned sources in 373.7 seconds.  It retained all 971 exact edges, all 60
   finding dispositions, all 15 real descriptor reviews, and the identical
   output SHA-256 `727710aa6c8229c71e3064f28f81764dda1f51e8420eef88da49f2cf5cf3d257`.
-- Status: implementation tests pass (163 total).  The fixed mapping is exact
+- Status: implementation tests pass (172 total).  The fixed mapping is exact
   for the descriptor forms exercised by the pinned source, but broader
   property accessor, wrapper-shadowing, and conditional descriptor red tests
   are still required before this checkpoint can be accepted as the general

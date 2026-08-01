@@ -2468,6 +2468,82 @@ class RepositoryIndex:
                             getattr(statement, "col_offset", 0),
                         ),
                     )
+
+                    def callable_node_for_expression(
+                        expression_node: ast.AST,
+                        line: int,
+                        class_node: ast.ClassDef = node,
+                        active_tag_guards: set[str] = tag_guard_names,
+                        current_module: str = module,
+                        current_imports: dict[str, str] = imports,
+                        local_classes: dict[str, ClassInfo] = classes,
+                        local_functions: dict[str, CallableInfo] = functions,
+                    ) -> ast.AST | None:
+                        expression = _expression_name(expression_node)
+                        if expression is None:
+                            return None
+                        if "." not in expression:
+                            local_state = _scope_state_before(
+                                class_node.body,
+                                line,
+                                active_tag_guards,
+                            )
+                            local_nodes = {
+                                alternative.node
+                                for alternative in local_state.get(
+                                    expression,
+                                    (),
+                                )
+                                if alternative.kind == "function" and alternative.node is not None
+                            }
+                            if len(local_nodes) == 1:
+                                return next(iter(local_nodes))
+                        resolved = _resolve_bound_reference(
+                            current_module,
+                            expression,
+                            current_imports,
+                            {*local_classes, *local_functions},
+                        )
+                        callable_info = self.find_callable(resolved)
+                        return callable_info.node if callable_info is not None else None
+
+                    def register_property_assignment(
+                        binding: _ScopeBinding,
+                        accessors_by_node: dict[
+                            int,
+                            tuple[
+                                ast.AST | None,
+                                ast.AST | None,
+                                ast.AST | None,
+                            ],
+                        ] = property_accessors,
+                    ) -> None:
+                        binding_node = binding.node
+                        if binding_node is None or id(binding_node) in accessors_by_node:
+                            return
+                        if isinstance(binding_node, (ast.AnnAssign, ast.Assign)):
+                            value = binding_node.value
+                        else:
+                            return
+                        if not (
+                            isinstance(value, ast.Call)
+                            and len(value.args) <= 3
+                            and not value.keywords
+                            and class_reference_resolver(
+                                value.func,
+                                binding.line,
+                            )
+                            == {"builtins.property"}
+                        ):
+                            return
+                        nodes = [callable_node_for_expression(argument, binding.line) for argument in value.args[:3]]
+                        nodes.extend([None] * (3 - len(nodes)))
+                        if value.args and nodes[0] is None:
+                            return
+                        accessors = (nodes[0], nodes[1], nodes[2])
+                        accessors_by_node[id(binding_node)] = accessors
+                        self._property_accessors_by_node[id(binding_node)] = accessors
+
                     for function_node in class_functions:
                         function_line = getattr(function_node, "lineno", 0)
                         class_state = _scope_state_before(
@@ -2475,14 +2551,15 @@ class RepositoryIndex:
                             function_line,
                             tag_guard_names,
                         )
+                        for alternatives in class_state.values():
+                            for alternative in alternatives:
+                                register_property_assignment(alternative)
                         known_properties = {
                             name
                             for name, alternatives in class_state.items()
                             if alternatives
                             and all(
-                                alternative.kind == "function"
-                                and alternative.node is not None
-                                and id(alternative.node) in property_accessors
+                                alternative.node is not None and id(alternative.node) in property_accessors
                                 for alternative in alternatives
                             )
                         }
@@ -2661,6 +2738,7 @@ class RepositoryIndex:
                         imports,
                         {*classes, *functions},
                         class_reference_resolver,
+                        tag_guard_names,
                     )
                 elif isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                     imports.pop(node.name, None)
@@ -3132,9 +3210,10 @@ class RepositoryIndex:
         imports: dict[str, str],
         local_names: set[str],
         reference_resolver: Callable[[ast.AST, int], set[str | None]],
+        tag_guard_names: set[str],
     ) -> None:
         explicit_methods = _method_nodes(node)
-        for statement in node.body:
+        for statement in _main_module_statements(node.body, tag_guard_names):
             value: ast.AST | None = None
             targets: Sequence[ast.AST] = ()
             if isinstance(statement, ast.Assign):
@@ -3190,35 +3269,91 @@ class RepositoryIndex:
                 )
 
     def _materialize_class_callable_aliases(self) -> None:
+        grouped: dict[
+            tuple[str, str],
+            list[tuple[str, str, int]],
+        ] = defaultdict(list)
         for class_name, member_name, target, kind, line in self._pending_method_aliases:
-            source = self.find_callable(target)
-            if source is None or not isinstance(
-                source.node,
-                (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda),
-            ):
-                continue
+            grouped[(class_name, member_name)].append((target, kind, line))
+
+        for (class_name, member_name), pending in grouped.items():
             class_info = self.classes[class_name]
-            if member_name in class_info.methods:
-                continue
             qualified_name = f"{class_name}.{member_name}"
-            alias = CallableInfo(
-                qualified_name=qualified_name,
-                module=class_info.module,
-                file=class_info.file,
-                owner=class_info.name,
-                name=member_name,
-                node=source.node,
-                binding_line=line,
-                origin_kind=kind,
-                descriptor_kind=(
-                    kind if kind in {"classmethod", "property", "staticmethod"} else source.descriptor_kind
-                ),
-            )
-            class_info.methods[member_name] = source.node
-            class_info.method_variants[member_name] = (source.node,)
-            self.callables[qualified_name] = alias
-            self.callable_variants[qualified_name] = (alias,)
-            if class_name in self.unconditional_symbols and target in self.unconditional_symbols:
+            variants = list(self.callable_variants.get(qualified_name, ()))
+            exact_alias_targets: list[str] = []
+            for target, kind, line in pending:
+                source = self.find_callable(target)
+                if source is None or not isinstance(
+                    source.node,
+                    (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda),
+                ):
+                    continue
+
+                source_variants = source.descriptor_variants or (source.descriptor_kind,)
+                if kind in {"classmethod", "property", "staticmethod"}:
+                    installed_variants = (kind,)
+                elif source.owner is None:
+                    installed_variants = source_variants
+                else:
+                    installed_variants = tuple(
+                        sorted(
+                            {
+                                (
+                                    "ordinary"
+                                    if candidate in {"ordinary", "staticmethod"}
+                                    else ("property" if candidate == "property" else "unknown")
+                                )
+                                for candidate in source_variants
+                            }
+                        )
+                    )
+                descriptor_kind = installed_variants[0] if len(installed_variants) == 1 else "unknown"
+                property_nodes = None
+                if descriptor_kind == "property":
+                    property_nodes = (source.node, None, None) if kind == "property" else source.property_accessor_nodes
+                variants.append(
+                    CallableInfo(
+                        qualified_name=qualified_name,
+                        module=class_info.module,
+                        file=class_info.file,
+                        owner=class_info.name,
+                        name=member_name,
+                        node=source.node,
+                        binding_line=line,
+                        origin_kind=kind,
+                        descriptor_kind=descriptor_kind,
+                        descriptor_variants=installed_variants,
+                        property_accessor_nodes=property_nodes,
+                        signature_override=source.signature,
+                    )
+                )
+                exact_alias_targets.append(target)
+
+            if not variants:
+                continue
+            unique = {
+                (
+                    candidate.binding_line or -1,
+                    getattr(candidate.node, "lineno", 0),
+                    candidate.descriptor_kind or "",
+                    json.dumps(
+                        candidate.signature,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ): candidate
+                for candidate in variants
+            }
+            variants = [unique[key] for key in sorted(unique)]
+            class_info.methods.setdefault(member_name, variants[0].node)
+            class_info.method_variants[member_name] = tuple(candidate.node for candidate in variants)
+            self.callables[qualified_name] = variants[0]
+            self.callable_variants[qualified_name] = tuple(variants)
+            if (
+                class_name in self.unconditional_symbols
+                and exact_alias_targets
+                and all(target in self.unconditional_symbols for target in exact_alias_targets)
+            ):
                 self.unconditional_symbols.add(qualified_name)
 
     def resolve_reference(self, module: str, expression: str) -> str:
@@ -3293,8 +3428,9 @@ class RepositoryIndex:
             value = node.value
         else:
             return None
+        alias_kind = self._class_alias_descriptor_kinds.get((qualified_name, binding.line))
         if isinstance(value, ast.Call):
-            wrapper = self._class_alias_descriptor_kinds.get((qualified_name, binding.line))
+            wrapper = alias_kind
             if wrapper not in {"classmethod", "property", "staticmethod"} or len(value.args) != 1 or value.keywords:
                 return None
             owner_name = qualified_name.rsplit(".", 1)[0]
@@ -3304,7 +3440,7 @@ class RepositoryIndex:
                 # ordinary non-callable values.
                 return None
             value = value.args[0]
-        elif binding.kind != "alias":
+        elif binding.kind != "alias" and alias_kind != "callable_alias":
             return None
         expression = _expression_name(value)
         if expression is None:
@@ -3417,7 +3553,11 @@ class RepositoryIndex:
                 target,
                 frozenset((*seen, canonical)),
             ):
-                if endpoint is None:
+                alias_template = next(
+                    (candidate for candidate in direct if candidate.binding_line == binding.line),
+                    endpoint,
+                )
+                if alias_template is None:
                     owner_name, member_name = canonical.rsplit(".", 1)
                     owner = self.find_class(owner_name)
                     if owner is None:
@@ -3438,11 +3578,11 @@ class RepositoryIndex:
                 else:
                     variants.append(
                         replace(
-                            endpoint,
+                            alias_template,
                             node=source.node,
                             binding_line=binding.line,
                             origin_kind="callable_alias",
-                            signature_override=source.signature_override,
+                            signature_override=(alias_template.signature_override or source.signature),
                         )
                     )
 
@@ -6845,6 +6985,8 @@ class InterfaceBoundaryGenerator:
             candidates = set()
         elif parts[0] in context.bindings:
             candidates = {".".join([candidate, *parts[1:]]) for candidate in context.bindings[parts[0]]}
+        elif parts[0] in _BUILTIN_DESCRIPTOR_DECORATORS.values():
+            candidates = {".".join([f"builtins.{parts[0]}", *parts[1:]])}
         elif expression.startswith(("vllm.", "vllm_ascend.")):
             candidates = {expression}
         else:
@@ -7458,16 +7600,21 @@ class InterfaceBoundaryGenerator:
         kind = "replacement"
         installed_descriptor_kind: str | None = None
         if isinstance(node, ast.Call):
-            shadowed_names = {
-                *_scope_bound_names_before(module_info.tree.body, line),
-                *context.local_callables,
+            wrapper_expression = _expression_name(node.func)
+            wrapper_kinds = {
+                _BUILTIN_DESCRIPTOR_DECORATORS[reference]
+                for reference in (
+                    self._resolve_patch_references(
+                        module_info,
+                        wrapper_expression,
+                        context,
+                    )
+                    if wrapper_expression is not None
+                    else set()
+                )
+                if reference in _BUILTIN_DESCRIPTOR_DECORATORS
             }
-            wrapper_reference = _resolved_decorator_reference(
-                node.func,
-                module_info.imports,
-                shadowed_names,
-            )
-            wrapper = _BUILTIN_DESCRIPTOR_DECORATORS.get(wrapper_reference or "")
+            wrapper = next(iter(wrapper_kinds)) if len(wrapper_kinds) == 1 else None
             if wrapper in {"classmethod", "property", "staticmethod"} and len(node.args) == 1 and not node.keywords:
                 kind = wrapper
                 installed_descriptor_kind = wrapper
