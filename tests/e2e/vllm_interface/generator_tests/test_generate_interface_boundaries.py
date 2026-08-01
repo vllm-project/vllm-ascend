@@ -8491,3 +8491,297 @@ base.run = replacement
         signature_findings[0].generator_issue,
         signature_findings[0].supplemental,
     ) == ("review", False, True)
+
+
+def test_v026_descriptor_sha_allowlist_does_not_imply_signature_transparency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    descriptor_only_sha = "descriptor-only-sha"
+    monkeypatch.setitem(
+        generator._PINNED_ORDINARY_DESCRIPTOR_DECORATORS,
+        ("fixture", descriptor_only_sha),
+        frozenset({"vllm.base.signature_transform"}),
+    )
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def signature_transform(function):
+    def wrapper(*args, **kwargs):
+        return function(*args, **kwargs)
+    return wrapper
+
+
+class Base:
+    @signature_transform
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"fixture": descriptor_only_sha},
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.upstream_descriptor_kind == "ordinary"
+    assert override.upstream_signature_contract.status == "unknown"
+    assert override.upstream_signature_contract.runtime_entry_signature is None
+    assert any(
+        finding.reason_code == "unknown_signature_transform"
+        and finding.downstream_owner == "Child"
+        for finding in findings
+    )
+
+
+def test_v026_varargs_only_method_keeps_exact_bound_call_signature(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(*args):
+        return args
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(*args):
+        return args
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    bound = ["sync", [], [], "args", [], None]
+    assert override.upstream_signature_contract.status == "exact"
+    assert override.upstream_signature_contract.bound_call_signature == bound
+    assert override.installed_signature_contract.status == "exact"
+    assert override.installed_signature_contract.bound_call_signature == bound
+
+
+def test_v026_receiver_binding_without_positional_slot_is_invalid(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(self, *, mode=None):
+        return mode
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(*, mode=None):
+        return mode
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    installed = override.installed_signature_contract
+    assert installed.status == "invalid"
+    assert installed.bound_call_signature is None
+    assert any(
+        finding.reason_code == "invalid_receiver_binding"
+        and finding.downstream_owner == "Child"
+        and finding.supplemental
+        for finding in findings
+    )
+
+
+def test_v026_unknown_descriptor_has_unknown_bound_call_signature(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+def implementation(receiver, value):
+    return value
+
+
+class Child(Base):
+    if runtime_flag:
+        run = implementation
+    else:
+        run = staticmethod(implementation)
+""",
+    )
+
+    relations, _ = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    installed = override.installed_signature_contract
+    assert override.installed_descriptor_kind == "unknown"
+    assert installed.status == "unknown"
+    assert installed.bound_call_signature is None
+
+
+def test_v026_exact_installed_signature_incompatibility_is_directional(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    def run(self, value, *, mode=None):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class NarrowChild(Base):
+    def run(self, value):
+        return value
+
+
+class WideChild(Base):
+    def run(self, value, *args, mode=None, **kwargs):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    overrides = [relation for relation in relations if relation.relation == "override"]
+    assert {relation.downstream_owner for relation in overrides} == {
+        "NarrowChild",
+        "WideChild",
+    }
+    assert all(
+        relation.upstream_signature_contract.status == "exact"
+        and relation.installed_signature_contract.status == "exact"
+        for relation in overrides
+    )
+    incompatibilities = [
+        finding
+        for finding in findings
+        if finding.reason_code == "signature_incompatible"
+    ]
+    assert len(incompatibilities) == 1
+    assert (
+        incompatibilities[0].downstream_owner,
+        incompatibilities[0].status,
+        incompatibilities[0].generator_issue,
+        incompatibilities[0].supplemental,
+    ) == ("NarrowChild", "risk", False, True)
+
+
+def test_v026_dedup_marks_conditional_installed_signature_contract_unknown(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def replacement(receiver, value):
+    return value
+
+
+if runtime_flag:
+    Target.run = replacement
+else:
+    Target.run = staticmethod(replacement)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patches = [relation for relation in relations if relation.relation == "monkey_patch"]
+    assert len(patches) == 1
+    patch = patches[0]
+    assert len(patch.evidence) == 2
+    assert patch.installed_descriptor_kind == "unknown"
+    assert patch.installed_signature_contract.status == "unknown"
+    assert patch.installed_signature_contract.bound_call_signature is None
+    assert any(
+        finding.reason_code == "conditional_signature_contract"
+        and finding.downstream_name == "replacement"
+        and finding.supplemental
+        for finding in findings
+    )
