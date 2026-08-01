@@ -7801,16 +7801,12 @@ def test_v024_class_local_shadow_is_not_treated_as_builtin_wrapper_assignment(
         vllm_root,
         "vllm/base.py",
         """
-def runtime_wrapper(function):
-    return build_runtime_value(function)
-
-
-def helper(value):
+def helper(owner, value):
     return value
 
 
 class Base:
-    staticmethod = runtime_wrapper
+    staticmethod = classmethod
     run = staticmethod(helper)
 """,
     )
@@ -7822,8 +7818,8 @@ from vllm.base import Base
 
 
 class Child(Base):
-    @staticmethod
-    def run(value):
+    @classmethod
+    def run(cls, value):
         return value
 """,
     )
@@ -7834,5 +7830,6 @@ class Child(Base):
     ).generate()
 
     override = next(relation for relation in relations if relation.relation == "override")
-    assert override.upstream_descriptor_kind == "unknown"
-    assert any(finding.reason_code == "unknown_descriptor_kind" for finding in findings)
+    assert override.upstream_descriptor_kind == "classmethod"
+    assert override.downstream_descriptor_kind == "classmethod"
+    assert not findings
