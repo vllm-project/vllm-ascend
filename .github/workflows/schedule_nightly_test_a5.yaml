@@ -457,4 +457,9 @@ jobs:
 
       - name: Remove dedicated taint from test nodes
         run: |
-          kubectl taint nodes ${{ vars.A5_TAINT_NODES }} dedicated- || true
+          # Remove dedicated taint from test nodes
+          if [[ -n "${{ vars.A5_TAINT_NODES }}" ]]; then
+            kubectl taint nodes ${{ vars.A5_TAINT_NODES }} dedicated- || true
+          else
+            echo "A5_TAINT_NODES variable is empty, skip taint remove."
+          fi
