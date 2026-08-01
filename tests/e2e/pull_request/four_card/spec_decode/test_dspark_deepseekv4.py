@@ -39,11 +39,15 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     ("golden", "num_speculative_tokens", "additional_config"),
     [
         pytest.param(
-            [0.88, 0.74, 0.58, 0.49, 0.40], 5, {"enable_flashcomm1": False, "enable_dsa_cp": False},
+            [0.88, 0.74, 0.58, 0.49, 0.40],
+            5,
+            {"enable_flashcomm1": False, "enable_dsa_cp": False},
             id="dspark",
         ),
         pytest.param(
-            [0.88, 0.74, 0.58, 0.49, 0.40, 0.30, 0.18], 7, {"enable_flashcomm1": True, "enable_dsa_cp": True},
+            [0.88, 0.74, 0.58, 0.49, 0.40, 0.30, 0.18],
+            7,
+            {"enable_flashcomm1": True, "enable_dsa_cp": True},
             id="dsa-cp-dspark",
         ),
     ],
