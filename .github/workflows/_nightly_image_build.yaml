@@ -64,12 +64,13 @@ jobs:
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       matrix:
-        vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' && needs.parse-trigger.outputs.vllm_ascend_branch || inputs.vllm_ascend_branch)) }}
-    uses: ./.github/workflows/_nightly_image_build.yaml
-    with:
-      target: a5
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+        arch:
+          - name: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - name: arm64
+            runner: ubuntu-22.04-arm
+            platform: linux/arm64
     outputs:
       swr_registry: ${{ steps.build.outputs.swr_registry }}
       swr_temp_registry: ${{ steps.build.outputs.swr_temp_registry }}
@@ -223,4 +224,3 @@ jobs:
             -t "${MANIFEST_TAG}" \
             "${AMD64_TAG}" \
             "${ARM64_TAG}"
-            
