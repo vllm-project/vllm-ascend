@@ -9,6 +9,9 @@ generator problem.
 - Red-test checkpoints: `922a810e8` (10 new tests; 9 initially failed and one
   existing-correct module-wrapper control passed) and `2e032820e` (8 focused
   installation tests; the typed lazy instance case initially failed).
+  Checkpoint `2f3f910cf` adds eight failing scope/property cases; the ambiguous
+  wrapper fixture was then replaced by an exactly provable classmethod alias
+  in `83d7f5781`.
 - Problem: signature-only contracts could not see a change between an
   ordinary method, `property`, `classmethod`, and `staticmethod`.  In the
   pinned source pair this hid ten real override differences, including
@@ -39,6 +42,14 @@ generator problem.
     `torch.inference_mode` are enabled only for the exact pinned source SHAs;
     an unregistered source version remains `unknown` instead of inheriting an
     unverified assumption.
+  - descriptor names are now resolved from the normal-path binding state at
+    definition time.  This respects dead branches, deletion, import aliases,
+    later rebinding, a missing `builtins` import, and class-local shadowing;
+    conditional classmethod/staticmethod aliases remain explicit variants;
+  - property getter, setter, and deleter definitions are retained as three
+    separate callable contracts.  The getter remains the read signature after
+    a later setter/deleter definition, and an accessor is accepted only when
+    the preceding normal-path binding is proved to be a property.
 - First fixed-source run (before class/module/instance refinement): 971
   relations, exactly matching all v0.23 edges, plus 67 supplemental reviews
   (52 unknown and 15 known mismatches).  Manual review proved that the 15
@@ -63,7 +74,7 @@ generator problem.
 - Independent coverage audit v0.5 still classifies all 1,019 candidates with
   zero missing, conflicting, or generator-issue records and the same two
   pre-existing auditor-only patch orphans.
-- Status: implementation tests pass (155 total).  The fixed mapping is exact
+- Status: implementation tests pass (163 total).  The fixed mapping is exact
   for the descriptor forms exercised by the pinned source, but broader
   property accessor, wrapper-shadowing, and conditional descriptor red tests
   are still required before this checkpoint can be accepted as the general

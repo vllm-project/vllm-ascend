@@ -41,7 +41,7 @@ import hashlib
 import json
 import subprocess
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -841,6 +841,134 @@ def _scope_final_bindings(
     return _scope_final_binding_state(statements, tag_guard_names) or {}
 
 
+def _scope_state_before(
+    statements: Sequence[ast.stmt],
+    line: int,
+    tag_guard_names: set[str],
+) -> dict[str, tuple[_ScopeBinding, ...]]:
+    """Return bindings after statements that finish before ``line``.
+
+    Descriptor decorators are evaluated at definition time.  Looking at the
+    final import table, or at every lexical assignment before a line, is not
+    sufficient: an inactive branch must not shadow a builtin and ``del`` can
+    restore fallback lookup.  The normal-path scope interpreter already owns
+    those rules, so descriptor resolution reuses its state.
+    """
+
+    prefix = [
+        statement
+        for statement in statements
+        if getattr(statement, "end_lineno", getattr(statement, "lineno", 0)) < line
+    ]
+    return _scope_final_binding_state(prefix, tag_guard_names) or {}
+
+
+def _import_binding_reference(
+    node: ast.Import | ast.ImportFrom,
+    local_name: str,
+    *,
+    module: str,
+    is_package: bool,
+) -> str | None:
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            bound_name = alias.asname or alias.name.split(".", 1)[0]
+            if bound_name == local_name:
+                return alias.name if alias.asname else alias.name.split(".", 1)[0]
+        return None
+
+    source_module = _relative_import_module(
+        module,
+        is_package,
+        node.level,
+        node.module,
+    )
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        if (alias.asname or alias.name) == local_name:
+            return f"{source_module}.{alias.name}" if source_module else alias.name
+    return None
+
+
+def _scope_reference_variants(
+    expression_node: ast.AST,
+    *,
+    statements: Sequence[ast.stmt],
+    line: int,
+    tag_guard_names: set[str],
+    module: str,
+    is_package: bool,
+    fallback: Callable[[ast.AST], set[str | None]] | None = None,
+    seen: frozenset[tuple[str, int]] = frozenset(),
+) -> set[str | None]:
+    """Resolve one expression on every normal path reaching ``line``.
+
+    ``None`` is an explicit unresolved alternative.  Returning all variants
+    lets callers distinguish a conditional classmethod/staticmethod choice
+    from a genuinely dynamic decorator instead of silently selecting the last
+    import seen in the file.
+    """
+
+    candidate = expression_node.func if isinstance(expression_node, ast.Call) else expression_node
+    expression = _expression_name(candidate)
+    if expression is None:
+        return {None}
+    root, separator, remainder = expression.partition(".")
+    state = _scope_state_before(statements, line, tag_guard_names)
+    bindings = state.get(root, ())
+
+    def fallback_references() -> set[str | None]:
+        if fallback is not None:
+            return fallback(candidate)
+        if not separator and root in _BUILTIN_DESCRIPTOR_DECORATORS.values():
+            return {f"builtins.{root}"}
+        return {None}
+
+    if not bindings or all(binding.kind == "unbound" for binding in bindings):
+        return fallback_references()
+
+    references: set[str | None] = set()
+    for binding in bindings:
+        if binding.kind == "unbound":
+            references.update(fallback_references())
+            continue
+        binding_node = binding.node
+        reference: str | None = None
+        if isinstance(binding_node, (ast.Import, ast.ImportFrom)):
+            reference = _import_binding_reference(
+                binding_node,
+                root,
+                module=module,
+                is_package=is_package,
+            )
+        elif isinstance(binding_node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+            reference = f"{module}.{binding_node.name}"
+        elif isinstance(binding_node, (ast.Assign, ast.AnnAssign)):
+            value = binding_node.value
+            recursion_key = (root, binding.line)
+            if value is not None and recursion_key not in seen:
+                nested = _scope_reference_variants(
+                    value,
+                    statements=statements,
+                    line=binding.line,
+                    tag_guard_names=tag_guard_names,
+                    module=module,
+                    is_package=is_package,
+                    fallback=fallback,
+                    seen=frozenset((*seen, recursion_key)),
+                )
+                references.update(
+                    (f"{item}.{remainder}" if item is not None and separator else item) for item in nested
+                )
+                continue
+        if reference is None:
+            references.add(None)
+        else:
+            references.add(f"{reference}.{remainder}" if separator else reference)
+    return references or {None}
+
+
 def _possible_method_nodes(
     node: ast.ClassDef,
     tag_guard_names: set[str],
@@ -1370,14 +1498,15 @@ def _resolved_decorator_reference(
     return expression
 
 
-def _definition_descriptor_kind(
+def _definition_descriptor_kinds(
     node: ast.AST | None,
     *,
     imports: dict[str, str] | None = None,
     shadowed_names: set[str] | None = None,
     known_properties: set[str] | None = None,
     ordinary_decorators: set[str] | frozenset[str] | None = None,
-) -> str | None:
+    reference_resolver: Callable[[ast.AST], set[str | None]] | None = None,
+) -> tuple[str | None, ...]:
     """Classify the object produced by a function definition.
 
     Decorators are applied from bottom to top.  A known outer descriptor
@@ -1386,40 +1515,69 @@ def _definition_descriptor_kind(
     """
 
     if isinstance(node, ast.Lambda):
-        return "ordinary"
+        return ("ordinary",)
     if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
-        return None
+        return (None,)
 
     imports = imports or {}
     shadowed_names = shadowed_names or set()
     known_properties = known_properties or set()
     ordinary_decorators = ordinary_decorators or set()
-    kind = "ordinary"
+    kinds: set[str | None] = {"ordinary"}
     for decorator in reversed(node.decorator_list):
-        reference = _resolved_decorator_reference(
-            decorator,
-            imports,
-            shadowed_names,
-        )
-        descriptor_kind = _BUILTIN_DESCRIPTOR_DECORATORS.get(reference or "")
-        if descriptor_kind is not None and not isinstance(decorator, ast.Call):
-            kind = descriptor_kind
-            continue
-        if reference in _TRANSPARENT_DESCRIPTOR_DECORATORS:
-            continue
-        if reference in ordinary_decorators:
-            kind = "ordinary" if kind == "ordinary" else "unknown"
-            continue
         expression = _expression_name(decorator)
         if (
             expression is not None
             and expression.rsplit(".", 1)[-1] in {"deleter", "getter", "setter"}
             and expression.rsplit(".", 1)[0] in known_properties
         ):
-            kind = "property"
+            kinds = {"property"}
             continue
-        kind = "unknown"
-    return kind
+        references = (
+            reference_resolver(decorator)
+            if reference_resolver is not None
+            else {
+                _resolved_decorator_reference(
+                    decorator,
+                    imports,
+                    shadowed_names,
+                )
+            }
+        )
+        next_kinds: set[str | None] = set()
+        for kind in kinds:
+            for reference in references:
+                descriptor_kind = _BUILTIN_DESCRIPTOR_DECORATORS.get(reference or "")
+                if descriptor_kind is not None and not isinstance(decorator, ast.Call):
+                    next_kinds.add(descriptor_kind)
+                elif reference in _TRANSPARENT_DESCRIPTOR_DECORATORS:
+                    next_kinds.add(kind)
+                elif reference in ordinary_decorators:
+                    next_kinds.add("ordinary" if kind == "ordinary" else "unknown")
+                else:
+                    next_kinds.add("unknown")
+        kinds = next_kinds or {"unknown"}
+    return tuple(sorted(kinds, key=lambda item: item or ""))
+
+
+def _definition_descriptor_kind(
+    node: ast.AST | None,
+    *,
+    imports: dict[str, str] | None = None,
+    shadowed_names: set[str] | None = None,
+    known_properties: set[str] | None = None,
+    ordinary_decorators: set[str] | frozenset[str] | None = None,
+    reference_resolver: Callable[[ast.AST], set[str | None]] | None = None,
+) -> str | None:
+    kinds = _definition_descriptor_kinds(
+        node,
+        imports=imports,
+        shadowed_names=shadowed_names,
+        known_properties=known_properties,
+        ordinary_decorators=ordinary_decorators,
+        reference_resolver=reference_resolver,
+    )
+    return kinds[0] if len(kinds) == 1 else "unknown"
 
 
 def _scope_must_bound_names(
@@ -1599,6 +1757,13 @@ class CallableInfo:
     binding_line: int | None = None
     origin_kind: str = "definition"
     descriptor_kind: str | None = "ordinary"
+    descriptor_variants: tuple[str | None, ...] = ()
+    property_accessor_nodes: tuple[ast.AST | None, ast.AST | None, ast.AST | None] | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+        repr=False,
+    )
     signature_override: list[object] | None = field(
         default=None,
         compare=False,
@@ -1611,6 +1776,14 @@ class CallableInfo:
         if self.signature_override is not None:
             return self.signature_override
         return _jsonable_signature(self.node)
+
+    @property
+    def property_accessors(
+        self,
+    ) -> tuple[list[object] | None, list[object] | None, list[object] | None] | None:
+        if self.property_accessor_nodes is None:
+            return None
+        return tuple(_jsonable_signature(node) for node in self.property_accessor_nodes)
 
 
 @dataclass(frozen=True)
@@ -1718,6 +1891,30 @@ class Relation:
     upstream_descriptor_kind: str | None = None
     downstream_descriptor_kind: str | None = None
     installed_descriptor_kind: str | None = None
+    upstream_property_accessors: (
+        tuple[
+            list[object] | None,
+            list[object] | None,
+            list[object] | None,
+        ]
+        | None
+    ) = field(default=None, compare=False, hash=False)
+    downstream_property_accessors: (
+        tuple[
+            list[object] | None,
+            list[object] | None,
+            list[object] | None,
+        ]
+        | None
+    ) = field(default=None, compare=False, hash=False)
+    installed_property_accessors: (
+        tuple[
+            list[object] | None,
+            list[object] | None,
+            list[object] | None,
+        ]
+        | None
+    ) = field(default=None, compare=False, hash=False)
 
     def upstream_key(self) -> tuple[str, str, str, str]:
         return (
@@ -2072,6 +2269,12 @@ class RepositoryIndex:
         self._unconditional_star_imports: set[tuple[str, str]] = set()
         self._pending_method_aliases: list[tuple[str, str, str, str, int]] = []
         self._descriptor_kinds_by_node: dict[int, str | None] = {}
+        self._descriptor_variants_by_node: dict[int, tuple[str | None, ...]] = {}
+        self._property_accessors_by_node: dict[
+            int,
+            tuple[ast.AST | None, ast.AST | None, ast.AST | None],
+        ] = {}
+        self._class_alias_descriptor_kinds: dict[tuple[str, int], str | None] = {}
         self.parse_errors: list[dict[str, str]] = []
         self._parse()
 
@@ -2207,7 +2410,47 @@ class RepositoryIndex:
                         getattr(node, "lineno", 0),
                     )
                     descriptor_kinds: dict[int, str | None] = {}
-                    known_properties: set[str] = set()
+                    descriptor_variants: dict[int, tuple[str | None, ...]] = {}
+                    property_accessors: dict[
+                        int,
+                        tuple[ast.AST | None, ast.AST | None, ast.AST | None],
+                    ] = {}
+
+                    def module_reference_resolver(
+                        expression: ast.AST,
+                        module_tree: ast.Module = tree,
+                        class_line: int = getattr(node, "lineno", 0),
+                        active_tag_guards: set[str] = tag_guard_names,
+                        current_module: str = module,
+                        current_is_package: bool = is_package,
+                    ) -> set[str | None]:
+                        return _scope_reference_variants(
+                            expression,
+                            statements=module_tree.body,
+                            line=class_line,
+                            tag_guard_names=active_tag_guards,
+                            module=current_module,
+                            is_package=current_is_package,
+                        )
+
+                    def class_reference_resolver(
+                        expression: ast.AST,
+                        line: int,
+                        class_node: ast.ClassDef = node,
+                        active_tag_guards: set[str] = tag_guard_names,
+                        current_class: str = qualified_name,
+                        module_fallback: Callable[[ast.AST], set[str | None]] = module_reference_resolver,
+                    ) -> set[str | None]:
+                        return _scope_reference_variants(
+                            expression,
+                            statements=class_node.body,
+                            line=line,
+                            tag_guard_names=active_tag_guards,
+                            module=current_class,
+                            is_package=False,
+                            fallback=module_fallback,
+                        )
+
                     class_functions = sorted(
                         (
                             statement
@@ -2226,26 +2469,95 @@ class RepositoryIndex:
                         ),
                     )
                     for function_node in class_functions:
+                        function_line = getattr(function_node, "lineno", 0)
+                        class_state = _scope_state_before(
+                            node.body,
+                            function_line,
+                            tag_guard_names,
+                        )
+                        known_properties = {
+                            name
+                            for name, alternatives in class_state.items()
+                            if alternatives
+                            and all(
+                                alternative.kind == "function"
+                                and alternative.node is not None
+                                and id(alternative.node) in property_accessors
+                                for alternative in alternatives
+                            )
+                        }
                         class_shadowed_names = {
                             *module_shadowed_names,
                             *_scope_bound_names_before(
                                 node.body,
-                                getattr(function_node, "lineno", 0),
+                                function_line,
                             ),
                         }
-                        descriptor_kind = _definition_descriptor_kind(
+                        variants_for_node = _definition_descriptor_kinds(
                             function_node,
                             imports=imports,
                             shadowed_names=class_shadowed_names,
                             known_properties=known_properties,
                             ordinary_decorators=self.ordinary_descriptor_decorators,
+                            reference_resolver=lambda expression, line=function_line: class_reference_resolver(
+                                expression,
+                                line,
+                            ),
                         )
+                        descriptor_kind = variants_for_node[0] if len(variants_for_node) == 1 else "unknown"
                         descriptor_kinds[id(function_node)] = descriptor_kind
+                        descriptor_variants[id(function_node)] = variants_for_node
                         self._descriptor_kinds_by_node[id(function_node)] = descriptor_kind
-                        if descriptor_kind == "property":
-                            known_properties.add(function_node.name)
-                        else:
-                            known_properties.discard(function_node.name)
+                        self._descriptor_variants_by_node[id(function_node)] = variants_for_node
+
+                        accessor_kind: str | None = None
+                        accessor_name: str | None = None
+                        for decorator in reversed(function_node.decorator_list):
+                            expression = _expression_name(decorator)
+                            if expression is None or "." not in expression:
+                                continue
+                            candidate_name, candidate_kind = expression.rsplit(".", 1)
+                            if candidate_kind in {"deleter", "getter", "setter"}:
+                                accessor_name = candidate_name
+                                accessor_kind = candidate_kind
+                                break
+
+                        resolved_accessors: (
+                            tuple[
+                                ast.AST | None,
+                                ast.AST | None,
+                                ast.AST | None,
+                            ]
+                            | None
+                        ) = None
+                        if accessor_name in known_properties and accessor_kind is not None:
+                            accessor_bases = {
+                                property_accessors[id(alternative.node)]
+                                for alternative in class_state.get(accessor_name, ())
+                                if alternative.node is not None and id(alternative.node) in property_accessors
+                            }
+                            if len(accessor_bases) == 1:
+                                getter, setter, deleter = next(iter(accessor_bases))
+                                if accessor_kind == "getter":
+                                    getter = function_node
+                                elif accessor_kind == "setter":
+                                    setter = function_node
+                                else:
+                                    deleter = function_node
+                                resolved_accessors = (getter, setter, deleter)
+                        elif descriptor_kind == "property" and any(
+                            _BUILTIN_DESCRIPTOR_DECORATORS.get(reference or "") == "property"
+                            for decorator in function_node.decorator_list
+                            for reference in class_reference_resolver(
+                                decorator,
+                                function_line,
+                            )
+                        ):
+                            resolved_accessors = (function_node, None, None)
+
+                        if resolved_accessors is not None:
+                            property_accessors[id(function_node)] = resolved_accessors
+                            self._property_accessors_by_node[id(function_node)] = resolved_accessors
                     self.final_bindings.update(
                         {
                             f"{qualified_name}.{name}": alternatives
@@ -2322,6 +2634,19 @@ class RepositoryIndex:
                                     id(candidate),
                                     "unknown",
                                 ),
+                                descriptor_variants=descriptor_variants.get(
+                                    id(candidate),
+                                    (),
+                                ),
+                                property_accessor_nodes=property_accessors.get(
+                                    id(candidate),
+                                ),
+                                signature_override=(
+                                    _jsonable_signature(property_accessors[id(candidate)][0])
+                                    if id(candidate) in property_accessors
+                                    and property_accessors[id(candidate)][0] is not None
+                                    else None
+                                ),
                             )
                             for candidate in info.method_variants.get(method_name, (method_node,))
                         )
@@ -2335,6 +2660,7 @@ class RepositoryIndex:
                         qualified_name,
                         imports,
                         {*classes, *functions},
+                        class_reference_resolver,
                     )
                 elif isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                     imports.pop(node.name, None)
@@ -2805,6 +3131,7 @@ class RepositoryIndex:
         class_name: str,
         imports: dict[str, str],
         local_names: set[str],
+        reference_resolver: Callable[[ast.AST, int], set[str | None]],
     ) -> None:
         explicit_methods = _method_nodes(node)
         for statement in node.body:
@@ -2821,12 +3148,19 @@ class RepositoryIndex:
 
             kind = "callable_alias"
             if isinstance(value, ast.Call):
-                wrapper = _expression_name(value.func)
-                if wrapper not in {"classmethod", "property", "staticmethod"}:
+                wrapper_kinds = {
+                    _BUILTIN_DESCRIPTOR_DECORATORS[reference]
+                    for reference in reference_resolver(
+                        value.func,
+                        getattr(statement, "lineno", 0),
+                    )
+                    if reference in _BUILTIN_DESCRIPTOR_DECORATORS
+                }
+                if len(wrapper_kinds) != 1:
                     continue
                 if len(value.args) != 1 or value.keywords:
                     continue
-                kind = wrapper
+                kind = next(iter(wrapper_kinds))
                 value = value.args[0]
             expression = _expression_name(value)
             if expression is None:
@@ -2850,6 +3184,9 @@ class RepositoryIndex:
                         kind,
                         getattr(statement, "lineno", 0),
                     )
+                )
+                self._class_alias_descriptor_kinds[(f"{class_name}.{target.id}", getattr(statement, "lineno", 0))] = (
+                    kind
                 )
 
     def _materialize_class_callable_aliases(self) -> None:
@@ -2957,8 +3294,8 @@ class RepositoryIndex:
         else:
             return None
         if isinstance(value, ast.Call):
-            wrapper = _expression_name(value.func)
-            if wrapper not in {"classmethod", "staticmethod"} or len(value.args) != 1 or value.keywords:
+            wrapper = self._class_alias_descriptor_kinds.get((qualified_name, binding.line))
+            if wrapper not in {"classmethod", "property", "staticmethod"} or len(value.args) != 1 or value.keywords:
                 return None
             owner_name = qualified_name.rsplit(".", 1)[0]
             if owner_name not in self.classes:
@@ -3338,12 +3675,9 @@ class InterfaceBoundaryGenerator:
         candidates: Sequence[CallableInfo],
     ) -> tuple[str | None, bool]:
         kinds = {
-            (
-                None
-                if candidate.descriptor_kind is None
-                else (candidate.descriptor_kind if candidate.descriptor_kind in DESCRIPTOR_KINDS else "unknown")
-            )
+            None if candidate_kind is None else (candidate_kind if candidate_kind in DESCRIPTOR_KINDS else "unknown")
             for candidate in candidates
+            for candidate_kind in (candidate.descriptor_variants or (candidate.descriptor_kind,))
         }
         if not kinds:
             return None, False
@@ -4010,6 +4344,13 @@ class InterfaceBoundaryGenerator:
             upstream_descriptor_kind=upstream_descriptor_kind,
             downstream_descriptor_kind=downstream_descriptor_kind,
             installed_descriptor_kind=downstream_descriptor_kind,
+            upstream_property_accessors=upstream_callable.property_accessors,
+            downstream_property_accessors=(
+                downstream_callable.property_accessors if downstream_callable is not None else None
+            ),
+            installed_property_accessors=(
+                downstream_callable.property_accessors if downstream_callable is not None else None
+            ),
         )
         self.relations.append(relation)
         self._append_descriptor_finding(
