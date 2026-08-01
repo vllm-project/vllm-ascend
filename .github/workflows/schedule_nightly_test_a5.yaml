@@ -224,9 +224,10 @@ jobs:
   double-node-tests:
     name: double-node
     needs: [setup-vars, parse-trigger]
-    if: >-
-      always() &&
-      needs['parse-trigger'].outputs.run == 'true'
+    if: always()
+    # if: >-
+    #   always() &&
+    #   needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -263,9 +264,10 @@ jobs:
   single-node-tests:
     name: single-node
     needs: [setup-vars, parse-trigger]
-    if: >-
-      always() &&
-      needs['parse-trigger'].outputs.run == 'true'
+    if: always()
+    # if: >-
+    #   always() &&
+    #   needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 9
@@ -293,9 +295,10 @@ jobs:
   multi-card-tests:
     name: multi-card
     needs: [setup-vars, parse-trigger]
-    if: >-
-      always() &&
-      needs['parse-trigger'].outputs.run == 'true'
+    if: always()
+    # if: >-
+    #   always() &&
+    #   needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
