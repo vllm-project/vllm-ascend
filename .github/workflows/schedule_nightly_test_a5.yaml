@@ -97,35 +97,12 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
+            const payload = context.payload;
             const eventName = context.eventName;
-            core.setOutput('ref', context.sha || 'unknown');
-            core.setOutput('request_id', '');
-            core.setOutput('vllm_ascend_branch', 'main');
-            core.setOutput('is_pr_event', 'false');
-            
-            // workflow_dispatch 手动触发
-            if (eventName === 'workflow_dispatch') {
-              const inputs = context.payload.inputs || {};
-              const testCases = (inputs.test_cases || '').trim();
-              core.setOutput('ref', inputs.vllm_ascend_ref || context.sha || '');
-              core.setOutput('request_id', inputs.request_id || '');
-              core.setOutput('vllm_ascend_branch', inputs.vllm_ascend_branch || 'main');
-              core.setOutput('is_pr_event', 'false');
-              if (testCases) {
-                core.setOutput('run', 'true');
-                if (testCases === 'all') {
-                  core.setOutput('filter', 'all');
-                } else {
-                  core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
-                }
-              } else {
-                core.setOutput('run', 'false');
-                core.setOutput('filter', '');
-              }
-              return;
-            }
+            let testFilter = '';
             
             if (eventName === 'pull_request') {
+                const pullRequest = payload.pull_request;
                 const hasNightlyLabel = pullRequest.labels.some(label => label.name === 'nightly-test');
                 if (!hasNightlyLabel) {
                     core.info('PR missing nightly-test label, skip nightly jobs');
@@ -133,15 +110,12 @@ jobs:
                     core.setOutput('filter', '');
                     return;
                 }
-            
-                // 只要带有nightly-test标签，直接执行全部用例，等价 test_cases=all
                 core.info('Detect nightly-test label, run all nightly test cases');
                 testFilter = 'all';
             }
             
-            // fallback
-            core.setOutput('run', 'false');
-            core.setOutput('filter', '');
+            core.setOutput('run', 'true');
+            core.setOutput('filter', testFilter);
 
   setup-vars:
     name: Export global env vars as job outputs
