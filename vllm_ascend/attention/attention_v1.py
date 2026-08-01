@@ -535,7 +535,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_tokens,
             getattr(self.vllm_config.model_config, "max_model_len", num_tokens),
         )
-        max_blocks_per_seq = (max_seqlen_k + block_size - 1) // block_size + 1
+        # Match the buffer's block-table width to the actual block table so
+        # the pre-replay .copy_() shapes align.
+        if attn_metadata.block_tables is not None:
+            max_blocks_per_seq = attn_metadata.block_tables.shape[1]
+        else:
+            max_blocks_per_seq = (max_seqlen_k + block_size - 1) // block_size
 
         # Fixed-size NPU buffers whose addresses are captured by NPUGraph.
         cache_seqlens_buf = torch.zeros(max_batch_size, dtype=torch.int32, device=device)
@@ -629,10 +634,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # block_table: real rows first, padding rows zeroed so
                         # padding requests point to block 0 (valid memory).
                         if meta.block_tables is not None:
-                            n_bt = min(meta.block_tables.shape[0], block_table_buf.shape[0])
-                            block_table_buf[:n_bt].copy_(meta.block_tables[:n_bt])
-                            if n_bt < block_table_buf.shape[0]:
-                                block_table_buf[n_bt:].zero_()
+                            n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
+                            n_bt_c = min(meta.block_tables.shape[1], block_table_buf.shape[1])
+                            block_table_buf[:n_bt_r, :n_bt_c].copy_(
+                                meta.block_tables[:n_bt_r, :n_bt_c]
+                            )
+                            if n_bt_r < block_table_buf.shape[0]:
+                                block_table_buf[n_bt_r:].zero_()
                 break
 
         if using_paged_attention(num_tokens, vllm_config):
