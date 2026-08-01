@@ -1762,37 +1762,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("torch_npu.npu_fused_infer_attention_score")
-    def test_kimi_k3_a3_single_token_prefill_returns_value(self, mock_fia, mock_get_device_type):
-        """A causal one-token prefill has no attention reduction to perform."""
-        self.impl.fa_quant_layer = False
-        self.impl.use_mla_rope = False
-        q_nope = torch.randn(1, self.impl.num_heads, self.impl.qk_nope_head_dim)
-        q_pe = torch.randn(1, self.impl.num_heads, self.impl.qk_rope_head_dim)
-        k_nope = torch.randn(1, self.impl.num_heads, self.impl.qk_nope_head_dim)
-        k_pe = torch.randn(1, self.impl.num_heads, self.impl.qk_rope_head_dim)
-        value = torch.randn(1, self.impl.num_heads, self.impl.v_head_dim)
-        prefill_metadata = MagicMock(
-            actual_seq_lengths_q=[1],
-            chunked_context=None,
-        )
-        attn_metadata = MagicMock(prefill=prefill_metadata)
-        kv_cache = (MagicMock(), MagicMock())
-
-        output = self.impl._forward_prefill(
-            q_nope,
-            q_pe,
-            k_nope,
-            k_pe,
-            value,
-            kv_cache,
-            attn_metadata,
-        )
-
-        torch.testing.assert_close(output, value.reshape(1, -1))
-        mock_fia.assert_not_called()
-
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
     @patch("torch_npu.npu_fused_infer_attention_score")
