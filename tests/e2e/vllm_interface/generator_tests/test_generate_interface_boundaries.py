@@ -7502,3 +7502,337 @@ class Child(Base):
     ) == ("unknown", "ordinary", "ordinary")
     assert len(findings) == 1
     assert findings[0].reason_code == "unknown_descriptor_kind"
+
+
+def test_v024_property_override_keeps_getter_and_setter_contracts(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, value):
+        self._state = value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, value):
+        self._state = value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    getter = ["sync", [], [["self", True]], None, [], None]
+    setter = [
+        "sync",
+        [],
+        [["self", True], ["value", True]],
+        None,
+        [],
+        None,
+    ]
+    assert override.upstream_signature == getter
+    assert override.downstream_signature == getter
+    assert override.upstream_property_accessors == (getter, setter, None)
+    assert override.downstream_property_accessors == (getter, setter, None)
+    assert override.installed_property_accessors == (getter, setter, None)
+    assert not findings
+
+
+def test_v024_rebound_property_name_is_not_treated_as_a_setter(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @property
+    def state(self):
+        return None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+def runtime_wrapper(function):
+    return build_runtime_value(function)
+
+
+class Child(Base):
+    @property
+    def state(self):
+        return None
+
+    state = runtime_wrapper
+
+    @state.setter
+    def state(self, value):
+        pass
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.downstream_descriptor_kind == "unknown"
+    assert any(finding.reason_code == "unknown_descriptor_kind" for finding in findings)
+
+
+def test_v024_rebound_import_alias_is_not_still_a_builtin_descriptor(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+from builtins import staticmethod as bind
+
+
+def runtime_wrapper(function):
+    return build_runtime_value(function)
+
+
+bind = runtime_wrapper
+
+
+class Base:
+    @bind
+    def run(self, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    def run(self, value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.upstream_descriptor_kind == "unknown"
+    assert any(finding.reason_code == "unknown_descriptor_kind" for finding in findings)
+
+
+def test_v024_conditional_builtin_alias_preserves_descriptor_variants(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+if runtime_flag:
+    from builtins import staticmethod as bind
+else:
+    from builtins import classmethod as bind
+
+
+class Base:
+    @bind
+    def run(owner, value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @staticmethod
+    def run(value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.upstream_descriptor_kind == "unknown"
+    assert any(finding.reason_code == "conditional_descriptor_kind" for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "shadow_source",
+    [
+        "if False:\n    staticmethod = runtime_wrapper",
+        "staticmethod = runtime_wrapper\ndel staticmethod",
+    ],
+)
+def test_v024_unreachable_or_deleted_shadow_restores_builtin_descriptor(
+    tmp_path: Path,
+    shadow_source: str,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        f"""
+def runtime_wrapper(function):
+    return build_runtime_value(function)
+
+
+{shadow_source}
+
+
+class Base:
+    @staticmethod
+    def run(value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @staticmethod
+    def run(value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.upstream_descriptor_kind == "staticmethod"
+    assert not findings
+
+
+def test_v024_unbound_builtins_root_is_not_assumed_to_be_imported(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Base:
+    @builtins.staticmethod
+    def run(value):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @staticmethod
+    def run(value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.upstream_descriptor_kind == "unknown"
+    assert any(finding.reason_code == "unknown_descriptor_kind" for finding in findings)
+
+
+def test_v024_class_local_shadow_is_not_treated_as_builtin_wrapper_assignment(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def runtime_wrapper(function):
+    return build_runtime_value(function)
+
+
+def helper(value):
+    return value
+
+
+class Base:
+    staticmethod = runtime_wrapper
+    run = staticmethod(helper)
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base
+
+
+class Child(Base):
+    @staticmethod
+    def run(value):
+        return value
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    override = next(relation for relation in relations if relation.relation == "override")
+    assert override.upstream_descriptor_kind == "unknown"
+    assert any(finding.reason_code == "unknown_descriptor_kind" for finding in findings)
