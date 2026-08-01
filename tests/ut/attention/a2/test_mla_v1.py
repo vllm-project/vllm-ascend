@@ -2822,3 +2822,64 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.num_kv_heads)
         self.assertEqual(result.shape[2], HD)
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu.npu_fused_infer_attention_score_v2")
+    def test_forward_decode_a3_fa_quant_pads_query_descale_with_heads(
+        self,
+        mock_npu_fused_infer_attention_score_v2,
+        mock_get_forward_context,
+        _mock_get_device_type,
+    ):
+        """FIA's per-token-per-head query descale must match padded Q heads."""
+        num_heads = 6
+        padded_heads = 8
+        block_size = 128
+        self.impl.num_heads = num_heads
+        self.impl.num_heads_padded = padded_heads
+        self.impl.head_padding = padded_heads - num_heads
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 512
+        self.impl.qk_nope_head_dim = 512
+        self.impl.qk_rope_head_dim = 64
+        self.impl.enable_kv_nz = False
+        self.impl.enable_mla_fia_split = False
+        self.impl.fa_quant_layer = True
+        self.impl.speculative_config = None
+        self.impl.fak_descale_float = torch.ones(1)
+        self.impl._v_up_proj = MagicMock(return_value=torch.empty(1, num_heads, self.impl.v_head_dim))
+
+        q_nope = torch.randn(1, num_heads, self.impl.qk_nope_head_dim)
+        q_pe = torch.randn(1, num_heads, self.impl.qk_rope_head_dim)
+        k_nope = torch.randint(
+            -128,
+            127,
+            (block_size, self.impl.num_kv_heads, self.impl.kv_lora_rank),
+            dtype=torch.int8,
+        )
+        k_pe = torch.randn(block_size, self.impl.num_kv_heads, self.impl.qk_rope_head_dim)
+        descale = torch.ones(1, num_heads)
+        attn_metadata = MagicMock()
+        attn_metadata.attn_state = AscendAttentionState.DecodeOnly
+        attn_metadata.decode = MagicMock()
+        attn_metadata.decode.block_table = torch.zeros((1, 1), dtype=torch.int32)
+        attn_metadata.decode.seq_lens_list = [block_size]
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_fused_infer_attention_score_v2.return_value = [
+            torch.empty(padded_heads, 1, 1, self.impl.kv_lora_rank),
+            None,
+        ]
+
+        self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, block_size, attn_metadata, descale)
+
+        call_args = mock_npu_fused_infer_attention_score_v2.call_args
+        self.assertEqual(call_args.args[0].shape, (1, 1, padded_heads, self.impl.qk_nope_head_dim))
+        expected_descale = torch.nn.functional.pad(
+            descale.view(1, 1, num_heads),
+            (0, padded_heads - num_heads),
+            "constant",
+            0,
+        )
+        torch.testing.assert_close(call_args.kwargs["dequant_scale_query"], expected_descale)

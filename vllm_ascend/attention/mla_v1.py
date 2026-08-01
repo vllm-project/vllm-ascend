@@ -1755,6 +1755,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
+                if self.head_padding > 0:
+                    # query_quant_mode=3 is per-token, per-head. FIA sees the
+                    # padded query heads, so its scale must have the identical
+                    # head axis. A zero scale keeps the synthetic zero query
+                    # heads zero after dequantization.
+                    dequant_scale_q_nope = F.pad(dequant_scale_q_nope, (0, self.head_padding), "constant", 0)
         elif self.fa_quant_layer:
             attn_mask = None
             sparse_mode = 0
@@ -1767,6 +1773,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
+                if self.head_padding > 0:
+                    dequant_scale_q_nope = F.pad(
+                        dequant_scale_q_nope,
+                        (0, 0, 0, self.head_padding),
+                        "constant",
+                        0,
+                    )
                 attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
             else:
                 input_layout = "BSND_NBSD"
@@ -1776,6 +1789,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
+                if self.head_padding > 0:
+                    dequant_scale_q_nope = F.pad(dequant_scale_q_nope, (0, self.head_padding), "constant", 0)
                 attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
