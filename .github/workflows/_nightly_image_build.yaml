@@ -86,11 +86,15 @@ jobs:
 
       - name: Login to Huawei Cloud SWR (Release)
         id: login-swr
-        if: ${{ inputs.build_type != 'daily' && secrets.HW_USERNAME && secrets.HW_TOKEN }}
+        if: ${{ inputs.build_type != 'daily' }}
         env:
           HW_USERNAME: ${{ secrets.HW_USERNAME }}
           HW_TOKEN: ${{ secrets.HW_TOKEN }}
         run: |
+          if [[ -z "${HW_USERNAME}" || -z "${HW_TOKEN}" ]]; then
+            echo "Credentials empty, skip docker login"
+            exit 0
+          fi
           echo "$HW_TOKEN" | docker login -u "$HW_USERNAME" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
 
       - name: Login to Huawei Cloud SWR (Daily)
@@ -100,6 +104,10 @@ jobs:
           HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
           HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
         run: |
+          if [[ -z "${HW_USERNAME_DAILY}" || -z "${HW_TOKEN_DAILY}" ]]; then
+            echo "Daily credentials empty, skip docker login"
+            exit 0
+          fi
           docker login -u cn-north-4@"$HW_USERNAME_DAILY" -p "$HW_TOKEN_DAILY" swr.cn-north-4.myhuaweicloud.com
 
       - name: Login to Quay.io (for daily base image pull)
