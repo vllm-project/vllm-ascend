@@ -82,3 +82,54 @@ def test_deepseek_v4_dspark_acceptance_tp4(model_name):
         f"acceptance_per_pos {acceptance_per_pos} is not greater than golden {golden} (num_drafts={num_drafts})"
     )
     cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_deepseek_v4_dsa_cp_dspark_acceptance_tp4(model_name):
+    golden = [0.88, 0.74, 0.58, 0.49, 0.40, 0.30, 0.18]
+
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    max_tokens = 1024
+
+    with VllmRunner(
+        model_name,
+        tensor_parallel_size=4,
+        max_model_len=4096,
+        enable_expert_parallel=True,
+        disable_log_stats=False,
+        speculative_config={
+            "method": "dspark",
+            "num_speculative_tokens": 7,
+            "enforce_eager": True,
+        },
+        additional_config={"enable_flashcomm1": True, "enable_dsa_cp": True},
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[8, 16]),
+    ) as spec_vllm_model:
+        _ = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
+        metrics = spec_vllm_model.model.get_metrics()
+
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * 7
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, (
+        f"acceptance_per_pos {acceptance_per_pos} is not greater than golden {golden} (num_drafts={num_drafts})"
+    )
+    cleanup_dist_env_and_memory()
