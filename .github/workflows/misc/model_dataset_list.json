@@ -297,7 +297,10 @@
       "lightseekorg/kimi-k2.6-eagle3",
       "RedHatAI/GLM-5.2-speculator.dspark",
       "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot",
-      "Eco-Tech/Qwen3-32B-w8a8c8"
+      "Eco-Tech/Qwen3-32B-w8a8c8",
+      "Eco-Tech/Qwen3.6-35B-A3B-w8a8",
+      "z-lab/Kimi-K2.5-DFlash",
+      "Eco-Tech/Kimi-K2.7-Code-w4a8"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
