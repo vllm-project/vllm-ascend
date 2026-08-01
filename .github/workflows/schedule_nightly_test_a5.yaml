@@ -96,12 +96,13 @@ jobs:
        - name: Set trigger outputs
          id: set
          run: |
+           {
            echo "run=true" >> $GITHUB_OUTPUT
            echo "filter=all" >> $GITHUB_OUTPUT
            echo "ref=${{ github.event.pull_request.head.sha || '' }}" >> $GITHUB_OUTPUT
            echo "request_id=" >> $GITHUB_OUTPUT
            echo "vllm_ascend_branch=main" >> $GITHUB_OUTPUT
-           echo "is_pr_event=${{ github.event_name == 'pull_request' && 'true' || 'false' }}" >> $GITHUB_OUTPUT
+           echo "is_pr_event=${{ github.event_name == 'pull_request' && 'true' || 'false' }}" } >> $GITHUB_OUTPUT
 
   setup-vars:
     name: Export global env vars as job outputs
