@@ -17,6 +17,9 @@ import torch
 import vllm.v1.sample.ops.topk_topp_sampler as topk_topp_sampler
 import vllm.v1.worker.gpu.sample.sampler as gpu_sampler
 import vllm.v1.worker.gpu.sample.states as states
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def apply_top_k_top_p(
@@ -33,6 +36,16 @@ def apply_top_k_top_p(
     ``Sampler.sample``) and ``gpu.sample.states`` at import time, so the source
     module and both local bindings must be rebound for nightly to take effect.
     """
+    # Log at entry so we can tell the patched function was invoked even when
+    # k/p are both None (early return) or when temperature fails earlier.
+    logger.info_once(
+        "[patch_topk_topp] Ascend V2 patch invoked: forcing apply_top_k_top_p_pytorch "
+        "(batch=%s, has_k=%s, has_p=%s)",
+        logits.shape[0] if logits is not None else None,
+        k is not None,
+        p is not None,
+    )
+
     if p is None and k is None:
         return logits
 
@@ -54,3 +67,7 @@ topk_topp_sampler.apply_top_k_top_p = apply_top_k_top_p
 gpu_sampler.apply_top_k_top_p = apply_top_k_top_p
 # V2 SamplingStates.apply_top_k_top_p uses this import-time binding.
 states.apply_top_k_top_p = apply_top_k_top_p
+logger.info_once(
+    "[patch_topk_topp] Ascend V2 patch loaded: rebound apply_top_k_top_p on "
+    "topk_topp_sampler, gpu.sample.sampler, and gpu.sample.states"
+)
