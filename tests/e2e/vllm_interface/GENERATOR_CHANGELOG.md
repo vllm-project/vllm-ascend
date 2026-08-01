@@ -88,6 +88,11 @@ generator problem.
   pinned sources in 373.7 seconds.  It retained all 971 exact edges, all 60
   finding dispositions, all 15 real descriptor reviews, and the identical
   output SHA-256 `727710aa6c8229c71e3064f28f81764dda1f51e8420eef88da49f2cf5cf3d257`.
+- Alias-variant regression run: checkpoint `2b3eddf10` regenerated the same
+  pinned sources in 413.7 seconds with the identical 971 relations, 60
+  findings, 15 descriptor reviews, and byte-identical SHA-256.  The two
+  class-assignment aliases present in the fixed mapping therefore remain
+  stable while the newly covered variants are available for future changes.
 - Status: implementation tests pass (172 total).  The fixed mapping is exact
   for the descriptor forms exercised by the pinned source, but broader
   property accessor, wrapper-shadowing, and conditional descriptor red tests
