@@ -355,7 +355,7 @@ jobs:
     if: >-
       always() &&
       inputs.request_id == '' &&
-      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped' || needs.single-node-tests.result != 'skipped' || needs.multi-card-tests.result != 'skipped')
     runs-on: linux-aarch64-a5-8
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
