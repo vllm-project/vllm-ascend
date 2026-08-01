@@ -75,15 +75,14 @@ def init_weight_transfer_engine(base_url: str) -> None:
     response.raise_for_status()
 
 
-def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
+def start_weight_update(base_url: str) -> None:
     """Start weight update via HTTP endpoint.
 
     Prepares the model for layerwise reload on the vLLM server side.
     Must be called before update_weights.
     """
     url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
+    response = requests.post(url, timeout=60)
     response.raise_for_status()
 
 
