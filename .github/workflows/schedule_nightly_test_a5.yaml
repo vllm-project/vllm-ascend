@@ -100,7 +100,7 @@ jobs:
             const payload = context.payload;
             const eventName = context.eventName;
             let testFilter = '';
-            
+
             if (eventName === 'pull_request') {
                 const pullRequest = payload.pull_request;
                 const hasNightlyLabel = pullRequest.labels.some(label => label.name === 'nightly-test');
@@ -112,8 +112,10 @@ jobs:
                 }
                 core.info('Detect nightly-test label, run all nightly test cases');
                 testFilter = 'all';
+            } else if (eventName === 'workflow_dispatch') {
+                testFilter = core.getInput('test_cases') || 'all';
             }
-            
+
             core.setOutput('run', 'true');
             core.setOutput('filter', testFilter);
 
