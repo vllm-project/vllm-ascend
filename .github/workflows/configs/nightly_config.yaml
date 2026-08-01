@@ -308,13 +308,17 @@ a3-560t:
 
 a5:
   multi_node:
-    test_config: []
+    test_config:
+      - name: Qwen3-235B-W8A8-EPLB
+        os: linux-aarch64-a5-8
+        size: 2
+        config_file_path: Qwen3-235B-W8A8-EPLB.yaml
   double_node:
     test_config: []
   single_node:
     test_config:
       - name: deepSeek-V3.2-W8A8-DCP
-        os: linux-aarch64-a5-8 
+        os: linux-aarch64-a5-8
         config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
   multi_card:
     test_config: []
