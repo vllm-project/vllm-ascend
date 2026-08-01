@@ -103,7 +103,7 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
 
     iterator = iter([("model.weight", torch.zeros(3))])
 
-    with patch(f"{_MODULE}.reduce_tensor", fake_reduce):
+    with patch("vllm_ascend.distributed.weight_transfer.trainer_send.reduce_tensor", fake_reduce):
         NPUIPCWeightTransferEngine._send_unpacked(iterator, trainer_args, npu_uuid)
 
     update_info = captured["update_info"]
@@ -146,14 +146,26 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     def load_weights(weights):
         received["weights"] = weights
 
+    policy = MagicMock()
+    policy.make_load_weights.return_value = load_weights
+    engine.model = MagicMock()
+    engine._weight_update_lifecycle_policy = policy
+
     with (
         _patch_rebuild_npu_tensor(fake_rebuild),
         patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid),
         patch("torch.accelerator.current_device_index", return_value=device_index),
     ):
-        engine.receive_weights(update_info, load_weights)
+        engine.receive_weights(update_info)
 
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
     # Index 6 (device index) overwritten with the receiver's device.
     assert seen["args"][6] == device_index
+
+
+def test_npu_generate_uuid_delegates_device_mapping():
+    with patch(f"{_MODULE}.get_npu_ipc_uuid", return_value="host-0") as get_uuid:
+        assert npu_ipc_engine.npu_generate_uuid() == "host-0"
+
+    get_uuid.assert_called_once_with()

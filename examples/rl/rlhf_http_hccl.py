@@ -33,12 +33,20 @@ The example performs the following steps:
 * Generate text again to show normal output after the weight update.
 """
 
-import requests
 import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 from vllm.utils.network_utils import get_ip, get_open_port
 
+from examples.rl.weight_transfer_http_utils import (
+    finish_weight_update,
+    get_world_size,
+    init_weight_transfer_engine,
+    pause_generation,
+    resume_generation,
+    start_weight_update,
+    update_weights,
+)
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerSendWeightsArgs,
     HCCLWeightTransferEngine,
@@ -61,95 +69,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
         results.append(response.choices[0].text)
     return results
 
-
-def init_weight_transfer_engine(
-    base_url: str,
-    master_address: str,
-    master_port: int,
-    rank_offset: int,
-    world_size: int,
-) -> None:
-    """Initialize weight transfer via HTTP endpoint."""
-    url = f"{base_url}/init_weight_transfer_engine"
-    payload = {
-        "init_info": dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-        )
-    }
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def update_weights(
-    base_url: str,
-    names: list[str],
-    dtype_names: list[str],
-    shapes: list[list[int]],
-    packed: bool = False,
-    packed_buffer_size_bytes: int | None = None,
-) -> None:
-    """Update weights via HTTP endpoint."""
-    url = f"{base_url}/update_weights"
-    payload = {
-        "update_info": dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=packed,
-        )
-    }
-    if packed and packed_buffer_size_bytes is not None:
-        payload["update_info"]["packed_buffer_size_bytes"] = packed_buffer_size_bytes
-    response = requests.post(url, json=payload, timeout=300)
-    response.raise_for_status()
-
-
-def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
-    """Start weight update via HTTP endpoint.
-
-    Prepares the model for layerwise reload on the vLLM server side.
-    Must be called before update_weights.
-    """
-    url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def finish_weight_update(base_url: str) -> None:
-    """Finish weight update via HTTP endpoint.
-
-    Finalizes layerwise reload on the vLLM server side.
-    Must be called after all update_weights calls are complete.
-    """
-    url = f"{base_url}/finish_weight_update"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
-def pause_generation(base_url: str) -> None:
-    """Pause generation via HTTP endpoint."""
-    url = f"{base_url}/pause"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
-def resume_generation(base_url: str) -> None:
-    """Resume generation via HTTP endpoint."""
-    url = f"{base_url}/resume"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
-def get_world_size(base_url: str) -> int:
-    """Get world size from the vLLM server."""
-    url = f"{base_url}/get_world_size"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    return response.json()["world_size"]
 
 
 def main():
@@ -200,9 +119,15 @@ def main():
     # wait for HCCL connection)
     import threading
 
+    init_info = dict(
+        master_address=master_address,
+        master_port=master_port,
+        rank_offset=rank_offset,
+        world_size=world_size,
+    )
     init_thread = threading.Thread(
         target=init_weight_transfer_engine,
-        args=(BASE_URL, master_address, master_port, rank_offset, world_size),
+        args=(BASE_URL, init_info),
     )
     init_thread.start()
 
@@ -248,9 +173,16 @@ def main():
     # Start the update_weights call in a separate thread since it will block
     # waiting for HCCL broadcasts
     # packed=True enables efficient batched tensor broadcasting
+    update_info = dict(
+        names=names,
+        dtype_names=dtype_names,
+        shapes=shapes,
+        packed=True,
+        packed_buffer_size_bytes=packed_buffer_size_bytes,
+    )
     update_thread = threading.Thread(
         target=update_weights,
-        args=(BASE_URL, names, dtype_names, shapes, True, packed_buffer_size_bytes),
+        args=(BASE_URL, update_info),
     )
     update_thread.start()
 

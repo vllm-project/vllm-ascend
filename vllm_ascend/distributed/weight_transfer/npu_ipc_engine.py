@@ -2,18 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU IPC-based weight transfer engine using Ascend IPC for communication."""
 
-import os
 import pickle
-import socket
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass
-from functools import lru_cache
+from dataclasses import dataclass
 from typing import Any
 
 import pybase64 as base64
-import requests
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -26,9 +21,17 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferUpdateInfo,
 )
 
+from vllm_ascend.distributed.weight_transfer.device_mapping import get_npu_ipc_uuid
+from vllm_ascend.distributed.weight_transfer.lifecycle import WeightUpdateLifecyclePolicy, get_weight_update_lifecycle_policy
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
+)
+from vllm_ascend.distributed.weight_transfer.trainer_send import (
+    TrainerProcessCoordinator,
+    collect_parameter_metadata,
+    default_parameter_tensor,
+    dispatch_update_info,
 )
 
 
@@ -58,45 +61,9 @@ class NPUIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):
     identical."""
 
 
-@lru_cache(maxsize=1)
-def get_ip() -> str:
-    try:
-        # try to get ip from network interface
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception:  # noqa: BLE001
-        # fallback to get ip from hostname
-        return socket.gethostbyname(socket.gethostname())
-
-
-@lru_cache(maxsize=1)
 def npu_generate_uuid() -> str:
-    """Generate a unique identifier for the current process's physical NPU chip.
-
-    Returns ``{host_ip}-{physical_chip_id}`` where ``host_ip`` is the local
-    machine's IP address and ``physical_chip_id`` is derived from the current
-    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``.
-
-    On Ascend NPU, ``torch.accelerator.current_device_index()`` returns the
-    *logical* device index. When ``ASCEND_RT_VISIBLE_DEVICES`` is set, it
-    maps logical indices to physical chip IDs (e.g., ``ASCEND_RT_VISIBLE_DEVICES=2,3``
-    means logical device 0 → physical chip 2, logical device 1 → physical chip 3).
-    If the env var is not set, the logical index is used directly as the
-    physical chip ID (identity mapping).
-
-    The result is cached because it is constant for the lifetime of the
-    process. Both the trainer and inference worker processes co-located
-    on the same physical NPU chip will produce the same UUID, which is
-    required for NPU IPC handle matching.
-    """
-    logical_device = torch.accelerator.current_device_index()
-    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", None)
-    if visible_devices:
-        physical_device = int(visible_devices.split(",")[logical_device].strip())
-    else:
-        physical_device = logical_device
-    return f"{get_ip()}-{physical_device}"
+    """Generate a unique identifier for the current process's physical NPU chip."""
+    return get_npu_ipc_uuid()
 
 
 class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitInfo, NPUIPCWeightTransferUpdateInfo]):
@@ -115,6 +82,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
 
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
+    supports_draft_weight_update = False
 
     def __init__(  # type: ignore[misc]
         self,
@@ -124,6 +92,10 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
+        self._weight_update_lifecycle_policy: WeightUpdateLifecyclePolicy = get_weight_update_lifecycle_policy(False)
+
+    def set_weight_update_lifecycle_policy(self, policy: WeightUpdateLifecyclePolicy) -> None:
+        self._weight_update_lifecycle_policy = policy
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
         """Parse update dict, deserializing pickled IPC handles if present.
@@ -155,25 +127,19 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         pass
 
     def start_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        self._weight_update_lifecycle_policy.start(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        self._weight_update_lifecycle_policy.finish(self.model, self.model_config)
 
-    def receive_weights(
-        self,
-        update_info: NPUIPCWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
         Args:
             update_info: NPU IPC update info containing parameter names,
                 dtypes, shapes, and IPC handles.
-            load_weights: Callable that loads weights into the model.
         """
+        load_weights = self._weight_update_lifecycle_policy.make_load_weights(self.model)
         device_index = torch.accelerator.current_device_index()
         physical_npu_id = npu_generate_uuid()
 
@@ -258,81 +224,16 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
             NPUIPCWeightTransferEngine._send_unpacked(iterator, args, npu_uuid)
 
     @staticmethod
-    def _is_rank_zero() -> bool:
-        """Return True if this is rank 0 or no distributed group exists."""
-        if not torch.distributed.is_initialized():
-            return True
-        return torch.distributed.get_rank() == 0
-
-    @staticmethod
-    def _all_gather_and_merge_handles(
-        handles: list[dict[str, tuple]],
-    ) -> list[dict[str, tuple]]:
-        """All-gather and merge IPC handle dicts across ranks.
-
-        Each rank contributes a list of ``{npu_uuid: ipc_args}`` dicts.
-        Rank 0 collects and merges per-index; other ranks receive a list
-        of empty dicts. No-op when no distributed group exists.
-        """
-        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-            return handles
-
-        world_size = torch.distributed.get_world_size()
-        gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
-        torch.distributed.all_gather_object(gathered, handles)
-        torch.distributed.barrier()
-        torch.npu.synchronize()
-
-        if torch.distributed.get_rank() == 0:
-            merged: list[dict[str, tuple]] = []
-            for param_idx in range(len(handles)):
-                m: dict[str, tuple] = {}
-                for rank_handles in gathered:
-                    if rank_handles is not None:
-                        m.update(rank_handles[param_idx])
-                merged.append(m)
-            return merged
-        return [{} for _ in handles]
-
-    @staticmethod
-    def _post_send_sync() -> None:
-        """Barrier + synchronize after a send; no-op if single-NPU."""
-        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-            torch.distributed.barrier()
-        torch.npu.synchronize()
-
-    @staticmethod
     def _send_unpacked(
         iterator: Iterator[tuple[str, torch.Tensor]],
         args: NPUIPCTrainerSendWeightsArgs,
         npu_uuid: str,
     ) -> None:
         """Send all weights in a single API call (non-packed mode)."""
-        names: list[str] = []
-        dtype_names: list[str] = []
-        shapes: list[list[int]] = []
-        ipc_handles: list[dict[str, tuple]] = []
-        # Hold strong refs to every contiguous copy until the send + post-send
-        # sync completes.  ``reduce_tensor``'s returned args do NOT keep
-        # storage alive.
-        weight_refs: list[torch.Tensor] = []
+        names, dtype_names, shapes, ipc_handles, weight_refs = collect_parameter_metadata(iterator, npu_uuid)
+        ipc_handles = TrainerProcessCoordinator.all_gather_and_merge_handles(ipc_handles)
 
-        for name, tensor in iterator:
-            names.append(name)
-            dtype_names.append(str(tensor.dtype).split(".")[-1])
-            shapes.append(list(tensor.shape))
-
-            weight = tensor.detach().contiguous()
-            weight_refs.append(weight)
-            # Store only the rebuild args (drop the func); the consumer rebuilds
-            # with the well-known ``rebuild_npu_tensor``, mirroring upstream's
-            # CUDA IPC engine.
-            _, ipc_args = reduce_tensor(weight)
-            ipc_handles.append({npu_uuid: ipc_args})
-
-        ipc_handles = NPUIPCWeightTransferEngine._all_gather_and_merge_handles(ipc_handles)
-
-        if NPUIPCWeightTransferEngine._is_rank_zero():
+        if TrainerProcessCoordinator.is_rank_zero():
             NPUIPCWeightTransferEngine._do_send(
                 args=args,
                 names=names,
@@ -341,7 +242,8 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 ipc_handles=ipc_handles,
             )
 
-        NPUIPCWeightTransferEngine._post_send_sync()
+        TrainerProcessCoordinator.post_send_sync()
+        _ = weight_refs
 
     @staticmethod
     def _send_packed(
@@ -350,7 +252,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         npu_uuid: str,
     ) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        post_iter_func: Callable = lambda item: item[1]
+        post_iter_func: Callable = default_parameter_tensor
 
         for chunk in packed_npu_ipc_producer(
             iterator=iterator,
@@ -358,9 +260,9 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
             post_iter_func=post_iter_func,
             buffer_size_bytes=args.packed_buffer_size_bytes,
         ):
-            ipc_handle = NPUIPCWeightTransferEngine._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
+            ipc_handle = TrainerProcessCoordinator.all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
 
-            if NPUIPCWeightTransferEngine._is_rank_zero():
+            if TrainerProcessCoordinator.is_rank_zero():
                 NPUIPCWeightTransferEngine._do_send(
                     args=args,
                     names=chunk["names"],
@@ -371,7 +273,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                     packed=True,
                 )
 
-            NPUIPCWeightTransferEngine._post_send_sync()
+            TrainerProcessCoordinator.post_send_sync()
 
     @staticmethod
     def _do_send(
@@ -396,19 +298,9 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         update_fields["ipc_handles"] = ipc_handles
         update_info = NPUIPCWeightTransferUpdateInfo(**update_fields)
 
-        if callable(args.send_mode):
-            args.send_mode(update_info)
-        elif args.send_mode == "ray":
-            import ray
-
-            handles = args.llm_handle if isinstance(args.llm_handle, list) else [args.llm_handle]
-            ray.get([h.update_weights.remote(dict(update_info=asdict(update_info))) for h in handles])
-        elif args.send_mode == "http":
-            pickled_handles = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
-            http_fields = {k: v for k, v in update_fields.items() if k != "ipc_handles"}
-            http_fields["ipc_handles_pickled"] = pickled_handles
-
-            url = f"{args.url}/update_weights"
-            payload = {"update_info": http_fields}
-            response = requests.post(url, json=payload, timeout=300)
-            response.raise_for_status()
+        dispatch_update_info(
+            args=args,
+            update_info=update_info,
+            update_fields=update_fields,
+            ipc_handles=ipc_handles,
+        )

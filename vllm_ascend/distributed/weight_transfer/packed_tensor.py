@@ -15,6 +15,37 @@ DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
 
+def dtype_name(dtype: torch.dtype) -> str:
+    return str(dtype).split(".")[-1]
+
+
+def tensor_nbytes(tensor: torch.Tensor) -> int:
+    return tensor.numel() * tensor.element_size()
+
+
+def packed_tensor_size(shape: list[int], dtype: torch.dtype) -> int:
+    return math.prod(shape) * dtype.itemsize
+
+
+def unpack_packed_tensor(
+    packed_tensor: torch.Tensor,
+    names: list[str],
+    shapes: list[list[int]],
+    dtypes: list[torch.dtype],
+    tensor_sizes: list[int],
+    *,
+    clone: bool = False,
+) -> list[tuple[str, torch.Tensor]]:
+    unpacked_tensors = packed_tensor.split(tensor_sizes)
+    weights = []
+    for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors):
+        weight = tensor.contiguous().view(dtype).view(*shape)
+        if clone:
+            weight = weight.clone()
+        weights.append((name, weight))
+    return weights
+
+
 def packed_broadcast_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     group: Any,
@@ -111,21 +142,6 @@ def packed_broadcast_consumer(
                     Both producer and consumer must use the same value.
     """
 
-    def unpack_tensor(
-        packed_tensor: torch.Tensor,
-        names: list[str],
-        shapes: list[list[int]],
-        dtypes: list[torch.dtype],
-        tensor_sizes: list[int],
-    ) -> list[tuple[str, torch.Tensor]]:
-        """Unpack a packed uint8 tensor into a list of typed tensors."""
-        unpacked_tensors = packed_tensor.split(tensor_sizes)
-        unpacked_list = [
-            (name, tensor.contiguous().view(dtype).view(*shape))
-            for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
-        ]
-        return unpacked_list
-
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
@@ -151,7 +167,7 @@ def packed_broadcast_consumer(
                 except StopIteration:
                     done = True
                     break
-                tensor_size = math.prod(shape) * dtype.itemsize
+                tensor_size = packed_tensor_size(shape, dtype)
                 packing_tensor_meta_data[buffer_idx].append((name, shape, dtype, tensor_size))
                 packing_tensor_sizes[buffer_idx] += tensor_size
                 if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -177,7 +193,7 @@ def packed_broadcast_consumer(
         with torch.npu.stream(streams[buffer_idx]):
             names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
             post_unpack_func(
-                unpack_tensor(
+                unpack_packed_tensor(
                     packed_tensors[buffer_idx],
                     list(names),
                     list(shapes),
@@ -243,7 +259,7 @@ def packed_npu_ipc_producer(
             yield {
                 "names": names,
                 "shapes": shapes,
-                "dtype_names": [str(d).split(".")[-1] for d in dtypes],
+                "dtype_names": [dtype_name(d) for d in dtypes],
                 "tensor_sizes": tensor_sizes,
                 "ipc_handle": {npu_uuid: ipc_args},
             }
@@ -262,7 +278,7 @@ def packed_npu_ipc_producer(
         yield {
             "names": names,
             "shapes": shapes,
-            "dtype_names": [str(d).split(".")[-1] for d in dtypes],
+            "dtype_names": [dtype_name(d) for d in dtypes],
             "tensor_sizes": tensor_sizes,
             "ipc_handle": {npu_uuid: ipc_args},
         }
@@ -314,12 +330,11 @@ def packed_npu_ipc_consumer(
     packed = packed[:content_size]
 
     dtypes = [getattr(torch, dn) for dn in dtype_names]
-    weights: list[tuple[str, torch.Tensor]] = []
-    offset = 0
-    for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
-        raw = packed[offset : offset + size]
-        tensor = raw.contiguous().view(dtype).view(*shape).clone()
-        weights.append((name, tensor))
-        offset += size
-
-    return weights
+    return unpack_packed_tensor(
+        packed,
+        names,
+        shapes,
+        dtypes,
+        tensor_sizes,
+        clone=True,
+    )
