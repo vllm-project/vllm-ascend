@@ -4,6 +4,54 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.25.0 - runtime signature contracts (in progress)
+
+- Red-test checkpoint: `2e3445e46`.  Five tests first failed only because the
+  relation model had no runtime-signature fields.  They cover
+  `functools.wraps`, an unknown decorator inside `classmethod`, exact
+  source-SHA pinning for `torch.inference_mode`, receiver binding, and an
+  unknown decorator on a module-level patch target.
+- Problem: the old mapping stored only the syntax-level `def` signature.  That
+  is insufficient after a decorator changes the callable object, and it also
+  mixes the explicit `self`/`cls` parameter with the interface seen after
+  Python binds a method to an instance or class.
+- Changes:
+  - every verified override and monkey patch now keeps four distinct views:
+    source definition, runtime entry, introspection-reported signature, and
+    bound-call signature;
+  - `functools.wraps(target)` keeps the wrapper's real runtime entry while
+    recording the target signature exposed by introspection and the exact
+    forwarded target;
+  - descriptor binding removes a receiver only for an ordinary method,
+    classmethod, or property installed in a class namespace; module and
+    instance writes do not borrow class binding semantics;
+  - decorator effects are processed from inner to outer.  Builtin descriptor
+    decorators, standard transparent decorators, and exact source-SHA-pinned
+    adapters stay exact; every other runtime transform fails closed with a
+    supplemental `unknown_signature_transform` review;
+  - exact decorator references are retained by AST-node identity when patch
+    scanning reconstructs local functions.  This fixes a false unknown result
+    for module-level `@classmethod` functions later installed on a class;
+  - existing descriptor tests now assert descriptor and signature findings
+    separately.  A decorator may have a known descriptor kind but still have
+    an unknown runtime calling convention, so suppressing one dimension with
+    the other would hide a real dependency risk.
+- Test evidence: all 177 isolated generator and independent-auditor tests pass;
+  Ruff and Ruff formatting pass.  A fixed-source regeneration and independent
+  review are still required before this checkpoint is accepted.
+- Independent review after the green tests found five release-blocking gaps:
+  descriptor-only SHA allowlists do not prove signature transparency;
+  receiver binding does not yet distinguish varargs, invalid bindings, and an
+  unknown descriptor; contracts are not yet serialized or compared; exact
+  upstream and installed signatures are not yet checked directionally for call
+  compatibility; and relation deduplication does not merge contract variants.
+  This commit is therefore a rollback-safe model scaffold, not an accepted
+  generator result.
+- Next known gaps: LoRA conditional wrapper protocols, Triton JIT launch
+  protocols, `support_torch_compile` class transformations, and serialization
+  of the new contracts.  Until those are modeled, the generator must retain
+  their unknown/review results rather than claim complete accuracy.
+
 ## v0.24.0 - descriptor binding contracts (in progress)
 
 - Red-test checkpoints: `922a810e8` (10 new tests; 9 initially failed and one

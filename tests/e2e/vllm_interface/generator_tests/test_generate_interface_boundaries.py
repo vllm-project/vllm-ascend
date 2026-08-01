@@ -6954,11 +6954,15 @@ class Child(Base):
     overrides = [relation for relation in relations if relation.relation == "override"]
     assert len(overrides) == 1
     assert overrides[0].upstream_descriptor_kind == "unknown"
-    assert len(findings) == 1
+    assert {finding.reason_code for finding in findings} == {
+        "unknown_descriptor_kind",
+        "unknown_signature_transform",
+    }
+    descriptor_finding = next(finding for finding in findings if finding.reason_code == "unknown_descriptor_kind")
     assert (
-        findings[0].reason_code,
-        findings[0].supplemental,
-        findings[0].upstream_descriptor_kind,
+        descriptor_finding.reason_code,
+        descriptor_finding.supplemental,
+        descriptor_finding.upstream_descriptor_kind,
     ) == ("unknown_descriptor_kind", True, "unknown")
 
 
@@ -7268,7 +7272,7 @@ base.run = replacement
         patches[0].downstream_descriptor_kind,
         patches[0].installed_descriptor_kind,
     ) == (None, "ordinary", None)
-    assert not [finding for finding in findings if finding.supplemental]
+    assert [finding.reason_code for finding in findings if finding.supplemental] == ["unknown_signature_transform"]
 
 
 def test_v024_staticmethod_lambda_patch_records_wrapper_evidence(
@@ -7364,8 +7368,10 @@ class Child(Base):
     assert pinned.upstream_descriptor_kind == "ordinary"
     assert not pinned_findings
     assert unregistered.upstream_descriptor_kind == "unknown"
-    assert len(unregistered_findings) == 1
-    assert unregistered_findings[0].reason_code == "unknown_descriptor_kind"
+    assert {finding.reason_code for finding in unregistered_findings} == {
+        "unknown_descriptor_kind",
+        "unknown_signature_transform",
+    }
 
 
 def test_v024_outer_classmethod_determines_kind_after_unknown_inner_decorator(
@@ -7408,7 +7414,7 @@ class Child(Base):
         override.downstream_descriptor_kind,
         override.installed_descriptor_kind,
     ) == ("classmethod", "classmethod", "classmethod")
-    assert not findings
+    assert [finding.reason_code for finding in findings] == ["unknown_signature_transform"]
 
 
 def test_v024_outer_unknown_decorator_masks_inner_classmethod(
@@ -7451,8 +7457,10 @@ class Child(Base):
         override.downstream_descriptor_kind,
         override.installed_descriptor_kind,
     ) == ("unknown", "classmethod", "classmethod")
-    assert len(findings) == 1
-    assert findings[0].reason_code == "unknown_descriptor_kind"
+    assert {finding.reason_code for finding in findings} == {
+        "unknown_descriptor_kind",
+        "unknown_signature_transform",
+    }
 
 
 def test_v024_shadowed_builtin_staticmethod_decorator_is_unknown(
@@ -7500,8 +7508,10 @@ class Child(Base):
         override.downstream_descriptor_kind,
         override.installed_descriptor_kind,
     ) == ("unknown", "ordinary", "ordinary")
-    assert len(findings) == 1
-    assert findings[0].reason_code == "unknown_descriptor_kind"
+    assert {finding.reason_code for finding in findings} == {
+        "unknown_descriptor_kind",
+        "unknown_signature_transform",
+    }
 
 
 def test_v024_property_override_keeps_getter_and_setter_contracts(
@@ -8380,15 +8390,12 @@ class Child(Base):
     unknown = next(relation for relation in unknown_relations if relation.relation == "override")
     assert pinned.upstream_signature_contract.status == "exact"
     assert any(
-        "torch.inference_mode" in item and torch_sha in item
-        for item in pinned.upstream_signature_contract.provenance
+        "torch.inference_mode" in item and torch_sha in item for item in pinned.upstream_signature_contract.provenance
     )
     assert unknown.upstream_signature_contract.status == "unknown"
     assert unknown.upstream_signature_contract.runtime_entry_signature is None
     assert any(
-        finding.reason_code == "unknown_signature_transform"
-        and finding.supplemental
-        for finding in unknown_findings
+        finding.reason_code == "unknown_signature_transform" and finding.supplemental for finding in unknown_findings
     )
 
 
@@ -8477,11 +8484,7 @@ base.run = replacement
     assert contract.runtime_entry_signature is None
     assert contract.reported_signature is None
     assert contract.status == "unknown"
-    signature_findings = [
-        finding
-        for finding in findings
-        if finding.reason_code == "unknown_signature_transform"
-    ]
+    signature_findings = [finding for finding in findings if finding.reason_code == "unknown_signature_transform"]
     assert len(signature_findings) == 1
     assert (
         signature_findings[0].status,

@@ -969,6 +969,50 @@ def _scope_reference_variants(
     return references or {None}
 
 
+def _decorator_reference_tuple(
+    node: ast.AST | None,
+    reference_resolver: Callable[[ast.AST], set[str | None]],
+) -> tuple[str | None, ...]:
+    """Keep one exact reference per decorator, or ``None`` when ambiguous."""
+
+    if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        return ()
+    return tuple(
+        next(iter(references)) if len(references) == 1 else None
+        for decorator in node.decorator_list
+        for references in (reference_resolver(decorator),)
+    )
+
+
+def _scope_decorator_reference_tuple(
+    node: ast.AST | None,
+    *,
+    statements: Sequence[ast.stmt],
+    tag_guard_names: set[str],
+    module: str,
+    is_package: bool,
+) -> tuple[str | None, ...]:
+    """Resolve function decorators against their enclosing module scope."""
+
+    if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        return ()
+    line = getattr(node, "lineno", 0)
+    return tuple(
+        next(iter(references)) if len(references) == 1 else None
+        for decorator in node.decorator_list
+        for references in (
+            _scope_reference_variants(
+                decorator,
+                statements=statements,
+                line=line,
+                tag_guard_names=tag_guard_names,
+                module=module,
+                is_package=is_package,
+            ),
+        )
+    )
+
+
 def _possible_method_nodes(
     node: ast.ClassDef,
     tag_guard_names: set[str],
@@ -1747,6 +1791,20 @@ class ClassInfo:
 
 
 @dataclass(frozen=True)
+class SignatureContract:
+    """Static views of one callable after decorators and descriptor binding."""
+
+    definition_signature: list[object] | None
+    runtime_entry_signature: list[object] | None
+    reported_signature: list[object] | None
+    bound_call_signature: list[object] | None
+    forwarded_targets: tuple[str, ...] = ()
+    protocol: str = "python_call"
+    status: str = "exact"
+    provenance: tuple[str, ...] = ("ast_definition",)
+
+
+@dataclass(frozen=True)
 class CallableInfo:
     qualified_name: str
     module: str
@@ -1758,6 +1816,7 @@ class CallableInfo:
     origin_kind: str = "definition"
     descriptor_kind: str | None = "ordinary"
     descriptor_variants: tuple[str | None, ...] = ()
+    decorator_references: tuple[str | None, ...] = ()
     property_accessor_nodes: tuple[ast.AST | None, ast.AST | None, ast.AST | None] | None = field(
         default=None,
         compare=False,
@@ -1915,6 +1974,21 @@ class Relation:
         ]
         | None
     ) = field(default=None, compare=False, hash=False)
+    upstream_signature_contract: SignatureContract | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+    )
+    downstream_signature_contract: SignatureContract | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+    )
+    installed_signature_contract: SignatureContract | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+    )
 
     def upstream_key(self) -> tuple[str, str, str, str]:
         return (
@@ -2270,6 +2344,10 @@ class RepositoryIndex:
         self._pending_method_aliases: list[tuple[str, str, str, str, int]] = []
         self._descriptor_kinds_by_node: dict[int, str | None] = {}
         self._descriptor_variants_by_node: dict[int, tuple[str | None, ...]] = {}
+        self._decorator_references_by_node: dict[
+            int,
+            tuple[str | None, ...],
+        ] = {}
         self._property_accessors_by_node: dict[
             int,
             tuple[ast.AST | None, ast.AST | None, ast.AST | None],
@@ -2586,6 +2664,13 @@ class RepositoryIndex:
                         descriptor_variants[id(function_node)] = variants_for_node
                         self._descriptor_kinds_by_node[id(function_node)] = descriptor_kind
                         self._descriptor_variants_by_node[id(function_node)] = variants_for_node
+                        self._decorator_references_by_node[id(function_node)] = _decorator_reference_tuple(
+                            function_node,
+                            lambda expression, line=function_line: class_reference_resolver(
+                                expression,
+                                line,
+                            ),
+                        )
 
                         accessor_kind: str | None = None
                         accessor_name: str | None = None
@@ -2715,6 +2800,10 @@ class RepositoryIndex:
                                     id(candidate),
                                     (),
                                 ),
+                                decorator_references=self._decorator_references_by_node.get(
+                                    id(candidate),
+                                    (),
+                                ),
                                 property_accessor_nodes=property_accessors.get(
                                     id(candidate),
                                 ),
@@ -2743,6 +2832,14 @@ class RepositoryIndex:
                 elif isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                     imports.pop(node.name, None)
                     qualified_name = f"{module}.{node.name}"
+                    decorator_references = _scope_decorator_reference_tuple(
+                        node,
+                        statements=tree.body,
+                        tag_guard_names=tag_guard_names,
+                        module=module,
+                        is_package=is_package,
+                    )
+                    self._decorator_references_by_node[id(node)] = decorator_references
                     info = CallableInfo(
                         qualified_name=qualified_name,
                         module=module,
@@ -2759,6 +2856,7 @@ class RepositoryIndex:
                             ),
                             ordinary_decorators=self.ordinary_descriptor_decorators,
                         ),
+                        decorator_references=decorator_references,
                     )
                     functions[node.name] = info
                     self._descriptor_kinds_by_node[id(node)] = info.descriptor_kind
@@ -2789,26 +2887,37 @@ class RepositoryIndex:
                     self.callables.pop(qualified_name, None)
                     self.callable_variants.pop(qualified_name, None)
                     continue
-                variants = tuple(
-                    CallableInfo(
-                        qualified_name=qualified_name,
+                variants_list: list[CallableInfo] = []
+                for candidate in candidates:
+                    decorator_references = _scope_decorator_reference_tuple(
+                        candidate,
+                        statements=tree.body,
+                        tag_guard_names=tag_guard_names,
                         module=module,
-                        file=relative_file,
-                        owner=None,
-                        name=function_name,
-                        node=candidate,
-                        descriptor_kind=_definition_descriptor_kind(
-                            candidate,
-                            imports=imports,
-                            shadowed_names=_scope_bound_names_before(
-                                tree.body,
-                                getattr(candidate, "lineno", 0),
-                            ),
-                            ordinary_decorators=self.ordinary_descriptor_decorators,
-                        ),
+                        is_package=is_package,
                     )
-                    for candidate in candidates
-                )
+                    self._decorator_references_by_node[id(candidate)] = decorator_references
+                    variants_list.append(
+                        CallableInfo(
+                            qualified_name=qualified_name,
+                            module=module,
+                            file=relative_file,
+                            owner=None,
+                            name=function_name,
+                            node=candidate,
+                            descriptor_kind=_definition_descriptor_kind(
+                                candidate,
+                                imports=imports,
+                                shadowed_names=_scope_bound_names_before(
+                                    tree.body,
+                                    getattr(candidate, "lineno", 0),
+                                ),
+                                ordinary_decorators=self.ordinary_descriptor_decorators,
+                            ),
+                            decorator_references=decorator_references,
+                        )
+                    )
+                variants = tuple(variants_list)
                 functions[function_name] = variants[0]
                 self.callables[qualified_name] = variants[0]
                 self.callable_variants[qualified_name] = variants
@@ -2821,6 +2930,17 @@ class RepositoryIndex:
                 if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                     continue
                 qualified_name = f"{module}.{node.name}"
+                decorator_references = _scope_decorator_reference_tuple(
+                    node,
+                    statements=tree.body,
+                    tag_guard_names=tag_guard_names,
+                    module=module,
+                    is_package=is_package,
+                )
+                self._decorator_references_by_node.setdefault(
+                    id(node),
+                    decorator_references,
+                )
                 loose_functions[node.name].append(
                     CallableInfo(
                         qualified_name=qualified_name,
@@ -2838,6 +2958,7 @@ class RepositoryIndex:
                             ),
                             ordinary_decorators=self.ordinary_descriptor_decorators,
                         ),
+                        decorator_references=self._decorator_references_by_node[id(node)],
                     )
                 )
 
@@ -2919,6 +3040,10 @@ class RepositoryIndex:
                         descriptor_kind=self._descriptor_kinds_by_node.get(
                             id(node),
                             "unknown",
+                        ),
+                        decorator_references=self._decorator_references_by_node.get(
+                            id(node),
+                            (),
                         ),
                     )
                     for node in function_nodes
@@ -3323,6 +3448,7 @@ class RepositoryIndex:
                         origin_kind=kind,
                         descriptor_kind=descriptor_kind,
                         descriptor_variants=installed_variants,
+                        decorator_references=source.decorator_references,
                         property_accessor_nodes=property_nodes,
                         signature_override=source.signature,
                     )
@@ -3621,6 +3747,7 @@ class InterfaceBoundaryGenerator:
         source_versions: dict[str, str] | None = None,
     ):
         source_versions = source_versions or {}
+        self.source_versions = dict(source_versions)
         ordinary_descriptor_decorators = {
             decorator
             for package, version in source_versions.items()
@@ -3824,6 +3951,174 @@ class InterfaceBoundaryGenerator:
         if len(kinds) == 1:
             return next(iter(kinds)), False
         return "unknown", True
+
+    def _repository_for_callable(
+        self,
+        callable_info: CallableInfo,
+    ) -> RepositoryIndex | None:
+        if callable_info.qualified_name.startswith("vllm_ascend."):
+            return self.downstream
+        if callable_info.qualified_name.startswith("vllm."):
+            return self.upstream
+        for package, index in self.externals.items():
+            if callable_info.qualified_name == package or callable_info.qualified_name.startswith(f"{package}."):
+                return index
+        return None
+
+    def _bound_call_signature(
+        self,
+        signature: list[object] | None,
+        *,
+        descriptor_kind: str | None,
+        binds_receiver: bool,
+    ) -> list[object] | None:
+        if signature is None:
+            return None
+        result = json.loads(json.dumps(signature))
+        if not binds_receiver or descriptor_kind not in {"classmethod", "ordinary", "property"}:
+            return result
+        positional_only = result[1]
+        positional_or_keyword = result[2]
+        if positional_only:
+            positional_only.pop(0)
+        elif positional_or_keyword:
+            positional_or_keyword.pop(0)
+        else:
+            return None
+        return result
+
+    def _signature_contract(
+        self,
+        callable_info: CallableInfo,
+        *,
+        descriptor_kind: str | None = None,
+        binds_receiver: bool | None = None,
+    ) -> SignatureContract:
+        definition_signature = callable_info.signature
+        runtime_entry_signature = definition_signature
+        reported_signature = definition_signature
+        status = "exact"
+        provenance = ["ast_definition"]
+        forwarded_targets: list[str] = []
+        node = callable_info.node
+        decorators = tuple(node.decorator_list) if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) else ()
+        references = callable_info.decorator_references
+        if len(references) != len(decorators):
+            references = tuple(None for _ in decorators)
+
+        repository = self._repository_for_callable(callable_info)
+        for decorator, reference in reversed(tuple(zip(decorators, references))):
+            expression = _expression_name(decorator.func if isinstance(decorator, ast.Call) else decorator)
+            label = reference or expression or "<dynamic-decorator>"
+            if reference == "functools.wraps" and isinstance(decorator, ast.Call) and decorator.args:
+                target_expression = _expression_name(decorator.args[0])
+                target_name = None
+                if repository is not None and target_expression is not None:
+                    target_name = self._canonical_reference(
+                        repository.resolve_reference(
+                            callable_info.module,
+                            target_expression,
+                        )
+                    )
+                target_callable = self._callable_info(target_name) if target_name is not None else None
+                provenance.append(f"functools.wraps:{target_name or target_expression or '<unknown>'}")
+                if target_name is not None:
+                    forwarded_targets.append(target_name)
+                if target_callable is None:
+                    reported_signature = None
+                    status = "unknown"
+                else:
+                    reported_signature = target_callable.signature
+                continue
+            if reference in _BUILTIN_DESCRIPTOR_DECORATORS or reference in (
+                _TRANSPARENT_DESCRIPTOR_DECORATORS - {"functools.wraps"}
+            ):
+                provenance.append(label)
+                continue
+
+            pinned_version = next(
+                (
+                    version
+                    for package, version in self.source_versions.items()
+                    if reference
+                    in _PINNED_ORDINARY_DESCRIPTOR_DECORATORS.get(
+                        (package, version),
+                        (),
+                    )
+                ),
+                None,
+            )
+            if pinned_version is not None:
+                provenance.append(f"{label}@{pinned_version}")
+                continue
+
+            if expression is not None and expression.rsplit(".", 1)[-1] in {
+                "deleter",
+                "getter",
+                "setter",
+            }:
+                provenance.append(label)
+                continue
+
+            runtime_entry_signature = None
+            reported_signature = None
+            status = "unknown"
+            provenance.append(label)
+
+        effective_kind = callable_info.descriptor_kind if descriptor_kind is None else descriptor_kind
+        receiver_binding = callable_info.owner is not None if binds_receiver is None else binds_receiver
+        bound_call_signature = self._bound_call_signature(
+            runtime_entry_signature,
+            descriptor_kind=effective_kind,
+            binds_receiver=receiver_binding,
+        )
+        return SignatureContract(
+            definition_signature=definition_signature,
+            runtime_entry_signature=runtime_entry_signature,
+            reported_signature=reported_signature,
+            bound_call_signature=bound_call_signature,
+            forwarded_targets=tuple(dict.fromkeys(forwarded_targets)),
+            protocol=("property_access" if effective_kind == "property" else "python_call"),
+            status=status,
+            provenance=tuple(provenance),
+        )
+
+    def _append_signature_finding(
+        self,
+        relation: Relation,
+        *,
+        target_expression: str,
+        evidence_line: int,
+        evidence_scope: str | None = None,
+        evidence_guards: tuple[str, ...] = (),
+    ) -> None:
+        contracts = (
+            relation.upstream_signature_contract,
+            relation.downstream_signature_contract,
+            relation.installed_signature_contract,
+        )
+        if not any(contract is not None and contract.status != "exact" for contract in contracts):
+            return
+        self.findings.append(
+            CandidateFinding(
+                relation=relation.relation,
+                downstream_file=relation.downstream_file,
+                downstream_owner=relation.downstream_owner,
+                downstream_name=relation.downstream_name,
+                target_expression=target_expression,
+                evidence_line=evidence_line,
+                reason=(
+                    "a decorator changes the runtime callable contract and "
+                    "its exact signature effect is not proven for this source version"
+                ),
+                status="review",
+                reason_code="unknown_signature_transform",
+                generator_issue=False,
+                evidence_scope=evidence_scope,
+                evidence_guards=evidence_guards,
+                supplemental=True,
+            )
+        )
 
     def _append_descriptor_finding(
         self,
@@ -4466,6 +4761,18 @@ class InterfaceBoundaryGenerator:
             if downstream_callable and downstream_callable.binding_line is not None
             else getattr(method_node, "lineno", 0)
         )
+        upstream_signature_contract = self._signature_contract(
+            upstream_callable,
+            descriptor_kind=upstream_descriptor_kind,
+        )
+        downstream_signature_contract = (
+            self._signature_contract(
+                downstream_callable,
+                descriptor_kind=downstream_descriptor_kind,
+            )
+            if downstream_callable is not None
+            else None
+        )
         relation = Relation(
             relation="override",
             upstream_file=upstream_callable.file,
@@ -4491,6 +4798,9 @@ class InterfaceBoundaryGenerator:
             installed_property_accessors=(
                 downstream_callable.property_accessors if downstream_callable is not None else None
             ),
+            upstream_signature_contract=upstream_signature_contract,
+            downstream_signature_contract=downstream_signature_contract,
+            installed_signature_contract=downstream_signature_contract,
         )
         self.relations.append(relation)
         self._append_descriptor_finding(
@@ -4498,6 +4808,11 @@ class InterfaceBoundaryGenerator:
             target_expression=upstream_name,
             evidence_line=evidence_line,
             conditional=(upstream_descriptor_conditional or downstream_descriptor_conditional),
+        )
+        self._append_signature_finding(
+            relation,
+            target_expression=upstream_name,
+            evidence_line=evidence_line,
         )
 
     def _effective_method_resolution(
@@ -4632,6 +4947,10 @@ class InterfaceBoundaryGenerator:
                             getattr(node, "lineno", 0),
                         ),
                         ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
+                    ),
+                    decorator_references=self.downstream._decorator_references_by_node.get(
+                        id(node),
+                        (),
                     ),
                 )
                 definitions[identity] = PrivateHelperDefinition(
@@ -6483,6 +6802,10 @@ class InterfaceBoundaryGenerator:
                         ),
                         ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
                     ),
+                    decorator_references=self.downstream._decorator_references_by_node.get(
+                        id(node),
+                        (),
+                    ),
                 )
                 context.bindings.pop(node.name, None)
                 context.binding_alternatives.pop(node.name, None)
@@ -7442,6 +7765,19 @@ class InterfaceBoundaryGenerator:
             target_expression=evidence_target or target,
             installed_descriptor_kind=installed_descriptor_kind,
         )
+        upstream_signature_contract = self._signature_contract(
+            upstream_callable,
+            descriptor_kind=upstream_descriptor_kind,
+        )
+        downstream_signature_contract = self._signature_contract(
+            replacement.info,
+            descriptor_kind=downstream_descriptor_kind,
+        )
+        installed_signature_contract = self._signature_contract(
+            replacement.info,
+            descriptor_kind=installed_descriptor_kind,
+            binds_receiver=target_uses_descriptor,
+        )
         relation = Relation(
             relation="monkey_patch",
             upstream_file=upstream_callable.file,
@@ -7459,6 +7795,9 @@ class InterfaceBoundaryGenerator:
             upstream_descriptor_kind=upstream_descriptor_kind,
             downstream_descriptor_kind=downstream_descriptor_kind,
             installed_descriptor_kind=installed_descriptor_kind,
+            upstream_signature_contract=upstream_signature_contract,
+            downstream_signature_contract=downstream_signature_contract,
+            installed_signature_contract=installed_signature_contract,
         )
         self.relations.append(relation)
         self._append_descriptor_finding(
@@ -7466,6 +7805,13 @@ class InterfaceBoundaryGenerator:
             target_expression=evidence_target or target,
             evidence_line=line,
             conditional=upstream_descriptor_conditional,
+            evidence_scope=self._scope_name(context),
+            evidence_guards=context.guard_texts,
+        )
+        self._append_signature_finding(
+            relation,
+            target_expression=evidence_target or target,
+            evidence_line=line,
             evidence_scope=self._scope_name(context),
             evidence_guards=context.guard_texts,
         )
@@ -7895,6 +8241,10 @@ class InterfaceBoundaryGenerator:
                 binding_line=line,
                 origin_kind=kind,
                 descriptor_kind=descriptor_kind,
+                decorator_references=self.downstream._decorator_references_by_node.get(
+                    id(returned_node),
+                    (),
+                ),
             ),
             kind=kind,
             installed_descriptor_kind=("unknown" if identity_return else descriptor_kind or "unknown"),
