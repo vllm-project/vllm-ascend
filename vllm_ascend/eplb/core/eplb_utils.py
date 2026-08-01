@@ -20,6 +20,7 @@ from collections import defaultdict
 
 import numpy as np
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 
@@ -70,13 +71,30 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
     return torch.tensor(groups, dtype=torch.int32)
 
 
+def generate_global_placement_elastic_ep(n_expert, ep_size, n_redundant, num_shared_experts):
+    n_expert -= num_shared_experts
+    if (n_expert + n_redundant) % ep_size != 0:
+        raise ValueError("(n_expert + n_redundant) % ep_size must be 0")
+    # Split (routed + redundant) physical slots evenly across ranks, then wrap
+    # redundant ids back to routed ids via modulo. This distributes replicas
+    # uniformly (each logical expert replicated on evenly-spaced ranks) and
+    # matches the placement used before the EPLB decoupling.
+    all_experts = np.arange(n_expert + n_redundant)
+    groups = np.array_split(all_experts, ep_size)
+    groups = [group % n_expert for group in groups]
+    if num_shared_experts > 0:
+        for i, group in enumerate(groups):
+            groups[i] = np.append(group, n_expert + i % num_shared_experts)
+    return torch.tensor(groups, dtype=torch.int32)
+
+
 def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1, tp_size=None):
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
     global_placement = None
     eplb_enable = eplb_config.dynamic_eplb
-    n_redundant = eplb_config.num_redundant_experts if eplb_enable else 0
+    n_redundant = eplb_config.num_redundant_experts
     num_shared_experts = num_shared_experts if mix_placement else 0
 
     if ep_size == 1:
@@ -84,15 +102,17 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         return None, None, None, n_redundant
 
     if expert_map_path:
-        eplb_enable = True
         global_placement, physical_count = expert_file_to_tensor(expert_map_path, layer_id)
         n_redundant = physical_count - n_experts
-    elif not eplb_enable:
+    elif not eplb_enable and not get_current_vllm_config().parallel_config.enable_elastic_ep:
         _, expert_map, _ = determine_expert_map(ep_size, moe_config.ep_rank, n_experts)
         return None, expert_map, None, 0
 
     if global_placement is None:
-        global_placement = generate_global_placement(n_experts, ep_size, n_redundant, num_shared_experts)
+        if get_current_vllm_config().parallel_config.enable_elastic_ep:
+            global_placement = generate_global_placement_elastic_ep(n_experts, ep_size, n_redundant, num_shared_experts)
+        else:
+            global_placement = generate_global_placement(n_experts, ep_size, n_redundant, num_shared_experts)
         if mix_placement:
             n_redundant += ep_size - 1
     global_expert_map = []
@@ -103,15 +123,11 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         global_expert_map.append(expert_map)
         if rankid == moe_config.ep_rank:
             local_expert_map = expert_map
-    log2phy = (
-        generate_log2phy_map(
-            global_expert_map,
-            moe_config.ep_rank,
-            tp_size=int(tp_size) if tp_size is not None else None,
-        ).npu()
-        if eplb_enable
-        else None
-    )
+    log2phy = generate_log2phy_map(
+        global_expert_map,
+        moe_config.ep_rank,
+        tp_size=int(tp_size) if tp_size is not None else None,
+    ).npu()
 
     return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant
 

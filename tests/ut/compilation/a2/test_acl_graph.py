@@ -145,6 +145,9 @@ class TestACLGraphWrapper(TestBase):
         self.mock_forward_context.batch_descriptor = self.mock_batch_descriptor
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
+        # Reset global variable to ensure test isolation
+        acl_graph._acl_graph_pool = None
+
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
     @patch("vllm_ascend.compilation.acl_graph.envs")
     def test_initialization_with_default_options(self, mock_envs, mock_current_platform):

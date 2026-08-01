@@ -1,8 +1,45 @@
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
+from vllm.distributed import get_cached_tcp_store_client
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    _init_stateless_group,
+    get_world_group,
+    init_model_parallel_group,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+
+def _init_ep_like_group(
+    group_ranks: list[list[int]],
+    group_name: str,
+    master_ip: str,
+    backend: str,
+    *,
+    coord_store=None,
+    enable_elastic_ep: bool = False,
+) -> GroupCoordinator:
+    """Create an EP-like communication group (mc2 / dynamic_eplb / fc3_quant_x).
+
+    When elastic EP is enabled, use stateless groups so new ranks can join
+    dynamically; otherwise use standard model parallel groups.
+    """
+    if enable_elastic_ep:
+        return _init_stateless_group(
+            group_ranks,
+            group_name,
+            master_ip,
+            backend,
+            coord_store=coord_store,
+        )
+    return init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name=group_name,
+    )
+
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -24,12 +61,25 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
-    world_size = torch.distributed.get_world_size()
-    backend = torch.distributed.get_backend(get_world_group().device_group)
+    enable_elastic_ep = parallel_config.enable_elastic_ep
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
+    coord_store = None
+    if enable_elastic_ep:
+        coord_store = get_cached_tcp_store_client(
+            parallel_config.data_parallel_master_ip,
+            parallel_config._coord_store_port,
+        )
+        # Use stateless world group for global information
+        world_size = get_world_group().world_size
+        tp_pp_pcp_size = global_tp_size * global_pp_size * global_pcp_size
+        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(global_pp_size, global_pcp_size, global_tp_size)
+        backend = "hccl"
+    else:
+        world_size = torch.distributed.get_world_size()
+        backend = torch.distributed.get_backend(get_world_group().device_group)
 
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
@@ -51,12 +101,16 @@ def init_ascend_model_parallel(
     if pd_head_ratio > 1 and get_current_vllm_config().kv_transfer_config.is_kv_producer:
         num_head_replica = get_ascend_config().num_head_replica
         remote_tp_size = global_tp_size // pd_tp_ratio
+        ranks_base = local_all_ranks if enable_elastic_ep else all_ranks
         if num_head_replica <= 1:
-            group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
+            group_ranks = ranks_base.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-            group_ranks = all_ranks.clone().view(
-                global_dp_size * global_pp_size * global_pcp_size, -1, num_head_replica
-            )  # [DP_size, num_head, num_head_replica]
+            reshape_dim = (
+                global_pp_size * global_pcp_size
+                if enable_elastic_ep
+                else global_dp_size * global_pp_size * global_pcp_size
+            )
+            group_ranks = ranks_base.clone().view(reshape_dim, -1, num_head_replica)
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
@@ -83,13 +137,23 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
-    global _MC2
-    _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
-
+    global _MC2, _DYNAMIC_EPLB
+    _MC2 = _init_ep_like_group(
+        group_ranks,
+        "mc2",
+        parallel_config.data_parallel_master_ip,
+        backend,
+        coord_store=coord_store,
+        enable_elastic_ep=enable_elastic_ep,
+    )
     if get_ascend_config().eplb_config.dynamic_eplb:
-        global _DYNAMIC_EPLB
-        _DYNAMIC_EPLB = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
+        _DYNAMIC_EPLB = _init_ep_like_group(
+            group_ranks,
+            "dynamic_eplb",
+            parallel_config.data_parallel_master_ip,
+            backend,
+            coord_store=coord_store,
+            enable_elastic_ep=enable_elastic_ep,
         )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
@@ -132,6 +196,24 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+
+
+def _replace_ascend_active_groups(
+    *,
+    mc2: GroupCoordinator | None,
+    dynamic_eplb: GroupCoordinator | None,
+) -> None:
+    """Destroy the current DP/EP/WORLD/EPLB groups and replace them.
+
+    Destruction is collective — all ranks in the old groups must call this
+    function together.  Pass all-``None`` to tear down without replacement.
+    """
+    global _MC2, _DYNAMIC_EPLB
+    for group in (_MC2, _DYNAMIC_EPLB):
+        if group is not None:
+            group.destroy()
+    _MC2 = mc2
+    _DYNAMIC_EPLB = dynamic_eplb
 
 
 def model_parallel_initialized():
