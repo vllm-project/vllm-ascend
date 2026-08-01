@@ -1,16 +1,16 @@
-File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/attention/attention_v1.py", line 1864, in forward
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/attention/attention_v1.py", line 1800, in forward_impl
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]     output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/attention/attention_v1.py", line 1526, in forward_fused_infer_attention
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]     fa3_graph_params = self._get_fa3_graph_params(
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/attention/attention_v1.py", line 541, in _get_fa3_graph_params
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]     meta = get_scheduler_metadata(
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]            ^^^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/flash_attn_npu_3/flash_attn_npu_interface.py", line 1150, in get_scheduler_metadata
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]     scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004]                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-(Worker_TP2 pid=41905) ERROR 08-01 16:48:57 [multiproc_executor.py:1004] RuntimeError: aclrtSynchronizeStream(aicpuStream) failed
+File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2354, in execute_model
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]     hidden_states = self._model_forward(
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]                     ^^^^^^^^^^^^^^^^^^^^
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2924, in _model_forward
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]     self._update_full_graph_params_if_needed(
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2884, in _update_full_graph_params_if_needed
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]     update_full_graph_params(
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/compilation/acl_graph.py", line 290, in update_full_graph_params
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]     impl_cls.update_graph_params(
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/attention/attention_v1.py", line 633, in update_graph_params
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]     block_table_buf[:n_bt].copy_(meta.block_tables[:n_bt])
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004] RuntimeError: copy_d2d_baseformat_opapi:../torch_npu/csrc/aten/ops/op_api/CopyKernelOpApi.cpp:89 NPU function error: call aclnnInplaceCopy failed, error code is 161002
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004] [ERROR] 2026-08-01-18:35:19 (PID:44177, Device:0, RankID:-1) ERR00100 PTA call acl api failed.
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004] [PID: 44177] 2026-08-01-18:35:19.418.903 Invalid_Argument_Tensor_Input_Shape(EZ1007): Shape [2, 128] of the tensor of operator aclnnInplaceCopy_38219 has incorrect dimension 128. Reason: The tensor whose shape is [2, 128] and the tensor whose shape is [2, 129] do not meet the broadcast condition.
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004] TraceBack (most recent call last):
+(Worker_TP0 pid=44177) ERROR 08-01 18:35:19 [multiproc_executor.py:1004]         The size of tensor self [2, 129] must match the size of tensor src [2, 128].
