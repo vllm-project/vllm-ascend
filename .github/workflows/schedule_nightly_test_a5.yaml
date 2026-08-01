@@ -98,20 +98,91 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ inputs.test_cases }}'.trim();
-
             core.setOutput('ref', context.sha || 'unknown');
-
-            if (testCases) {
-              core.setOutput('run', 'true');
-              if (testCases === 'all') {
-                core.setOutput('filter', 'all');
+            core.setOutput('request_id', '');
+            core.setOutput('vllm_ascend_branch', 'main');
+            core.setOutput('is_pr_event', 'false');
+            
+            // workflow_dispatch 手动触发
+            if (eventName === 'workflow_dispatch') {
+              const inputs = context.payload.inputs || {};
+              const testCases = (inputs.test_cases || '').trim();
+              core.setOutput('ref', inputs.vllm_ascend_ref || context.sha || '');
+              core.setOutput('request_id', inputs.request_id || '');
+              core.setOutput('vllm_ascend_branch', inputs.vllm_ascend_branch || 'main');
+              core.setOutput('is_pr_event', 'false');
+              if (testCases) {
+                core.setOutput('run', 'true');
+                if (testCases === 'all') {
+                  core.setOutput('filter', 'all');
+                } else {
+                  core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+                }
               } else {
-                core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
               }
               return;
             }
-
+            
+            // pull_request 事件（labeled / synchronize）
+            if (eventName === 'pull_request') {
+              const labels = context.payload.pull_request.labels.map(l => l.name);
+              const prNumber = context.payload.pull_request.number;
+              core.setOutput('ref', context.payload.pull_request.head.sha);
+              core.setOutput('request_id', 'pr-' + prNumber);
+              core.setOutput('vllm_ascend_branch', 'main');
+              core.setOutput('is_pr_event', 'true');
+            
+              // 识别标签 nightly-test-a5
+              if (!labels.includes('nightly-test-a5')) {
+                core.info('nightly-test-a5 label not found; skipping.');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+            
+              // 查找最新 /nightly-pr 评论
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+              let testFilter = null;
+              for (let i = comments.length - 1; i >= 0; i--) {
+                const body = comments[i].body;
+                if (!body) continue;
+                const match = body.trim().match(/^\/nightly-pr(?:\s+(.+))?$/m);
+                if (match) {
+                  const args = (match[1] || '').trim();
+                  if (!args) {
+                    core.info('/nightly-pr without arguments; skipping all tests.');
+                    testFilter = 'none';
+                  } else {
+                    testFilter = ',' + args.split(/\s+/).join(',') + ',';
+                  }
+                  break;
+                }
+              }
+            
+              if (testFilter === null) {
+                core.info('nightly-test-a5 label present but no /nightly-pr comment found; skipping.');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+              if (testFilter === 'none') {
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+              core.setOutput('run', 'true');
+              core.setOutput('filter', testFilter);
+              return;
+            }
+            
+            // fallback
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
 
@@ -167,6 +238,7 @@ jobs:
     name: Build nightly-a5 image
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
+      || github.event_name == 'pull_request'
     strategy:
       matrix:
         vllm_ascend_branch: >-
