@@ -30,9 +30,7 @@ def _nz_memory_to_logical(cache: torch.Tensor, block_size: int, width: int, c0: 
     # shape it was declared with. Re-read it as logical [block, block_size, width].
     block_num = cache.numel() // (block_size * width)
     return (
-        cache.reshape(block_num, width // c0, block_size, c0)
-        .permute(0, 2, 1, 3)
-        .reshape(block_num, block_size, width)
+        cache.reshape(block_num, width // c0, block_size, c0).permute(0, 2, 1, 3).reshape(block_num, block_size, width)
     )
 
 
@@ -117,9 +115,7 @@ SUPPORTED_MODE_COMBOS = [
 
 @pytest.mark.parametrize("cache_mode, quant_mode, dtype", SUPPORTED_MODE_COMBOS)
 @torch.inference_mode()
-def test_mla_preprocess_supported_modes(
-    cache_mode: str, quant_mode: str, dtype: torch.dtype
-):
+def test_mla_preprocess_supported_modes(cache_mode: str, quant_mode: str, dtype: torch.dtype):
     """Smoke-test every (cache_mode, quant_mode, dtype) the kernel instantiates."""
     torch.manual_seed(0)
     token_num = 8
@@ -144,25 +140,17 @@ def test_mla_preprocess_supported_modes(
     qnope_scale = torch.ones((head_num,), dtype=dtype, device="npu")
 
     if no_quant:
-        wdqkv = torch.randn(
-            (1, hidden_size // 16, mm1_out, 16), dtype=dtype, device="npu"
-        )
+        wdqkv = torch.randn((1, hidden_size // 16, mm1_out, 16), dtype=dtype, device="npu")
         wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
-        wuq = torch.randn(
-            (1, q_lora // 16, head_num * 192, 16), dtype=dtype, device="npu"
-        )
+        wuq = torch.randn((1, q_lora // 16, head_num * 192, 16), dtype=dtype, device="npu")
         wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
         beta1 = de_scale0 = de_scale1 = bias0 = bias1 = None
         quant_scale0 = quant_offset0 = quant_scale1 = quant_offset1 = None
     else:
         wuk = torch_npu.npu_format_cast(wuk, 29)
-        wdqkv = torch.randint(
-            0, 7, (1, hidden_size // 32, mm1_out, 32), dtype=torch.int8, device="npu"
-        )
+        wdqkv = torch.randint(0, 7, (1, hidden_size // 32, mm1_out, 32), dtype=torch.int8, device="npu")
         wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
-        wuq = torch.randint(
-            0, 7, (1, q_lora // 32, head_num * 192, 32), dtype=torch.int8, device="npu"
-        )
+        wuq = torch.randint(0, 7, (1, q_lora // 32, head_num * 192, 32), dtype=torch.int8, device="npu")
         wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
         beta1 = torch.randn((q_lora,), dtype=dtype, device="npu")
         de_scale0 = torch.rand((mm1_out,), dtype=torch.float32, device="npu")
@@ -177,12 +165,8 @@ def test_mla_preprocess_supported_modes(
     kv_cache, kv_cache_rope, ctkv_dtype, ctkv_fill = _build_mode_caches(
         cache_mode, block_num, block_size, kv_lora_rank, rope_dim, dtype
     )
-    q_nope_out = torch.full(
-        (token_num, head_num, kv_lora_rank), ctkv_fill, dtype=ctkv_dtype, device="npu"
-    )
-    q_rope_out = torch.full(
-        (token_num, head_num, rope_dim), float("nan"), dtype=dtype, device="npu"
-    )
+    q_nope_out = torch.full((token_num, head_num, kv_lora_rank), ctkv_fill, dtype=ctkv_dtype, device="npu")
+    q_rope_out = torch.full((token_num, head_num, rope_dim), float("nan"), dtype=dtype, device="npu")
     q_down = torch.empty((token_num, q_lora), dtype=dtype, device="npu")
 
     torch.ops._C_ascend.mla_preprocess(
@@ -224,9 +208,7 @@ def test_mla_preprocess_supported_modes(
     assert _tensor_written(kv_cache, ctkv_fill), "kv_cache was not written"
     # kvcache fuses rope into kv_cache; other modes write a separate rope cache.
     if cache_mode != "kvcache":
-        assert _tensor_written(kv_cache_rope, float("nan")), (
-            "kv_cache_rope was not written"
-        )
+        assert _tensor_written(kv_cache_rope, float("nan")), "kv_cache_rope was not written"
 
     gc.collect()
     torch.npu.empty_cache()
@@ -254,9 +236,7 @@ def test_mla_preprocess_qm1_noncontiguous_cache(cache_mode: str):
     hidden_states = torch.randn((token_num, hidden_size), dtype=dtype, device="npu")
     quant_scale0 = torch.tensor([0.25], dtype=dtype, device="npu")
     quant_offset0 = torch.zeros((1,), dtype=torch.int8, device="npu")
-    wdqkv = torch.randint(
-        0, 7, (1, 224, 2112, 32), dtype=torch.int8, device="npu"
-    )
+    wdqkv = torch.randint(0, 7, (1, 224, 2112, 32), dtype=torch.int8, device="npu")
     wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
     de_scale0 = torch.rand((2112,), dtype=torch.float32, device="npu")
     bias0 = torch.randint(0, 7, (2112,), dtype=torch.int32, device="npu")
@@ -265,16 +245,10 @@ def test_mla_preprocess_qm1_noncontiguous_cache(cache_mode: str):
 
     quant_scale1 = torch.tensor([0.25], dtype=dtype, device="npu")
     quant_offset1 = torch.zeros((1,), dtype=torch.int8, device="npu")
-    wuq = torch.randint(
-        0, 7, (1, 48, head_num * 192, 32), dtype=torch.int8, device="npu"
-    )
+    wuq = torch.randint(0, 7, (1, 48, head_num * 192, 32), dtype=torch.int8, device="npu")
     wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
-    de_scale1 = torch.rand(
-        (head_num * 192,), dtype=torch.float32, device="npu"
-    )
-    bias1 = torch.randint(
-        0, 7, (head_num * 192,), dtype=torch.int32, device="npu"
-    )
+    de_scale1 = torch.rand((head_num * 192,), dtype=torch.float32, device="npu")
+    bias1 = torch.randint(0, 7, (head_num * 192,), dtype=torch.int32, device="npu")
     gamma2 = torch.randn((512,), dtype=dtype, device="npu")
     cos = torch.randn((token_num, 64), dtype=dtype, device="npu")
     sin = torch.randn((token_num, 64), dtype=dtype, device="npu")
@@ -284,35 +258,21 @@ def test_mla_preprocess_qm1_noncontiguous_cache(cache_mode: str):
 
     ctkv_scale = torch.tensor([1.0], dtype=dtype, device="npu")
     qnope_scale = torch.ones((head_num,), dtype=dtype, device="npu")
-    ctkv_shape = (
-        (block_num, 512 // 32, block_size, 32)
-        if quantized_cache
-        else (block_num, block_size, 512)
-    )
-    rope_shape = (
-        (block_num, 64 // 16, block_size, 16)
-        if quantized_cache
-        else (block_num, block_size, 64)
-    )
+    ctkv_shape = (block_num, 512 // 32, block_size, 32) if quantized_cache else (block_num, block_size, 512)
+    rope_shape = (block_num, 64 // 16, block_size, 16) if quantized_cache else (block_num, block_size, 64)
     ctkv_dtype = torch.int8 if quantized_cache else dtype
     ctkv_fill = -85 if quantized_cache else float("nan")
 
     def run(stride: int):
-        kv_cache, kv_backing = _make_dim0_strided_cache(
-            ctkv_shape, stride, ctkv_dtype, ctkv_fill
-        )
-        kv_cache_rope, rope_backing = _make_dim0_strided_cache(
-            rope_shape, stride, dtype, float("nan")
-        )
+        kv_cache, kv_backing = _make_dim0_strided_cache(ctkv_shape, stride, ctkv_dtype, ctkv_fill)
+        kv_cache_rope, rope_backing = _make_dim0_strided_cache(rope_shape, stride, dtype, float("nan"))
         q_nope_out = torch.full(
             (token_num, head_num, 512),
             ctkv_fill,
             dtype=ctkv_dtype,
             device="npu",
         )
-        q_rope_out = torch.full(
-            (token_num, head_num, 64), float("nan"), dtype=dtype, device="npu"
-        )
+        q_rope_out = torch.full((token_num, head_num, 64), float("nan"), dtype=dtype, device="npu")
         q_down = torch.empty((token_num, 1536), dtype=dtype, device="npu")
 
         torch.ops._C_ascend.mla_preprocess(
@@ -360,9 +320,7 @@ def test_mla_preprocess_qm1_noncontiguous_cache(cache_mode: str):
     contiguous = run(1)
     noncontiguous = run(stride_factor)
 
-    for contiguous_output, noncontiguous_output in zip(
-        contiguous[:4], noncontiguous[:4]
-    ):
+    for contiguous_output, noncontiguous_output in zip(contiguous[:4], noncontiguous[:4]):
         torch.testing.assert_close(
             noncontiguous_output,
             contiguous_output,
@@ -370,12 +328,8 @@ def test_mla_preprocess_qm1_noncontiguous_cache(cache_mode: str):
             atol=0,
             equal_nan=True,
         )
-    _assert_dim0_holes_untouched(
-        noncontiguous[4], stride_factor, ctkv_fill
-    )
-    _assert_dim0_holes_untouched(
-        noncontiguous[5], stride_factor, float("nan")
-    )
+    _assert_dim0_holes_untouched(noncontiguous[4], stride_factor, ctkv_fill)
+    _assert_dim0_holes_untouched(noncontiguous[5], stride_factor, float("nan"))
 
 
 @torch.inference_mode()
@@ -431,12 +385,8 @@ def test_mla_preprocess_nzcache_accepts_logical_cache_shape():
             rope_shape = (block_num, rope_dim // c0, block_size, c0)
         kv_cache = torch.full(ctkv_shape, float("nan"), dtype=dtype, device="npu")
         kv_cache_rope = torch.full(rope_shape, float("nan"), dtype=dtype, device="npu")
-        q_nope_out = torch.full(
-            (token_num, head_num, kv_lora_rank), float("nan"), dtype=dtype, device="npu"
-        )
-        q_rope_out = torch.full(
-            (token_num, head_num, rope_dim), float("nan"), dtype=dtype, device="npu"
-        )
+        q_nope_out = torch.full((token_num, head_num, kv_lora_rank), float("nan"), dtype=dtype, device="npu")
+        q_rope_out = torch.full((token_num, head_num, rope_dim), float("nan"), dtype=dtype, device="npu")
         q_down = torch.empty((token_num, 1536), dtype=dtype, device="npu")
 
         torch.ops._C_ascend.mla_preprocess(
@@ -486,8 +436,6 @@ def test_mla_preprocess_nzcache_accepts_logical_cache_shape():
     physical = run(logical=False)
     logical = run(logical=True)
 
-    for name, expected, actual in zip(
-        ("q_nope", "q_rope", "cache_ctkv", "cache_rope"), physical, logical
-    ):
+    for name, expected, actual in zip(("q_nope", "q_rope", "cache_ctkv", "cache_rope"), physical, logical):
         assert not torch.isnan(actual).any(), f"{name} has unwritten slots"
         torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=name)
