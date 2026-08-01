@@ -248,8 +248,6 @@ jobs:
     with:
       target: a5
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_ref: >-
-        ${{ github.event_name == 'pull_request' && needs.parse-trigger.outputs.ref || inputs.vllm_ascend_ref }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
