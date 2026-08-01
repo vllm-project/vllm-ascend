@@ -681,6 +681,11 @@ inline void ValidateCacheNonFirstAxisContiguous(const at::Tensor &cache, const c
     auto strides = cache.strides();
     int64_t expectedStride = 1;
     for (int64_t i = static_cast<int64_t>(sizes.size()) - 1; i >= 1; --i) {
+        // A size-1 axis is never traversed, so PyTorch is free to report any
+        // stride for it (unsqueeze, slicing, ...).
+        if (sizes[i] == 1) {
+            continue;
+        }
         TORCH_CHECK(strides[i] == expectedStride,
                     tensorName, " dim", i, " is non-contiguous: actual stride=", strides[i],
                     ", expected contiguous stride=", expectedStride,
@@ -691,35 +696,41 @@ inline void ValidateCacheNonFirstAxisContiguous(const at::Tensor &cache, const c
 
 inline uint64_t GetTensorStride0(const at::Tensor &cache)
 {
-    const uint64_t defaultStride0 = GetDefaultStride0FromSizes(cache.sizes());
     if (cache.dim() < 1) {
-        return defaultStride0;
+        return GetDefaultStride0FromSizes(cache.sizes());
     }
-    const uint64_t actualStride0 = static_cast<uint64_t>(cache.stride(0));
-    return (actualStride0 == defaultStride0) ? defaultStride0 : actualStride0;
+    return static_cast<uint64_t>(cache.stride(0));
 }
 
-// blockSize: ND [blockNum, blockSize, ...] → dim1;
-// NZ physical storage [blockNum, C1, blockSize, C0] → dim2 when dim2 != 1.
+// The NZ cache modes accept two equivalent spellings of the same bytes:
+//   - physical  [blockNum, C1, blockSize, C0], as the ATB/ST harnesses build it
+//   - logical   [blockNum, blockSize, numKvHeads=1, dim], as vLLM allocates it
+// Both describe a compact block of blockSize*dim elements, so only the shape
+// interpretation differs. dim2 is the only axis that tells them apart.
+inline bool IsPhysicalNzCache(const at::Tensor &cache, int32_t cacheMode)
+{
+    const bool isNzCache = (cacheMode == 2 || cacheMode == 3);
+    return isNzCache && cache.dim() == 4 && cache.size(2) != 1;
+}
+
+// blockSize: physical NZ → dim2; ND and logical NZ → dim1.
 inline uint64_t GetKvCacheBlockSize(const at::Tensor &kv_cache, int32_t cacheMode)
 {
     auto sizes = kv_cache.sizes();
     TORCH_CHECK(sizes.size() >= 2, "kv_cache must have at least 2 dims");
-    const bool isNzCache = (cacheMode == 2 || cacheMode == 3);
-    if (isNzCache && sizes.size() > 2 && sizes[2] != 1) {
+    if (IsPhysicalNzCache(kv_cache, cacheMode)) {
         return static_cast<uint64_t>(sizes[2]);
     }
     return static_cast<uint64_t>(sizes[1]);
 }
 
-// NZ rope caches are [blockNum, ropeDim/16, blockSize, 16], so their last axis
-// is C0 rather than the rope dim; recover the rope dim from the C1/C0 pair.
+// Physical NZ rope caches are [blockNum, ropeDim/16, blockSize, 16], so their
+// last axis is C0 rather than the rope dim; recover it from the C1/C0 pair.
 inline uint32_t GetRopeHeadDim(const at::Tensor &kv_cache_rope, int32_t cacheMode)
 {
     auto sizes = kv_cache_rope.sizes();
     TORCH_CHECK(!sizes.empty(), "kv_cache_rope must not be a scalar");
-    const bool isNzCache = (cacheMode == 2 || cacheMode == 3);
-    if (isNzCache && sizes.size() == 4) {
+    if (IsPhysicalNzCache(kv_cache_rope, cacheMode)) {
         return static_cast<uint32_t>(sizes[1] * sizes[3]);
     }
     return static_cast<uint32_t>(sizes.back());
