@@ -104,12 +104,10 @@ jobs:
             if (eventName === 'pull_request') {
                 const pullRequest = payload.pull_request;
                 const hasNightlyLabel = pullRequest.labels.some(label => label.name === 'nightly-test');
-                if (!hasNightlyLabel) {
-                    core.info('PR missing nightly-test label, skip nightly jobs');
-                    core.setOutput('run', 'false');
-                    core.setOutput('filter', '');
-                    return;
-                }
+                // 强制启用，忽略标签判断
+                core.info('Force run nightly test cases, skip label check');
+                testFilter = 'all';
+                core.setOutput('run', 'true');
                 core.info('Detect nightly-test label, run all nightly test cases');
                 testFilter = 'all';
             } else if (eventName === 'workflow_dispatch') {
