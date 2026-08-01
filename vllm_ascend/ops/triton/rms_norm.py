@@ -2,7 +2,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["hidden_state_stride_bs", "total_batch"])
 def triton_rms_kernel(
     hidden_state_ptr,
     hidden_state_stride_bs,
