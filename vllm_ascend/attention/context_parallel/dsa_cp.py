@@ -899,9 +899,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if is_noncausal:
             local_query_lens = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
-            local_seq_lens[:num_reqs].copy_(
-                torch.where(local_query_lens > 0, seq_lens[:num_reqs], 0)
-            )
+            local_seq_lens[:num_reqs].copy_(torch.where(local_query_lens > 0, seq_lens[:num_reqs], 0))
         return (
             local_start,
             local_end,
