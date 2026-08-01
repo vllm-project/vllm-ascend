@@ -2416,28 +2416,31 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(cache_call["slot_mapping"], slots)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_scatter_pa_kv_cache")
     @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_quantize")
-    @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
-    def test_kimi_k3_exec_kv_prefill_quantizes_a3_latent_cache_to_int8(
+    def test_kimi_k3_exec_kv_prefill_quantizes_and_writes_a3_nz_cache(
         self,
-        mock_reshape_and_cache,
         mock_npu_quantize,
+        mock_scatter_pa_kv_cache,
         mock_get_device_type,
     ):
         self.impl.use_mla_rope = False
         self.impl.fa_quant_layer = True
         self.impl.num_kv_heads = 1
-        self.impl.kv_lora_rank = 4
-        self.impl.qk_rope_head_dim = 2
+        self.impl.kv_lora_rank = 32
+        self.impl.qk_rope_head_dim = 16
         self.impl.fak_descale_reciprocal = torch.tensor([4.0])
         self.impl.dtype = torch.int8
-        kv_no_split = torch.arange(12, dtype=torch.bfloat16).view(2, 1, 6)
-        kv_c_normed = kv_no_split[..., :4] + 100
-        raw_k_pe = kv_no_split[..., 4:]
+        kv_no_split = torch.arange(96, dtype=torch.bfloat16).view(2, 1, 48)
+        kv_c_normed = kv_no_split[..., :32] + 100
+        raw_k_pe = kv_no_split[..., 32:]
         quantized_kv_c = torch.zeros(kv_c_normed.shape, dtype=torch.int8)
         self.impl.kv_a_layernorm = MagicMock(return_value=kv_c_normed)
         mock_npu_quantize.return_value = quantized_kv_c
-        kv_cache = (MagicMock(name="latent_cache"), MagicMock(name="position_cache"))
+        kv_cache = (
+            torch.empty(2, 4, 1, 32, dtype=torch.int8),
+            torch.empty(2, 4, 1, 16, dtype=torch.bfloat16),
+        )
         slots = torch.tensor([3, 7])
 
         k_pe, k_nope = self.impl.exec_kv_prefill(
@@ -2458,23 +2461,25 @@ class TestAscendMLAImpl(TestBase):
             -1,
             False,
         )
-        self.assertEqual(mock_reshape_and_cache.call_count, 2)
-        latent_call, position_call = mock_reshape_and_cache.call_args_list
+        self.assertEqual(mock_scatter_pa_kv_cache.call_count, 2)
+        latent_call, position_call = mock_scatter_pa_kv_cache.call_args_list
         latent_call = latent_call.kwargs
         position_call = position_call.kwargs
 
-        self.assertIs(latent_call["key"], quantized_kv_c)
-        self.assertIs(latent_call["value"], quantized_kv_c)
-        self.assertIs(latent_call["key_cache"], kv_cache[0])
-        self.assertIs(latent_call["value_cache"], kv_cache[0])
-        self.assertIs(latent_call["slot_mapping"], slots)
+        torch.testing.assert_close(latent_call["key"], quantized_kv_c)
+        torch.testing.assert_close(latent_call["value"], quantized_kv_c)
+        self.assertEqual(latent_call["key_cache"].shape, (2, 1, 1, 4, 32))
+        self.assertIs(latent_call["key_cache"]._base, kv_cache[0])
+        self.assertIs(latent_call["value_cache"]._base, kv_cache[0])
+        torch.testing.assert_close(latent_call["slot_mapping"], slots)
         self.assertEqual(latent_call["key"].dtype, latent_call["value"].dtype)
 
         torch.testing.assert_close(position_call["key"], raw_k_pe)
         torch.testing.assert_close(position_call["value"], raw_k_pe)
-        self.assertIs(position_call["key_cache"], kv_cache[1])
-        self.assertIs(position_call["value_cache"], kv_cache[1])
-        self.assertIs(position_call["slot_mapping"], slots)
+        self.assertEqual(position_call["key_cache"].shape, (2, 1, 1, 4, 16))
+        self.assertIs(position_call["key_cache"]._base, kv_cache[1])
+        self.assertIs(position_call["value_cache"]._base, kv_cache[1])
+        torch.testing.assert_close(position_call["slot_mapping"], slots)
         self.assertEqual(position_call["key"].dtype, position_call["value"].dtype)
 
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")

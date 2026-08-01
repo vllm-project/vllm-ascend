@@ -1570,21 +1570,57 @@ class AscendMLAImpl(MLAAttentionImpl):
                 -1,
                 False,
             )
-            # reshape_and_cache requires key and value to have the same dtype.
-            DeviceOperator.reshape_and_cache(
-                key=cache_kv_c,
-                value=cache_kv_c,
-                key_cache=kv_cache[0],
-                value_cache=kv_cache[0],
-                slot_mapping=slots,
-            )
-            DeviceOperator.reshape_and_cache(
-                key=k_pe,
-                value=k_pe,
-                key_cache=kv_cache[1],
-                value_cache=kv_cache[1],
-                slot_mapping=slots,
-            )
+            if device_type == AscendDeviceType.A3:
+                # A3 C8 FIA consumes PA_NZ KV.  The regular
+                # ``reshape_and_cache`` path writes the logical BSND layout;
+                # merely viewing that storage as NZ in _forward_decode changes
+                # its interpretation and corrupts every decode attention read.
+                # Scatter directly into the matching 5D NZ views instead.
+                block_size = kv_cache[0].shape[1]
+                latent_cache_nz = kv_cache[0].view(
+                    -1,
+                    self.num_kv_heads,
+                    self.kv_lora_rank // 32,
+                    block_size,
+                    32,
+                )
+                rope_cache_nz = kv_cache[1].view(
+                    -1,
+                    self.num_kv_heads,
+                    self.qk_rope_head_dim // 16,
+                    block_size,
+                    16,
+                )
+                torch_npu.npu_scatter_pa_kv_cache(
+                    key=cache_kv_c.contiguous(),
+                    value=cache_kv_c.contiguous(),
+                    key_cache=latent_cache_nz,
+                    value_cache=latent_cache_nz,
+                    slot_mapping=slots.contiguous(),
+                )
+                torch_npu.npu_scatter_pa_kv_cache(
+                    key=k_pe.contiguous(),
+                    value=k_pe.contiguous(),
+                    key_cache=rope_cache_nz,
+                    value_cache=rope_cache_nz,
+                    slot_mapping=slots.contiguous(),
+                )
+            else:
+                # reshape_and_cache requires key and value to have the same dtype.
+                DeviceOperator.reshape_and_cache(
+                    key=cache_kv_c,
+                    value=cache_kv_c,
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[0],
+                    slot_mapping=slots,
+                )
+                DeviceOperator.reshape_and_cache(
+                    key=k_pe,
+                    value=k_pe,
+                    key_cache=kv_cache[1],
+                    value_cache=kv_cache[1],
+                    slot_mapping=slots,
+                )
         else:
             DeviceOperator.reshape_and_cache(
                 key=cache_kv_c,
