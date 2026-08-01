@@ -468,12 +468,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
-        # Seed the graph-cache during eager (warmup) so graph capture never
-        # calls get_scheduler_metadata inside torch.npu.graph() — FA3's
+        # Seed the graph-cache during eager decode (warmup) so graph capture
+        # never calls get_scheduler_metadata inside torch.npu.graph() — FA3's
         # get_scheduler_metadata performs an aclrtSynchronizeStream which is
         # illegal on the captured stream.
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        self._get_fa3_graph_params(num_tokens, attn_metadata, block_size, query)
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            self._get_fa3_graph_params(num_tokens, attn_metadata, block_size, query)
 
         cache_seqlens = attn_metadata.seq_lens
         if cache_seqlens.device != query.device:
@@ -503,38 +504,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_size: int,
         query: torch.Tensor,
     ):
-        """Return cached FA3 graph params for *num_tokens*.
+        """Return cached FA3 graph params for *num_tokens* (decode only).
 
         Pre-allocates MAX-configuration NPU buffers (fixed shapes) so that:
-          1. ``scheduler_metadata`` is valid for any batch padded up to the
-             graph's maximum size — the schedule is fixed at capture time.
+          1. ``scheduler_metadata`` is valid for any decode batch padded up to
+             the graph's maximum size — every decode request has exactly one
+             query token, so ``max_seqlen_q=1`` is always correct.
           2. The buffers' data is refreshed before each replay via
              ``update_graph_params`` (no H2D inside ``torch.npu.graph()``).
-          3. The ``block_table`` buffer is zero-padded so padding sequences
+          3. The ``block_table`` buffer is zero-padded so padding requests
              point to block 0 (valid memory), never stale freed blocks.
 
-        Returns ``None`` for non-cache attention states (PrefillNoCache).
+        Returns ``None`` for non-decode attention states (prefill stays on
+        the CANN V1 graph path).
         """
         if num_tokens in self._fa3_scheduler_metadata:
             return self._fa3_scheduler_metadata[num_tokens]
 
-        is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
-        if not is_cache:
-            self._fa3_scheduler_metadata[num_tokens] = None
-            return None
+        if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+            return None  # prefill stays on CANN V1; do not cache
 
         from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
 
         device = query.device
-        # Worst-case config for this graph size: up to num_tokens sequences,
-        # one of which may hold all num_tokens query tokens, and KV length up
-        # to the model's max sequence length.
+        # Decode config: num_tokens requests, each with exactly 1 query token,
+        # KV length up to the model's max sequence length.
         max_batch_size = num_tokens
-        max_seqlen_q = num_tokens
-        max_seqlen_k = max(
-            num_tokens,
-            getattr(self.vllm_config.model_config, "max_model_len", num_tokens),
-        )
+        max_seqlen_q = 1
+        max_seqlen_k = getattr(self.vllm_config.model_config, "max_model_len", num_tokens)
         # Match the buffer's block-table width to the actual block table so
         # the pre-replay .copy_() shapes align.
         if attn_metadata.block_tables is not None:
@@ -549,14 +546,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
         )
 
-        # Populate buffers with the current (warmup) batch data so that
-        # get_scheduler_metadata sees valid seq_lens rather than zeros.
+        # Decode: cu_seqlens_q is always [0, 1, ..., num_tokens] (each request
+        # has exactly 1 query token).  Fixed at allocation time.
+        cu_seqlens_q_buf.copy_(
+            torch.arange(max_batch_size + 1, dtype=torch.int32, device=device)
+        )
+        # cache_seqlens: warmup batch's real KV lengths.
         n = min(attn_metadata.seq_lens.numel(), max_batch_size)
         cache_seqlens_buf[:n].copy_(attn_metadata.seq_lens[:n].to(device=device))
-        n_cu = min(attn_metadata.query_start_loc.numel(), max_batch_size + 1)
-        cu_seqlens_q_buf[:n_cu].copy_(attn_metadata.query_start_loc[:n_cu])
 
-        # Scheduler metadata for the MAX config — valid for any padded batch.
+        # Scheduler metadata for the decode max config — valid for any decode
+        # batch padded to num_tokens requests.
         meta = get_scheduler_metadata(
             batch_size=max_batch_size,
             max_seqlen_q=max_seqlen_q,
@@ -1410,7 +1410,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # Use fixed-size NPU buffers from the cached graph params — no
             # H2D copy or tensor creation inside the graph capture stream.
             scheduler_metadata, cache_seqlens, cu_seqlens_q, block_table_buf = fa3_graph_params
-            max_seqlen_q = num_tokens  # max config: worst-case query length
+            max_seqlen_q = 1  # decode: every request has exactly 1 query token
 
             causal = attn_metadata.causal
             window_size = (
@@ -1534,13 +1534,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            if self._fa3_enabled:
-                # FA3 graph capture for ALL layers when FA3 is available.
-                # Using FA3 and CANN FIA ops in the same torch.npu.graph()
-                # session corrupts CANN runtime capture state — the FA3
-                # CustomOp interferes with CANN's internal AICPU metadata
-                # tracking (ComputeFAMetadataPv), causing subsequent CANN
-                # FIA ops to crash.
+            if self._fa3_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                # FA3 decode-only graph capture.  Decode has exactly 1 query
+                # token per request (num_tokens == batch size), so the fixed
+                # scheduler config is always valid.  Prefill (variable batch /
+                # long sequences) stays on CANN V1 — padding prefill to the
+                # graph size would overflow the query tensor.
                 key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
                     key, value, attn_metadata, kv_cache,
                 )
@@ -1605,7 +1604,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if self._fa3_enabled:
+            if self._fa3_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 from vllm_ascend.attention.fa3_adapter import fa3_forward
 
                 is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
@@ -1639,7 +1638,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
 
-            if not self._fa3_enabled:
+            # CANN V1 path: prefill always runs here (FA3 is decode-only); decode
+            # reaches here only if FA3 failed (self._fa3_enabled reset to False).
+            if not self._fa3_enabled or attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
                 if not attn_metadata.causal:
                     attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                         query=query,
