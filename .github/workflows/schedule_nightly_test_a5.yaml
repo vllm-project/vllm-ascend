@@ -104,17 +104,14 @@ jobs:
             if (eventName === 'pull_request') {
                 const pullRequest = payload.pull_request;
                 const hasNightlyLabel = pullRequest.labels.some(label => label.name === 'nightly-test');
-                // 强制启用，忽略标签判断
                 core.info('Force run nightly test cases, skip label check');
                 testFilter = 'all';
                 core.setOutput('run', 'true');
-                core.info('Detect nightly-test label, run all nightly test cases');
-                testFilter = 'all';
             } else if (eventName === 'workflow_dispatch') {
                 testFilter = core.getInput('test_cases') || 'all';
+                core.setOutput('run', 'true');
             }
 
-            core.setOutput('run', 'true');
             core.setOutput('filter', testFilter);
 
   setup-vars:
@@ -172,33 +169,10 @@ jobs:
           echo "::notice title=multi_node::${{ steps.set-matrix.outputs.multi_node }}"
           echo "::notice title=double_node::${{ steps.set-matrix.outputs.double_node }}"
           echo "::notice title=multi_card::${{ steps.set-matrix.outputs.multi_card }}"
-  # build-image:
-  #   name: Build nightly-a5 image
-  #   if: false
-  #   # if: >-
-  #   #   (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
-  #   #   || github.event_name == 'pull_request'
-  #   strategy:
-  #     matrix:
-  #       vllm_ascend_branch: >-
-  #         ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' && needs['parse-trigger'].outputs.vllm_ascend_branch || inputs.vllm_ascend_branch)) }}
-  #   uses: ./.github/workflows/_nightly_image_build.yaml
-  #   with:
-  #     target: a5
-  #     vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-  #   secrets:
-  #     HW_USERNAME: ${{ secrets.HW_USERNAME }}
-  #     HW_TOKEN: ${{ secrets.HW_TOKEN }}
-  #     GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
   multi-node-tests:
     name: multi-node
     needs: [setup-vars, parse-trigger]
-    # needs: [setup-vars, parse-trigger, build-image]
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
@@ -206,7 +180,7 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJson(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -236,12 +210,7 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, multi-node-tests]
-    # needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
@@ -249,7 +218,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJson(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -280,11 +249,6 @@ jobs:
   single-node-tests:
     name: single-node
     needs: [setup-vars, parse-trigger]
-    # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
@@ -292,7 +256,7 @@ jobs:
       fail-fast: false
       max-parallel: 9
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJson(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
@@ -313,19 +277,14 @@ jobs:
 
   multi-card-tests:
     name: multi-card
-    needs: [setup-vars, parse-trigger, double-node-tests]
-    # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJson(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_card) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
