@@ -157,6 +157,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Debug print parsed test matrix
+        run: |
+          echo "Test filter value: ${{ needs.parse-trigger.outputs.filter }}"
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py \
+            --soc a5 \
+            --filter "${{ needs.parse-trigger.outputs.filter }}"
+            
       - name: Read A5 test matrix config
         id: set-matrix
         env:
