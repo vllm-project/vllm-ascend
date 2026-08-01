@@ -281,7 +281,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, double-node-tests]
+    needs: [setup-vars, parse-trigger]
     # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     # if: >-
     #   always() &&
