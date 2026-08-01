@@ -92,27 +92,29 @@ jobs:
       vllm_ascend_branch: ${{ steps.parse.outputs.vllm_ascend_branch }}
       is_pr_event: ${{ steps.parse.outputs.is_pr_event }}
     steps:
-      - name: Parse trigger
-        id: parse
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const payload = context.payload;
-            const eventName = context.eventName;
-            let testFilter = '';
-
-            if (eventName === 'pull_request') {
-                const pullRequest = payload.pull_request;
-                const hasNightlyLabel = pullRequest.labels.some(label => label.name === 'nightly-test');
-                core.info('Force run nightly test cases, skip label check');
-                testFilter = 'all';
-                core.setOutput('run', 'true');
-            } else if (eventName === 'workflow_dispatch') {
-                testFilter = core.getInput('test_cases') || 'all';
-                core.setOutput('run', 'true');
-            }
-
-            core.setOutput('filter', testFilter);
+      parse-trigger:
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' && 
+           contains(github.event.pull_request.labels.*.name, 'nightly-test'))
+        runs-on: linux-aarch64-a5-8
+        outputs:
+          run: ${{ steps.set.outputs.run }}
+          filter: ${{ steps.set.outputs.filter }}
+          ref: ${{ steps.set.outputs.ref }}
+          request_id: ${{ steps.set.outputs.request_id }}
+          vllm_ascend_branch: ${{ steps.set.outputs.vllm_ascend_branch }}
+          is_pr_event: ${{ steps.set.outputs.is_pr_event }}
+        steps:
+          - name: Set trigger outputs
+            id: set
+            run: |
+              echo "run=true" >> $GITHUB_OUTPUT
+              echo "filter=all" >> $GITHUB_OUTPUT
+              echo "ref=${{ github.event.pull_request.head.sha || '' }}" >> $GITHUB_OUTPUT
+              echo "request_id=" >> $GITHUB_OUTPUT
+              echo "vllm_ascend_branch=main" >> $GITHUB_OUTPUT
+              echo "is_pr_event=${{ github.event_name == 'pull_request' && 'true' || 'false' }}" >> $GITHUB_OUTPUT
 
   setup-vars:
     name: Export global env vars as job outputs
