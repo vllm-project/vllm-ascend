@@ -244,7 +244,7 @@ jobs:
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' && needs.parse-trigger.outputs.vllm_ascend_branch || inputs.vllm_ascend_branch)) }}
+          ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' && needs['parse-trigger'].outputs.vllm_ascend_branch || inputs.vllm_ascend_branch)) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
@@ -259,7 +259,7 @@ jobs:
     needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
+      needs['parse-trigger'].outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -278,14 +278,14 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
     secrets:
@@ -298,7 +298,7 @@ jobs:
     needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
+      needs['parse-trigger'].outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -317,14 +317,14 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
     secrets:
@@ -337,7 +337,7 @@ jobs:
     needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
+      needs['parse-trigger'].outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -353,9 +353,9 @@ jobs:
       name: ${{ matrix.test_config.name }}
       should_run: >-
         ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
@@ -367,7 +367,7 @@ jobs:
     needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
+      needs['parse-trigger'].outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -383,9 +383,9 @@ jobs:
       name: ${{ matrix.test_config.name }}
       should_run: >-
         ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
@@ -411,7 +411,7 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
-      needs.parse-trigger.result == 'success'
+      needs['parse-trigger'].result == 'success'
     runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: Merge all benchmark result artifacts
