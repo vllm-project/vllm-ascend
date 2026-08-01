@@ -530,10 +530,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
             for meta in forward_context.attn_metadata.values():
                 if meta.seq_lens is not None:
                     with torch.npu.stream(update_stream):
+                        # Pad/truncate to the captured graph size so .copy_()
+                        # succeeds even when the actual batch differs from the
+                        # warmup batch that sized the cached tensors.
+                        src_seqlens = meta.seq_lens
+                        n_cache = cache_seqlens.numel()
+                        if src_seqlens.numel() != n_cache:
+                            if src_seqlens.numel() < n_cache:
+                                src_seqlens = torch.cat(
+                                    [src_seqlens, src_seqlens.new_ones(n_cache - src_seqlens.numel())]
+                                )
+                            else:
+                                src_seqlens = src_seqlens[:n_cache]
                         cache_seqlens.copy_(
-                            meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
+                            src_seqlens.to(device=cache_seqlens.device, non_blocking=True)
                         )
-                        cu_seqlens_q.copy_(meta.query_start_loc)
+
+                        src_qsl = meta.query_start_loc
+                        n_cu = cu_seqlens_q.numel()
+                        if src_qsl.numel() != n_cu:
+                            if src_qsl.numel() < n_cu:
+                                src_qsl = torch.cat(
+                                    [src_qsl, src_qsl.new_full((n_cu - src_qsl.numel(),), src_qsl[-1])]
+                                )
+                            else:
+                                src_qsl = src_qsl[:n_cu]
+                        cu_seqlens_q.copy_(src_qsl)
                 break
 
         if using_paged_attention(num_tokens, vllm_config):
