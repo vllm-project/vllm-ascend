@@ -23,7 +23,7 @@ from vllm.config import get_current_vllm_config
 
 from .base import QuantType
 from .registry import register_scheme
-from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
+from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod, apply_mxfp4_weight_scale_layout
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
 
@@ -120,11 +120,7 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
-        )
-        g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
-        )
+        layer.w13_weight_scale.data = apply_mxfp4_weight_scale_layout(
+            layer.w13_weight_scale.data, view_uint8=True)
+        layer.w2_weight_scale.data = apply_mxfp4_weight_scale_layout(
+            layer.w2_weight_scale.data, view_uint8=True)

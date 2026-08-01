@@ -551,7 +551,109 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
-        if self.dynamic_eplb:
+        # Expert offload: incrementally page in needed experts, update log2phy.
+        # Mirrors AscendW8A8DynamicFusedMoEMethod.apply and
+        # AscendW4A8MXFPDynamicFusedMoEMethod.apply — without this block the
+        # decode path would read stale slots for expert_id >= num_device_experts,
+        # producing garbled output (only the first num_device_experts are
+        # resident on NPU when offload is enabled).
+        use_prefill_pool = False
+        prefill_slot = -1
+        num_tokens = topk_ids.size(0)
+        if getattr(layer, 'enable_expert_offload', False):
+            from vllm_ascend.expert_offload import ExpertOffloadManager
+            mgr = ExpertOffloadManager.get_instance()
+            is_mc = getattr(layer, 'enable_multi_card', False)
+            if is_mc:
+                mgr.update_weights_multi_card(layer, topk_ids, log2phy,
+                                              topk_weights, hidden_states=x,
+                                              mc2_mask=mc2_mask)
+            else:
+                mgr.update_weights(layer, topk_ids, log2phy, topk_weights,
+                                   hidden_states=x)
+            # Prefill regime: num_tokens > offload_threshold.
+            #  - single-card: pool holds all experts, identity log2phy.
+            #  - multi-card:  pool holds this rank's EP shard (loaded by
+            #    update_weights_multi_card); AllGather comm, shard config.
+            # Multi-card also uses the pool during profile_run (AllGather needs
+            # an allocated weight buffer; dummy data, garbage weights are fine).
+            # Drive the multi-card split off the comm TYPE (MC2=decode,
+            # AllGather=prefill) — the single source of truth — so decode and
+            # prefill never disagree at the mc2_capacity/offload_threshold gap.
+            if is_mc:
+                prefill_regime = _EXTRA_CTX.moe_comm_type != MoECommType.MC2
+            else:
+                prefill_regime = num_tokens > mgr.offload_threshold
+            if (prefill_regime
+                    and mgr._prefill_initialized
+                    and (is_mc or not mgr._skip_prefill)):
+                use_prefill_pool = True
+                try:
+                    layer_idx = mgr.moe_layers.index(layer)
+                except ValueError:
+                    layer_idx = 0
+                prefill_slot = layer_idx % len(mgr._prefill_w13)
+
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
+        if use_prefill_pool:
+            # Prefill pool holds all experts; swap weight references to the
+            # pool and use an identity log2phy. Weight tensors are int32
+            # (liar tensors with NZ storage) matching the decode path.
+            w1 = [mgr._prefill_w13[prefill_slot]]
+            w1_scale = [mgr._prefill_w13_scale[prefill_slot]]
+            w2 = [mgr._prefill_w2[prefill_slot]]
+            w2_scale = [mgr._prefill_w2_scale[prefill_slot]]
+            if mgr._prefill_w13_scale_bias and mgr._prefill_w2_scale_bias:
+                w1_scale_bias = [mgr._prefill_w13_scale_bias[prefill_slot]]
+                w2_scale_bias = [mgr._prefill_w2_scale_bias[prefill_slot]]
+            else:
+                w1_scale_bias = None
+                w2_scale_bias = None
+            # Override local expert count so kernel groupList matches pool.
+            # Single-card uses AllGather dispatcher (num_experts_local); multi-card
+            # prefill uses All2All dispatcher (num_local_experts + derived indices),
+            # which is the standard A3 EP prefill path and does its own token
+            # all-to-all (AllGather EP would need sequence parallel to gather).
+            _saved_nle = layer.moe_config.num_local_experts
+            _saved_lne = layer.local_num_experts
+            td = moe_comm_method.token_dispatcher
+            _saved_td = {
+                "num_experts_local": getattr(td, "num_experts_local", None),
+                "num_local_experts": getattr(td, "num_local_experts", None),
+                "expert_ids_per_ep_rank": getattr(td, "expert_ids_per_ep_rank", None),
+                "local_expert_indices": getattr(td, "local_expert_indices", None),
+            }
+            if is_mc:
+                # Multi-card prefill = EP shard via All2All: each rank's pool
+                # local [0:shard] holds its shard (loaded by
+                # update_weights_multi_card). Patch the All2All dispatcher
+                # (init'd with decode nel=num_device_experts) to the shard so
+                # its contiguous local_expert_indices / all-to-all splits match.
+                # All2All routes via local_expert_indices, so NO log2phy and the
+                # shard expert_map is unused (All2All doesn't read expert_map).
+                shard = mgr.mc_shard_size
+                layer.moe_config.num_local_experts = shard
+                layer.local_num_experts = shard
+                if getattr(td, "num_local_experts", None) is not None:
+                    td.num_local_experts = shard
+                    td.local_expert_indices = [td.ep_rank * shard + i for i in range(shard)]
+                    if td.expert_ids_per_ep_rank is not None:
+                        td.expert_ids_per_ep_rank = torch.tensor(
+                            [i % shard for i in range(mgr.num_total_experts)],
+                            dtype=torch.int32, device=td.expert_ids_per_ep_rank.device)
+                if getattr(td, "num_experts_local", None) is not None:
+                    td.num_experts_local = shard
+                expert_map = mgr._get_shard_expert_map()
+                log2phy = None
+            else:
+                ntotal = mgr.num_total_experts
+                layer.moe_config.num_local_experts = ntotal
+                layer.local_num_experts = ntotal
+                if getattr(td, "num_experts_local", None) is not None:
+                    td.num_experts_local = ntotal
+                # Use prefill-specific identity log2phy (don't pollute decode path)
+                log2phy = mgr._prefill_log2phy
+        elif self.dynamic_eplb:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
             w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
@@ -582,8 +684,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w1_scale_bias = [layer.w13_scale_bias.detach()] if hasattr(layer, "w13_scale_bias") else None
             w2_scale_bias = [layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None
 
-        moe_comm_method = _EXTRA_CTX.moe_comm_method
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
@@ -607,6 +708,24 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
             )
         )
+        # Trigger next-layer expert prefetch AFTER GMM kernel submission
+        # (decode path only) so compute_event captures real GMM work.
+        if (getattr(layer, 'enable_expert_offload', False)
+                and not use_prefill_pool
+                and num_tokens <= mgr.offload_threshold):
+            mgr.trigger_next_layer_prefetch(layer, x)
+        # Restore decode-path expert count after prefill override.
+        if use_prefill_pool:
+            layer.moe_config.num_local_experts = _saved_nle
+            layer.local_num_experts = _saved_lne
+            td = moe_comm_method.token_dispatcher
+            if _saved_td["num_experts_local"] is not None and hasattr(td, "num_experts_local"):
+                td.num_experts_local = _saved_td["num_experts_local"]
+            if _saved_td["num_local_experts"] is not None and hasattr(td, "num_local_experts"):
+                td.num_local_experts = _saved_td["num_local_experts"]
+                td.local_expert_indices = _saved_td["local_expert_indices"]
+                td.expert_ids_per_ep_rank = _saved_td["expert_ids_per_ep_rank"]
+        return final_hidden_states
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         scale = scale.transpose(1, 2).contiguous()

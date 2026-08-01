@@ -151,6 +151,7 @@ class MoECommMethod(ABC):
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
+            routed_topk_ids = routed_topk_ids.clamp(min=0)  # safety: unmapped -> 0
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,

@@ -51,6 +51,9 @@ class AscendConfig:
 
         from vllm_ascend import envs as ascend_envs
 
+        expert_offload_config = additional_config.get("expert_offload_config", {})
+        self.expert_offload_config = ExpertOffloadConfig(expert_offload_config)
+
         self.scheduler_config = SchedulerConfig(
             additional_config,
             balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
@@ -941,6 +944,101 @@ class SchedulerConfig:
         return default
 
 
+class ExpertOffloadConfig:
+    """
+    Configuration Object for expert_offload_config from additional_config
+    """
+
+    _defaults = {
+        "expert_offload": False,
+        "num_device_experts": 32,
+        "num_device_layers": 2,
+        "expert_map_path": None,
+        "cache_policy_enabled": False,
+        "cache_recent_window": 32,
+        "cache_ema_beta": 0.9,
+        "cache_recent_weight": 1.0,
+        "cache_ema_weight": 0.5,
+        "cache_router_weight": 0.3,
+        "cache_age_weight": 0.01,
+        "cache_stats_log_interval": 1000,
+        "moe_offload_debug": False,
+        "expert_prefetch_enabled": False,
+        "expert_prefetch_num": 2,
+        "shard_per_rank": True,
+        "enable_multi_card": False,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"Config has no attribute '{key}'")
+
+        self._validate_config()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"Config has no attribute '{key}'")
+
+    def _validate_config(self):
+        if self.expert_map_path is not None:
+            logger.info("The expert_map is %s", self.expert_map_path)
+            if not self.expert_map_path.endswith(".json"):
+                raise TypeError("The expert_map is not json.")
+            if not (os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK)):
+                raise ValueError("The expert_map is not exist.")
+        if not isinstance(self.config["num_device_experts"], int):
+            raise TypeError("num_device_experts must be an integer")
+        if self.config["num_device_experts"] < 0:
+            raise ValueError(f"num_device_experts must >= 0; got {self.config['num_device_experts']} instead")
+        if not isinstance(self.config["num_device_layers"], int):
+            raise TypeError("num_device_layers must be an integer")
+        if self.config["num_device_layers"] < 1:
+            raise ValueError(f"num_device_layers must >= 1; got {self.config['num_device_layers']} instead")
+        if not isinstance(self.config["expert_offload"], bool):
+            raise TypeError("expert_offload must be a boolean")
+        if not isinstance(self.config["cache_policy_enabled"], bool):
+            raise TypeError("cache_policy_enabled must be a boolean")
+        if not isinstance(self.config["cache_recent_window"], int):
+            raise TypeError("cache_recent_window must be an integer")
+        if self.config["cache_recent_window"] < 1:
+            raise ValueError("cache_recent_window must >= 1")
+        for key in (
+            "cache_ema_beta",
+            "cache_recent_weight",
+            "cache_ema_weight",
+            "cache_router_weight",
+            "cache_age_weight",
+        ):
+            if not isinstance(self.config[key], (int, float)):
+                raise TypeError(f"{key} must be a number")
+        if not 0 <= self.config["cache_ema_beta"] < 1:
+            raise ValueError("cache_ema_beta must be in [0, 1)")
+        if not isinstance(self.config["cache_stats_log_interval"], int):
+            raise TypeError("cache_stats_log_interval must be an integer")
+        if self.config["cache_stats_log_interval"] < 0:
+            raise ValueError("cache_stats_log_interval must >= 0")
+        if not isinstance(self.config["moe_offload_debug"], bool):
+            raise TypeError("moe_offload_debug must be a boolean")
+        if not isinstance(self.config["expert_prefetch_enabled"], bool):
+            raise TypeError("expert_prefetch_enabled must be a boolean")
+        if not isinstance(self.config["expert_prefetch_num"], int):
+            raise TypeError("expert_prefetch_num must be an integer")
+        if self.config["expert_prefetch_num"] < 1:
+            raise ValueError(
+                f"expert_prefetch_num must >= 1; "
+                f"got {self.config['expert_prefetch_num']} instead")
+        if not isinstance(self.config["enable_multi_card"], bool):
+            raise TypeError("enable_multi_card must be a boolean")
+
+
 _ASCEND_CONFIG: AscendConfig | None = None
 
 
@@ -954,7 +1052,7 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     """
     if config is None:
         return False
-    return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
+    return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config") and hasattr(config, "expert_offload_config")
 
 
 def init_ascend_config(vllm_config):

@@ -209,6 +209,31 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids,
         )
+
+        # Expert offload: incrementally page in needed experts, update log2phy
+        use_prefill_pool = False
+        prefill_slot = -1
+        if getattr(layer, 'enable_expert_offload', False):
+            from vllm_ascend.expert_offload import ExpertOffloadManager
+            mgr = ExpertOffloadManager.get_instance()
+            num_tokens = topk_ids.size(0)
+            if getattr(layer, 'enable_multi_card', False):
+                mgr.update_weights_multi_card(layer, topk_ids, log2phy,
+                                              topk_weights, hidden_states=x,
+                                              mc2_mask=mc2_mask)
+            else:
+                mgr.update_weights(layer, topk_ids, log2phy, topk_weights,
+                                   hidden_states=x)
+            if (not getattr(layer, 'enable_multi_card', False)
+                    and num_tokens > mgr.offload_threshold
+                    and mgr._prefill_initialized and not mgr._skip_prefill):
+                use_prefill_pool = True
+                try:
+                    layer_idx = mgr.moe_layers.index(layer)
+                except ValueError:
+                    layer_idx = 0
+                prefill_slot = layer_idx % len(mgr._prefill_w13)
+
         try:
             _vllm_config = get_current_vllm_config()
         except AssertionError:
@@ -240,38 +265,67 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             activation = "swigluoai_uninterleave"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
-        # and provide dummy scales (w1_scale, w2_scale). This is required because:
-        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine/mega_moe) expects
-        # inputs in a list format.
-        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
-        # incorrect. The ideal solution is to pass None. However, if the underlying
-        # dispatch_ffn_combine/mega_moe C++ operator does not support None for the scale argument
-        # (due to signature constraints), we are forced to use a placeholder empty tensor.
-        # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
-        # or None for scales in non-quantized scenarios.
-        w13_weight_list = getattr(layer, "w13_weight_list", None)
-        w2_weight_list = getattr(layer, "w2_weight_list", None)
-        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+        if use_prefill_pool:
+            from vllm_ascend.expert_offload import ExpertOffloadManager
+            mgr = ExpertOffloadManager.get_instance()
+            # Override local expert count so kernel groupList matches prefill pool
+            _saved_nle = layer.moe_config.num_local_experts
+            _saved_lne = layer.local_num_experts
+            ntotal = mgr.num_total_experts
+            layer.moe_config.num_local_experts = ntotal
+            layer.local_num_experts = ntotal
+            # Also patch token dispatcher (cached with old num_experts_local)
+            _saved_td_nel = moe_comm_method.token_dispatcher.num_experts_local
+            moe_comm_method.token_dispatcher.num_experts_local = ntotal
+            # Use prefill-specific identity log2phy (don't pollute decode path)
+            log2phy = mgr._prefill_log2phy
+            if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+                w1 = [mgr._prefill_w13[prefill_slot]]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2 = [mgr._prefill_w2[prefill_slot]]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            else:
+                w1 = mgr._prefill_w13[prefill_slot]
+                w1_scale = None
+                w2 = mgr._prefill_w2[prefill_slot]
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
         else:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
-            w1_scale = None
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
-            w2_scale = None
-            w1_scale_bias = None
-            w2_scale_bias = None
+            # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
+            # and provide dummy scales (w1_scale, w2_scale). This is required because:
+            # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
+            # inputs in a list format.
+            # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
+            # incorrect. The ideal solution is to pass None. However, if the underlying
+            # dispatch_ffn_combine C++ operator does not support None for the scale argument
+            # (due to signature constraints), we are forced to use a placeholder empty tensor.
+            # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
+            # or None for scales in non-quantized scenarios.
+            w13_weight_list = getattr(layer, "w13_weight_list", None)
+            w2_weight_list = getattr(layer, "w2_weight_list", None)
+            has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
+            if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+                if self.dynamic_eplb and not has_split_weight_lists:
+                    logger.warning_once(
+                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
+                        "tensor lists. This may cause accuracy issues or communication hangs."
+                    )
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            else:
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
+                w1_scale = None
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -305,6 +359,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
+        # Trigger next-layer expert prefetch AFTER GMM kernel submission
+        # so compute_event captures real GMM work for true overlap.
+        if getattr(layer, 'enable_expert_offload', False) and not use_prefill_pool:
+            mgr.trigger_next_layer_prefetch(layer, x)
+        # Restore decode-path expert count after prefill override
+        if use_prefill_pool:
+            layer.moe_config.num_local_experts = _saved_nle
+            layer.local_num_experts = _saved_lne
+            moe_comm_method.token_dispatcher.num_experts_local = _saved_td_nel
         return final_hidden_states
 
 
@@ -340,6 +403,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_output_transform,
             routed_scaling_factor,
         )
+        # --- [expert_offload ADAPT onto main] read offload config + preset emap.
+        # main refactored __init__ (factory now pre-allocates weights via standard
+        # EP sizing); this preset seeds _expert_map_offload consumed by the override
+        # below, and enable_expert_offload gates every later offload hook. ---
+        from vllm_ascend.ascend_config import get_ascend_config
+        from vllm_ascend.expert_offload.utils import init_expert_offload_config
+        _offload_cfg = get_ascend_config().expert_offload_config
+        self.enable_expert_offload, _offload_emap = init_expert_offload_config(
+            _offload_cfg, moe_config.num_experts)
+        if _offload_emap is not None:
+            self._expert_map_offload = _offload_emap
         self.top_k = moe_config.experts_per_token
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
@@ -371,6 +445,29 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
 
         self.quant_type = self._get_quant_type()
+
+        # [expert_offload] Only QUANTIZED MoE layers (W4A8/W8A8/mxfp4) are
+        # offload-eligible: the offload path NZ-casts + packs expert weights
+        # into the quantized GMM's weight format and pages them via quantized
+        # apply hooks. An unquantized (bf16/fp16) MoE layer has no NZ cast and
+        # no quantized apply path, so it cannot be paged in/out. Drop the
+        # offload flags for such a layer so the three offload init blocks below
+        # (log2phy/_expert_map override, num_local_experts shrink, device-weight
+        # re-create + CPU buffer + weight-loader wrap) are all skipped — it runs
+        # as a normal fully-resident bf16 MoE. This is the GLM MTP draft case:
+        # its experts ship as FLOAT while target layers are W8A8_DYNAMIC, so
+        # quant_type==NONE uniquely identifies it at init (params_dtype cannot,
+        # being bf16-nominal for all W4A8 layers). enable_multi_card is given a
+        # safe default here; the multi-card init block below overrides it for
+        # eligible layers.
+        self.enable_multi_card = False
+        if self.enable_expert_offload and self.quant_type == QuantType.NONE:
+            logger.info_once(
+                "[expert_offload] MoE layer %s is unquantized (quant_type=NONE) "
+                "— skipping offload, running fully resident on device.",
+                getattr(self, "layer_name", "?"))
+            self.enable_expert_offload = False
+            self.routed_experts.enable_expert_offload = False
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -434,6 +531,54 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
 
+        # --- [expert_offload ADAPT onto main] override _expert_map/log2phy with
+        # offload versions. init_eplb_config above set the standard-EP map; offload
+        # needs its own: multi-card = per-rank dynamic placement (log2phy rewritten
+        # every layer by multi_card_planner; _expert_map = arange(total_slots) so
+        # moe_expert_num = total and dispatch expert_token_nums = total/ep_size =
+        # per-rank slots = device weight dim0); single-card = hottest-N slots. ---
+        if self.enable_expert_offload:
+            self.global_num_experts = moe_config.num_experts
+            self.enable_multi_card = (
+                _offload_cfg.enable_multi_card and self.moe_config.ep_size > 1)
+            from vllm_ascend.expert_offload.utils import (
+                init_log2phy_for_offload, init_log2phy_for_offload_multi_card)
+            if self.enable_multi_card:
+                from vllm.distributed.parallel_state import get_ep_group as _gep
+                _ep = _gep()
+                # NOTE: no ep_size*topk slot floor here. The device buffer is
+                # only used when it actually fits the active expert union —
+                # select_moe_comm_method routes to MC2+buffer iff
+                # num_tokens*topk <= num_device_experts, else ALLTOALL+prefill
+                # pool (full experts). So the buffer can never overflow and no
+                # slot floor / auto-bump is needed. The old ep_size*topk bump
+                # defended against pad-token garbage inflating the union; that
+                # garbage is now filtered by mc2_mask (51a6d644), and the
+                # buffer-fit check in select_moe_comm_method is the correct
+                # bound. offload_threshold (= num_device_experts // topk) is set
+                # in ExpertOffloadManager.__init__.
+                _per_rank = _offload_cfg.num_device_experts // _ep.world_size
+                self.log2phy = init_log2phy_for_offload_multi_card(
+                    self.global_num_experts, _per_rank, _ep.world_size,
+                    _ep.rank_in_group)
+                self._expert_map = torch.arange(
+                    _offload_cfg.num_device_experts, dtype=torch.int32)
+                # device weight dim0 must equal per_rank slots (GMM groupList).
+                # NOTE: local_num_experts is a read-only property -> moe_config.num_local_experts;
+                # the small slot count is applied to moe_config in the offload block below
+                # (after EPLB validation), which the property then reads.
+                if _offload_cfg.moe_offload_debug:
+                    logger.info_once(
+                        "[multi_card_offload INIT] ep_size=%s ep_rank=%s "
+                        "global_num_experts=%s num_device_experts(total)=%s "
+                        "per_rank_slots=%s _expert_map.shape=%s",
+                        _ep.world_size, _ep.rank_in_group, self.global_num_experts,
+                        _offload_cfg.num_device_experts, _per_rank,
+                        tuple(self._expert_map.shape))
+            else:
+                self.log2phy = init_log2phy_for_offload(
+                    self.global_num_experts, _offload_cfg.num_device_experts)
+
         moe_config.global_redundant_expert_num = self.global_redundant_expert_num
         local_num_experts = moe_config.num_local_experts
         expected_local_num_experts = (
@@ -445,6 +590,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 f"allocated={local_num_experts}, placement={expected_local_num_experts}. "
                 "Ensure vLLM and Ascend use the same redundant expert count."
             )
+        # [expert_offload] local_num_experts is a read-only property -> moe_config.num_local_experts.
+        # The EPLB validation above passed with the full count; NOW override to the small offload
+        # slot count, BEFORE setup_moe_comm_method so expert_token_nums / token-dispatcher are sized
+        # to the offload per-rank slots (== device weight dim0 from create_weights), not full EP.
+        if self.enable_expert_offload:
+            if self.enable_multi_card:
+                from vllm.distributed.parallel_state import get_ep_group as _gep
+                _offload_ne = _offload_cfg.num_device_experts // _gep().world_size
+            else:
+                _offload_ne = _offload_cfg.num_device_experts
+            self.moe_config.num_local_experts = _offload_ne
         # Keep ExpertMapManager's physical-expert map until checkpoint loading
         # finishes. The upstream loader uses it to place both original and
         # redundant physical experts. Ascend execution uses self._expert_map,
@@ -484,10 +640,111 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
             self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
+        # --- [expert_offload ADAPT onto main] In v0.25.1 the expert weights live
+        # on routed_experts (the "refactored weight owner" — apply() passes
+        # routed_experts as the weight layer, not self), so the offload machinery
+        # must operate on routed_experts, not the runner. Propagate the offload
+        # flags + global_num_experts onto it (apply's offload block reads them
+        # from layer=routed_experts), wrap routed_experts.weight_loader so
+        # checkpoint loading stashes experts >= ndev into the CPU buffer,
+        # re-create its device weights at the offload slot size
+        # (num_device_experts//ep_size) so the freshly-wrapped loader takes
+        # effect on the new params, and register per-layer CPU buffers. ---
+        if self.enable_expert_offload:
+            self.routed_experts.global_num_experts = self.global_num_experts
+            self.routed_experts.enable_expert_offload = self.enable_expert_offload
+            self.routed_experts.enable_multi_card = self.enable_multi_card
+            # Propagate log2phy onto routed_experts (same tensor object — the
+            # planner rewrites it in place via copy_) so pregate's
+            # next_layer.log2phy resolves: moe_layers stores routed_experts in
+            # v0.25.1 (not the runner, which owns log2phy).
+            self.routed_experts.log2phy = self.log2phy
+            self._wrap_weight_loader_for_offload()
+            # Source create_weights params from where main actually keeps them:
+            # moe_config / routed_experts, NOT the runner (main moved
+            # intermediate_size_per_partition off the runner; params_dtype lives on
+            # routed_experts). hidden_size is still a runner attr. Mirrors the
+            # factory's moe_quant_params in routed_experts.py.
+            _offload_moe_quant_params = {
+                "num_experts": self.local_num_experts,
+                "hidden_size": self.hidden_size,
+                "intermediate_size_per_partition":
+                    self.moe_config.intermediate_size_per_partition,
+                "params_dtype": self.routed_experts.params_dtype,
+                "weight_loader": self.routed_experts.weight_loader,
+            }
+            self._quant_method.create_weights(layer=self.routed_experts,
+                                             **_offload_moe_quant_params)
+            from vllm_ascend.expert_offload import ExpertOffloadManager
+            ExpertOffloadManager.get_instance().init_layer_cpu_buffers(
+                self.routed_experts, self.moe_instance_id)
+
         # Register this MoE layer with EPLB for PP compatibility.
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    def _wrap_weight_loader_for_offload(self):
+        """Wrap weight_loader to intercept w13/w2 weights and store them on CPU.
+
+        Also intercepts scale/offset parameters for quantized models (W8A8).
+        Uses weight_name substring matching to distinguish param types:
+        - "weight_scale" → scale params
+        - "weight_offset" → offset params
+        - otherwise → weight params
+        """
+        from vllm_ascend.expert_offload import ExpertOffloadManager
+        mgr = ExpertOffloadManager.get_instance()
+        layer_moe_idx = self.moe_instance_id
+        # v0.25.1: weight_loader lives on routed_experts (RoutedExperts), not the
+        # runner. Wrap it there so checkpoint loading of expert params (which hold
+        # a reference to routed_experts.weight_loader set at create_weights time)
+        # goes through the offload interceptor. Re-create weights after this so
+        # the new params capture the wrapped loader.
+        orig_wl = self.routed_experts.weight_loader
+        # ndev = per-rank device slot count (== device weight dim0). The loader
+        # fills the device weight with experts [0, ndev); num_device_experts is
+        # the TOTAL slot count, so divide by ep_size. ep_size=1 (single-card) is
+        # a no-op. CPU buffer still gets ALL experts (loaded above this guard).
+        ndev = mgr.num_device_experts // mgr.ep_size
+
+        def _offload_weight_loader(param, loaded_weight, weight_name, shard_id,
+                                   expert_id, **kwargs):
+            # --- Handle scale/offset/scale_bias params (quantized models) ---
+            if "weight_scale" in weight_name:
+                mgr._load_scale_shard(layer_moe_idx, expert_id,
+                                      "w13_weight_scale" if shard_id in ("w1", "w3")
+                                      else "w2_weight_scale",
+                                      shard_id, loaded_weight)
+                if expert_id >= ndev:
+                    return None
+            elif "weight_offset" in weight_name:
+                mgr._load_scale_shard(layer_moe_idx, expert_id,
+                                      "w13_weight_offset" if shard_id in ("w1", "w3")
+                                      else "w2_weight_offset",
+                                      shard_id, loaded_weight)
+                if expert_id >= ndev:
+                    return None
+            elif "scale_bias" in weight_name:
+                mgr._load_scale_shard(layer_moe_idx, expert_id,
+                                      "w13_scale_bias" if shard_id in ("w1", "w3")
+                                      else "w2_scale_bias",
+                                      shard_id, loaded_weight)
+                if expert_id >= ndev:
+                    return None
+            else:
+                # --- Handle weight params (existing logic) ---
+                if shard_id in ("w1", "w3"):
+                    mgr.load_w13(layer_moe_idx, expert_id, loaded_weight, shard_id)
+                elif shard_id == "w2":
+                    mgr.load_w2(layer_moe_idx, expert_id, loaded_weight)
+                # Only load to device if expert_id < num_device_experts
+                if shard_id in ("w1", "w2", "w3") and expert_id >= ndev:
+                    return None
+            return orig_wl(param, loaded_weight, weight_name, shard_id,
+                           expert_id, **kwargs)
+
+        self.routed_experts.weight_loader = _offload_weight_loader
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
