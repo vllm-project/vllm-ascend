@@ -189,7 +189,7 @@ jobs:
     needs: [parse-trigger, setup-vars]
     if: >-
       always() &&
-      needs['parse-trigger'].outputs.run == 'true'
+      needs['parse-trigger'].outputs.run != ''
     strategy:
       fail-fast: false
       max-parallel: 3
