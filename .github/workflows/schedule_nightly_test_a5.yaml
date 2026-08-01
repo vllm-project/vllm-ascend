@@ -160,7 +160,7 @@ jobs:
                     core.info('/nightly-pr without arguments; skipping all tests.');
                     testFilter = 'none';
                   } else {
-                    testFilter = ',' + args.split(/\s+/).join(',') + ',';
+                    testFilter = ',' + args.split(/\s+/).map(s => s.trim()).join(',') + ',';
                   }
                   break;
                 }
@@ -210,7 +210,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_branch }}
+          ref: ${{ github.event_name == 'pull_request' ? needs.parse-trigger.outputs.ref : inputs.vllm_ascend_branch }}
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
@@ -242,11 +242,12 @@ jobs:
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
+          ${{ fromJSON(format('["{0}"]', github.event_name == 'pull_request' ? needs.parse-trigger.outputs.vllm_ascend_branch : inputs.vllm_ascend_branch)) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      vllm_ascend_ref: ${{ github.event_name == 'pull_request' ? needs.parse-trigger.outputs.ref : inputs.vllm_ascend_ref }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -361,7 +362,7 @@ jobs:
       aop_single_enabled: ${{ inputs.aop_enabled }}
 
   multi-card-tests:
-    name: single-node
+    name: multi-card
     needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
