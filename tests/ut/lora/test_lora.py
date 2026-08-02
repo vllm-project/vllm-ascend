@@ -55,6 +55,7 @@ def test_single_lora_slot_enabled_on_a2_and_a3(device_type: AscendDeviceType) ->
         wrapper = PunicaWrapperNPU(16, 4, "cpu", lora_config=lora_config)
 
     assert wrapper._single_lora_slot
+    assert wrapper._single_lora_mask is not None
     assert wrapper._single_lora_mask.shape == (16, 1)
 
 
@@ -369,6 +370,7 @@ def test_single_lora_mask_is_refreshed_with_metadata() -> None:
     )
 
 
+@pytest.mark.parametrize("add_inputs", [True, False])
 def test_single_lora_linear_masks_base_rows(add_inputs: bool) -> None:
     token_indices = torch.tensor([0, -1, 0, -1, 0])
     adapter_mask = token_indices.eq(0).unsqueeze(1).to(torch.bfloat16)
@@ -502,6 +504,7 @@ def test_packed_lora_wrappers_extend_only_non_sharded_merged_layers() -> None:
     assert all("Sharded" not in base.__name__ for base in AscendMergedQKVParallelLinearWithLoRA.__mro__)
 
 
+@pytest.mark.parametrize(("max_loras", "expected"), [(1, True), (2, False)])
 def test_merged_column_packed_wrapper_requires_single_adapter_slot(max_loras: int, expected: bool) -> None:
     lora_config: Any = SimpleNamespace(max_loras=max_loras, fully_sharded_loras=False)
 
@@ -516,6 +519,7 @@ def test_merged_column_packed_wrapper_requires_single_adapter_slot(max_loras: in
     assert can_replace is expected
 
 
+@pytest.mark.parametrize(("max_loras", "expected"), [(1, True), (2, False)])
 def test_qkv_packed_wrapper_requires_single_adapter_slot(max_loras: int, expected: bool) -> None:
     class FakeAscendQKVParallelLinear(nn.Module):
         pass
