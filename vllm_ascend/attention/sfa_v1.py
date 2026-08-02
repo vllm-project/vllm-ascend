@@ -352,7 +352,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         block_size = self.kernel_block_size
 
-        cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+        runtime_cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+        self.actual_seq_lengths_query.zero_()
+        self.actual_seq_lengths_query[:num_reqs].copy_(runtime_cum_query_lens)
+        cum_query_lens = self.actual_seq_lengths_query[:num_reqs]
         runtime_seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         self.actual_seq_lengths_key.zero_()
         self.actual_seq_lengths_key[:num_reqs].copy_(runtime_seq_lens)
