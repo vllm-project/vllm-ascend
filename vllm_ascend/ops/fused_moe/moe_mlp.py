@@ -361,136 +361,6 @@ def quant_apply_mlp(
     return hidden_states, before_gmm2_evt
 
 
-def w8a8_dynamic_lora_apply_mlp(
-    hidden_states: torch.Tensor,
-    w1: list[torch.Tensor] | torch.Tensor,
-    w1_scale: list[torch.Tensor] | torch.Tensor,
-    w2: list[torch.Tensor] | torch.Tensor,
-    w2_scale: list[torch.Tensor] | torch.Tensor,
-    group_list: torch.Tensor,
-    *,
-    group_list_type: int,
-    activation: str | None,
-    swiglu_limit: float,
-    lora_context,
-    expanded_row_idx: torch.Tensor | None,
-    topk_ids: torch.Tensor | None,
-    dynamic_scale: torch.Tensor | None,
-    dynamic_eplb: bool,
-) -> tuple[torch.Tensor, torch.npu.Event | None]:
-    """Run W8A8_DYNAMIC experts with BF16 LoRA injection boundaries."""
-    if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER:
-        raise NotImplementedError(
-            "Ascend W8A8_DYNAMIC MoE LoRA currently supports only the "
-            "AllGather TP path; EP, AlltoAll, MC2, and FusedMC2 are unsupported."
-        )
-    if dynamic_eplb:
-        raise NotImplementedError("Ascend W8A8_DYNAMIC MoE LoRA does not support dynamic EPLB.")
-    if dynamic_scale is not None or hidden_states.dtype == torch.int8:
-        raise AssertionError(
-            "W8A8_DYNAMIC MoE LoRA requires BF16/FP16 routed activations. "
-            "Dispatch-side quantization must be disabled for LoRA batches."
-        )
-    if expanded_row_idx is None or topk_ids is None:
-        raise AssertionError(
-            "W8A8_DYNAMIC MoE LoRA requires AllGather routing metadata (expanded_row_idx and topk_ids)."
-        )
-
-    w1_list = w1 if isinstance(w1, list) else [w1]
-    w2_list = w2 if isinstance(w2, list) else [w2]
-    w1_scale_list = w1_scale if isinstance(w1_scale, list) else [w1_scale]
-    w2_scale_list = w2_scale if isinstance(w2_scale, list) else [w2_scale]
-    if not all(len(values) == 1 for values in (w1_list, w2_list, w1_scale_list, w2_scale_list)):
-        raise NotImplementedError(
-            "W8A8_DYNAMIC MoE LoRA does not support per-expert tensor lists used by dynamic EPLB."
-        )
-
-    from vllm_ascend.lora.fused_moe import (
-        moe_lora_apply_w2,
-        moe_lora_apply_w13,
-    )
-
-    input_dtype = hidden_states.dtype
-    lora_w13_input = hidden_states
-    quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=hidden_states,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
-
-    gate_up_out = torch_npu.npu_grouped_matmul(
-        x=[quantized_input],
-        weight=w1_list,
-        scale=[w1_scale_list[0].to(w2_scale_list[0].dtype)],
-        per_token_scale=[input_scale],
-        split_item=2,
-        group_type=0,
-        group_list=group_list,
-        group_list_type=group_list_type,
-        output_dtype=input_dtype,
-    )[0]
-    lora_routing = moe_lora_apply_w13(
-        lora_context,
-        gate_up_out=gate_up_out,
-        hidden_states=lora_w13_input,
-        expanded_row_idx=expanded_row_idx,
-        topk_ids=topk_ids,
-    )
-
-    if activation == MoEActivation.SWIGLUOAI:
-        activated = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out)
-    elif activation == MoEActivation.SWIGLUSTEP:
-        activated = AscendSwigluStepAndMul.swiglustep_forward(
-            gate_up_out,
-            limit=swiglu_limit or 7.0,
-        )
-    elif activation in (MoEActivation.GELU, MoEActivation.GELU_TANH):
-        gate, up = gate_up_out.chunk(2, dim=-1)
-        approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
-        activated = torch.nn.functional.gelu(gate, approximate=approximate) * up
-    else:
-        if swiglu_limit > 0:
-            gate, up = gate_up_out.chunk(2, dim=-1)
-            gate = gate.clamp(max=swiglu_limit)
-            up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
-            gate_up_out = torch.cat((gate, up), dim=-1)
-        activated = torch_npu.npu_swiglu(gate_up_out)
-
-    quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=activated,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
-    before_gmm2_evt = torch.npu.current_stream().record_event()
-    down_out = DeviceOperator.npu_grouped_matmul_gmm2(
-        hidden_states=quantized_activated,
-        weight=w2_list,
-        weight_scale=w2_scale_list,
-        per_token_scale=activated_scale,
-        group_list=group_list,
-        group_list_type=group_list_type,
-        input_dtype=input_dtype,
-        act_quant_type=torch.int8,
-        weight_quant_type=None,
-        scale_type=None,
-        per_token_scale_type=None,
-        use_bf16=input_dtype == torch.bfloat16,
-        use_mxfp_quant=False,
-        bias=None,
-        fallback_output_dtype=w2_scale_list[0].dtype,
-        mxfp_quant_dtype=None,
-    )
-    moe_lora_apply_w2(
-        lora_context,
-        down_out=down_out,
-        silu_out=activated,
-        lora_routing=lora_routing,
-    )
-    return down_out, before_gmm2_evt
-
-
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -635,29 +505,9 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     from vllm_ascend.lora.fused_moe import is_moe_lora_active
 
     if is_moe_lora_active(mlp_compute_input.lora_context):
-        if mlp_compute_input.quant.quant_type != QuantType.W8A8:
-            raise NotImplementedError("Ascend quantized MoE LoRA currently supports only W8A8_DYNAMIC.")
-        if w1_scale_bias is not None or w2_scale_bias is not None:
-            raise NotImplementedError("W8A8_DYNAMIC MoE LoRA does not support fused scale-bias.")
-        if w1_offset is not None or w2_offset is not None:
-            raise NotImplementedError("W8A8_DYNAMIC MoE LoRA does not support antiquant offsets.")
-        assert w1_scale is not None and w2_scale is not None
-        return w8a8_dynamic_lora_apply_mlp(
-            hidden_states=hidden_states,
-            w1=w1,
-            w1_scale=w1_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            group_list=group_list,
-            group_list_type=group_list_type,
-            activation=activation,
-            swiglu_limit=swiglu_limit,
-            lora_context=mlp_compute_input.lora_context,
-            expanded_row_idx=mlp_compute_input.expanded_row_idx,
-            topk_ids=mlp_compute_input.topk_ids,
-            dynamic_scale=dynamic_scale,
-            dynamic_eplb=dynamic_eplb,
-        )
+        from vllm_ascend.lora.quant_moe import apply_quant_moe_lora
+
+        return apply_quant_moe_lora(mlp_compute_input=mlp_compute_input)
 
     assert w1_scale is not None and w2_scale is not None
     act_quant_type = torch.int8 if mlp_compute_input.quant.is_int_quant else torch.float8_e4m3fn
