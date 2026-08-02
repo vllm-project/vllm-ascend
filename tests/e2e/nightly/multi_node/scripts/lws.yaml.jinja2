@@ -43,8 +43,6 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
               - name: AOP_MULTI_ENABLED
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
@@ -56,11 +54,19 @@ spec:
                 bash /root/.cache/tests/run.sh
             resources:
               limits:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 ephemeral-storage: 100Gi
                 cpu: 125
             ports:
@@ -135,11 +141,19 @@ spec:
                 bash /root/.cache/tests/run.sh
             resources:
               limits:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 ephemeral-storage: 100Gi
                 cpu: 125
             volumeMounts:
