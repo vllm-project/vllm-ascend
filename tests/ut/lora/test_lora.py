@@ -1,4 +1,5 @@
 from types import MethodType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -12,7 +13,7 @@ from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 def test_single_lora_linear_masks_base_rows(add_inputs: bool) -> None:
     token_indices = torch.tensor([0, -1, 0, -1, 0])
     adapter_mask = token_indices.eq(0).unsqueeze(1).to(torch.bfloat16)
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         _single_lora_slot=True,
         _get_single_lora_mask=Mock(return_value=adapter_mask),
     )
@@ -60,7 +61,7 @@ def test_single_lora_mask_is_refreshed_with_metadata() -> None:
 
 
 def test_single_lora_mask_matches_input_rows() -> None:
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         _single_lora_mask=torch.tensor([[1], [0], [1], [0]], dtype=torch.bfloat16),
     )
     x = torch.empty(3, 5)
@@ -75,7 +76,7 @@ def test_single_lora_mask_matches_input_rows() -> None:
 def test_single_lora_linear_packed_slices(add_inputs: bool, scale: float) -> None:
     token_indices = torch.tensor([0, -1, 0, -1])
     adapter_mask = token_indices.eq(0).unsqueeze(1).to(torch.bfloat16)
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         _single_lora_slot=True,
         _get_single_lora_mask=Mock(return_value=adapter_mask),
     )
@@ -116,7 +117,7 @@ def test_single_lora_linear_packed_slices(add_inputs: bool, scale: float) -> Non
 @pytest.mark.parametrize("scale", [0.5, 1.0])
 def test_single_lora_linear_uses_prepacked_a(add_inputs: bool, scale: float) -> None:
     adapter_mask = torch.tensor([[1], [0], [1], [0]], dtype=torch.bfloat16)
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         _single_lora_slot=True,
         _get_single_lora_mask=Mock(return_value=adapter_mask),
     )
@@ -159,7 +160,7 @@ def test_single_lora_linear_uses_prepacked_a(add_inputs: bool, scale: float) -> 
 
 
 def test_non_homogeneous_prefill_linear_falls_back() -> None:
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         no_lora=False,
         _single_lora_slot=False,
         add_shrink=Mock(),
