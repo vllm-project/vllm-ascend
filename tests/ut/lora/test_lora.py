@@ -48,6 +48,7 @@ def test_single_lora_slot_enabled_on_a2_and_a3(device_type: AscendDeviceType) ->
         wrapper = PunicaWrapperNPU(16, 4, "cpu", lora_config=lora_config)
 
     assert wrapper._single_lora_slot
+    assert wrapper._single_lora_mask is not None
     assert wrapper._single_lora_mask.shape == (16, 1)
 
 
