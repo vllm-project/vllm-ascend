@@ -5,7 +5,6 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -110,6 +109,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        self._force_lora_bmm_expand_slice = False
+
+    def enable_compatible_lora_bmm_expand_slice(self) -> None:
+        """Use the compatible expand-slice path for the language wrapper."""
+        self._force_lora_bmm_expand_slice = True
+
+    def _requires_bmm_expand_slice(self, x: torch.Tensor, y_slice_size: int) -> bool:
+        # The fused Ascend expand op requires rank <= output slice size. Packed
+        # Qwen3.5 projections can contain narrower slices, so select the
+        # compatible implementation from the static tensor shape instead of a
+        # model-specific environment switch.
+        return self._force_lora_bmm_expand_slice or x.shape[-1] > y_slice_size
 
     def _shrink_prefill(
         self,
@@ -177,7 +188,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # No LoRA request, so return directly
         if self.no_lora:
             return
-        if envs_ascend.VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS:
+        if self._requires_bmm_expand_slice(x, y_slice_size):
             self._bmm_expand_slice(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
             return
         self.sgmv_expand_slice(
@@ -199,7 +210,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        if envs_ascend.VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS:
+        if self._requires_bmm_expand_slice(x, y_slice_size):
             self._bmm_expand_slice(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
             return
         self.bgmv_expand_slice(
@@ -223,10 +234,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     ):
         """Drop-in expand-slice replacement for shared-experts LoRA.
 
-        Replaces both sgmv_expand_slice and bgmv_expand_slice under
-        VLLM_ASCEND_MOE_LORA_ALLOW_SHARED_EXPERTS=1. It is dispatched through
-        a mutating torch custom op so Dynamo fullgraph keeps it opaque instead
-        of tracing the dynamic size nodes that trip vLLM graph splitting.
+        Replaces both sgmv_expand_slice and bgmv_expand_slice when a wrapped
+        MoE layer has shared experts. It is dispatched through a mutating torch
+        custom op so Dynamo fullgraph keeps it opaque instead of tracing the
+        dynamic size nodes that trip vLLM graph splitting.
         """
         _moe_lora_bmm_expand_slice_op(
             y,
