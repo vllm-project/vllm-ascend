@@ -182,7 +182,7 @@ jobs:
       max-parallel: 3
       matrix:
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node | default('[]')) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
@@ -218,7 +218,7 @@ jobs:
       max-parallel: 4
       matrix:
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node | default('[]')) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
@@ -254,7 +254,7 @@ jobs:
       max-parallel: 9
       matrix:
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node | default('[]')) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node  || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -280,7 +280,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card | default('[]')) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
