@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -8,11 +9,11 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.lora.quant_moe import apply_quant_moe_lora
 from vllm_ascend.ops.fused_moe.moe_mlp import (
     cumsum_group_list,
     unified_apply_mlp,
     unquant_apply_mlp,
-    w8a8_dynamic_lora_apply_mlp,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -24,6 +25,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
+QUANT_MOE_LORA = "vllm_ascend.lora.quant_moe"
 
 
 class TestCumsumGroupList(unittest.TestCase):
@@ -258,7 +260,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         mock_unquant.assert_not_called()
 
 
-class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
+class TestQuantMoELoRA(unittest.TestCase):
     @staticmethod
     def _compute_input(
         *,
@@ -290,13 +292,13 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
             ),
         )
 
-    def test_active_w8a8_lora_uses_dedicated_path(self):
+    def test_active_quant_lora_uses_extensible_dispatcher(self):
         expected = torch.randn(2, 8)
         mlp_compute_input = self._compute_input()
 
         with (
             patch(
-                f"{MOE_MLP}.w8a8_dynamic_lora_apply_mlp",
+                f"{QUANT_MOE_LORA}.apply_quant_moe_lora",
                 return_value=expected,
             ) as mock_lora,
             patch(f"{MOE_MLP}.quant_apply_mlp") as mock_quant,
@@ -316,7 +318,7 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
 
         with (
             patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
-            patch(f"{MOE_MLP}.w8a8_dynamic_lora_apply_mlp") as mock_lora,
+            patch(f"{QUANT_MOE_LORA}.apply_quant_moe_lora") as mock_lora,
         ):
             output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
@@ -324,11 +326,11 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
         mock_quant.assert_called_once()
         mock_lora.assert_not_called()
 
-    def test_active_non_w8a8_lora_is_rejected(self):
+    def test_unregistered_quant_type_is_rejected(self):
         mlp_compute_input = self._compute_input(quant_type=QuantType.W4A8)
 
-        with self.assertRaisesRegex(NotImplementedError, "only W8A8_DYNAMIC"):
-            unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+        with self.assertRaisesRegex(NotImplementedError, "no implementation registered"):
+            apply_quant_moe_lora(mlp_compute_input=mlp_compute_input)
 
     def test_injects_lora_at_bf16_boundaries(self):
         hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
@@ -347,8 +349,23 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
         stream = MagicMock(name="npu_stream")
         stream.record_event.return_value = event
 
+        mlp_compute_input = replace(
+            self._compute_input(),
+            hidden_states=hidden_states,
+            group_list=torch.tensor([1, 1]),
+            weights=MoEWeights(
+                w1=[torch.ones(1, 4, 6, dtype=torch.int8)],
+                w1_scale=[torch.ones(1, 6)],
+                w2=[torch.ones(1, 3, 4, dtype=torch.int8)],
+                w2_scale=[torch.ones(1, 4, dtype=torch.bfloat16)],
+            ),
+            lora_context=lora_context,
+            expanded_row_idx=expanded_row_idx,
+            topk_ids=topk_ids,
+        )
+
         with (
-            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            patch(f"{QUANT_MOE_LORA}._EXTRA_CTX") as mock_ctx,
             patch("torch.npu.current_stream", return_value=stream),
             patch.object(
                 DeviceOperator,
@@ -359,12 +376,12 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
                 ],
             ) as mock_quant,
             patch(
-                f"{MOE_MLP}.torch_npu.npu_grouped_matmul",
+                f"{QUANT_MOE_LORA}.torch_npu.npu_grouped_matmul",
                 return_value=[gate_up_out],
                 create=True,
             ) as mock_gmm1,
             patch(
-                f"{MOE_MLP}.torch_npu.npu_swiglu",
+                f"{QUANT_MOE_LORA}.torch_npu.npu_swiglu",
                 return_value=activated,
                 create=True,
             ),
@@ -374,27 +391,14 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
                 return_value=down_out,
             ) as mock_gmm2,
             patch(
-                "vllm_ascend.lora.fused_moe.moe_lora_apply_w13",
+                f"{QUANT_MOE_LORA}.moe_lora_apply_w13",
                 return_value=routing,
             ) as mock_w13,
-            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w2") as mock_w2,
+            patch(f"{QUANT_MOE_LORA}.moe_lora_apply_w2") as mock_w2,
         ):
             mock_ctx.moe_comm_type = MoECommType.ALLGATHER
-            output, output_event = w8a8_dynamic_lora_apply_mlp(
-                hidden_states=hidden_states,
-                w1=[torch.ones(1, 4, 6, dtype=torch.int8)],
-                w1_scale=[torch.ones(1, 6)],
-                w2=[torch.ones(1, 3, 4, dtype=torch.int8)],
-                w2_scale=[torch.ones(1, 4, dtype=torch.bfloat16)],
-                group_list=torch.tensor([1, 1]),
-                group_list_type=1,
-                activation="silu",
-                swiglu_limit=0.0,
-                lora_context=lora_context,
-                expanded_row_idx=expanded_row_idx,
-                topk_ids=topk_ids,
-                dynamic_scale=None,
-                dynamic_eplb=False,
+            output, output_event = apply_quant_moe_lora(
+                mlp_compute_input=mlp_compute_input,
             )
 
         self.assertIs(output, down_out)
@@ -430,43 +434,31 @@ class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
         )
 
     def test_rejects_unsupported_execution_modes(self):
-        kwargs = {
-            "hidden_states": torch.randn(1, 4, dtype=torch.bfloat16),
-            "w1": [torch.ones(1, 4, 8, dtype=torch.int8)],
-            "w1_scale": [torch.ones(1, 8)],
-            "w2": [torch.ones(1, 4, 4, dtype=torch.int8)],
-            "w2_scale": [torch.ones(1, 4)],
-            "group_list": torch.tensor([1]),
-            "group_list_type": 1,
-            "activation": "silu",
-            "swiglu_limit": 0.0,
-            "lora_context": SimpleNamespace(),
-            "expanded_row_idx": torch.tensor([0]),
-            "topk_ids": torch.tensor([[0]]),
-            "dynamic_scale": None,
-            "dynamic_eplb": False,
-        }
+        mlp_compute_input = self._compute_input()
 
-        with patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx:
+        with patch(f"{QUANT_MOE_LORA}._EXTRA_CTX") as mock_ctx:
             mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
             with self.assertRaisesRegex(NotImplementedError, "FusedMC2"):
-                w8a8_dynamic_lora_apply_mlp(**kwargs)
+                apply_quant_moe_lora(mlp_compute_input=mlp_compute_input)
 
             mock_ctx.moe_comm_type = MoECommType.ALLGATHER
             with self.assertRaisesRegex(NotImplementedError, "dynamic EPLB"):
-                w8a8_dynamic_lora_apply_mlp(**(kwargs | {"dynamic_eplb": True}))
+                apply_quant_moe_lora(
+                    mlp_compute_input=replace(
+                        mlp_compute_input,
+                        dynamic_eplb=True,
+                    )
+                )
 
             with self.assertRaisesRegex(
                 AssertionError,
                 "Dispatch-side quantization",
             ):
-                w8a8_dynamic_lora_apply_mlp(
-                    **(
-                        kwargs
-                        | {
-                            "hidden_states": torch.ones(1, 4, dtype=torch.int8),
-                            "dynamic_scale": torch.ones(1),
-                        }
+                apply_quant_moe_lora(
+                    mlp_compute_input=replace(
+                        mlp_compute_input,
+                        hidden_states=torch.ones(2, 8, dtype=torch.int8),
+                        dynamic_scale=torch.ones(2),
                     )
                 )
 
