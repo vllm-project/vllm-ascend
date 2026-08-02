@@ -32,6 +32,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.lora.fused_moe import is_moe_lora_active
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -68,6 +69,10 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
         """
         self.top_k = kwargs.get("top_k", 0)
         self.num_experts = kwargs.get("num_experts", 0)
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def ep_group(self):
@@ -354,13 +359,25 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
     ):
         quant_type = token_dispatch_input.quant.quant_type
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        hidden_states = token_dispatch_input.hidden_states
         unquantized_mxfp4_dispatch = quant_type == QuantType.MXFP4 and dynamic_scale is None
         # Without prepare-stage scales, MXFP4 stays unquantized in dispatch and
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP8
         with_quant = with_quant and not unquantized_mxfp4_dispatch
+        lora_active = is_moe_lora_active(self.lora_context)
+        if lora_active and quant_type == QuantType.W8A8:
+            if dynamic_scale is not None or hidden_states.dtype == torch.int8:
+                raise NotImplementedError(
+                    "Ascend W8A8_DYNAMIC MoE LoRA v1 is TP-only and requires "
+                    "unquantized activations before AllGather dispatch."
+                )
+            # The LoRA A projection needs the expert-sorted BF16/FP16 input.
+            # Quantize inside the MLP after routing instead.
+            with_quant = False
+        elif lora_active and token_dispatch_input.quant.is_quant:
+            raise NotImplementedError("Ascend quantized MoE LoRA currently supports only W8A8_DYNAMIC.")
         is_mxfp = token_dispatch_input.quant.is_mxfp
-        hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
