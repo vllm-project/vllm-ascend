@@ -1,11 +1,20 @@
 from types import MethodType, SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
+import vllm
+from torch import nn
+from vllm.lora.layers import MergedColumnParallelLinearWithLoRA, MergedQKVParallelLinearWithLoRA
 
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+from vllm_ascend.lora.utils import (
+    AscendMergedColumnParallelLinearWithLoRA,
+    AscendMergedQKVParallelLinearWithLoRA,
+    _PackedLoRAAWeightsMixin,
+    refresh_all_lora_classes,
+)
 
 
 @pytest.mark.parametrize("add_inputs", [True, False])
@@ -185,3 +194,49 @@ def test_non_homogeneous_prefill_linear_falls_back() -> None:
 
     wrapper.add_shrink.assert_called_once_with(buffer, x, lora_a, 1.0)
     wrapper.add_expand.assert_called_once_with(y, buffer, lora_b, (6,), add_inputs=True)
+
+
+def test_packed_lora_wrappers_extend_only_non_sharded_merged_layers() -> None:
+    assert AscendMergedColumnParallelLinearWithLoRA.__mro__[:3] == (
+        AscendMergedColumnParallelLinearWithLoRA,
+        _PackedLoRAAWeightsMixin,
+        MergedColumnParallelLinearWithLoRA,
+    )
+    assert MergedQKVParallelLinearWithLoRA in AscendMergedQKVParallelLinearWithLoRA.__mro__
+    assert all("Sharded" not in base.__name__ for base in AscendMergedQKVParallelLinearWithLoRA.__mro__)
+
+
+def test_refresh_lora_classes_prioritizes_packed_wrappers() -> None:
+    original_classes = vllm.lora.utils._all_lora_classes
+    with patch.object(vllm.lora.utils, "_all_lora_classes", original_classes):
+        refresh_all_lora_classes()
+        assert vllm.lora.utils._all_lora_classes[:2] == (
+            AscendMergedColumnParallelLinearWithLoRA,
+            AscendMergedQKVParallelLinearWithLoRA,
+        )
+
+
+def test_packed_lora_a_weights_follow_set_and_reset_lifecycle() -> None:
+    layer: Any = object.__new__(AscendMergedColumnParallelLinearWithLoRA)
+    nn.Module.__init__(layer)
+    layer.n_slices = 2
+    layer.input_size = 4
+    layer.device = torch.device("cpu")
+    layer.lora_a_stacked = (
+        torch.ones(1, 1, 2, 4),
+        torch.full((1, 1, 2, 4), 2.0),
+    )
+    lora_config: Any = SimpleNamespace(lora_dtype=torch.float32)
+
+    with patch.object(MergedColumnParallelLinearWithLoRA, "create_lora_weights"):
+        layer.create_lora_weights(1, lora_config)
+
+    assert layer.lora_a_packed.shape == (1, 1, 4, 4)
+    with patch.object(MergedColumnParallelLinearWithLoRA, "set_lora"):
+        layer.set_lora(0, [], [])
+    torch.testing.assert_close(layer.lora_a_packed[0, 0, :2], layer.lora_a_stacked[0][0, 0])
+    torch.testing.assert_close(layer.lora_a_packed[0, 0, 2:], layer.lora_a_stacked[1][0, 0])
+
+    with patch.object(MergedColumnParallelLinearWithLoRA, "reset_lora"):
+        layer.reset_lora(0)
+    assert not torch.count_nonzero(layer.lora_a_packed)
