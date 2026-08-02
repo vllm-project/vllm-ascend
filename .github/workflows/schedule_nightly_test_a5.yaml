@@ -173,135 +173,6 @@ jobs:
           echo "::notice title=multi_card::${{ steps.set-matrix.outputs.multi_card }}"
           echo "::notice title=RUN_FLAG::${{ needs['parse-trigger'].outputs.run }}"
 
-  # multi-node-tests:
-  #   name: multi-node
-  #   needs: [parse-trigger, setup-vars]
-  #   if: always()
-  #   strategy:
-  #     fail-fast: false
-  #     max-parallel: 3
-  #     matrix:
-  #       vllm_ascend_branch: ["main"]
-  #       test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node || '[]') }}
-  #   uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-  #   with:
-  #     soc_version: a5
-  #     runner: linux-aarch64-a5-8
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-  #     ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-  #     vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-  #     replicas: 1
-  #     size: ${{ matrix.test_config.size }}
-  #     config_file_path: ${{ matrix.test_config.config_file_path }}
-  #     name: ${{ matrix.test_config.name }}
-  #     vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
-  #     aop_multi_enabled: ${{ inputs.aop_enabled }}
-  #     request_id: ${{ inputs.request_id || '' }}
-  #     should_run: >-
-  #       ${{
-  #         needs['parse-trigger'].outputs.run == 'true' && (
-  #           needs['parse-trigger'].outputs.filter == 'all' ||
-  #           contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
-  #         )
-  #       }}
-  #   secrets:
-  #     KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-  #     OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-  #     OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
-  # double-node-tests:
-  #   name: double-node
-  #   needs: [parse-trigger, setup-vars]
-  #   if: always()
-  #   strategy:
-  #     fail-fast: false
-  #     max-parallel: 4
-  #     matrix:
-  #       vllm_ascend_branch: ["main"]
-  #       test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node || '[]') }}
-  #   uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-  #   with:
-  #     soc_version: a5
-  #     runner: linux-aarch64-a5-8
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-  #     ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-  #     vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-  #     replicas: 1
-  #     size: ${{ matrix.test_config.size }}
-  #     config_file_path: ${{ matrix.test_config.config_file_path }}
-  #     name: ${{ matrix.test_config.name }}
-  #     vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
-  #     aop_multi_enabled: ${{ inputs.aop_enabled }}
-  #     request_id: ${{ inputs.request_id || '' }}
-  #     should_run: >-
-  #       ${{
-  #         needs['parse-trigger'].outputs.run == 'true' && (
-  #           needs['parse-trigger'].outputs.filter == 'all' ||
-  #           contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
-  #         )
-  #       }}
-  #   secrets:
-  #     KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-  #     OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-  #     OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
-  # single-node-tests:
-  #   name: single-node
-  #   needs: [parse-trigger, setup-vars]
-  #   if: always()
-  #   strategy:
-  #     fail-fast: false
-  #     max-parallel: 9
-  #     matrix:
-  #       vllm_ascend_branch: ["main"]
-  #       test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node  || '[]') }}
-  #   uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-  #   with:
-  #     runner: ${{ matrix.test_config.os }}
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-  #     config_file_path: ${{ matrix.test_config.config_file_path }}
-  #     name: ${{ matrix.test_config.name }}
-  #     should_run: >-
-  #       ${{
-  #         needs['parse-trigger'].outputs.run == 'true' && (
-  #           needs['parse-trigger'].outputs.filter == 'all' ||
-  #           contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
-  #         )
-  #       }}
-  #     request_id: ${{ inputs.request_id || '' }}
-  #     vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-  #     aop_single_enabled: ${{ inputs.aop_enabled }}
-
-  # multi-card-tests:
-  #   name: multi-card
-  #   needs: [parse-trigger, setup-vars]
-  #   if: always()
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       vllm_ascend_branch: ["main"]
-  #       test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card || '[]') }}
-  #   uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-  #   with:
-  #     runner: ${{ matrix.test_config.os }}
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-  #     tests: ${{ matrix.test_config.tests }}
-  #     config_file_path: ${{ matrix.test_config.config_file_path }}
-  #     name: ${{ matrix.test_config.name }}
-  #     should_run: >-
-  #       ${{
-  #         needs['parse-trigger'].outputs.run == 'true' && (
-  #           needs['parse-trigger'].outputs.filter == 'all' ||
-  #           contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
-  #         )
-  #       }}
-  #     request_id: ${{ inputs.request_id || '' }}
-  #     vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-  #     aop_single_enabled: ${{ inputs.aop_enabled }}
-  #   secrets:
-  #     OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-  #     OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
   debug-run-condition:
     name: Debug Run Condition
     needs: [parse-trigger, setup-vars]
@@ -320,7 +191,7 @@ jobs:
   multi-node-tests:
     name: multi-node
     needs: [parse-trigger, setup-vars]
-    if: true
+    if: always()
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -341,100 +212,48 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
-      # should_run: ${{ needs['parse-trigger'].outputs.run == 'true' && (needs['parse-trigger'].outputs.filter == 'all' || contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))) }}
-      should_run: true
+      should_run: >-
+        ${{
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
+          )
+        }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
-  # double-node-tests:
-  #   name: double-node
-  #   needs: [parse-trigger, setup-vars]
-  #   if: true
-  #   strategy:
-  #     fail-fast: false
-  #     max-parallel: 4
-  #     matrix:
-  #       vllm_ascend_branch: ["main"]
-  #       test_config: ${{ fromJSON('[{"name":"Qwen3-235B-W8A8-EPLB","os":"linux-aarch64-a5-8","size":2,"config_file_path":"Qwen3-235B-W8A8-EPLB.yaml"}]') }}
-  #   uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-  #   with:
-  #     soc_version: a5
-  #     runner: linux-aarch64-a5-8
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-  #     ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-  #     vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-  #     replicas: 1
-  #     size: ${{ matrix.test_config.size }}
-  #     config_file_path: ${{ matrix.test_config.config_file_path }}
-  #     name: ${{ matrix.test_config.name }}
-  #     vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
-  #     aop_multi_enabled: ${{ inputs.aop_enabled }}
-  #     request_id: ${{ inputs.request_id || '' }}
-  #     should_run: ${{ needs['parse-trigger'].outputs.run == 'true' && (needs['parse-trigger'].outputs.filter == 'all' || contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))) }}
-  #   secrets:
-  #     KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-  #     OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-  #     OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
   single-node-tests:
     name: single-node
     needs: [parse-trigger, setup-vars]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true'
+    if: always()
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 9
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
+        vllm_ascend_branch: ["main"]
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      should_run: "true"
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      tests: ${{ matrix.test_config.tests || '' }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
-      testcase_timeout: 600
+      should_run: >-
+        ${{
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
+          )
+        }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
 
-  # multi-card-tests:
-  #   name: multi-card
-  #   needs: [parse-trigger, setup-vars]
-  #   if: true
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       vllm_ascend_branch: ["main"]
-  #       test_config: ${{ fromJSON('[]') }}
-  #   uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-  #   with:
-  #     runner: ${{ matrix.test_config.os }}
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-  #     tests: ${{ matrix.test_config.tests }}
-  #     config_file_path: ${{ matrix.test_config.config_file_path }}
-  #     name: ${{ matrix.test_config.name }}
-  #     should_run: ${{ needs['parse-trigger'].outputs.run == 'true' && (needs['parse-trigger'].outputs.filter == 'all' || contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))) }}
-  #     request_id: ${{ inputs.request_id || '' }}
-  #     vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-  #     aop_single_enabled: ${{ inputs.aop_enabled }}
-  #   secrets:
-  #     OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-  #     OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
     needs: [multi-node-tests, single-node-tests]
-    # needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
-    # if: >-
-    #   always() &&
-    #   (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped' || needs.single-node-tests.result != 'skipped' || needs.multi-card-tests.result != 'skipped')
     if: >-
       always() &&
       (needs.multi-node-tests.result != 'skipped' || needs.single-node-tests.result != 'skipped')
@@ -445,7 +264,6 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a5.zip
-    # needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
       always() &&
@@ -464,12 +282,7 @@ jobs:
 
   remove-taints:
     name: Remove node taints
-    # needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
     needs: [multi-node-tests, single-node-tests]
-    # if: >-
-    #   always() &&
-    #   inputs.request_id == '' &&
-    #   (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped' || needs.single-node-tests.result != 'skipped' || needs.multi-card-tests.result != 'skipped')
     if: >-
       always() &&
       inputs.request_id == '' &&
