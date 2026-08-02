@@ -1,4 +1,5 @@
 from types import MethodType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -15,7 +16,7 @@ def test_shared_experts_select_compatible_expand_slice(shared_experts) -> None:
         _shared_experts=shared_experts,
         set_lora_context=Mock(),
     )
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         base_layer=base_layer,
         _build_lora_context=Mock(return_value="context"),
     )
@@ -62,7 +63,7 @@ def test_expand_slice_path_follows_model_structure_and_tensor_shape(
     slice_size: int,
     expect_compatible_path: bool,
 ) -> None:
-    wrapper = SimpleNamespace(
+    wrapper: Any = SimpleNamespace(
         no_lora=False,
         _force_lora_bmm_expand_slice=force_compatible_path,
         _bmm_expand_slice=Mock(),
