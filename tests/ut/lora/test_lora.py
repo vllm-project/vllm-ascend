@@ -4,10 +4,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
+    _moe_lora_projection_enabled,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     has_lora,
@@ -221,3 +224,92 @@ def test_lora_bmm_expand_slice_rejects_incompatible_shapes(
 
     with pytest.raises(ValueError, match=message):
         bmm_expand_slice(x, weights, y, indices, 1, slice_size, True)
+
+
+@pytest.mark.parametrize(
+    ("lora_b", "w13_num_slices", "expected"),
+    [
+        ([torch.zeros(2, 3), torch.zeros(2, 3), torch.zeros(2, 3)], 2, (False, False)),
+        ([torch.ones(2, 3), torch.zeros(2, 3), torch.zeros(2, 3)], 2, (True, False)),
+        ([torch.zeros(2, 3), torch.ones(2, 3), torch.zeros(2, 3)], 2, (False, True)),
+        ([torch.zeros(2, 3), torch.zeros(2, 3), torch.ones(2, 3)], 2, (True, False)),
+        ([torch.ones(2, 3), torch.zeros(2, 3)], 1, (True, False)),
+    ],
+)
+def test_moe_lora_projection_enabled(lora_b, w13_num_slices, expected) -> None:
+    assert _moe_lora_projection_enabled(lora_b, w13_num_slices) == expected
+
+
+def test_moe_lora_apply_uses_projection_specific_enable_masks() -> None:
+    punica_wrapper = Mock()
+    context = SimpleNamespace(
+        punica_wrapper=punica_wrapper,
+        w13_lora_a_stacked="w13_a",
+        w13_lora_b_stacked="w13_b",
+        w2_lora_a_stacked="w2_a",
+        w2_lora_b_stacked="w2_b",
+        adapter_enabled="all_enabled",
+        w13_adapter_enabled="w13_enabled",
+        w2_adapter_enabled="w2_enabled",
+    )
+    routing = (torch.tensor([0]), torch.tensor([0]))
+
+    moe_lora_apply_w13(
+        context,
+        gate_up_out="gate_up_out",
+        hidden_states="hidden_states",
+        lora_routing=routing,
+    )
+    moe_lora_apply_w2(
+        context,
+        down_out="down_out",
+        silu_out="silu_out",
+        lora_routing=routing,
+    )
+
+    calls = punica_wrapper.add_lora_fused_moe.call_args_list
+    assert calls[0].kwargs["adapter_enabled"] == "w13_enabled"
+    assert calls[1].kwargs["adapter_enabled"] == "w2_enabled"
+
+
+def test_moe_lora_projection_masks_follow_adapter_lifecycle() -> None:
+    layer = object.__new__(AscendFusedMoEWithLoRA)
+    BaseLayerWithLoRA.__init__(layer)
+    layer.moe_config = SimpleNamespace(moe_parallel_config=SimpleNamespace(use_ep=False))
+    layer._w13_slices = 2
+
+    def create_weights(module, max_loras, lora_config, model_config=None):
+        module.adapter_enabled = torch.zeros(max_loras + 1, dtype=torch.int)
+
+    context = SimpleNamespace()
+    with (
+        patch.object(FusedMoEWithLoRA, "create_lora_weights", create_weights),
+        patch.object(FusedMoEWithLoRA, "set_lora"),
+        patch.object(FusedMoEWithLoRA, "reset_lora"),
+        patch.object(FusedMoEWithLoRA, "_build_lora_context", return_value=context),
+    ):
+        layer.create_lora_weights(1, SimpleNamespace())
+        layer.set_lora(
+            0,
+            [torch.empty(0)] * 3,
+            [torch.zeros(2, 3), torch.ones(2, 3), torch.zeros(2, 3)],
+        )
+
+        assert layer.w13_adapter_enabled.tolist() == [0, 0]
+        assert layer.w2_adapter_enabled.tolist() == [1, 0]
+        assert layer._build_lora_context() is context
+        assert context.use_ep is False
+        assert context.w13_adapter_enabled is layer.w13_adapter_enabled
+        assert context.w2_adapter_enabled is layer.w2_adapter_enabled
+
+        layer.set_lora(
+            0,
+            [torch.empty(0)] * 3,
+            [torch.ones(2, 3), torch.zeros(2, 3), torch.zeros(2, 3)],
+        )
+        assert layer.w13_adapter_enabled.tolist() == [1, 0]
+        assert layer.w2_adapter_enabled.tolist() == [0, 0]
+
+        layer.reset_lora(0)
+        assert layer.w13_adapter_enabled.tolist() == [0, 0]
+        assert layer.w2_adapter_enabled.tolist() == [0, 0]
