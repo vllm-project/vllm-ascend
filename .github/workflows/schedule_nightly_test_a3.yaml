@@ -67,45 +67,11 @@ on:
         default: '2026.08.03'
       bisect_good_commit:
         description: 'explicit good commit for bisect (overrides good_table lookup)'
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
         required: false
-        default: ''
+        default: '{}'
         type: string
-      bisect_bad_commit:
-        description: 'bad commit to bisect from (default HEAD)'
-        required: false
-        default: 'HEAD'
-        type: string
-      bisect_fail_confirm_retries:
-        description: 'flaky guard retry count for bisect (default 1)'
-        required: false
-        default: ''
-        type: string
-      bisect_trial_timeout:
-        description: 'per-trial pytest timeout in seconds for bisect (default 7200)'
-        required: false
-        default: ''
-        type: string
-      bisect_barrier_timeout:
-        description: 'multi-node barrier timeout in seconds for bisect (default 3600)'
-        required: false
-        default: ''
-        type: string
-      bisect_no_verify_good:
-        description: 'skip good endpoint verification in bisect'
-        required: false
-        default: false
-        type: boolean
-      bisect_no_verify_bad:
-        description: 'skip bad endpoint verification in bisect'
-        required: false
-        default: false
-        type: boolean
-      bisect_force_initial_build:
-        description: 'clean-rebuild on the first bisect trial'
-        required: false
-        default: false
-        type: boolean
-
 permissions:
   contents: read
   pull-requests: read
@@ -260,14 +226,14 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ inputs.bisect_good_commit }}
-      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
-      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
-      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
-      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
-      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
-      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
-      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
@@ -310,14 +276,14 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ inputs.bisect_good_commit }}
-      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
-      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
-      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
-      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
-      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
-      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
-      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
@@ -363,14 +329,14 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ inputs.bisect_good_commit }}
-      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
-      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
-      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
-      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
-      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
-      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
-      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ''
     secrets:
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
@@ -405,14 +371,14 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ inputs.bisect_good_commit }}
-      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
-      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
-      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
-      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
-      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
-      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
-      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ''
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}

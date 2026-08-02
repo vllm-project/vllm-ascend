@@ -69,39 +69,11 @@ on:
         default: '2026.08.03'
       bisect_good_commit:
         description: 'Known good vLLM-Ascend commit SHA'
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
         required: false
-        default: ''
+        default: '{}'
         type: string
-      bisect_bad_commit:
-        description: 'Known bad vLLM-Ascend commit SHA'
-        required: false
-        default: 'HEAD'
-        type: string
-      bisect_fail_confirm_retries:
-        required: false
-        default: ''
-        type: string
-      bisect_trial_timeout:
-        required: false
-        default: ''
-        type: string
-      bisect_barrier_timeout:
-        required: false
-        default: ''
-        type: string
-      bisect_no_verify_good:
-        required: false
-        default: false
-        type: boolean
-      bisect_no_verify_bad:
-        required: false
-        default: false
-        type: boolean
-      bisect_force_initial_build:
-        required: false
-        default: false
-        type: boolean
-
 permissions:
   contents: read
   pull-requests: read
@@ -258,14 +230,14 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
       aop_single_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ inputs.bisect_good_commit }}
-      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
-      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
-      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
-      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
-      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
-      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
-      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: tests/e2e/models/configs
 
   single-node-accuracy-tests-pr-only:
@@ -297,14 +269,14 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
       aop_single_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ inputs.bisect_good_commit }}
-      bisect_bad_commit: ${{ inputs.bisect_bad_commit }}
-      bisect_fail_confirm_retries: ${{ inputs.bisect_fail_confirm_retries }}
-      bisect_trial_timeout: ${{ inputs.bisect_trial_timeout }}
-      bisect_barrier_timeout: ${{ inputs.bisect_barrier_timeout }}
-      bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
-      bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
-      bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: tests/e2e/models/configs
 
   clear-pre-logs:
