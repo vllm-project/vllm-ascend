@@ -439,6 +439,21 @@ class SharedProxyScheduler:
             if is_initial_request:
                 self.request_num = max(0, self.request_num - 1)
 
+    def abort_assignment(
+        self,
+        prefiller_key: str,
+        prefiller_load: float,
+        decoder_key: str,
+        decoder_load: float,
+        is_initial_request: bool,
+    ) -> None:
+        """Release load reserved by a completed prefill-to-decode assignment."""
+        with self._lock:
+            self._release_load(ServerRole.PREFILL, prefiller_key, prefiller_load, kv_cache=True)
+            self._release_load(ServerRole.DECODE, decoder_key, decoder_load, active_tokens=True)
+            if is_initial_request:
+                self.request_num = max(0, self.request_num - 1)
+
     def release_prefill_kv(self, key: str, load: float) -> None:
         with self._lock:
             self._release_load(ServerRole.PREFILL, key, load, kv_cache=True)
@@ -925,6 +940,27 @@ async def _abort_prefill_selection(
     )
 
 
+async def _abort_assignment(
+    runtime: WorkerRuntime,
+    prefiller_key: str,
+    prefiller_score: float,
+    decoder_key: str,
+    decoder_score: float,
+    *,
+    is_initial_request: bool,
+) -> None:
+    await asyncio.shield(
+        runtime.schedule(
+            "abort_assignment",
+            prefiller_key,
+            prefiller_score,
+            decoder_key,
+            decoder_score,
+            is_initial_request=is_initial_request,
+        )
+    )
+
+
 async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, release_prefill_kv: bool) -> None:
     await asyncio.shield(
         runtime.schedule(
@@ -953,6 +989,7 @@ async def assign_instances(
     pick_prefill = "begin_request" if is_initial_request else "reserve_prefill"
     prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
+    decoder = None
 
     try:
         prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
@@ -976,16 +1013,27 @@ async def assign_instances(
             prefiller_score,
             decoder_score,
         )
+        decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
     except (asyncio.CancelledError, Exception):
-        await _abort_prefill_selection(
-            runtime,
-            prefiller_key,
-            prefiller_score,
-            is_initial_request=is_initial_request,
-        )
+        if decoder is None:
+            await _abort_prefill_selection(
+                runtime,
+                prefiller_key,
+                prefiller_score,
+                is_initial_request=is_initial_request,
+            )
+        else:
+            await _abort_assignment(
+                runtime,
+                prefiller_key,
+                prefiller_score,
+                decoder["key"],
+                decoder_score,
+                is_initial_request=is_initial_request,
+            )
         raise
 
-    logger.debug("Using %s %s", prefiller_client.base_url, build_base_url(decoder["host"], decoder["port"]))
+    logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
     return InstanceInfo(
         request_id=request_id,
         prefiller_key=prefiller_key,

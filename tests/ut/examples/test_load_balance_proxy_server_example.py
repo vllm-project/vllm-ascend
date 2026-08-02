@@ -27,13 +27,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROXY_PATH = REPO_ROOT / "examples" / "disaggregated_prefill_v1" / "load_balance_proxy_server_example.py"
 MODULE_NAME = "vllm_ascend_load_balance_proxy_server_example"
-MISSING_MODULE = object()
 
 
 @pytest.fixture(scope="module")
 def proxy_module():
     previous_policy = asyncio.get_event_loop_policy()
-    previous_uvloop = sys.modules.pop("uvloop", MISSING_MODULE)
+    previous_uvloop = sys.modules.pop("uvloop", None)
     try:
         sys.modules.pop(MODULE_NAME, None)
         spec = importlib.util.spec_from_file_location(MODULE_NAME, PROXY_PATH)
@@ -46,7 +45,7 @@ def proxy_module():
         asyncio.set_event_loop_policy(previous_policy)
         sys.modules.pop(MODULE_NAME, None)
         sys.modules.pop("uvloop", None)
-        if previous_uvloop is not MISSING_MODULE:
+        if previous_uvloop is not None:
             sys.modules["uvloop"] = previous_uvloop
 
 
@@ -233,6 +232,114 @@ def test_assign_instances_releases_prefill_pressure_when_no_decoder_exists(proxy
         "begin_request",
         "finish_prefill_and_pick_decoder",
         "abort_prefill",
+    ]
+
+
+@pytest.mark.parametrize("is_initial_request", [True, False])
+def test_assign_instances_releases_assignment_when_decoder_client_fails(
+    proxy_module,
+    monkeypatch,
+    is_initial_request,
+):
+    scheduler = proxy_module.SharedProxyScheduler(
+        [("127.0.0.1", 8100)],
+        [("127.0.0.1", 8200)],
+    )
+    runtime = RecordingRuntime(scheduler)
+    if not is_initial_request:
+        scheduler.request_num = 1
+
+    async def send_success(*_args, **_kwargs):
+        return FakeResponse()
+
+    async def get_client(role, _key):
+        if role is proxy_module.ServerRole.DECODE:
+            raise RuntimeError("decoder client unavailable")
+        return SimpleNamespace(base_url="http://prefiller/v1")
+
+    monkeypatch.setattr(runtime, "get_client", get_client)
+    monkeypatch.setattr(proxy_module, "runtime", runtime)
+    monkeypatch.setattr(proxy_module, "global_args", SimpleNamespace(max_retries=1, retry_delay=0.0))
+    monkeypatch.setattr(proxy_module, "send_request_to_service", send_success)
+
+    with pytest.raises(RuntimeError, match="decoder client unavailable"):
+        asyncio.run(
+            proxy_module.assign_instances(
+                "/completions",
+                {},
+                100,
+                is_initial_request=is_initial_request,
+            )
+        )
+
+    prefiller = next(iter(scheduler.prefillers.values()))
+    decoder = next(iter(scheduler.decoders.values()))
+    assert (prefiller.active_tokens, prefiller.active_kv_cache) == (0.0, 0.0)
+    assert decoder.active_tokens == 0.0
+    assert scheduler.request_num == (0 if is_initial_request else 1)
+    expected_pick = "begin_request" if is_initial_request else "reserve_prefill"
+    assert runtime.scheduled_methods == [
+        expected_pick,
+        "finish_prefill_and_pick_decoder",
+        "abort_assignment",
+    ]
+
+
+@pytest.mark.parametrize("is_initial_request", [True, False])
+def test_assign_instances_releases_assignment_when_decoder_client_lookup_is_cancelled(
+    proxy_module,
+    monkeypatch,
+    is_initial_request,
+):
+    scheduler = proxy_module.SharedProxyScheduler(
+        [("127.0.0.1", 8100)],
+        [("127.0.0.1", 8200)],
+    )
+    runtime = RecordingRuntime(scheduler)
+    if not is_initial_request:
+        scheduler.request_num = 1
+    decoder_client_requested = asyncio.Event()
+
+    async def send_success(*_args, **_kwargs):
+        return FakeResponse()
+
+    async def get_client(role, _key):
+        if role is proxy_module.ServerRole.DECODE:
+            decoder_client_requested.set()
+            await asyncio.Future()
+        return SimpleNamespace(base_url="http://prefiller/v1")
+
+    monkeypatch.setattr(runtime, "get_client", get_client)
+    monkeypatch.setattr(proxy_module, "runtime", runtime)
+    monkeypatch.setattr(proxy_module, "global_args", SimpleNamespace(max_retries=1, retry_delay=0.0))
+    monkeypatch.setattr(proxy_module, "send_request_to_service", send_success)
+
+    async def cancel_assignment():
+        task = asyncio.create_task(
+            proxy_module.assign_instances(
+                "/completions",
+                {},
+                100,
+                is_initial_request=is_initial_request,
+            )
+        )
+        await decoder_client_requested.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_assignment())
+
+    prefiller = next(iter(scheduler.prefillers.values()))
+    decoder = next(iter(scheduler.decoders.values()))
+    assert (prefiller.active_tokens, prefiller.active_kv_cache) == (0.0, 0.0)
+    assert decoder.active_tokens == 0.0
+    assert scheduler.request_num == (0 if is_initial_request else 1)
+    expected_pick = "begin_request" if is_initial_request else "reserve_prefill"
+    assert runtime.scheduled_methods == [
+        expected_pick,
+        "finish_prefill_and_pick_decoder",
+        "abort_assignment",
     ]
 
 
