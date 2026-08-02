@@ -59,6 +59,34 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             and self.lora_config.max_loras == 1
             and not self.lora_config.fully_sharded_loras
         )
+        self._single_lora_mask = None
+        if self._single_lora_slot:
+            assert self.lora_config is not None
+            lora_dtype = self.lora_config.lora_dtype
+            if not isinstance(lora_dtype, torch.dtype):
+                raise ValueError(f"LoRA dtype must be resolved before creating the Punica wrapper, got {lora_dtype!r}")
+            self._single_lora_mask = torch.empty(
+                (max_num_batched_tokens, 1),
+                dtype=lora_dtype,
+                device=device,
+            )
+
+    def _update_base_metadata(
+        self,
+        mapping,
+        lora_index_to_id: list[int | None],
+        max_loras: int,
+        vocab_size: int,
+    ) -> None:
+        super()._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+        if self._single_lora_mask is None:
+            return
+
+        token_count = self.indices_len[0]
+        assert token_count is not None
+        token_indices = torch.narrow(self._token_lora_indices, 0, 0, token_count)
+        mask = torch.narrow(self._single_lora_mask, 0, 0, token_count)
+        mask.copy_(token_indices.eq(0).unsqueeze(1))
 
     def update_metadata(
         self,
@@ -176,6 +204,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+
+    def _get_single_lora_mask(self, x: torch.Tensor) -> torch.Tensor:
+        assert self._single_lora_mask is not None
+        return torch.narrow(self._single_lora_mask, 0, 0, x.size(0))
 
     def _apply_expand(
         self,
@@ -348,6 +380,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             lora_b_stacked,
             scale,
             output_slices,
+            packed_lora_a=kwargs.get("packed_lora_a"),
             add_inputs=kwargs.get("add_inputs", True),
         ):
             return
@@ -371,6 +404,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         scale: float,
         output_slices: tuple[int, ...],
         *,
+        packed_lora_a: torch.Tensor | None = None,
         add_inputs: bool,
     ) -> bool:
         """Use masked GEMM when the service has one runtime LoRA slot."""
@@ -379,21 +413,52 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
-        adapter_mask = self._get_token_lora_indices(x).eq(0).unsqueeze(1)
-        offset = 0
-        for lora_a, lora_b, output_size in zip(lora_a_stacked, lora_b_stacked, output_slices, strict=True):
-            a_weight = lora_a[0, 0]
+        adapter_mask = self._get_single_lora_mask(x)
+        deltas = []
+        if packed_lora_a is not None and len(lora_a_stacked) > 1:
+            rank = lora_b_stacked[0].size(-1)
+            shrink = torch.matmul(x, packed_lora_a[0, 0].transpose(0, 1))
+            shrink.mul_(adapter_mask)
+            shrink_slices = tuple(
+                shrink.narrow(1, slice_index * rank, rank) for slice_index in range(len(lora_a_stacked))
+            )
+        else:
+            shrink_slices = tuple(
+                torch.matmul(x, lora_a[0, 0].transpose(0, 1)).mul_(adapter_mask) for lora_a in lora_a_stacked
+            )
+
+        for shrink, lora_b, output_size in zip(shrink_slices, lora_b_stacked, output_slices, strict=True):
             b_weight = lora_b[0, 0, :output_size]
-            shrink = torch.matmul(x, a_weight.transpose(0, 1))
-            delta = torch.matmul(shrink, b_weight.transpose(0, 1))
-            delta.mul_(adapter_mask)
+            deltas.append(torch.matmul(shrink, b_weight.transpose(0, 1)))
+
+        if len(deltas) > 1 and sum(output_slices) == y.shape[1]:
+            delta = torch.cat(deltas, dim=1)
+            PunicaWrapperNPU._update_single_lora_output(y, delta, scale, add_inputs)
+            return True
+
+        offset = 0
+        for delta, output_size in zip(deltas, output_slices, strict=True):
             y_slice = y.narrow(1, offset, output_size)
-            if add_inputs:
-                y_slice.add_(delta, alpha=scale)
-            else:
-                torch.mul(delta, scale, out=y_slice)
+            PunicaWrapperNPU._update_single_lora_output(y_slice, delta, scale, add_inputs)
             offset += output_size
         return True
+
+    @staticmethod
+    def _update_single_lora_output(
+        y: torch.Tensor,
+        delta: torch.Tensor,
+        scale: float,
+        add_inputs: bool,
+    ) -> None:
+        if add_inputs:
+            if scale == 1.0:
+                y.add_(delta)
+            else:
+                y.add_(delta, alpha=scale)
+        elif scale == 1.0:
+            y.copy_(delta)
+        else:
+            torch.mul(delta, scale, out=y)
 
     def add_lora_fused_moe(
         self,
