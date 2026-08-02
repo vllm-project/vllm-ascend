@@ -16,7 +16,7 @@
 
 """Keep base and LoRA full graphs in separate vLLM compile variants.
 
-vLLM e5588e49 drops non-shape Dynamo guards after the first trace. With LoRA
+vLLM d02df748 drops non-shape Dynamo guards after the first trace. With LoRA
 specialization enabled, that makes base and adapter requests reuse one compiled
 callable. Ascend needs independent callables because each variant owns a
 different ACL Graph and graph-task resource set.
@@ -41,7 +41,7 @@ from vllm.config.compilation import DynamicShapesType
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 
-_SUPPORTED_VLLM_COMMIT = "e5588e49bc2642670116664a7fc4096e27adb179"
+_SUPPORTED_VLLM_COMMIT = "d02df748bf9efd99022f1a062597dc3cb3808485"
 _SUPPORTED_WRAPPER_SHA256 = "c1b1fca679ea16aa07a696831a810c0d531da2bb0ea32dd6f1a95cdaef36de07"
 _PATCH_MARKER = "_vllm_ascend_lora_dual_graph_patch"
 _ORIGINAL_INIT_ATTR = "_vllm_ascend_lora_dual_graph_original_init"
