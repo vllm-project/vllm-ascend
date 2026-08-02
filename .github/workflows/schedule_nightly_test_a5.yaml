@@ -61,9 +61,6 @@ permissions:
   pull-requests: read
   issues: read
 
-# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
-# declared as "shell: bash -el {0}" on steps that need to be properly activated.
-# It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
     shell: bash -el {0}
@@ -73,9 +70,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Single source of truth for all shared variables across jobs.
-  # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
-  # so these values are exported as job outputs via the `setup-vars` job below.
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -96,14 +90,30 @@ jobs:
     steps:
       - name: Set trigger outputs
         id: set
-        run: |
-          # shellcheck disable=SC2129
-          echo "run=true" >> "$GITHUB_OUTPUT"
-          echo "filter=all" >> "$GITHUB_OUTPUT"
-          echo "ref=${{ github.event.pull_request.head.sha || '' }}" >> "$GITHUB_OUTPUT"
-          echo "request_id=" >> "$GITHUB_OUTPUT"
-          echo "vllm_ascend_branch=main" >> "$GITHUB_OUTPUT"
-          echo "is_pr_event=${{ github.event_name == 'pull_request' && 'true' || 'false' }}" >> "$GITHUB_OUTPUT"
+        uses: actions/github-script@v9
+        script: |
+          const eventName = context.eventName;
+          let testFilter = 'all';
+          let runFlag = 'false';
+          let prRef = '';
+          let branch = 'main';
+          if (eventName === 'pull_request') {
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            if (labels.includes('nightly-test')) {
+              runFlag = 'true';
+              prRef = context.payload.pull_request.head.sha;
+            }
+          } else if (eventName === 'workflow_dispatch') {
+            testFilter = core.getInput('test_cases') || 'all';
+            branch = core.getInput('vllm_ascend_branch') || 'main';
+            runFlag = 'true';
+          }
+          core.setOutput('run', runFlag);
+          core.setOutput('filter', testFilter);
+          core.setOutput('ref', prRef);
+          core.setOutput('request_id', core.getInput('request_id'));
+          core.setOutput('vllm_ascend_branch', branch);
+          core.setOutput('is_pr_event', eventName === 'pull_request' ? 'true' : 'false');
 
   setup-vars:
     name: Export global env vars as job outputs
@@ -121,7 +131,7 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
+            input_branch="${{ needs['parse-trigger'].outputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
@@ -160,20 +170,7 @@ jobs:
           echo "::notice title=multi_node::${{ steps.set-matrix.outputs.multi_node }}"
           echo "::notice title=double_node::${{ steps.set-matrix.outputs.double_node }}"
           echo "::notice title=multi_card::${{ steps.set-matrix.outputs.multi_card }}"
-
-  # debug-matrix:
-  #   name: Debug Matrix Output
-  #   needs: [parse-trigger, setup-vars]
-  #   runs-on: linux-amd64-cpu-8-hk
-  #   if: always()
-  #   steps:
-  #     - run: |
-  #         echo "==== multi_node raw ===="
-  #         echo "${{ needs.setup-vars.outputs.multi_node }}"
-  #         echo "==== single_node raw ===="
-  #         echo "${{ needs.setup-vars.outputs.single_node }}"
-  #         echo "==== run flag ===="
-  #         echo "${{ needs['parse-trigger'].outputs.run }}"
+          echo "::notice title=RUN_FLAG::${{ needs['parse-trigger'].outputs.run }}"
 
   multi-node-tests:
     name: multi-node
@@ -183,7 +180,6 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        # vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         vllm_ascend_branch: ["main"]
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
@@ -214,18 +210,14 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger]
+    needs: [parse-trigger, setup-vars]
     if: always()
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        # vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
@@ -254,18 +246,14 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger]
+    needs: [parse-trigger, setup-vars]
     if: always()
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 9
       matrix:
-        # vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -285,17 +273,13 @@ jobs:
 
   multi-card-tests:
     name: multi-card
-    needs: [setup-vars, parse-trigger]
+    needs: [parse-trigger, setup-vars]
     if: always()
-    # if: >-
-    #   always() &&
-    #   needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
-        # vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -319,12 +303,13 @@ jobs:
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
-    needs: [multi-node-tests, double-node-tests]
-    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+    needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
+    if: >-
+      always() &&
+      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped' || needs.single-node-tests.result != 'skipped' || needs.multi-card-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
         run: |
-          # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
 
   merge-benchmark-artifacts:
@@ -363,7 +348,6 @@ jobs:
 
       - name: Remove dedicated taint from test nodes
         run: |
-          # Remove dedicated taint from test nodes
           if [[ -n "${{ vars.A5_TAINT_NODES }}" ]]; then
             kubectl taint nodes ${{ vars.A5_TAINT_NODES }} dedicated- || true
           else
