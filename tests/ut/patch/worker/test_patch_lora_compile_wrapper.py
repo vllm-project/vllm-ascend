@@ -58,6 +58,10 @@ def test_specialized_init_creates_base_variants(monkeypatch):
     class CompilationConfig:
         cudagraph_specialize_lora = True
         backend = "vllm-ascend"
+        mode = patch_module.CompilationMode.VLLM_COMPILE
+        dynamic_shapes_config = SimpleNamespace(
+            type=patch_module.DynamicShapesType.BACKED
+        )
 
         def init_backend(self, _vllm_config, prefix, is_encoder):
             backend_prefixes.append((prefix, is_encoder))
@@ -90,6 +94,7 @@ def test_specialized_init_creates_base_variants(monkeypatch):
     monkeypatch.setattr(patch_module.torch, "compile", fake_compile)
     monkeypatch.setattr(patch_module.envs, "VLLM_USE_BYTECODE_HOOK", True)
     monkeypatch.setattr(patch_module.envs, "VLLM_USE_AOT_COMPILE", False)
+    monkeypatch.setattr(patch_module.backends_module, "model_tag", "backbone")
 
     patch_module._patched_init(model)
 
@@ -99,6 +104,43 @@ def test_specialized_init_creates_base_variants(monkeypatch):
     assert backend_prefixes == [("base", False), ("base_one", False)]
     assert model._base_compiled_callable.callable_fn.__func__.__code__.co_name == "forward_base"
     assert model._base_one_compiled_callable.callable_fn.__func__.__code__.co_name == "forward_base_one"
+    assert "guard_filter_fn" in model._base_compiled_callable.kwargs["options"]
+    assert "guard_filter_fn" in model._base_one_compiled_callable.kwargs["options"]
+
+
+def test_draft_model_skips_lora_specialization(monkeypatch):
+    config = SimpleNamespace(
+        lora_config=object(),
+        compilation_config=SimpleNamespace(cudagraph_specialize_lora=True),
+    )
+
+    class Model:
+        def forward(self, value):
+            return value
+
+    model = Model()
+    original_init_calls = []
+
+    def original_init(self, compile_prefix, is_encoder):
+        original_init_calls.append((compile_prefix, is_encoder))
+        self._compiled_callable = "draft"
+        self.first_compile = True
+        self.evaluate_guards = False
+        self.vllm_config = config
+
+    monkeypatch.setattr(patch_module, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(patch_module, "_ORIGINAL_INIT", original_init)
+    monkeypatch.setattr(patch_module.envs, "VLLM_USE_BYTECODE_HOOK", True)
+    monkeypatch.setattr(patch_module.envs, "VLLM_USE_AOT_COMPILE", False)
+    monkeypatch.setattr(patch_module.backends_module, "model_tag", "eagle_head")
+
+    patch_module._patched_init(model)
+
+    assert original_init_calls == [("", False)]
+    assert model.specialize_lora is False
+    assert model.use_bytecode_hook is True
+    assert not hasattr(model, "_base_compiled_callable")
+    assert not hasattr(model, "_base_one_compiled_callable")
 
 
 def test_specialized_init_rejects_aot(monkeypatch):
