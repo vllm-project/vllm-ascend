@@ -15,6 +15,29 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import importlib.util
+import sys
+from types import ModuleType
+
+# Compatibility stubs: vLLM main imports triton.experimental.gluon from
+# vllm/triton_utils/__init__.py, but triton-ascend 3.2.1's gluon internals
+# reference symbols (e.g. constexpr_type) that don't exist in its
+# triton.language.core. Gluon is ROCm/NVIDIA-only; stubbing it out at
+# module level prevents vLLM import failures on Ascend NPU.
+_triton_spec = importlib.util.find_spec("triton")
+_triton_avail = _triton_spec is not None
+for _stub in ("triton.experimental.gluon", "triton.experimental.gluon.language"):
+    if _stub not in sys.modules:
+        sys.modules[_stub] = ModuleType(_stub)
+if _triton_avail:
+    try:
+        import triton.language.core as _tl_core
+    except Exception:
+        pass
+    else:
+        if not hasattr(_tl_core, "_aggregate"):
+            _tl_core._aggregate = lambda *a, **kw: None
+
 _GLOBAL_PATCH_APPLIED = False
 
 
