@@ -81,6 +81,7 @@ on:
       filter_expr:
         required: true
         type: string
+        default: "all"
         description: test case filter string, "all" or comma-separated case names
     secrets:
       KUBECONFIG_B64:
