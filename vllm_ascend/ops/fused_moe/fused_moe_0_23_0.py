@@ -23,6 +23,7 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+from vllm_ascend.lora.fused_moe import is_moe_lora_active
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -566,10 +567,18 @@ class AscendFusedMoE(FusedMoE):
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
             # Only used for int quantization
-            has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
-                self._shared_experts.down_proj, "weight_scale"
+            gate_up_proj = self._shared_experts.gate_up_proj
+            down_proj = self._shared_experts.down_proj
+            # Dense LoRA wrappers keep quantized base weights/scales on their
+            # ``base_layer``. Unwrap only for the base-only raw quant path;
+            # active LoRA batches continue through the wrappers below.
+            quantized_gate_up_proj = getattr(gate_up_proj, "base_layer", gate_up_proj)
+            quantized_down_proj = getattr(down_proj, "base_layer", down_proj)
+            has_quantized_shared = hasattr(quantized_gate_up_proj, "weight_scale") and hasattr(
+                quantized_down_proj, "weight_scale"
             )
-            if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            shared_lora_active = is_moe_lora_active(getattr(self, "_ascend_moe_lora_context", None))
+            if has_quantized_shared and not shared_lora_active and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -579,8 +588,8 @@ class AscendFusedMoE(FusedMoE):
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
-                    self._shared_experts.gate_up_proj.weight,
-                    self._shared_experts.gate_up_proj.weight_scale,
+                    quantized_gate_up_proj.weight,
+                    quantized_gate_up_proj.weight_scale,
                     pertoken_scale=None,
                     bias=None,
                     output_dtype=torch.int32,
@@ -595,7 +604,7 @@ class AscendFusedMoE(FusedMoE):
                     group_index.fill_(hidden_states.shape[0])
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
-                    weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
+                    weight_scale=quantized_gate_up_proj.weight_scale_fp32,
                     activation_scale=pertoken_scale,
                     bias=None,
                     quant_scale=None,
@@ -611,13 +620,13 @@ class AscendFusedMoE(FusedMoE):
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = torch_npu.npu_quant_matmul(
                     quantized_x,
-                    self._shared_experts.down_proj.weight,
-                    self._shared_experts.down_proj.weight_scale,
+                    quantized_down_proj.weight,
+                    quantized_down_proj.weight_scale,
                     pertoken_scale=swiglu_out_scale,
                     bias=None,
                     output_dtype=original_dtype,
                 )
-            elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
+            elif has_quantized_shared and not shared_lora_active and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -627,7 +636,7 @@ class AscendFusedMoE(FusedMoE):
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
-                hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
+                hidden_states = quantized_gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
@@ -641,7 +650,7 @@ class AscendFusedMoE(FusedMoE):
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
-                shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
+                shared_out = quantized_down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)

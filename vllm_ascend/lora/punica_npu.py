@@ -9,6 +9,57 @@ from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
+@torch.library.custom_op(
+    "vllm_ascend::moe_lora_bmm_expand_slice",
+    mutates_args={"y"},
+)
+def _moe_lora_bmm_expand_slice_op(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indices: torch.Tensor,
+    y_offset: int,
+    y_slice_size: int,
+    add_inputs: bool,
+) -> None:
+    rows = x.shape[0]
+    indices = indices[:rows]
+    safe_indices = indices.clamp(min=0).to(torch.long)
+    gathered = w_t_all[safe_indices, 0].to(y.dtype)
+    active_rank = gathered.shape[-1]
+    x_active = x[..., :active_rank].to(y.dtype).contiguous()
+
+    if x_active.shape[0] == 0 or gathered.shape[1] == 0:
+        return
+
+    delta = torch.bmm(gathered, x_active.unsqueeze(-1)).squeeze(-1)
+    delta = torch.where(
+        (indices >= 0).unsqueeze(-1),
+        delta,
+        torch.zeros_like(delta),
+    )
+
+    y_slice = y.narrow(1, y_offset, y_slice_size)
+    y_slice = y_slice[: delta.shape[0]]
+    if add_inputs:
+        y_slice.add_(delta)
+    else:
+        y_slice.copy_(delta)
+
+
+@_moe_lora_bmm_expand_slice_op.register_fake
+def _moe_lora_bmm_expand_slice_fake(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indices: torch.Tensor,
+    y_offset: int,
+    y_slice_size: int,
+    add_inputs: bool,
+) -> None:
+    return None
+
+
 # The platforms that are compatible with the PyTorch-native implementation can
 # inherit this class
 class PunicaWrapperNPU(PunicaWrapperBase):
@@ -48,6 +99,38 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        self._force_lora_bmm_expand_slice = False
+
+    def enable_compatible_lora_bmm_expand_slice(self) -> None:
+        """Enable the dense LoRA expand path used by shared experts."""
+        self._force_lora_bmm_expand_slice = True
+
+    def update_metadata(
+        self,
+        mapping,
+        lora_index_to_id,
+        max_loras,
+        vocab_size,
+        **kwargs,
+    ) -> None:
+        super().update_metadata(
+            mapping,
+            lora_index_to_id,
+            max_loras,
+            vocab_size,
+            **kwargs,
+        )
+        # PunicaWrapperBase only refreshes no_lora for prefill metadata.
+        # Keep it batch-accurate for decode so base-only batches retain the
+        # original fused W8A8 MoE path.
+        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+
+    def _requires_bmm_expand_slice(
+        self,
+        x: torch.Tensor,
+        y_slice_size: int,
+    ) -> bool:
+        return self._force_lora_bmm_expand_slice or x.shape[-1] > y_slice_size
 
     def _shrink_prefill(
         self,
@@ -115,6 +198,16 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # No LoRA request, so return directly
         if self.no_lora:
             return
+        if self._requires_bmm_expand_slice(x, y_slice_size):
+            self._bmm_expand_slice(
+                y,
+                x,
+                w_t_all,
+                y_offset,
+                y_slice_size,
+                add_inputs,
+            )
+            return
         self.sgmv_expand_slice(
             x,
             w_t_all,
@@ -134,10 +227,39 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
+        if self._requires_bmm_expand_slice(x, y_slice_size):
+            self._bmm_expand_slice(
+                y,
+                x,
+                w_t_all,
+                y_offset,
+                y_slice_size,
+                add_inputs,
+            )
+            return
         self.bgmv_expand_slice(
             x,
             w_t_all,
             y,
+            self._get_token_lora_indices(x),
+            y_offset,
+            y_slice_size,
+            add_inputs,
+        )
+
+    def _bmm_expand_slice(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        y_offset: int,
+        y_slice_size: int,
+        add_inputs: bool,
+    ) -> None:
+        _moe_lora_bmm_expand_slice_op(
+            y,
+            x,
+            w_t_all,
             self._get_token_lora_indices(x),
             y_offset,
             y_slice_size,
