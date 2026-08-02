@@ -302,6 +302,22 @@ jobs:
   #     OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
   #     OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
+  debug-condition:
+    name: Debug Run Condition
+    needs: [parse-trigger, setup-vars]
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Print all variables
+        env:
+          RUN_VAL: ${{ needs['parse-trigger'].outputs.run }}
+          FILTER_VAL: ${{ needs['parse-trigger'].outputs.filter }}
+          SINGLE_NODE_JSON: ${{ needs.setup-vars.outputs.single_node }}
+        run: |
+          echo "====================DEBUG INFO===================="
+          echo "parse-trigger.outputs.run = >$RUN_VAL<"
+          echo "parse-trigger.outputs.filter = >$FILTER_VAL<"
+          echo "single_node json = $SINGLE_NODE_JSON"
+
   multi-node-tests:
     name: multi-node
     needs: [parse-trigger, setup-vars]
