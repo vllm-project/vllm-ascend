@@ -5,6 +5,8 @@
 import hashlib
 import struct
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
@@ -12,6 +14,28 @@ import zmq
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class SizedDict(OrderedDict):
+    """Insertion-ordered mapping with a bounded number of entries."""
+
+    def __init__(self, max_size=16000, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            value: dict[int, list[int]] = {}
+            self[key] = value
+            return value
 
 
 def group_concurrent_contiguous(
@@ -109,3 +133,13 @@ def ensure_zmq_recv(
             else:
                 logger.error("Receive failed after all retries. source=%s, error=%s. ", path, e)
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
+
+
+__all__ = [
+    "SizedDict",
+    "ensure_zmq_recv",
+    "ensure_zmq_send",
+    "group_concurrent_contiguous",
+    "split_if_not_byte_contiguous",
+    "string_to_int64_hash",
+]

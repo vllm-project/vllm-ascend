@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
@@ -42,7 +43,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
         # Requests waiting for the worker to start a READ transfer.
-        self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         # Producer requests whose blocks must remain allocated until read.
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
@@ -96,12 +97,10 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 "remote_request_id",
             )
             if all(field in params for field in required_remote_fields):
-                local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
-                local_full_block_ids = blocks.get_block_ids() if num_external_tokens > 0 else tuple()
+                local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else tuple()
                 self._reqs_need_recv[request.request_id] = (
                     request,
                     local_block_ids,
-                    local_full_block_ids,
                     num_external_tokens,
                 )
             else:
@@ -117,13 +116,12 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
 
         for (
             req_id,
-            (req, block_ids, full_block_ids, num_external_tokens),
+            (req, block_ids, num_external_tokens),
         ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
-                local_full_block_ids=full_block_ids,
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
             )
@@ -177,14 +175,19 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_request_id": request.request_id,
             "remote_host": self.side_channel_host,
             "remote_port": self.side_channel_port,
-            "remote_pcp_size": self.pcp_size,
-            "remote_dcp_size": self.dcp_size,
-            "remote_ptp_size": self.tp_size,
             "last_token_id": request.output_token_ids[-1],
-            "remote_multi_nodes_meta_mapping": (self.multi_nodes_meta_mapping),
             "num_prompt_blocks": num_prompt_blocks,
             "remote_block_size": self.block_size,
         }
+
+    def on_new_request(self, request: "Request") -> None:
+        pass
+
+    def update_connector_output(
+        self,
+        connector_output: KVConnectorOutput,
+    ) -> None:
+        pass
 
 
 __all__ = ["MooncakePullConnectorScheduler"]
