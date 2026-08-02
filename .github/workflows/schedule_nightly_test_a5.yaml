@@ -342,7 +342,7 @@ jobs:
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
       # should_run: ${{ needs['parse-trigger'].outputs.run == 'true' && (needs['parse-trigger'].outputs.filter == 'all' || contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))) }}
-      should_run: "true"
+      should_run: true
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -393,7 +393,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       # should_run: ${{ needs.parse-trigger.outputs.run }}
-      should_run: "true"
+      should_run: true
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       tests: ${{ matrix.test_config.tests }}
