@@ -124,6 +124,7 @@ def cmd_matrix(_args):
             node = _walk(matrix, path)
             cfg = node if isinstance(node, list) else []
             json_str = json.dumps(cfg, separators=(",", ":"))
+            # GitHub Actions official multiline syntax
             f.write(f"{name}<<EOF\n{json_str}\nEOF\n")
 
 
