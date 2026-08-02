@@ -375,19 +375,19 @@ jobs:
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   single-node-tests:
-      name: single-node
-      needs: [parse-trigger, setup-vars]
-      if: true
-      uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-      with:
-        runner: linux-aarch64-a5-8
-        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5'
-        config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
-        name: deepSeek-V3.2-W8A8-DCP
-        should_run: ${{ needs['parse-trigger'].outputs.run == 'true' }}
-        request_id: ${{ inputs.request_id || '' }}
-        vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-        aop_single_enabled: ${{ inputs.aop_enabled }}
+    name: single-node
+    needs: [parse-trigger, setup-vars]
+    if: true
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: linux-aarch64-a5-8
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5'
+      config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
+      name: deepSeek-V3.2-W8A8-DCP
+      should_run: ${{ needs['parse-trigger'].outputs.run == 'true' }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
 
   multi-card-tests:
     name: multi-card
