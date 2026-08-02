@@ -123,7 +123,7 @@ def cmd_matrix(_args):
         for name, path in spec.items():
             node = _walk(matrix, path)
             cfg = node if isinstance(node, list) else []
-            f.write(f"{name}={json.dumps(cfg)}\n")
+            f.write(f"{name}={json.dumps(cfg, separators=(',', ':'))}\n")
 
 
 _MODES = {
