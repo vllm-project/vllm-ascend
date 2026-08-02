@@ -380,18 +380,21 @@ jobs:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
-  single-node-tests-debug:
-    name: single-node-debug
+  single-node-tests:
+    name: single-node
     needs: [parse-trigger, setup-vars]
     if: >-
       always() &&
-      needs['parse-trigger'].outputs.run == 'true'
-    runs-on: linux-amd64-cpu-8-hk
-    steps:
-      - name: Debug output
-        run: |
-          echo "run value: >>${{ needs.parse-trigger.outputs.run }}<<"
-          echo "is_pr_event: >>${{ needs.parse-trigger.outputs.is_pr_event }}<<"
+      needs.parse-trigger.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      # 你原有所有with入参保留
 
   multi-card-tests:
     name: multi-card
