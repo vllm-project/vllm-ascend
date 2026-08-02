@@ -36,12 +36,14 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 
 QuantMoELoRAApply = Callable[[MoEMlpComputeInput], tuple[torch.Tensor, torch.npu.Event | None]]
+QuantMoELoRADispatchValidator = Callable[[torch.Tensor, torch.Tensor | None], None]
 
 
 @dataclass(frozen=True)
 class QuantMoELoRAImpl:
     apply: QuantMoELoRAApply
     requires_unquantized_dispatch: bool
+    validate_dispatch_input: QuantMoELoRADispatchValidator | None
 
 
 _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
@@ -51,6 +53,7 @@ def register_quant_moe_lora_impl(
     quant_type: QuantType,
     *,
     requires_unquantized_dispatch: bool = True,
+    validate_dispatch_input: QuantMoELoRADispatchValidator | None = None,
 ):
     """Register the LoRA execution implementation for a quantized MoE type."""
 
@@ -60,6 +63,7 @@ def register_quant_moe_lora_impl(
         _QUANT_MOE_LORA_IMPLS[quant_type] = QuantMoELoRAImpl(
             apply=apply,
             requires_unquantized_dispatch=requires_unquantized_dispatch,
+            validate_dispatch_input=validate_dispatch_input,
         )
         return apply
 
@@ -76,9 +80,24 @@ def apply_quant_moe_lora(
     return impl.apply(mlp_compute_input)
 
 
-def quant_moe_lora_requires_unquantized_dispatch(quant_type: QuantType) -> bool:
-    """Return the dispatch policy declared by a quantized MoE LoRA impl."""
-    return _get_quant_moe_lora_impl(quant_type).requires_unquantized_dispatch
+def configure_quant_moe_lora_dispatch(
+    *,
+    quant_type: QuantType,
+    hidden_states: torch.Tensor,
+    dynamic_scale: torch.Tensor | None,
+    with_quant: bool,
+) -> bool:
+    """Apply a registered implementation's policy to MoE dispatch.
+
+    The generic token dispatcher deliberately does not interpret activation
+    dtypes or scales. Those details belong to the quantization implementation.
+    """
+    impl = _get_quant_moe_lora_impl(quant_type)
+    if impl.validate_dispatch_input is not None:
+        impl.validate_dispatch_input(hidden_states, dynamic_scale)
+    if impl.requires_unquantized_dispatch:
+        return False
+    return with_quant
 
 
 def _get_quant_moe_lora_impl(quant_type: QuantType) -> QuantMoELoRAImpl:
@@ -117,7 +136,18 @@ def _apply_moe_activation(
     return torch_npu.npu_swiglu(gate_up_out)
 
 
-@register_quant_moe_lora_impl(QuantType.W8A8)
+def _validate_dynamic_int8_dispatch(
+    hidden_states: torch.Tensor,
+    dynamic_scale: torch.Tensor | None,
+) -> None:
+    if dynamic_scale is not None or hidden_states.dtype == torch.int8:
+        raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before AllGather dispatch.")
+
+
+@register_quant_moe_lora_impl(
+    QuantType.W8A8,
+    validate_dispatch_input=_validate_dynamic_int8_dispatch,
+)
 def _apply_dynamic_int8_moe_lora(
     mlp_compute_input: MoEMlpComputeInput,
 ) -> tuple[torch.Tensor, torch.npu.Event | None]:
@@ -221,6 +251,6 @@ def _apply_dynamic_int8_moe_lora(
 
 __all__ = [
     "apply_quant_moe_lora",
-    "quant_moe_lora_requires_unquantized_dispatch",
+    "configure_quant_moe_lora_dispatch",
     "register_quant_moe_lora_impl",
 ]

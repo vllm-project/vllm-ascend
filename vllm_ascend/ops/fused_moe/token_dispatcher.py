@@ -33,7 +33,7 @@ from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import is_moe_lora_active
-from vllm_ascend.lora.quant_moe import quant_moe_lora_requires_unquantized_dispatch
+from vllm_ascend.lora.quant_moe import configure_quant_moe_lora_dispatch
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -368,16 +368,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         with_quant = with_quant and not unquantized_mxfp4_dispatch
         lora_active = is_moe_lora_active(self.lora_context)
         if lora_active and token_dispatch_input.quant.is_quant:
-            requires_unquantized_dispatch = quant_moe_lora_requires_unquantized_dispatch(quant_type)
-            if requires_unquantized_dispatch:
-                if dynamic_scale is not None or hidden_states.dtype == torch.int8:
-                    raise NotImplementedError(
-                        "This Ascend quantized MoE LoRA implementation requires "
-                        "unquantized activations before AllGather dispatch."
-                    )
-                # The LoRA A projection needs the expert-sorted floating-point
-                # input. Quantize inside the registered MLP implementation.
-                with_quant = False
+            with_quant = configure_quant_moe_lora_dispatch(
+                quant_type=quant_type,
+                hidden_states=hidden_states,
+                dynamic_scale=dynamic_scale,
+                with_quant=with_quant,
+            )
         is_mxfp = token_dispatch_input.quant.is_mxfp
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids

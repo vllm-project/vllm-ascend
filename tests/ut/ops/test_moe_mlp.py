@@ -9,7 +9,10 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.lora.quant_moe import apply_quant_moe_lora
+from vllm_ascend.lora.quant_moe import (
+    apply_quant_moe_lora,
+    configure_quant_moe_lora_dispatch,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import (
     cumsum_group_list,
     unified_apply_mlp,
@@ -331,6 +334,25 @@ class TestQuantMoELoRA(unittest.TestCase):
 
         with self.assertRaisesRegex(NotImplementedError, "no implementation registered"):
             apply_quant_moe_lora(mlp_compute_input=mlp_compute_input)
+
+    def test_dynamic_int8_backend_owns_dispatch_validation(self):
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+
+        with_quant = configure_quant_moe_lora_dispatch(
+            quant_type=QuantType.W8A8,
+            hidden_states=hidden_states,
+            dynamic_scale=None,
+            with_quant=True,
+        )
+
+        self.assertFalse(with_quant)
+        with self.assertRaisesRegex(NotImplementedError, "Dynamic INT8"):
+            configure_quant_moe_lora_dispatch(
+                quant_type=QuantType.W8A8,
+                hidden_states=torch.ones(2, 8, dtype=torch.int8),
+                dynamic_scale=torch.ones(2),
+                with_quant=True,
+            )
 
     def test_injects_lora_at_bf16_boundaries(self):
         hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
