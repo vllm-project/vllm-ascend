@@ -17,9 +17,8 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
-
 import vllm_ascend.patch.worker.patch_lora_compile_wrapper  # noqa
+from vllm_ascend.utils import is_310p
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
