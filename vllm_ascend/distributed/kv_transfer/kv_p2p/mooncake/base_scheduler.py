@@ -169,9 +169,11 @@ class MooncakeBaseConnectorScheduler:
 
     def on_new_request(self, request: "Request") -> None:
         """Mooncake currently requires no request-arrival bookkeeping."""
+        raise NotImplementedError
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Mooncake currently requires no worker-output bookkeeping."""
+        raise NotImplementedError
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         raise NotImplementedError
