@@ -21,6 +21,13 @@
 
 namespace NpuArch::Epilogue::Block {
 
+struct ProceduralBoundaryMaskParams {
+    uint32_t mode;
+    uint32_t queryBegin;
+    uint32_t keyBegin;
+    uint32_t windowTokens;
+};
+
 template <
     class OutputType_,
     class InputType_,
@@ -124,6 +131,155 @@ public:
         } else {
             AscendC::SetVectorMask<int8_t>(0x0, mask);
         }
+    }
+
+    __aicore__ inline
+    void SetNegativeInfinityRangeUb(
+        const AscendC::LocalTensor<float> &rowBuffer,
+        uint32_t begin,
+        uint32_t end)
+    {
+        if (begin >= end) {
+            return;
+        }
+        constexpr uint32_t FLOAT_ELEMENTS_PER_DATA_BLOCK =
+            BLOCK_SIZE_IN_BYTE / sizeof(float);
+        constexpr float NEGATIVE_INFINITY = -3.402823466e+38F;
+
+        const uint32_t firstBlockBegin =
+            begin / FLOAT_ELEMENTS_PER_DATA_BLOCK *
+            FLOAT_ELEMENTS_PER_DATA_BLOCK;
+        const uint32_t lastBlockBegin =
+            (end - 1U) / FLOAT_ELEMENTS_PER_DATA_BLOCK *
+            FLOAT_ELEMENTS_PER_DATA_BLOCK;
+
+        if (firstBlockBegin == lastBlockBegin) {
+            if (begin == firstBlockBegin &&
+                end == firstBlockBegin + FLOAT_ELEMENTS_PER_DATA_BLOCK) {
+                AscendC::Duplicate(
+                    rowBuffer[firstBlockBegin],
+                    NEGATIVE_INFINITY,
+                    FLOAT_ELEMENTS_PER_DATA_BLOCK);
+                return;
+            }
+            const uint32_t firstLane = begin - firstBlockBegin;
+            const uint32_t laneCount = end - begin;
+            const uint64_t laneBits =
+                ((1ULL << laneCount) - 1ULL) << firstLane;
+            uint64_t rangeMask[2] = {laneBits, 0ULL};
+            AscendC::Duplicate<float>(
+                rowBuffer[firstBlockBegin],
+                NEGATIVE_INFINITY,
+                rangeMask,
+                1,
+                1,
+                0);
+            return;
+        }
+
+        uint32_t alignedMiddleBegin = begin;
+        const uint32_t firstLane = begin - firstBlockBegin;
+        if (firstLane != 0U) {
+            const uint32_t laneCount =
+                FLOAT_ELEMENTS_PER_DATA_BLOCK - firstLane;
+            const uint64_t laneBits =
+                ((1ULL << laneCount) - 1ULL) << firstLane;
+            uint64_t rangeMask[2] = {laneBits, 0ULL};
+            AscendC::Duplicate<float>(
+                rowBuffer[firstBlockBegin],
+                NEGATIVE_INFINITY,
+                rangeMask,
+                1,
+                1,
+                0);
+            alignedMiddleBegin =
+                firstBlockBegin + FLOAT_ELEMENTS_PER_DATA_BLOCK;
+        }
+
+        uint32_t alignedMiddleEnd = end;
+        const uint32_t lastLaneCount = end - lastBlockBegin;
+        if (lastLaneCount != FLOAT_ELEMENTS_PER_DATA_BLOCK) {
+            alignedMiddleEnd = lastBlockBegin;
+        }
+
+        if (alignedMiddleBegin < alignedMiddleEnd) {
+            AscendC::Duplicate(
+                rowBuffer[alignedMiddleBegin],
+                NEGATIVE_INFINITY,
+                alignedMiddleEnd - alignedMiddleBegin);
+        }
+
+        if (lastLaneCount != FLOAT_ELEMENTS_PER_DATA_BLOCK) {
+            const uint64_t laneBits =
+                (1ULL << lastLaneCount) - 1ULL;
+            uint64_t rangeMask[2] = {laneBits, 0ULL};
+            AscendC::Duplicate<float>(
+                rowBuffer[lastBlockBegin],
+                NEGATIVE_INFINITY,
+                rangeMask,
+                1,
+                1,
+                0);
+        }
+    }
+
+    __aicore__ inline
+    void ApplyProceduralBoundaryMaskUb(
+        uint32_t sUbOffset,
+        uint32_t rowOffsetThisSubBlock,
+        uint32_t rowOffsetCurLoop,
+        uint32_t rowNumCurLoop,
+        uint32_t columnNum,
+        uint32_t columnNumRound,
+        uint32_t qSBlockSize,
+        const ProceduralBoundaryMaskParams &params)
+    {
+        if (params.mode == 0U) {
+            return;
+        }
+
+        for (uint32_t localRow = 0U;
+             localRow < rowNumCurLoop;
+             ++localRow) {
+            const uint32_t globalRow =
+                rowOffsetThisSubBlock + rowOffsetCurLoop + localRow;
+            const uint32_t tokenInTile = globalRow % qSBlockSize;
+            const uint32_t queryPosition =
+                params.queryBegin + tokenInTile;
+            const uint32_t lower =
+                params.mode == 2U &&
+                        queryPosition > params.windowTokens
+                    ? queryPosition - params.windowTokens
+                    : 0U;
+            const uint32_t upper = queryPosition + 1U;
+            uint32_t validBegin =
+                lower > params.keyBegin
+                    ? lower - params.keyBegin
+                    : 0U;
+            validBegin = Min(validBegin, columnNum);
+            uint32_t validEnd =
+                upper > params.keyBegin
+                    ? upper - params.keyBegin
+                    : 0U;
+            validEnd = Min(validEnd, columnNum);
+
+            const AscendC::LocalTensor<float> rowBuffer =
+                lsUbTensor[
+                    sUbOffset + localRow * columnNumRound];
+            if (validBegin >= validEnd) {
+                SetNegativeInfinityRangeUb(
+                    rowBuffer, 0U, columnNumRound);
+            } else {
+                SetNegativeInfinityRangeUb(
+                    rowBuffer, 0U, validBegin);
+                SetNegativeInfinityRangeUb(
+                    rowBuffer, validEnd, columnNumRound);
+            }
+        }
+        AscendC::SetVectorMask<int8_t>(
+            static_cast<uint64_t>(-1),
+            static_cast<uint64_t>(-1));
+        AscendC::PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline
@@ -919,6 +1075,30 @@ public:
         uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile,
         uint32_t qSBlockSize, uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag softmaxFlag)
     {
+        const ProceduralBoundaryMaskParams noProceduralMask{
+            0U, 0U, 0U, 0U};
+        operator()(
+            gOutput,
+            gInput,
+            layoutOutput,
+            layoutInput,
+            actualBlockShape,
+            isFirstStackTile,
+            isLastNoMaskStackTile,
+            qSBlockSize,
+            qNBlockSize,
+            curStackTileMod,
+            softmaxFlag,
+            noProceduralMask);
+    }
+
+    __aicore__ inline
+    void operator()(AscendC::GlobalTensor<ElementOutput> gOutput, AscendC::GlobalTensor<ElementInput> gInput,
+        const LayoutOutput &layoutOutput, const LayoutInput &layoutInput, GemmCoord actualBlockShape,
+        uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile,
+        uint32_t qSBlockSize, uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag softmaxFlag,
+        const ProceduralBoundaryMaskParams &proceduralMask)
+    {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t columnNum = actualBlockShape.n();
         uint32_t columnNumRound = RoundUp(columnNum, BLOCK_SIZE);
@@ -973,6 +1153,15 @@ public:
                 auto layoutOutputCurLoop = layoutOutput.GetTileLayout(MatrixCoord(rowNumCurLoop, columnNum));
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(pingpongFlag);
                 ScaleS((pingpongFlag * MAX_UB_S_ELEM_NUM), rowNumCurLoop, columnNumRound);
+                ApplyProceduralBoundaryMaskUb(
+                    (pingpongFlag * MAX_UB_S_ELEM_NUM),
+                    rowOffsetThisSubBlock,
+                    rowOffsetCurLoop,
+                    rowNumCurLoop,
+                    columnNum,
+                    columnNumRound,
+                    qSBlockSize,
+                    proceduralMask);
                 SubCoreCompute<false>(
                     gOutputCurLoop,
                     layoutOutputCurLoop,

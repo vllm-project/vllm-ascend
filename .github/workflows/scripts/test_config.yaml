@@ -78,6 +78,16 @@
   tests:
     - tests/e2e/pull_request/two_card/test_gemma4.py
 
+- name: attention_trianglemix
+  optional: false
+  base: attention_common
+  source_file_dependencies:
+    - vllm_ascend/attention/trianglemix.py
+    - csrc/attention/triangle_paged_sparse_attention
+  tests:
+    - tests/ut/attention/a2/test_trianglemix.py
+    - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+
 - name: attention_fa3
   optional: false
   base: attention_common
@@ -824,6 +834,7 @@ estimated_times:
   tests/ut/attention/a2/test_sfa_cp_precision.py: 160
   tests/ut/attention/a2/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 100
+  tests/ut/attention/a2/test_trianglemix.py: 30
   tests/ut/compilation/a2/test_acl_graph.py: 40
   tests/ut/device_allocator/a2/test_find_loaded_library.py: 40
   tests/ut/eplb/core/a2/test_eplb_utils.py: 30

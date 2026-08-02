@@ -24,6 +24,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -40,8 +41,17 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.trianglemix import (
+    TriangleMixFallbackReason,
+    TriangleMixRequestPlan,
+    TriangleMixRuntimeStats,
+    build_trianglemix_plan,
+    timed_trianglemix_launch,
+    trianglemix_dispatch_reason,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -199,6 +209,9 @@ class AscendMetadata:
     model_runner_type: str = ""
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
+    # Immutable per-step sparse-prefill routing metadata. It is built once
+    # and reused by all selected layers in this scheduler step.
+    trianglemix_plan: TriangleMixRequestPlan | None = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -373,6 +386,21 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             num_prefills=num_prefills,
         )
+        trianglemix_config = get_ascend_config().trianglemix
+        trianglemix_plan = None
+        if trianglemix_config.enabled:
+            prompt_lens = None
+            if common_attn_metadata.num_prompt_tokens_cpu is not None:
+                prompt_lens = common_attn_metadata.num_prompt_tokens_cpu[:num_reqs].tolist()
+            trianglemix_plan = build_trianglemix_plan(
+                state_name=getattr(attn_state, "name", str(attn_state)),
+                cumulative_query_ends=actual_seq_lengths_q,
+                seq_lens=seq_lens_list,
+                prompt_lens=prompt_lens,
+                num_decodes=num_decodes,
+                num_prefills=num_prefills,
+                config=trianglemix_config,
+            )
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -390,6 +418,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            trianglemix_plan=trianglemix_plan,
             **backend_metadata,
         )
         return attn_metadata
@@ -465,6 +494,79 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+        self.trianglemix_config = get_ascend_config().trianglemix
+        self.trianglemix_stats = TriangleMixRuntimeStats(self.trianglemix_config)
+
+    def _try_trianglemix(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor | None:
+        layer_name = self._layer_name or ""
+        reason = trianglemix_dispatch_reason(
+            config=self.trianglemix_config,
+            plan=attn_metadata.trianglemix_plan,
+            layer_name=layer_name,
+            query=query,
+            output=output,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            block_table=attn_metadata.block_tables,
+            causal=attn_metadata.causal,
+            capturing=bool(_EXTRA_CTX.capturing),
+            tensor_parallel_size=(self.vllm_config.parallel_config.tensor_parallel_size),
+            context_parallel_enabled=(
+                self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+                or self.vllm_config.parallel_config.decode_context_parallel_size > 1
+            ),
+            sliding_window=self.sliding_window,
+            sinks=self.sinks,
+            alibi_slopes=self.alibi_slopes,
+            enable_c8_quant=self.enable_c8_quant,
+        )
+        plan = attn_metadata.trianglemix_plan
+        if reason is not TriangleMixFallbackReason.NONE:
+            # Calls on disabled/unselected layers are normal dense execution,
+            # not sparse-path fallback events.
+            if reason not in (
+                TriangleMixFallbackReason.DISABLED,
+                TriangleMixFallbackReason.LAYER_NOT_SELECTED,
+            ):
+                self.trianglemix_stats.record(layer_name=layer_name, reason=reason)
+            return None
+
+        assert plan is not None
+        assert self.key_cache is not None and self.value_cache is not None
+        try:
+            result, enqueue_ns = timed_trianglemix_launch(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                block_table=attn_metadata.block_tables,
+                plan=plan,
+                scale=self.scale,
+                output=output,
+            )
+        except Exception:
+            self.trianglemix_stats.record(
+                layer_name=layer_name,
+                reason=TriangleMixFallbackReason.OPERATOR_ERROR,
+            )
+            if self.trianglemix_config.strict:
+                raise
+            logger.exception(
+                "TriangleMix launch failed at layer %s; using official FIA",
+                layer_name,
+            )
+            return None
+        self.trianglemix_stats.record(
+            layer_name=layer_name,
+            reason=TriangleMixFallbackReason.NONE,
+            saved_qk=plan.saved_qk,
+            enqueue_ns=enqueue_ns,
+        )
+        return result
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -1278,6 +1380,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
+        trianglemix_output = self._try_trianglemix(query, attn_metadata, output)
+        if trianglemix_output is not None:
+            return trianglemix_output
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
@@ -1629,8 +1734,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        if self._use_layer_aware_fia_graph_replay:
-            self._layer_name = layer.layer_name
+        self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
