@@ -297,8 +297,8 @@ build_bisect_extra_args() {
     [ "${BISECT_NO_VERIFY_GOOD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-verify-good)
     [ "${BISECT_NO_VERIFY_BAD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-verify-bad)
     [ "${BISECT_FORCE_INITIAL_BUILD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--force-initial-build)
-    [ "${BISECT_NO_ASSUME_BUILT_HEAD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-assume-built-head)
-    [ -n "${BISECT_NATIVE_CHECK:-}" ] && BISECT_EXTRA_ARGS+=(--native-check "$BISECT_NATIVE_CHECK")
+    # Keep native source and built artifacts consistent across bisect jumps.
+    BISECT_EXTRA_ARGS+=(--native-check since-build)
     [ -n "${BISECT_CONFIG_BASE_PATH:-}" ] &&
         BISECT_EXTRA_ARGS+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
 }

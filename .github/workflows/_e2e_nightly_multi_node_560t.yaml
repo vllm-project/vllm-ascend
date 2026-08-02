@@ -140,16 +140,6 @@ on:
         type: boolean
         default: false
         description: clean-rebuild on the first bisect trial
-      bisect_no_assume_built_head:
-        required: false
-        type: boolean
-        default: false
-        description: do not treat container HEAD as already built
-      bisect_native_check:
-        required: false
-        type: string
-        default: ''
-        description: rebuild detection strategy (per-commit or since-build)
       bisect_config_base_path:
         required: false
         type: string
@@ -284,8 +274,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ inputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ inputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ inputs.bisect_native_check }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
         run: |
           set -euo pipefail
@@ -336,8 +324,6 @@ jobs:
             -D bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -D bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -D bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -D bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -D bisect_native_check="$BISECT_NATIVE_CHECK" \
             -D bisect_config_base_path="$BISECT_CONFIG_BASE_PATH" \
             --outfile lws.yaml
 

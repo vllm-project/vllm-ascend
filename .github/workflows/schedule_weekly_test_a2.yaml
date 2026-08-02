@@ -101,18 +101,6 @@ on:
         required: false
         default: false
         type: boolean
-      bisect_no_assume_built_head:
-        required: false
-        default: false
-        type: boolean
-      bisect_native_check:
-        required: false
-        default: ''
-        type: string
-      bisect_config_base_path:
-        required: false
-        default: 'tests/e2e/models/configs'
-        type: string
 
 permissions:
   contents: read
@@ -278,9 +266,7 @@ jobs:
       bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
       bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
       bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
-      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
-      bisect_native_check: ${{ inputs.bisect_native_check }}
-      bisect_config_base_path: ${{ inputs.bisect_config_base_path }}
+      bisect_config_base_path: tests/e2e/models/configs
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image]
@@ -319,9 +305,7 @@ jobs:
       bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
       bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
       bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
-      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
-      bisect_native_check: ${{ inputs.bisect_native_check }}
-      bisect_config_base_path: ${{ inputs.bisect_config_base_path }}
+      bisect_config_base_path: tests/e2e/models/configs
 
   clear-pre-logs:
     needs: [parse-trigger]

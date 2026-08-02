@@ -91,14 +91,6 @@ on:
         required: false
         type: boolean
         default: false
-      bisect_no_assume_built_head:
-        required: false
-        type: boolean
-        default: false
-      bisect_native_check:
-        required: false
-        type: string
-        default: ''
       bisect_config_base_path:
         required: false
         type: string
@@ -326,8 +318,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ inputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ inputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ inputs.bisect_native_check }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
         run: |
           model=$(head -n 1 /tmp/test-logs/failed-models.txt)
@@ -347,7 +337,7 @@ jobs:
             "" "" "$model" "" "$BISECT_GOOD_COMMIT" "$BISECT_FAIL_CONFIRM_RETRIES" \
             "$BISECT_TRIAL_TIMEOUT" "$BISECT_BARRIER_TIMEOUT" "$BISECT_NO_VERIFY_GOOD" \
             "$BISECT_NO_VERIFY_BAD" "$BISECT_FORCE_INITIAL_BUILD" \
-            "$BISECT_NO_ASSUME_BUILT_HEAD" "$BISECT_NATIVE_CHECK" "$BISECT_CONFIG_BASE_PATH"
+            "$BISECT_CONFIG_BASE_PATH"
 
       - name: Preserve accuracy test failure after AOP
         if: ${{ always() && inputs.aop_single_enabled && steps.report.outcome == 'failure' }}

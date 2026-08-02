@@ -56,9 +56,6 @@ jobs:
       bisect_no_verify_good: ${{ steps.resolve.outputs.bisect_no_verify_good }}
       bisect_no_verify_bad: ${{ steps.resolve.outputs.bisect_no_verify_bad }}
       bisect_force_initial_build: ${{ steps.resolve.outputs.bisect_force_initial_build }}
-      bisect_no_assume_built_head: ${{ steps.resolve.outputs.bisect_no_assume_built_head }}
-      bisect_native_check: ${{ steps.resolve.outputs.bisect_native_check }}
-      bisect_config_base_path: ${{ steps.resolve.outputs.bisect_config_base_path }}
       command: ${{ steps.resolve.outputs.command }}
     steps:
       - name: Install system dependencies
@@ -149,19 +146,14 @@ jobs:
           NEXT_IS_FAIL_CONFIRM_RETRIES=0
           NEXT_IS_TRIAL_TIMEOUT=0
           NEXT_IS_BARRIER_TIMEOUT=0
-          NEXT_IS_NATIVE_CHECK=0
-          NEXT_IS_CONFIG_BASE_PATH=0
           BISECT_GOOD_COMMIT=""
           BISECT_BAD_COMMIT="HEAD"
           BISECT_FAIL_CONFIRM_RETRIES=""
           BISECT_TRIAL_TIMEOUT=""
           BISECT_BARRIER_TIMEOUT=""
-          BISECT_NATIVE_CHECK=""
-          BISECT_CONFIG_BASE_PATH=""
           BISECT_NO_VERIFY_GOOD="false"
           BISECT_NO_VERIFY_BAD="false"
           BISECT_FORCE_INITIAL_BUILD="false"
-          BISECT_NO_ASSUME_BUILT_HEAD="false"
           PENDING_OPTION=""
           # Preserve slash-command tokens literally; do not expand '*' or '?'
           # against files in the runner workspace.
@@ -169,8 +161,7 @@ jobs:
           for WORD in $ALL_ARGS; do
             case "$WORD" in
               --good-commit|--bad-commit|--fail-confirm-retries|--trial-timeout|--barrier-timeout|\
-              --no-verify-good|--no-verify-bad|--force-initial-build|--no-assume-built-head|\
-              --native-check|--config-base-path)
+              --no-verify-good|--no-verify-bad|--force-initial-build)
                 if [ "$AOP_ENABLED" != "true" ]; then
                   echo "ERROR: $WORD must appear after --aop_enabled"
                   exit 1
@@ -206,14 +197,6 @@ jobs:
               BISECT_BARRIER_TIMEOUT="$WORD"
               NEXT_IS_BARRIER_TIMEOUT=0
               PENDING_OPTION=""
-            elif [ "$NEXT_IS_NATIVE_CHECK" = "1" ]; then
-              BISECT_NATIVE_CHECK="$WORD"
-              NEXT_IS_NATIVE_CHECK=0
-              PENDING_OPTION=""
-            elif [ "$NEXT_IS_CONFIG_BASE_PATH" = "1" ]; then
-              BISECT_CONFIG_BASE_PATH="$WORD"
-              NEXT_IS_CONFIG_BASE_PATH=0
-              PENDING_OPTION=""
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
             elif [ "$WORD" = "--aop_enabled" ]; then
@@ -239,20 +222,12 @@ jobs:
             elif [ "$WORD" = "--barrier-timeout" ]; then
               NEXT_IS_BARRIER_TIMEOUT=1
               PENDING_OPTION="$WORD"
-            elif [ "$WORD" = "--native-check" ]; then
-              NEXT_IS_NATIVE_CHECK=1
-              PENDING_OPTION="$WORD"
-            elif [ "$WORD" = "--config-base-path" ]; then
-              NEXT_IS_CONFIG_BASE_PATH=1
-              PENDING_OPTION="$WORD"
             elif [ "$WORD" = "--no-verify-good" ]; then
               BISECT_NO_VERIFY_GOOD="true"
             elif [ "$WORD" = "--no-verify-bad" ]; then
               BISECT_NO_VERIFY_BAD="true"
             elif [ "$WORD" = "--force-initial-build" ]; then
               BISECT_FORCE_INITIAL_BUILD="true"
-            elif [ "$WORD" = "--no-assume-built-head" ]; then
-              BISECT_NO_ASSUME_BUILT_HEAD="true"
             elif [[ "$WORD" == --* ]]; then
               echo "ERROR: unknown option: $WORD"
               exit 1
@@ -293,17 +268,6 @@ jobs:
               exit 1
             fi
           done
-          if [ -n "$BISECT_NATIVE_CHECK" ] &&
-             [ "$BISECT_NATIVE_CHECK" != "per-commit" ] &&
-             [ "$BISECT_NATIVE_CHECK" != "since-build" ]; then
-            echo "ERROR: --native-check must be per-commit or since-build"
-            exit 1
-          fi
-          if [ -n "$BISECT_CONFIG_BASE_PATH" ] &&
-             ! [[ "$BISECT_CONFIG_BASE_PATH" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
-            echo "ERROR: --config-base-path contains unsupported characters"
-            exit 1
-          fi
 
           if [ -z "$TEST_CASES" ]; then
             gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
@@ -325,9 +289,6 @@ jobs:
             echo "bisect_no_verify_good=$BISECT_NO_VERIFY_GOOD"
             echo "bisect_no_verify_bad=$BISECT_NO_VERIFY_BAD"
             echo "bisect_force_initial_build=$BISECT_FORCE_INITIAL_BUILD"
-            echo "bisect_no_assume_built_head=$BISECT_NO_ASSUME_BUILT_HEAD"
-            echo "bisect_native_check=$BISECT_NATIVE_CHECK"
-            echo "bisect_config_base_path=$BISECT_CONFIG_BASE_PATH"
           } >> "$GITHUB_OUTPUT"
 
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
@@ -401,9 +362,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -424,9 +382,6 @@ jobs:
             -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -464,9 +419,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -487,9 +439,6 @@ jobs:
             -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -527,9 +476,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -550,9 +496,6 @@ jobs:
             -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -672,9 +615,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -695,9 +635,6 @@ jobs:
             -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="${BISECT_CONFIG_BASE_PATH:-tests/e2e/models/configs}"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -735,9 +672,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -758,9 +692,6 @@ jobs:
             -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -798,9 +729,6 @@ jobs:
           BISECT_NO_VERIFY_GOOD: ${{ needs.authorize.outputs.bisect_no_verify_good }}
           BISECT_NO_VERIFY_BAD: ${{ needs.authorize.outputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ needs.authorize.outputs.bisect_force_initial_build }}
-          BISECT_NO_ASSUME_BUILT_HEAD: ${{ needs.authorize.outputs.bisect_no_assume_built_head }}
-          BISECT_NATIVE_CHECK: ${{ needs.authorize.outputs.bisect_native_check }}
-          BISECT_CONFIG_BASE_PATH: ${{ needs.authorize.outputs.bisect_config_base_path }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -822,9 +750,6 @@ jobs:
             -f bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
             -f bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
             -f bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
-            -f bisect_no_assume_built_head="$BISECT_NO_ASSUME_BUILT_HEAD" \
-            -f bisect_native_check="$BISECT_NATIVE_CHECK" \
-            -f bisect_config_base_path="$BISECT_CONFIG_BASE_PATH"
           sleep 8
           _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')

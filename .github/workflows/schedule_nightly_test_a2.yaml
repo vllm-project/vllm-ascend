@@ -104,21 +104,6 @@ on:
         required: false
         default: false
         type: boolean
-      bisect_no_assume_built_head:
-        description: 'do not treat container HEAD as already built'
-        required: false
-        default: false
-        type: boolean
-      bisect_native_check:
-        description: 'rebuild detection strategy (per-commit or since-build)'
-        required: false
-        default: ''
-        type: string
-      bisect_config_base_path:
-        description: 'override CONFIG_BASE_PATH for bisect'
-        required: false
-        default: ''
-        type: string
 
 permissions:
   contents: read
@@ -285,9 +270,7 @@ jobs:
       bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
       bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
       bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
-      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
-      bisect_native_check: ${{ inputs.bisect_native_check }}
-      bisect_config_base_path: ${{ inputs.bisect_config_base_path }}
+      bisect_config_base_path: ''
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -353,9 +336,7 @@ jobs:
       bisect_no_verify_good: ${{ inputs.bisect_no_verify_good }}
       bisect_no_verify_bad: ${{ inputs.bisect_no_verify_bad }}
       bisect_force_initial_build: ${{ inputs.bisect_force_initial_build }}
-      bisect_no_assume_built_head: ${{ inputs.bisect_no_assume_built_head }}
-      bisect_native_check: ${{ inputs.bisect_native_check }}
-      bisect_config_base_path: ${{ inputs.bisect_config_base_path }}
+      bisect_config_base_path: ''
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (

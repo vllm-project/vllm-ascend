@@ -65,10 +65,6 @@ spec:
                 value: {{ bisect_no_verify_bad | default("") | tojson }}
               - name: BISECT_FORCE_INITIAL_BUILD
                 value: {{ bisect_force_initial_build | default("") | tojson }}
-              - name: BISECT_NO_ASSUME_BUILT_HEAD
-                value: {{ bisect_no_assume_built_head | default("") | tojson }}
-              - name: BISECT_NATIVE_CHECK
-                value: {{ bisect_native_check | default("") | tojson }}
               - name: BISECT_CONFIG_BASE_PATH
                 value: {{ bisect_config_base_path | default("") | tojson }}
               - name: OPENLIBING_SECRET
@@ -166,10 +162,6 @@ spec:
                 value: {{ bisect_no_verify_bad | default("") | tojson }}
               - name: BISECT_FORCE_INITIAL_BUILD
                 value: {{ bisect_force_initial_build | default("") | tojson }}
-              - name: BISECT_NO_ASSUME_BUILT_HEAD
-                value: {{ bisect_no_assume_built_head | default("") | tojson }}
-              - name: BISECT_NATIVE_CHECK
-                value: {{ bisect_native_check | default("") | tojson }}
               - name: BISECT_CONFIG_BASE_PATH
                 value: {{ bisect_config_base_path | default("") | tojson }}
             command:
