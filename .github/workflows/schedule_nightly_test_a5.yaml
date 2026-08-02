@@ -194,33 +194,19 @@ jobs:
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
-      soc_version: a5
       runner: linux-aarch64-a5-8
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      request_id: ${{ inputs.request_id || '' }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+      ascend_log_prefix: nightly-a5
+      config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+      name: Qwen3-235B-W8A8-EPLB
+      replicas: 2
+      size: 2
       should_run: ${{ needs['parse-trigger'].outputs.run }}
-      # 新增：传递过滤字符串给子workflow
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   single-node-tests:
     name: single-node
@@ -228,23 +214,16 @@ jobs:
     if: >-
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
-    strategy:
-      fail-fast: false
-      max-parallel: 9
-      matrix:
-        vllm_ascend_branch: ["main"]
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node || '[]') }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      name: ${{ matrix.test_config.name }}
+      runner: linux-aarch64-a5-8
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+      config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
+      name: deepSeek-V3.2-W8A8-DCP
       should_run: ${{ needs['parse-trigger'].outputs.run }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
-      # 新增：传递过滤字符串给子workflow
       filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
 
   clear-pre-logs:
