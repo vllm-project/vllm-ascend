@@ -35,6 +35,27 @@ from vllm_ascend.lora.utils import (
     _PackedLoRAAWeightsMixin,
     refresh_all_lora_classes,
 )
+from vllm_ascend.utils import AscendDeviceType
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_single_lora_slot_enabled_on_a2_and_a3(device_type: AscendDeviceType) -> None:
+    lora_config = SimpleNamespace(
+        max_lora_rank=8,
+        max_loras=1,
+        fully_sharded_loras=False,
+        lora_dtype=torch.bfloat16,
+    )
+
+    with (
+        patch.object(PunicaWrapperBase, "__init__", return_value=None),
+        patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes"),
+        patch("vllm_ascend.lora.punica_npu.get_ascend_device_type", return_value=device_type),
+    ):
+        wrapper = PunicaWrapperNPU(16, 4, "cpu", lora_config=lora_config)
+
+    assert wrapper._single_lora_slot
+    assert wrapper._single_lora_mask.shape == (16, 1)
 
 
 def _make_base_layer(*, num_local_experts=256, is_act_and_mul=True, shared_experts=None, use_ep=False):
