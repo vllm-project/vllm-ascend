@@ -191,7 +191,12 @@ jobs:
   multi-node-tests:
     name: multi-node
     needs: [parse-trigger, setup-vars]
-    if: always()
+    if: >-
+          always() &&
+          needs['parse-trigger'].outputs.run == 'true' && (
+            needs['parse-trigger'].outputs.filter == 'all' ||
+            contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
+          )
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -212,9 +217,7 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs['parse-trigger'].outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
-      # 只传递全局开关，过滤逻辑下移到子workflow
-      global_run_flag: ${{ needs['parse-trigger'].outputs.run }}
-      global_filter: ${{ needs['parse-trigger'].outputs.filter }}
+      should_run: "true"
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -223,7 +226,12 @@ jobs:
   single-node-tests:
     name: single-node
     needs: [parse-trigger, setup-vars]
-    if: always()
+    if: >-
+      always() &&
+      needs['parse-trigger'].outputs.run == 'true' && (
+        needs['parse-trigger'].outputs.filter == 'all' ||
+        contains(needs['parse-trigger'].outputs.filter, format(',{0},', matrix.test_config.name))
+      )
     strategy:
       fail-fast: false
       max-parallel: 9
@@ -236,12 +244,10 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      should_run: "true"
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
-      # 全局参数，过滤逻辑下沉
-      global_run_flag: ${{ needs['parse-trigger'].outputs.run }}
-      global_filter: ${{ needs['parse-trigger'].outputs.filter }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
