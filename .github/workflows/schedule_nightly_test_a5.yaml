@@ -392,11 +392,10 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      # should_run: ${{ needs.parse-trigger.outputs.run }}
-      should_run: true
+      should_run: "true"
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      tests: ${{ matrix.test_config.tests }}
+      tests: ${{ matrix.test_config.tests || '' }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
