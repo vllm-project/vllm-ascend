@@ -56,9 +56,6 @@ jobs:
       bisect_no_verify_good: ${{ steps.resolve.outputs.bisect_no_verify_good }}
       bisect_no_verify_bad: ${{ steps.resolve.outputs.bisect_no_verify_bad }}
       bisect_force_initial_build: ${{ steps.resolve.outputs.bisect_force_initial_build }}
-      bisect_no_assume_built_head: ${{ steps.resolve.outputs.bisect_no_assume_built_head }}
-      bisect_native_check: ${{ steps.resolve.outputs.bisect_native_check }}
-      bisect_config_base_path: ${{ steps.resolve.outputs.bisect_config_base_path }}
       command: ${{ steps.resolve.outputs.command }}
     steps:
       - name: Install system dependencies
@@ -149,19 +146,14 @@ jobs:
           NEXT_IS_FAIL_CONFIRM_RETRIES=0
           NEXT_IS_TRIAL_TIMEOUT=0
           NEXT_IS_BARRIER_TIMEOUT=0
-          NEXT_IS_NATIVE_CHECK=0
-          NEXT_IS_CONFIG_BASE_PATH=0
           BISECT_GOOD_COMMIT=""
           BISECT_BAD_COMMIT="HEAD"
           BISECT_FAIL_CONFIRM_RETRIES=""
           BISECT_TRIAL_TIMEOUT=""
           BISECT_BARRIER_TIMEOUT=""
-          BISECT_NATIVE_CHECK=""
-          BISECT_CONFIG_BASE_PATH=""
           BISECT_NO_VERIFY_GOOD="false"
           BISECT_NO_VERIFY_BAD="false"
           BISECT_FORCE_INITIAL_BUILD="false"
-          BISECT_NO_ASSUME_BUILT_HEAD="false"
           PENDING_OPTION=""
           # Preserve slash-command tokens literally; do not expand '*' or '?'
           # against files in the runner workspace.
@@ -169,8 +161,7 @@ jobs:
           for WORD in $ALL_ARGS; do
             case "$WORD" in
               --good-commit|--bad-commit|--fail-confirm-retries|--trial-timeout|--barrier-timeout|\
-              --no-verify-good|--no-verify-bad|--force-initial-build|--no-assume-built-head|\
-              --native-check|--config-base-path)
+              --no-verify-good|--no-verify-bad|--force-initial-build)
                 if [ "$AOP_ENABLED" != "true" ]; then
                   echo "ERROR: $WORD must appear after --aop_enabled"
                   exit 1
@@ -206,14 +197,6 @@ jobs:
               BISECT_BARRIER_TIMEOUT="$WORD"
               NEXT_IS_BARRIER_TIMEOUT=0
               PENDING_OPTION=""
-            elif [ "$NEXT_IS_NATIVE_CHECK" = "1" ]; then
-              BISECT_NATIVE_CHECK="$WORD"
-              NEXT_IS_NATIVE_CHECK=0
-              PENDING_OPTION=""
-            elif [ "$NEXT_IS_CONFIG_BASE_PATH" = "1" ]; then
-              BISECT_CONFIG_BASE_PATH="$WORD"
-              NEXT_IS_CONFIG_BASE_PATH=0
-              PENDING_OPTION=""
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
             elif [ "$WORD" = "--aop_enabled" ]; then
@@ -239,20 +222,12 @@ jobs:
             elif [ "$WORD" = "--barrier-timeout" ]; then
               NEXT_IS_BARRIER_TIMEOUT=1
               PENDING_OPTION="$WORD"
-            elif [ "$WORD" = "--native-check" ]; then
-              NEXT_IS_NATIVE_CHECK=1
-              PENDING_OPTION="$WORD"
-            elif [ "$WORD" = "--config-base-path" ]; then
-              NEXT_IS_CONFIG_BASE_PATH=1
-              PENDING_OPTION="$WORD"
             elif [ "$WORD" = "--no-verify-good" ]; then
               BISECT_NO_VERIFY_GOOD="true"
             elif [ "$WORD" = "--no-verify-bad" ]; then
               BISECT_NO_VERIFY_BAD="true"
             elif [ "$WORD" = "--force-initial-build" ]; then
               BISECT_FORCE_INITIAL_BUILD="true"
-            elif [ "$WORD" = "--no-assume-built-head" ]; then
-              BISECT_NO_ASSUME_BUILT_HEAD="true"
             elif [[ "$WORD" == --* ]]; then
               echo "ERROR: unknown option: $WORD"
               exit 1
@@ -293,18 +268,6 @@ jobs:
               exit 1
             fi
           done
-          if [ -n "$BISECT_NATIVE_CHECK" ] &&
-             [ "$BISECT_NATIVE_CHECK" != "per-commit" ] &&
-             [ "$BISECT_NATIVE_CHECK" != "since-build" ]; then
-            echo "ERROR: --native-check must be per-commit or since-build"
-            exit 1
-          fi
-          if [ -n "$BISECT_CONFIG_BASE_PATH" ] &&
-             ! [[ "$BISECT_CONFIG_BASE_PATH" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
-            echo "ERROR: --config-base-path contains unsupported characters"
-            exit 1
-          fi
-
           if [ -z "$TEST_CASES" ]; then
             gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
               -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
@@ -313,7 +276,7 @@ jobs:
           fi
 
           printf -v BISECT_ARGS_JSON \
-            '{"good_commit":"%s","bad_commit":"%s","fail_confirm_retries":"%s","trial_timeout":"%s","barrier_timeout":"%s","no_verify_good":%s,"no_verify_bad":%s,"force_initial_build":%s,"no_assume_built_head":%s,"native_check":"%s","config_base_path":"%s"}' \
+            '{"good_commit":"%s","bad_commit":"%s","fail_confirm_retries":"%s","trial_timeout":"%s","barrier_timeout":"%s","no_verify_good":%s,"no_verify_bad":%s,"force_initial_build":%s}' \
             "$BISECT_GOOD_COMMIT" \
             "$BISECT_BAD_COMMIT" \
             "$BISECT_FAIL_CONFIRM_RETRIES" \
@@ -321,10 +284,7 @@ jobs:
             "$BISECT_BARRIER_TIMEOUT" \
             "$BISECT_NO_VERIFY_GOOD" \
             "$BISECT_NO_VERIFY_BAD" \
-            "$BISECT_FORCE_INITIAL_BUILD" \
-            "$BISECT_NO_ASSUME_BUILT_HEAD" \
-            "$BISECT_NATIVE_CHECK" \
-            "$BISECT_CONFIG_BASE_PATH"
+            "$BISECT_FORCE_INITIAL_BUILD"
 
           {
             echo "test_cases=$TEST_CASES"
@@ -338,9 +298,6 @@ jobs:
             echo "bisect_no_verify_good=$BISECT_NO_VERIFY_GOOD"
             echo "bisect_no_verify_bad=$BISECT_NO_VERIFY_BAD"
             echo "bisect_force_initial_build=$BISECT_FORCE_INITIAL_BUILD"
-            echo "bisect_no_assume_built_head=$BISECT_NO_ASSUME_BUILT_HEAD"
-            echo "bisect_native_check=$BISECT_NATIVE_CHECK"
-            echo "bisect_config_base_path=$BISECT_CONFIG_BASE_PATH"
             echo "bisect_args_json=$BISECT_ARGS_JSON"
           } >> "$GITHUB_OUTPUT"
 

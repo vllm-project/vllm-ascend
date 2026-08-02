@@ -215,9 +215,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_no_assume_built_head: ${{ fromJSON(inputs.bisect_args_json || '{}').no_assume_built_head || false }}
-      bisect_native_check: ${{ fromJSON(inputs.bisect_args_json || '{}').native_check || '' }}
-      bisect_config_base_path: ${{ fromJSON(inputs.bisect_args_json || '{}').config_base_path || '' }}
+      bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
       send_ready_signal: false
       should_run: >-
@@ -266,9 +264,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_no_assume_built_head: ${{ fromJSON(inputs.bisect_args_json || '{}').no_assume_built_head || false }}
-      bisect_native_check: ${{ fromJSON(inputs.bisect_args_json || '{}').native_check || '' }}
-      bisect_config_base_path: ${{ fromJSON(inputs.bisect_args_json || '{}').config_base_path || '' }}
+      bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
       send_ready_signal: true
       run_id: ${{ github.run_id }}
@@ -337,9 +333,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_no_assume_built_head: ${{ fromJSON(inputs.bisect_args_json || '{}').no_assume_built_head || false }}
-      bisect_native_check: ${{ fromJSON(inputs.bisect_args_json || '{}').native_check || '' }}
-      bisect_config_base_path: ${{ fromJSON(inputs.bisect_args_json || '{}').config_base_path || '' }}
+      bisect_config_base_path: ''
 
   multi-card-tests:
     name: single-node
@@ -379,9 +373,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_no_assume_built_head: ${{ fromJSON(inputs.bisect_args_json || '{}').no_assume_built_head || false }}
-      bisect_native_check: ${{ fromJSON(inputs.bisect_args_json || '{}').native_check || '' }}
-      bisect_config_base_path: ${{ fromJSON(inputs.bisect_args_json || '{}').config_base_path || '' }}
+      bisect_config_base_path: ''
     secrets:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}

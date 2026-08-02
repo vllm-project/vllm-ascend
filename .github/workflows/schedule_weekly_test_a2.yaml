@@ -222,9 +222,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_no_assume_built_head: ${{ fromJSON(inputs.bisect_args_json || '{}').no_assume_built_head || false }}
-      bisect_native_check: ${{ fromJSON(inputs.bisect_args_json || '{}').native_check || '' }}
-      bisect_config_base_path: ${{ fromJSON(inputs.bisect_args_json || '{}').config_base_path || 'tests/e2e/models/configs' }}
+      bisect_config_base_path: tests/e2e/models/configs
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image]
@@ -266,9 +264,7 @@ jobs:
       bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_no_assume_built_head: ${{ fromJSON(inputs.bisect_args_json || '{}').no_assume_built_head || false }}
-      bisect_native_check: ${{ fromJSON(inputs.bisect_args_json || '{}').native_check || '' }}
-      bisect_config_base_path: ${{ fromJSON(inputs.bisect_args_json || '{}').config_base_path || 'tests/e2e/models/configs' }}
+      bisect_config_base_path: tests/e2e/models/configs
 
   clear-pre-logs:
     needs: [parse-trigger]
