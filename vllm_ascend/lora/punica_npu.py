@@ -33,11 +33,7 @@ def _moe_lora_bmm_expand_slice_op(
         return
 
     delta = torch.bmm(gathered, x_active.unsqueeze(-1)).squeeze(-1)
-    delta = torch.where(
-        (indices >= 0).unsqueeze(-1),
-        delta,
-        torch.zeros_like(delta),
-    )
+    delta.masked_fill_((indices < 0).unsqueeze(-1), 0.0)
 
     y_slice = y.narrow(1, y_offset, y_slice_size)
     y_slice = y_slice[: delta.shape[0]]
