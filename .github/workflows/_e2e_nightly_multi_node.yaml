@@ -79,7 +79,7 @@ on:
         default: false
         description: enable Pod AOP pipeline on failure
       filter_expr:
-        required: true
+        # required: true
         type: string
         default: "all"
         description: test case filter string, "all" or comma-separated case names
