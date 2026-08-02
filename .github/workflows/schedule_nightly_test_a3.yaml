@@ -53,6 +53,14 @@ on:
         required: false
         default: false
         type: boolean
+      build_type:
+        description: 'Build type for nightly image: "release" or "daily". Daily uses daily base image from quay.io/atlas_inference/vllm-ascend'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
 
 permissions:
   contents: read
@@ -121,6 +129,7 @@ jobs:
       double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
+      build_type: ${{ steps.export.outputs.build_type }}
     steps:
       - id: export
         run: |
@@ -129,6 +138,7 @@ jobs:
             input_branch="${{ inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
+            echo "build_type=${{ inputs.build_type }}"
           } >> $GITHUB_OUTPUT
 
       - name: Checkout repository
@@ -170,10 +180,14 @@ jobs:
     with:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
+      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   multi-node-tests:
     name: multi-node
@@ -192,7 +206,18 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: >-
+        ${
+          needs.build-image.result == 'success' &&
+          format('{0}:{1}', needs.build-image.outputs.swr_registry, needs.build-image.outputs.full_tag)
+          ||
+          (
+            needs.setup-vars.outputs.build_type == 'daily' &&
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            ||
+            format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
+          )
+        }
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -231,7 +256,18 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: >-
+        ${
+          needs.build-image.result == 'success' &&
+          format('{0}:{1}', needs.build-image.outputs.swr_registry, needs.build-image.outputs.full_tag)
+          ||
+          (
+            needs.setup-vars.outputs.build_type == 'daily' &&
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            ||
+            format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
+          )
+        }
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -269,7 +305,18 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: >-
+        ${
+          needs.build-image.result == 'success' &&
+          format('{0}:{1}', needs.build-image.outputs.swr_registry, needs.build-image.outputs.full_tag)
+          ||
+          (
+            needs.setup-vars.outputs.build_type == 'daily' &&
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            ||
+            format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
+          )
+        }
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       should_run: >-
@@ -298,7 +345,18 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: >-
+        ${
+          needs.build-image.result == 'success' &&
+          format('{0}:{1}', needs.build-image.outputs.swr_registry, needs.build-image.outputs.full_tag)
+          ||
+          (
+            needs.setup-vars.outputs.build_type == 'daily' &&
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            ||
+            format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
+          )
+        }
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
