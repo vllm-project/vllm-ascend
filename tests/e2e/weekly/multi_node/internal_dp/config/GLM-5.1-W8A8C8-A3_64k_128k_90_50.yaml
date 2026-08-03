@@ -33,7 +33,6 @@ deployment:
       --tensor-parallel-size 4
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
-      --served-model-name glm-5
       --tool-call-parser glm47
       --reasoning-parser glm45
       --enable-auto-tool-choice

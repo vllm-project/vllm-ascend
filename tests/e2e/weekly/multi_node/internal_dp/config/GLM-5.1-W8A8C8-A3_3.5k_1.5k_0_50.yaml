@@ -1,5 +1,9 @@
 test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_3.5k_1.5k_0_50"
+<<<<<<< HEAD
 model: "Eco-Tech/GLM-5.1-w8a8c8"
+=======
+model: "gdydems/GLM-5.1-w8a8c8"
+>>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
@@ -21,7 +25,11 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
+<<<<<<< HEAD
       vllm serve Eco-Tech/GLM-5.1-w8a8c8
+=======
+      vllm serve gdydems/GLM-5.1-w8a8c8
+>>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -52,7 +60,11 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
+<<<<<<< HEAD
       vllm serve Eco-Tech/GLM-5.1-w8a8c8
+=======
+      vllm serve gdydems/GLM-5.1-w8a8c8
+>>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -72,7 +84,11 @@ deployment:
       --max-model-len 133120
       --max-num-batched-tokens 4096
       --trust-remote-code
+<<<<<<< HEAD
       --gpu-memory-utilization 0.95
+=======
+      --gpu-memory-utilization 0.8
+>>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
       --quantization ascend
       --enable-chunked-prefill
       --no-enable-prefix-caching
@@ -90,5 +106,20 @@ benchmarks:
     max_out_len: 1500
     batch_size: 64
     request_rate: 0
+<<<<<<< HEAD
     baseline: 1267.2573
+=======
+    baseline: 1
+    threshold: 0.97
+  perf_TPOT20:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_in3500_bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 32
+    max_out_len: 1500
+    batch_size: 8
+    request_rate: 0
+    baseline: 1
+>>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
     threshold: 0.97
