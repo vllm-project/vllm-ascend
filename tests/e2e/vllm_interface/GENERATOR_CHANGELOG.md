@@ -18,7 +18,14 @@ generator problem.
   differently. Once both kinds are known and unequal, this is a concrete
   downstream compatibility risk rather than an analysis uncertainty.
 - Test evidence: all 199 isolated generator and independent-auditor tests pass;
-  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+  Ruff and `git diff --check` pass.
+- Fixed-source evidence: all 971 endpoints and contracts remain unchanged from
+  v0.32. All 177 finding identity keys are unchanged; exactly 15
+  `descriptor_kind_mismatch` records move from review to risk. Final status is
+  135 risks, five reviews, nine expected, 22 excluded, six verified, and zero
+  generator issues. The five reviews are all Triton JIT signature transforms.
+  The independent audit still classifies all 1,019 candidates with no missing
+  or conflicting site. Runtime was about 658 seconds.
 
 ## v0.32.0 - compare wrapper-hidden signature views
 
