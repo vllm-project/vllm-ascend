@@ -196,6 +196,15 @@ jobs:
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
+      # ==========新增调试打印 开始==========
+      - name: Print matrix content debug
+        run: |
+          echo "multi_node=[${{ steps.set-matrix.outputs.multi_node }}]"
+          echo "double_node=[${{ steps.set-matrix.outputs.double_node }}]"
+          echo "single_node=[${{ steps.set-matrix.outputs.single_node }}]"
+          echo "multi_card=[${{ steps.set-matrix.outputs.multi_card }}]"
+      # ==========新增调试打印 结束==========
+      
   build-image:
     name: Build nightly-a5 image
     if: >-
