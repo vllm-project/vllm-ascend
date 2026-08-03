@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-03 09:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -141,8 +141,8 @@ msgstr ""
 "Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:29
-msgid "**Quantized Versions for Atlas inference products:**"
-msgstr "**适用于 Atlas 推理产品的量化版本：**"
+msgid "**Quantized Versions for Atlas 300I DUO:**"
+msgstr "**Atlas 300I DUO 的量化版本：**"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
 msgid "Quantization"
@@ -158,8 +158,8 @@ msgid "W8A8"
 msgstr "W8A8"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
-msgid "Atlas inference products (48GB,2 cards)"
-msgstr "Atlas推理产品（48GB，2卡）"
+msgid "Atlas 300I DUO (48GB,2 cards)"
+msgstr "Atlas 300I DUO（48GB，2卡）"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:35
 msgid ""
@@ -199,8 +199,8 @@ msgid "Atlas A2 inference products"
 msgstr "Atlas A2 推理产品"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:163
 msgid ""
@@ -305,24 +305,24 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:286
 msgid ""
-"`--dtype float16` is used for Atlas inference products to match the Atlas "
-"inference execution path."
-msgstr "`--dtype float16` 用于 Atlas 推理产品，以匹配 Atlas 推理执行路径。"
+"`--dtype float16` is used for Atlas 300I DUO to match the Atlas inference "
+"execution path."
+msgstr "`--dtype float16` 用于 Atlas 300I DUO，以匹配 Atlas 推理执行路径。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:287
 msgid ""
-"`--max-model-len 16384` is intentionally conservative. On Atlas inference "
-"products, large context lengths allocate large attention masks, so do not "
-"rely on automatic max-model-len detection."
+"`--max-model-len 16384` is intentionally conservative. On Atlas 300I DUO, "
+"large context lengths allocate large attention masks, so do not rely on "
+"automatic max-model-len detection."
 msgstr ""
-"`--max-model-len 16384` 有意设置得较为保守。在 Atlas 推理产品上，大的上下文长度会分配大的注意力掩码，因此不要依赖自动的 "
-"max-model-len 检测。"
+"`--max-model-len 16384` 有意设置为保守值。在 Atlas 300I DUO "
+"上，较大的上下文长度会分配较大的注意力掩码，因此不要依赖自动的 max-model-len 检测。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:288
 msgid ""
 "`--max-num-seqs 16` limits concurrent active requests to reduce KV cache and"
-" graph capture pressure on Atlas inference products."
-msgstr "`--max-num-seqs 16` 限制并发活动请求，以减少 Atlas 推理产品上的 KV 缓存和图捕获压力。"
+" graph capture pressure on Atlas 300I DUO."
+msgstr "`--max-num-seqs 16` 限制并发活动请求数，以减少 Atlas 300I DUO 上的 KV 缓存和图捕获压力。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:289
 msgid ""
@@ -334,27 +334,27 @@ msgstr "`--gpu-memory-utilization` 控制 KV 缓存容量。如果启动或运�
 #, python-brace-format
 msgid ""
 "`--additional-config '{\"ascend_compilation_config\": {\"fuse_norm_quant\": "
-"false}}'` disables norm-quant fusion for the Atlas inference products "
-"serving path."
+"false}}'` disables norm-quant fusion for the Atlas 300I DUO serving path."
 msgstr ""
 "`--additional-config '{\"ascend_compilation_config\": {\"fuse_norm_quant\": "
-"false}}'` 为Atlas推理产品服务路径禁用norm-quant融合。"
+"false}}'` 为 Atlas 300I DUO 服务路径禁用 norm-quant 融合。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:291
 #, python-brace-format
 msgid ""
 "`--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\", "
 "\"cudagraph_capture_sizes\": [1,32]}'` enables decode ACLGraph replay and "
-"explicitly limits capture sizes for Atlas inference products."
+"explicitly limits capture sizes for Atlas 300I DUO."
 msgstr ""
 "`--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\", "
-"\"cudagraph_capture_sizes\": [1,32]}'` 为Atlas推理产品启用解码ACLGraph重放并显式限制捕获大小。"
+"\"cudagraph_capture_sizes\": [1,32]}'` 启用解码 ACLGraph 重放，并明确限制 Atlas 300I DUO"
+" 的捕获大小。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:292
 msgid ""
 "`--no-enable-prefix-caching` is the default recommendation for this Atlas "
-"inference products example to reduce memory pressure."
-msgstr "`--no-enable-prefix-caching` 是该Atlas推理产品示例的默认推荐设置，用于降低内存压力。"
+"300I DUO example to reduce memory pressure."
+msgstr "`--no-enable-prefix-caching` 是此 Atlas 300I DUO 示例的默认建议，以减少内存压力。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:293
 msgid ""
@@ -842,3 +842,6 @@ msgstr ""
 
 #~ msgid "[Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"
 #~ msgstr "[下载](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"

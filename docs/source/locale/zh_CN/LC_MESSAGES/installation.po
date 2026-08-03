@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-03 09:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -49,22 +49,120 @@ msgid "Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series."
 msgstr "配备昇腾 NPU 的硬件，通常为 Atlas 800 A2 系列。"
 
 #: ../../source/installation.md:14
-msgid "Atlas inference products."
-msgstr "Atlas 推理产品。"
+msgid "Atlas 300I DUO."
+msgstr "Atlas 300I DUO。"
 
 #: ../../source/installation.md:15
 msgid "Software:"
 msgstr "软件："
 
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Software"
+msgstr "软件"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Supported version"
+msgstr "支持版本"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Note"
+msgstr "说明"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Ascend HDK"
+msgstr "Ascend HDK"
+
+#: ../../source/installation.md:17
+msgid ""
+"Refer to the documentation [CANN "
+"9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html)"
+msgstr ""
+"请参阅文档 [CANN "
+"9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html)"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Required for CANN"
+msgstr "CANN 所需"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "CANN"
+msgstr "CANN"
+
+#: ../../source/installation.md:17
+msgid "== 9.0.1"
+msgstr "== 9.0.1"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Required for vllm-ascend and torch-npu"
+msgstr "vllm-ascend 和 torch-npu 所需"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "torch-npu"
+msgstr "torch-npu"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "== 2.10.0"
+msgstr "== 2.10.0"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid ""
+"Required for vllm-ascend, No need to install manually, it will be auto "
+"installed in below steps"
+msgstr "vllm-ascend 所需，无需手动安装，将在以下步骤中自动安装"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "torch"
+msgstr "torch"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid ""
+"Required for torch-npu and vllm, No need to install manually, it will be "
+"auto installed in below steps"
+msgstr "torch-npu 和 vllm 所需，无需手动安装，将在以下步骤中自动安装"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "NNAL"
+msgstr "NNAL"
+
+#: ../../source/installation.md:17 ../../source/installation.md:32
+msgid "Required for libatb.so, enables advanced tensor operations"
+msgstr "libatb.so 所需，支持高级张量操作"
+
 #: ../../source/installation.md:26
 msgid ""
-"Atlas inference products require CANN 9.1.0 . The Atlas A2/A3 requirements "
-"in the table above remain unchanged."
-msgstr "Atlas 推理产品需要 CANN 9.1.0。上表中 Atlas A2/A3 的要求保持不变。"
+"Atlas 300I DUO require CANN 9.1.0 . The Atlas A2/A3 requirements in the "
+"table above remain unchanged."
+msgstr "Atlas 300I DUO 需要 CANN 9.1.0。上表中 Atlas A2/A3 的要求保持不变。"
 
 #: ../../source/installation.md ../../source/installation.md:273
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
+
+#: ../../source/installation.md:32
+msgid ""
+"Refer to the documentation [CANN "
+"9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-"
+"note.md)"
+msgstr ""
+"请参阅文档 [CANN "
+"9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-"
+"note.md)"
+
+#: ../../source/installation.md:32
+msgid "== 9.1.0"
+msgstr "== 9.1.0"
+
+#: ../../source/installation.md:32
+msgid "triton / triton-ascend"
+msgstr "triton / triton-ascend"
+
+#: ../../source/installation.md:32
+msgid "Not supported"
+msgstr "不支持"
+
+#: ../../source/installation.md:32
+msgid "Uninstalled in `Dockerfile.310p`"
+msgstr "在 `Dockerfile.310p` 中已卸载"
 
 #: ../../source/installation.md:43
 msgid "There are two installation methods:"
@@ -245,12 +343,12 @@ msgstr ""
 
 #: ../../source/installation.md:253
 msgid ""
-"Atlas inference products do not support `triton` or `triton-ascend`. Source "
+"Atlas 300I DUO does not support `triton` or `triton-ascend`. Source "
 "installations can pull these packages as dependencies; remove them before "
-"running on Atlas inference products:"
+"running on Atlas 300I DUO:"
 msgstr ""
-"Atlas 推理产品不支持 `triton` 或 `triton-ascend`。从源代码安装可能会将这些包作为依赖拉取；在 Atlas "
-"推理产品上运行前请移除它们："
+"Atlas 300I DUO 不支持 `triton` 或 `triton-ascend`。源码安装可能会将这些包作为依赖项引入；在 Atlas "
+"300I DUO 上运行前请移除它们："
 
 #: ../../source/installation.md:262
 msgid ""
@@ -286,8 +384,8 @@ msgid "Atlas A3: `export SOC_VERSION=ascend910_9391`"
 msgstr "Atlas A3：`export SOC_VERSION=ascend910_9391`"
 
 #: ../../source/installation.md:269
-msgid "Atlas inference products: `export SOC_VERSION=ascend310p1`"
-msgstr "Atlas 推理产品：`export SOC_VERSION=ascend310p1`"
+msgid "Atlas 300I DUO: `export SOC_VERSION=ascend310p1`"
+msgstr "Atlas 300I DUO：`export SOC_VERSION=ascend310p1`"
 
 #: ../../source/installation.md:270
 msgid ""
@@ -562,3 +660,12 @@ msgid ""
 "Run the following command to start the container in each node (You should "
 "download the weight to /root/.cache in advance):"
 msgstr "在每个节点上运行以下命令以启动容器（您应提前将权重下载到 /root/.cache）："
+
+#~ msgid "Atlas inference products."
+#~ msgstr "Atlas 推理产品。"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"
+
+#~ msgid "Atlas inference products: `export SOC_VERSION=ascend310p1`"
+#~ msgstr "Atlas 推理产品：`export SOC_VERSION=ascend310p1`"
