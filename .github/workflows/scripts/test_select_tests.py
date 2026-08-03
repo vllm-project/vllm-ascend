@@ -148,6 +148,7 @@ def test_route_helpers():
     select_tests._load_runner_mapping(
         {
             "runner_mapping": {
+                "tests/ut/attention/a2/test_attention_v1_precision.py": {"default": "a2_half_x1"},
                 "tests/ut/attention/a2/test_mla_precision.py": {"default": "a2_half_x1"},
                 "tests/e2e/pull_request/quarter_card": {"default": "a2_quarter_x1"},
                 "tests/e2e/pull_request/half_card": {"default": "a2_half_x1"},
@@ -179,7 +180,7 @@ def test_route_helpers():
     assert select_tests._route_ut_dir("tests/ut/mod/a3_8/test_x.py") == (8, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/attention/a2/test_attention_v1_precision.py") == (
         1,
-        select_tests.NpuType.A2_QUARTER,
+        select_tests.NpuType.A2_HALF,
     )
     assert select_tests._route_ut_dir("tests/ut/attention/a2/test_mla_precision.py::test_case") == (
         1,

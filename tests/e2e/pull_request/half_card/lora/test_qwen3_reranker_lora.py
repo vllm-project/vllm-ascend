@@ -1,4 +1,4 @@
-# Static capacity prediction: the 0.6B pooling model fits a 16 GiB vNPU.
+# CI correction: ACL graph capture needs more than the 16 GiB vNPU budget.
 from pathlib import Path
 
 from vllm import LLM

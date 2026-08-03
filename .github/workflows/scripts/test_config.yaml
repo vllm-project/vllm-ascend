@@ -199,7 +199,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
-    - tests/e2e/pull_request/quarter_card/test_batch_job_aware_scheduler_e2e.py
+    - tests/e2e/pull_request/half_card/test_batch_job_aware_scheduler_e2e.py
 
 # Device
 - name: device
@@ -335,7 +335,7 @@
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_minicpm.py
+    - tests/e2e/pull_request/half_card/test_minicpm.py
 
 - name: ops_moe
   optional: false
@@ -345,7 +345,7 @@
     - vllm_ascend/ops/mla.py
   tests:
     - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
-    - tests/e2e/pull_request/half_card/test_multistream_overlap_shared_expert.py
+    - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py
@@ -572,7 +572,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/extract_hidden_states_proposer.py
   tests:
-    - tests/e2e/pull_request/half_card/spec_decode/test_extract_hidden_states.py
+    - tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py
 
 - name: spec_decode_medusa
   optional: false
@@ -904,6 +904,8 @@ estimated_times:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  tests/ut/attention/a2/test_attention_v1_precision.py:
+    default: a2_half_x1
   tests/ut/attention/a2/test_mla_precision.py:
     default: a2_half_x1
   tests/e2e/pull_request/quarter_card:
