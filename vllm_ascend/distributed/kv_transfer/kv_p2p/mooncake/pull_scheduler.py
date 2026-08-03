@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Scheduler-side logic for Mooncake pull transfers."""
 
-import math
 import queue
 import threading
 import time
@@ -219,7 +218,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
         # Requests waiting for the worker to start a READ transfer.
-        self._reqs_need_recv: dict[str, tuple[Request, BlockIds, int]] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         # Producer requests whose blocks must remain allocated until read.
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
@@ -309,10 +308,16 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 "remote_request_id",
             )
             if all(field in params for field in required_remote_fields):
-                local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else tuple()
+                if num_external_tokens > 0:
+                    local_block_ids = blocks.get_unhashed_block_ids_all_groups()
+                    local_full_block_ids = blocks.get_block_ids()
+                else:
+                    local_block_ids = tuple()
+                    local_full_block_ids = tuple()
                 self._reqs_need_recv[request.request_id] = (
                     request,
                     local_block_ids,
+                    local_full_block_ids,
                     num_external_tokens,
                 )
                 self._reqs_recv_info[request.request_id] = (
@@ -333,12 +338,13 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
 
         for (
             req_id,
-            (req, block_ids, num_external_tokens),
+            (req, block_ids, full_block_ids, num_external_tokens),
         ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
+                local_full_block_ids=full_block_ids,
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
             )
@@ -370,7 +376,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
 
         prompt_token_ids = request.prompt_token_ids or []
         prompt_len = len(prompt_token_ids)
-        num_prompt_blocks = math.ceil(prompt_len / self.block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, prompt_len)
         num_computed_blocks = sum(len(group_block_ids) for group_block_ids in computed_block_ids)
         delay_free_blocks = num_computed_blocks > 0
@@ -393,13 +398,12 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "do_remote_prefill": True,
             "do_remote_decode": False,
             "remote_block_ids": computed_block_ids,
+            "remote_num_prompt_tokens": prompt_len,
             "remote_engine_id": self.engine_id,
             "remote_request_id": request.request_id,
             "remote_host": self.side_channel_host,
             "remote_port": self.side_channel_port,
             "last_token_id": request.output_token_ids[-1],
-            "num_prompt_blocks": num_prompt_blocks,
-            "remote_block_size": self.block_size,
         }
 
     def on_new_request(self, request: "Request") -> None:
