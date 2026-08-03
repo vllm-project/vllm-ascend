@@ -83,6 +83,7 @@ class ReqMeta:
     remote_request_id: str
     num_prompt_blocks: int
     remote_block_size: int
+    local_full_block_ids: BlockIds = tuple()
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -99,6 +100,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         num_external_tokens: int,
         kv_transfer_params: dict[str, Any],
+        local_full_block_ids: BlockIds | None = None,
     ) -> None:
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -111,6 +113,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_request_id=kv_transfer_params["remote_request_id"],
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
+            local_full_block_ids=local_full_block_ids or tuple(),
         )
 
 
