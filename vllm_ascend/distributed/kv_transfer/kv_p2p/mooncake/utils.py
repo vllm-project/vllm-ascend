@@ -7,13 +7,117 @@ import struct
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
+import torch
 import zmq
 from vllm.logger import init_logger
 
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
+    tensor_storage_key,
+)
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
 logger = init_logger(__name__)
+
+
+def as_kv_cache_tensors(cache_or_caches: Any) -> tuple[torch.Tensor, ...]:
+    """Normalize one layer's KV cache into a tuple of tensors."""
+    if isinstance(cache_or_caches, torch.Tensor):
+        return (cache_or_caches,)
+    if isinstance(cache_or_caches, (list, tuple)) and all(isinstance(cache, torch.Tensor) for cache in cache_or_caches):
+        return tuple(cache_or_caches)
+    raise TypeError(
+        f"A layer KV cache must be a tensor or a list/tuple of tensors, but got {type(cache_or_caches).__name__}."
+    )
+
+
+def _get_storage_nbytes(tensor: torch.Tensor) -> int:
+    """Return the byte size of the allocation backing tensor."""
+    try:
+        return tensor.untyped_storage().nbytes()
+    except Exception:
+        try:
+            return tensor.storage().nbytes()
+        except Exception:
+            return tensor.nbytes
+
+
+def collect_configured_register_regions(
+    kv_cache_config: "KVCacheConfig",
+    kv_caches: dict[str, Any],
+) -> RegisterRegions:
+    """Collect one registration range per configured backing storage."""
+    ranges_by_storage: dict[int, tuple[int, int]] = {}
+    configured_tensor_count = 0
+
+    def merge_storage_range(
+        storage_key: int,
+        register_start: int,
+        register_end: int,
+    ) -> None:
+        previous_range = ranges_by_storage.get(storage_key)
+        if previous_range is None:
+            ranges_by_storage[storage_key] = (register_start, register_end)
+        else:
+            ranges_by_storage[storage_key] = (
+                min(previous_range[0], register_start),
+                max(previous_range[1], register_end),
+            )
+
+    for tensor_config in kv_cache_config.kv_cache_tensors:
+        if not tensor_config.shared_by:
+            continue
+
+        cache_tensors: list[torch.Tensor] = []
+        for layer_name in tensor_config.shared_by:
+            cache_tensors.extend(as_kv_cache_tensors(kv_caches.get(layer_name)))
+
+        caches_by_storage: dict[int, list[torch.Tensor]] = {}
+        for cache in cache_tensors:
+            storage_key = tensor_storage_key(cache)
+            caches_by_storage.setdefault(storage_key, []).append(cache)
+
+        if len(caches_by_storage) == 1:
+            # KVCacheTensor.size is authoritative when all layer views belong
+            # to its one configured allocation. Packed layouts expose each
+            # view at allocation_base + offset.
+            storage_key, storage_caches = next(iter(caches_by_storage.items()))
+            register_start = min(cache.data_ptr() for cache in storage_caches) - tensor_config.offset
+            merge_storage_range(
+                storage_key,
+                register_start,
+                register_start + tensor_config.size,
+            )
+        else:
+            # Some cache types initialize component tensors independently.
+            # The config size cannot be applied to every storage, so register
+            # the actual range of each allocation.
+            for storage_key, storage_caches in caches_by_storage.items():
+                register_start = min(cache.data_ptr() for cache in storage_caches)
+                register_end = max(storage_key + _get_storage_nbytes(cache) for cache in storage_caches)
+                if register_end <= register_start:
+                    raise ValueError(f"Invalid KV cache storage range: start={register_start}, end={register_end}.")
+                merge_storage_range(storage_key, register_start, register_end)
+
+        configured_tensor_count += 1
+
+    if not ranges_by_storage:
+        raise ValueError("KV cache config contains no registerable tensors.")
+
+    ptrs = [region[0] for region in ranges_by_storage.values()]
+    lengths = [region[1] - region[0] for region in ranges_by_storage.values()]
+    return RegisterRegions(
+        ptrs=ptrs,
+        lengths=lengths,
+        logical_tensor_count=configured_tensor_count,
+        logical_total_bytes=sum(lengths),
+    )
 
 
 @dataclass
@@ -137,6 +241,8 @@ def ensure_zmq_recv(
 
 __all__ = [
     "SizedDict",
+    "as_kv_cache_tensors",
+    "collect_configured_register_regions",
     "ensure_zmq_recv",
     "ensure_zmq_send",
     "group_concurrent_contiguous",
