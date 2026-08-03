@@ -107,7 +107,14 @@ BISECT_CMD=(
 )
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")
-[ -n "$TESTS" ] && BISECT_CMD+=(--test-path "$TESTS")
+if [ -n "$TESTS" ]; then
+  # Match the environment of the original pytest-driven workflow step. These
+  # are internal replay details, not user-facing bisect parameters.
+  export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  export VLLM_USE_MODELSCOPE=True
+  export VLLM_CI_RUNNER="$RUNNER"
+  BISECT_CMD+=(--test-path "$TESTS")
+fi
 [ -n "$CONFIG" ] && [ -n "$TESTS" ] && {
   echo "ERROR: both config_file_path and tests were provided; cannot select bisect replay mode"
   exit 1

@@ -55,6 +55,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("auto_bisect")
 
 
+def _validate_test_path(repo_dir: Path, raw_test_path: str) -> None:
+    """Validate a pytest file, directory, or node ID under tests/e2e."""
+    path_text = raw_test_path.split("::", 1)[0]
+    test_path = Path(path_text)
+    resolved_test = (repo_dir / test_path).resolve()
+    allowed_root = (repo_dir / "tests/e2e").resolve()
+    valid_target = resolved_test.is_dir() or resolved_test.suffix == ".py"
+    if test_path.is_absolute() or not resolved_test.is_relative_to(allowed_root) or not valid_target:
+        raise SystemExit(
+            "--test-path must be a repository-relative Python file, pytest node ID, or directory under tests/e2e"
+        )
+
+
 class Bisector:
     def __init__(self, inp: BisectInput, opt: BisectOptions):
         self.inp = inp
@@ -402,11 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     repo_dir = Path(args.repo_dir)
     if args.test_path:
-        test_path = Path(args.test_path)
-        resolved_test = (repo_dir / test_path).resolve()
-        allowed_root = (repo_dir / "tests/e2e").resolve()
-        if test_path.is_absolute() or test_path.suffix != ".py" or not resolved_test.is_relative_to(allowed_root):
-            raise SystemExit("--test-path must be a repository-relative Python file under tests/e2e")
+        _validate_test_path(repo_dir, args.test_path)
     num_nodes = _resolve_num_nodes(args, repo_dir)
     inp = BisectInput(
         scene=args.scene,

@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 # Internal vs external DP pytest entries (mirrors run.sh selection logic).
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
 _EXTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
+_PYTEST_DRIVEN_IGNORE = "tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py"
 
 # Ascend toolkit env files sourced before launching multi-node pytest.
 _ENV_SOURCE_FILES = (
@@ -97,6 +98,11 @@ class BaseRunner:
 
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
+        if self.inp.test_path:
+            env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            env["VLLM_USE_MODELSCOPE"] = "True"
+            ld_library_path = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"/usr/local/lib:{ld_library_path}"
         if self.inp.config_yaml:
             env["CONFIG_YAML_PATH"] = self.inp.config_yaml
         if self.inp.config_base_path:
@@ -141,7 +147,7 @@ class SingleNodeRunner(BaseRunner):
     def _test_command(self) -> list[str]:
         """Return the pytest command matching the original failing workflow."""
         if self.inp.test_path:
-            return ["python", "-m", "pytest", "-sv", self.inp.test_path]
+            return ["python", "-m", "pytest", "-sv", self.inp.test_path, f"--ignore={_PYTEST_DRIVEN_IGNORE}"]
 
         config_base = self.inp.config_base_path
         if config_base and Path(config_base).as_posix().rstrip("/").endswith("tests/e2e/models/configs"):
