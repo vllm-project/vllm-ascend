@@ -1,3 +1,4 @@
+# Static capacity prediction: sequential 1.5B reference runs fit a 16 GiB vNPU.
 import huggingface_hub
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]

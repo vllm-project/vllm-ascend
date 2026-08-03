@@ -17,6 +17,7 @@
 # limitations under the License.
 #
 
+# CI correction: the largest case exceeds the 16 GiB vNPU graph-capture budget.
 import os
 
 import pytest

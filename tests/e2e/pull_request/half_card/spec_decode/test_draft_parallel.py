@@ -8,7 +8,7 @@ from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.spec_decode.utils import (
+from tests.e2e.pull_request.half_card.spec_decode.utils import (
     BASELINES,
     DRAFT_PARALLEL_MODELS,
     calculate_acceptance_per_pos,

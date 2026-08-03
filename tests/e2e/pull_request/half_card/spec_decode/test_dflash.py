@@ -7,17 +7,17 @@ from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DSPARK, calculate_acceptance_per_pos
+from tests.e2e.pull_request.half_card.spec_decode.utils import BASELINES, DFLASH, calculate_acceptance_per_pos
 
 
-@pytest.mark.parametrize("method", DSPARK.keys())
-@pytest.mark.parametrize("num_speculative_tokens", [7])
-def test_dspark_acceptance(
+@pytest.mark.parametrize("method", DFLASH.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [8])
+def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    main_model_name = DSPARK[method]["main"]
-    spec_model_name = DSPARK[method]["spec"]
+    main_model_name = DFLASH[method]["main"]
+    spec_model_name = DFLASH[method]["spec"]
 
     tokenizer = AutoTokenizer.from_pretrained(
         main_model_name,
@@ -41,12 +41,12 @@ def test_dspark_acceptance(
     ]
 
     speculative_config = {
-        "method": "dspark",
+        "method": "dflash",
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
     }
 
-    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[7, 8])
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[9, 18])
 
     with VllmRunner(
         main_model_name,

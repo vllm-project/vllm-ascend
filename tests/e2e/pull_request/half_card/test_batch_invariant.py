@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# Static capacity prediction: high batch/KV settings require a 32 GiB vNPU.
 import gc
 import os
 import random

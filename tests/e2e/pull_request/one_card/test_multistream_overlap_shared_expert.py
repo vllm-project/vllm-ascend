@@ -18,6 +18,9 @@
 Compare the outputs of vLLM with multistream_overlap_shared_expert
 enabled and disabled.
 
+The test requires physical-card HCCL semantics; a half-card vNPU fails during
+HCCL communicator initialization.
+
 Run `pytest tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py`.
 """
 

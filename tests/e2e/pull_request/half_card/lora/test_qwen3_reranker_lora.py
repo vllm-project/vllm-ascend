@@ -1,3 +1,4 @@
+# CI correction: ACL graph capture needs more than the 16 GiB vNPU budget.
 from pathlib import Path
 
 from vllm import LLM
@@ -42,7 +43,7 @@ def get_llm() -> LLM:
 def test_reranker_models_lora():
     # Load the Jinja template for formatting query-document pairs
     # The template ensures proper formatting for the reranker model
-    template_home = Path(__file__).parents[1] / "pooling" / "template"
+    template_home = Path(__file__).parents[2] / "one_card" / "pooling" / "template"
     template_path = "qwen3_reranker.jinja"
     chat_template = (template_home / template_path).read_text()
 
