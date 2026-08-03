@@ -245,10 +245,38 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
-**Notice:**
-The parameters are explained as follows:
+Key Parameter Descriptions:
 
-- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
+**Common Environment Variables for single-node deployment:**
+
+- `HCCL_OP_EXPANSION_MODE="AIV"`: Enables AIV mode for HCCL communication, required for optimal performance on Atlas series NPUs.
+- `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`: Enables expandable memory segments to reduce NPU memory fragmentation.
+- `HCCL_BUFFSIZE`: HCCL communication buffer size. Larger values may improve communication throughput at the cost of additional memory. Typical values: `200` for w4a8/w8a8 single-node, `256` for multi-node.
+- `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in v1 scheduler.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm communication optimization to reduce AllReduce overhead on prefill nodes. Note: with FlashComm enabled, `layer_sharding` list cannot include `o_proj` as an element.
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess operation fusion operator (MlaPreprocessOperation). This is enabled by default for w8a8 quantized models and significantly improves Decode performance, but consumes more NPU memory. If reducing memory usage is a higher priority, disable it by setting `VLLM_ASCEND_ENABLE_MLAPO=0`. Recommended for w8a8 scenarios; w4a8 scenarios may not benefit.
+
+**Key vllm serve parameters:**
+
+- `--enable-expert-parallel`: Enables expert parallelism for the MoE architecture of GLM-5. Must be enabled for this model.
+- `--tensor-parallel-size 16` / `--tensor-parallel-size 8`: Tensor parallelism within each DP rank. For A3 (16 NPUs), use `tp16`; for A2 (8 NPUs), use `tp8`.
+- `--quantization ascend`: Enables Ascend quantization for w4a8/w8a8 quantized weights.
+- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding. `num_speculative_tokens` controls how many tokens are speculated per step — higher values (3-5) improve throughput but consume more memory. `method: "deepseek_mtp"` is used for GLM-5's MTP draft model. `enforce_eager: true` is required because GLM-5 does not support graph-mode speculative decoding.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables CUDA graph capture for the decode phase only, improving Decode performance by reducing kernel launch overhead.
+- `--enable-chunked-prefill`: Enables chunked prefill to split long prompts into smaller chunks, improving TTFT for long-context scenarios and preventing prefill from blocking decode.
+- `--enable-prefix-caching`: Enables KV cache prefix caching to reuse KV cache across requests sharing common prefixes (e.g., system prompts), improving throughput.
+- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Enables an additional stream to overlap the computation of shared experts, improving efficiency. Note: this is automatically disabled when `VLLM_ASCEND_ENABLE_FUSED_MC2=1`, as the two optimizations conflict.
+- `--max-model-len`: Maximum total context length (input + output tokens) per request.
+- `--max-num-seqs`: Maximum number of concurrent sequences. Larger values improve throughput but consume more KV cache memory. For single-node A3, typically set to `8`–`16`.
+- `--max-num-batched-tokens`: Maximum number of tokens processed in a single batch. Typically `4096` for GLM-5 to balance throughput and latency.
+- `--gpu-memory-utilization`: NPU memory utilization fraction. Set to `0.95` to maximize available KV cache memory. Reduce if OOM errors occur.
+
+**Performance tuning notes for single-node:**
+
+- For low-latency scenarios, use `dp1tp16` (data-parallel-size 1, tensor-parallel-size 16) and consider reducing `--max-num-seqs` and `--max-num-batched-tokens`.
+- For high-throughput scenarios, increase `--max-num-seqs` and enable `--enable-prefix-caching`.
+- For long-context scenarios (e.g., 200K), use w8a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
+- If you encounter OOM, reduce `--gpu-memory-utilization`, `--max-num-seqs`, or `--max-model-len`. Disabling `VLLM_ASCEND_ENABLE_MLAPO` can also reduce memory usage (at the cost of performance).
 
 ### 5.2 Multi-node Deployment
 
@@ -611,6 +639,27 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --additional-config '{"multistream_overlap_shared_expert": true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
+
+Key Parameter Descriptions for multi-node deployment:
+
+In addition to all single-node parameters described in [Section 5.1](#51-single-node-online-deployment), the following parameters are specific to multi-node deployment:
+
+**Network and data parallel configuration:**
+
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
+- `--data-parallel-size`: Total number of data parallel ranks across all nodes. For 2-node deployment, typically set to `2`.
+- `--data-parallel-size-local`: Number of data parallel ranks on the current node. Usually set to `1` (one DP rank per node).
+- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
+- `--data-parallel-rpc-port`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: Indicates this is a non-master node. Do not use on node 0.
+- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `1`.
+
+**Multi-node performance tuning:**
+
+- For low-latency multi-node scenarios, keep `--data-parallel-size-local 1` to minimize cross-node communication.
+- `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For w8a8 on A3 multi-node, `16` is recommended. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
+- Enable `--enable-chunked-prefill` and `--enable-prefix-caching` on multi-node w8a8 deployments to improve throughput.
+- All nodes in a multi-node deployment must use identical `--tensor-parallel-size`, `--enable-expert-parallel`, and model weight path configurations.
 
 ### 5.3 Prefill-Decode Disaggregation
 
@@ -1286,15 +1335,54 @@ python load_balance_proxy_server_example.py \
       6721 6722 6723 6724
 ```
 
-**Notice:**
+Key Parameter Descriptions for PD separation deployment:
 
-Some configurations for optimization are shown below:
+In addition to the single-node and multi-node parameters described above, the following parameters are specific to Prefill-Decode disaggregation:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
-- `VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation.
+**Mooncake KV transfer configuration (`--kv-transfer-config`):**
 
-Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
+- `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
+- `"kv_role": "kv_producer"`: Set on prefill nodes — produces KV cache and sends it to decode nodes. Use `"kv_consumer"` on decode nodes.
+- `"kv_port"`: Port for Mooncake KV transfer communication. Each node group should use a distinct port range.
+- `"use_ascend_direct": true`: Enables Ascend direct (RDMA-like) transfer for KV cache, reducing latency.
+- `"prefill"` / `"decode"` sections: Specify the `dp_size` and `tp_size` of the prefill and decode node groups respectively. These must match the actual deployment topology.
+- Prefill nodes use `--enforce-eager` , because PD separation with MTP requires eager mode on the prefill path.
+- Decode nodes use `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` for improved decode performance.
+
+**Prefill node-specific configurations:**
+
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm communication optimization to reduce AllReduce overhead on prefill nodes. Note: with FlashComm enabled, `layer_sharding` cannot include `o_proj`.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
+- `HCCL_BUFFSIZE=256`: Larger HCCL buffer for prefill nodes to handle the higher communication volume.
+- `--additional-config '{"enable_dsa_cp": true}'`: Enables DSA context parallelism on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128K tokens.
+- `--max-num-batched-tokens 4096`: Higher batch token limit for prefill nodes to process prompts efficiently.
+- `--max-num-seqs 64`: Higher concurrent sequence limit on prefill nodes (only KV cache metadata is stored, actual KV cache is transferred to decode nodes).
+
+**Decode node-specific configurations:**
+
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables MLA preprocess operation fusion on decode nodes to significantly improve decode performance. Consumes more NPU memory. In PD scenarios, enable MLAPO only on decode nodes.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Same fused MC2 optimization as prefill nodes.
+- `TASK_QUEUE_ENABLE=1`: Enables the task queue on decode nodes for more efficient batch scheduling.
+- `--max-num-batched-tokens 32`: Small batch token limit on decode nodes — decode processes one token per sequence per step, so batch tokens should be close to `max-num-seqs`.
+- `--max-num-seqs 8`: Number of concurrent sequences per decode engine instance. Multiply by `dp_size_local` for total concurrent capacity per decode node.
+- `--gpu-memory-utilization 0.92`: Slightly lower memory utilization on decode nodes to leave room for KV cache received from prefill nodes.
+- `--additional-config '{"recompute_scheduler_enable": true}'`: Enables the recomputation scheduler. When decode node KV cache is insufficient, requests are sent back to prefill nodes for KV cache recomputation. Recommended on both prefill and decode nodes in PD scenarios.
+- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Enables overlapping shared expert computation (automatically disabled when `VLLM_ASCEND_ENABLE_FUSED_MC2=1`).
+
+**Common PD environment variables:**
+
+- `ASCEND_AGGREGATE_ENABLE=1`, `ASCEND_A3_ENABLE=1`: A3-specific optimizations for communication aggregation.
+- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode.
+- `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480`: Timeout (in seconds) for automatically releasing the prefill node's KV cache when a request is aborted.
+- `LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib`: Required for Mooncake library loading.
+
+**MTP in PD scenarios:**
+
+- Prefill nodes typically use `"num_speculative_tokens": 1` for MTP (minimal speculation during prefill).
+- Decode nodes use `"num_speculative_tokens": 3` for MTP to maximize decode throughput.
+- Both prefill and decode nodes must use the same `"method": "deepseek_mtp"` and `"enforce_eager": true`.
+
+For further explanation and restrictions of the environment variables above, refer to: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
 
 ## 6 Functional Verification
 
@@ -1341,26 +1429,62 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
+The tables below provide recommended parameter configurations for different deployment scenarios. All scenarios are categorized by use case (High Throughput, Low Latency, Long Context) and correspond to the deployment modes documented in [Chapter 5](#5-online-service-deployment).
+
 #### Table 1: Scenario Overview
 
-|Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|---------------|-------------------|
-|High Throughput|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on P nodes and dp8 dp4 on D nodes to balanced latency and throughput|
-|Low Latency|1P1D deployment|32 (A3)|GLM5-w8a8/GLM5.1-w8a8|dp4 tp8 on both P and D nodes to reduce latency|
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs) or 1 Atlas 800 A2 server (64G × 8 NPUs).
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes.
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|High Throughput|Single-Node Mixed (A3)|16 (A3)|w4a8 / w8a8|dp1 tp16, enable chunked-prefill and prefix-caching, increase max-num-seqs|
+|High Throughput|Multi-Node (2 nodes, A3)|32 (A3)|w8a8|dp2 tp16, balanced latency and throughput for concurrent multi-user workloads|
+|High Throughput|2P4D deployment (A3)|96 (A3)|w8a8|P: dp2 tp16, D: dp16 tp4 — dedicated P/D nodes for optimal throughput at scale|
+|Low Latency|Single-Node Mixed (A3)|16 (A3)|w4a8|dp1 tp16, MTP num_speculative_tokens=3, reduce max-num-seqs and max-num-batched-tokens|
+|Low Latency|Single-Node Mixed (A2)|8 (A2)|w4a8|dp1 tp8, MTP num_speculative_tokens=3, compact single-node deployment|
+|Low Latency|Multi-Node (2 nodes, A3)|32 (A3)|w8a8|dp2 tp16, MTP num_speculative_tokens=3, lower max-num-batched-tokens for faster TTFT|
+|Long Context<br>(200K)|Single-Node Mixed (A3)|16 (A3)|w8a8|dp1 tp16, max-model-len 200000, enable chunked-prefill, controlled max-num-seqs|
+|Long Context<br>(200K)|Multi-Node (2 nodes, A3)|32 (A3)|w8a8|dp2 tp16, max-model-len 200000, distributed KV cache across nodes|
+|Long Context<br>(128K)|Multi-Node (2 nodes, A2)|16 (A2)|w4a8|dp2 tp8, max-model-len 131072, enable chunked-prefill|
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|------------|----------------------|--------------|--------------------|
-|High Throughput (A3)|1P1D deployment|32|P:8 D:4|P:4 D:8|P:64 D:128|P:4096 D:32|P:133120 D:150000|3|
-|Low Latency (A3)|1P1D deployment|32|4|8|P:64 D:128|P:4096 D:32|P:133120 D:150000|3|
+|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
+|--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
+|High Throughput (A3)|Server / Single Machine|16|16|1|16|4096|200000|3|
+|High Throughput (A3)|Multi-Node (per node)|16|16|1|16|4096|200000|3|
+|High Throughput (A3)|2P4D — Server-P Node|16|16|2|64|4096|131072|1|
+|High Throughput (A3)|2P4D — Server-D Node|16|4|16|8|32|200000|3|
+|Low Latency (A3)|Server / Single Machine|16|16|1|8|4096|40960|3|
+|Low Latency (A2)|Server / Single Machine|8|8|1|4|4096|32768|3|
+|Low Latency (A3)|Multi-Node (per node)|16|16|1|8|4096|40960|3|
+|Long Context 200K (A3)|Server / Single Machine|16|16|1|8|4096|200000|3|
+|Long Context 200K (A3)|Multi-Node (per node)|16|16|1|16|4096|200000|3|
+|Long Context 128K (A2)|Multi-Node (per node)|8|8|1|2|4096|131072|3|
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+> For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Chapter 5](#5-online-service-deployment).
 
-**Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+#### Table 3: Performance-Related Parameter Tuning Guide
+
+|Parameter|Low Latency|High Throughput|Long Context|Description|
+|---------|-----------|---------------|-------------|-----------|
+|`--max-num-seqs`|Lower (4–8)|Higher (16–64)|Controlled (2–8)|Limits concurrent sequences. Lower values reduce scheduling latency; higher values increase throughput.|
+|`--max-model-len`|Shorter (32K–40K)|Longer (128K–200K)|Maximum (128K–200K)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
+|`--max-num-batched-tokens`|Lower (2048–4096)|Higher (4096–8192)|Higher for prefill (4096)|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
+|`--gpu-memory-utilization`|0.92–0.95|0.95|0.92–0.95|NPU memory fraction. Higher values leave more memory for KV cache. Reduce if OOM.|
+|`--enable-chunked-prefill`|Enable|Enable|Enable|Splits long prompts into chunks to prevent prefill from blocking decode. Recommended in all scenarios.|
+|`--enable-prefix-caching`|Optional|Enable|Optional|Reuses KV cache for shared prefixes (e.g., system prompts). Improves throughput when cache hit rate is high but may reduce available KV cache memory.|
+|`num_speculative_tokens`|3|3|3|MTP speculation count. Higher values improve decode throughput at the cost of memory for draft model KV cache. Use `1` on prefill nodes in PD mode.|
+|`VLLM_ASCEND_ENABLE_MLAPO`|1 (w8a8)|1 (w8a8)|0 or 1|Enables MLA fusion on w8a8 models. Improves decode performance but consumes more NPU memory. Disable for long-context if memory is insufficient.|
+|`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1|1|Communication optimization. Recommended in all scenarios unless layer_sharding includes o_proj.|
+
+### 9.2 Tuning Guidelines
+
+For general performance tuning methods, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+
+For detailed feature descriptions and configuration options, refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md).
+
+For environment variable descriptions and constraints, refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
 
 ## 10 FAQ
 
