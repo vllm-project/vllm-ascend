@@ -2,7 +2,7 @@
 # ACTUAL TEST CASES
 # ==========================================
 test_cases:
-  - name: "Qwen3.6-35B-A3B"
+  - name: "Qwen3.6-35B-A3B-w8a8-A3-accuracy"
     model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
     envs:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
