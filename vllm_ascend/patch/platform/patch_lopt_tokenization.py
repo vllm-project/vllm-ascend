@@ -190,7 +190,8 @@ async def _tokenize_prompt_with_lopt_async(
         return await standard_tokenize(renderer, prompt, params)
 
     encode = partial(lopt.encode, text, **encode_kwargs)
-    prompt_token_ids = await asyncio.get_running_loop().run_in_executor(renderer._executor, encode)
+    executor = getattr(renderer, "_executor", None)
+    prompt_token_ids = await asyncio.get_running_loop().run_in_executor(executor, encode)
     return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
 
