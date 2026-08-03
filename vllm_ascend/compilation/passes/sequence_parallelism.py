@@ -8,16 +8,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group,
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.noop_elimination import NoOpEliminationPass
-from vllm_ascend.utils import is_moe_model
-
-SP_MIN_TOKEN_NUM_DEFAULT = 1000
-
-
-def get_sp_min_token_num(config: VllmConfig) -> int:
-    if is_moe_model(config):
-        return 1
-
-    return SP_MIN_TOKEN_NUM_DEFAULT
+from vllm_ascend.sequence_parallel import get_default_sequence_parallel_min_tokens
 
 
 class _SequenceParallelPatternHelper:
@@ -204,7 +195,7 @@ class SequenceParallelismPass(VllmInductorPass):
 
             Qwen3VLMiddleAllReduceRMSNormPattern(config, epsilon).register(self.patterns)
 
-        self.min_tokens = get_sp_min_token_num(config)
+        self.min_tokens = get_default_sequence_parallel_min_tokens(config)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

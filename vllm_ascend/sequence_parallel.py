@@ -25,6 +25,12 @@ DENSE_SP_MIN_TOKENS = 1000
 MOE_SP_MIN_TOKENS = 1
 
 
+def get_default_sequence_parallel_min_tokens(vllm_config: "VllmConfig") -> int:
+    model_config = vllm_config.model_config
+    is_moe = bool(model_config is not None and model_config.is_moe)
+    return MOE_SP_MIN_TOKENS if is_moe else DENSE_SP_MIN_TOKENS
+
+
 class SequenceParallelActivationState(Enum):
     """Ownership of an activation at an SP-aware layer boundary."""
 
@@ -158,8 +164,7 @@ def resolve_sequence_parallel_policy(
 
     min_tokens = pass_config.sp_min_token_num
     if min_tokens is None:
-        is_moe = bool(model_config is not None and model_config.is_moe)
-        min_tokens = MOE_SP_MIN_TOKENS if is_moe else DENSE_SP_MIN_TOKENS
+        min_tokens = get_default_sequence_parallel_min_tokens(vllm_config)
     if not isinstance(min_tokens, int) or isinstance(min_tokens, bool):
         raise TypeError("sp_min_token_num must be an integer")
     if min_tokens < 0:

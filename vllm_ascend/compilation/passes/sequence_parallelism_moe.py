@@ -6,10 +6,8 @@ from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
 
-from vllm_ascend.compilation.passes.sequence_parallelism import (
-    _SequenceParallelPatternHelper,
-    get_sp_min_token_num,
-)
+from vllm_ascend.compilation.passes.sequence_parallelism import _SequenceParallelPatternHelper
+from vllm_ascend.sequence_parallel import get_default_sequence_parallel_min_tokens
 
 
 class MiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
@@ -182,7 +180,7 @@ class SequenceParallelismMoePass(VllmInductorPass):
 
         AllGatherChunkNoOpPattern(config).register(self.patterns)
 
-        self.min_tokens = get_sp_min_token_num(config)
+        self.min_tokens = get_default_sequence_parallel_min_tokens(config)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

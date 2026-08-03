@@ -32,7 +32,10 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.sequence_parallel import SequenceParallelRuntimeState
+from vllm_ascend.sequence_parallel import (
+    SequenceParallelRuntimeState,
+    get_default_sequence_parallel_min_tokens,
+)
 
 # isort: off
 from vllm_ascend.utils import (
@@ -202,9 +205,7 @@ class NPUPlatform(Platform):
         """Apply Ascend-specific defaults. Set sp_min_token_num=1 when enable_sp and not set."""
         pass_config = vllm_config.compilation_config.pass_config
         if pass_config.enable_sp and pass_config.sp_min_token_num is None:
-            from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
-
-            pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
+            pass_config.sp_min_token_num = get_default_sequence_parallel_min_tokens(vllm_config)
             logger.info("set sp_min_token_num to %s", pass_config.sp_min_token_num)
 
         default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
