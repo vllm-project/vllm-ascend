@@ -190,7 +190,6 @@ jobs:
           done
 
   select-tests:
-    needs: pre-commit
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
