@@ -571,8 +571,6 @@
     - tests/e2e/pull_request/one_card/test_guided_decoding.py
     - tests/e2e/pull_request/one_card/test_multi_instance.py
     - tests/e2e/pull_request/one_card/model_runner_v2
-    - tests/e2e/pull_request/two_card/test_external_launcher.py
-    - tests/e2e/pull_request/two_card/test_offline_weight_load.py
     - tests/e2e/pull_request/two_card/test_prefix_caching.py
     - tests/e2e/pull_request/two_card/test_qwen3_performance.py
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
@@ -777,11 +775,9 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_data_parallel.py: 570
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 150
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 180
-  tests/e2e/pull_request/two_card/test_external_launcher.py: 950
   tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 150
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 170
   tests/e2e/pull_request/two_card/test_moe_routing_replay.py: 490
-  tests/e2e/pull_request/two_card/test_offline_weight_load.py: 20
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 430
   tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 20
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 340
