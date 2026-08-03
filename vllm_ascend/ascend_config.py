@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.sequence_parallel import resolve_sequence_parallel_policy
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -96,12 +98,22 @@ class AscendConfig:
             and vllm_config.parallel_config.enable_expert_parallel
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
-        from vllm_ascend.utils import enable_sp
+        legacy_flashcomm_env_enabled = (
+            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Retain the old environment variable during the compatibility window.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
+        )
+        self.sequence_parallel_policy = resolve_sequence_parallel_policy(
+            vllm_config,
+            legacy_flashcomm_enabled=legacy_flashcomm_env_enabled or self.enable_shared_expert_dp,
+        )
+        if self.enable_shared_expert_dp and not legacy_flashcomm_env_enabled:
+            logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-        if self.enable_shared_expert_dp:
-            assert enable_sp(vllm_config=vllm_config, enable_shared_expert_dp=True)
-
-        if vllm_config.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vllm_config):
+        if (
+            vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and self.sequence_parallel_policy.legacy_flashcomm_enabled
+        ):
             tp_pcp_size = (
                 vllm_config.parallel_config.tensor_parallel_size
                 * vllm_config.parallel_config.prefill_context_parallel_size
@@ -193,11 +205,9 @@ class AscendConfig:
             quant_config
         )
         self._sparse_c8_layer_filter_enabled = self._has_sparse_c8_layer_config(quant_config)
-        self.enable_sp_by_pass = (
-            vllm_config.model_config is not None
-            and not vllm_config.model_config.enforce_eager
-            and vllm_config.compilation_config.pass_config.enable_sp
-        )
+        # Compatibility alias for call sites that have not migrated to the
+        # unified policy yet.
+        self.enable_sp_by_pass = self.sequence_parallel_policy.compile_pass_enabled
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)

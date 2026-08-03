@@ -41,6 +41,8 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.sequence_parallel_policy.configured)
+        self.assertEqual(ascend_config.enable_sp_by_pass, ascend_config.sequence_parallel_policy.compile_pass_enabled)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -76,6 +78,19 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+
+    @_clean_up_ascend_config
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_sequence_parallel_policy_resolves_flashcomm_env(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 2
+
+        policy = init_ascend_config(test_vllm_config).sequence_parallel_policy
+
+        self.assertTrue(policy.configured)
+        self.assertTrue(policy.enabled)
+        self.assertTrue(policy.legacy_flashcomm_enabled)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
