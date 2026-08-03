@@ -1,4 +1,4 @@
-import re
+import regex as re
 from pathlib import Path
 
 import pytest
@@ -114,7 +114,7 @@ def test_no_unknown_soc_defaults_or_empty_soc_writes():
     for name in sorted(AOP_TEMPLATES) + SCHEDULE_FILES:
         text = _read(AOP_TEMPLATES.get(name, name))
         assert "soc_version: unknown" not in text
-        assert "--soc \"\"" not in text
+        assert '--soc ""' not in text
 
 
 def test_shell_fail_closed_validation_present():
@@ -125,7 +125,5 @@ def test_shell_fail_closed_validation_present():
     age = (scripts / "aop_commit_age.sh").read_text(encoding="utf-8")
     assert "valid soc is required" in age
     assert "invalid scene" in age
-    run_sh = (REPO_ROOT / "tests" / "e2e" / "nightly" / "multi_node" / "scripts" / "run.sh").read_text(
-        encoding="utf-8"
-    )
+    run_sh = (REPO_ROOT / "tests" / "e2e" / "nightly" / "multi_node" / "scripts" / "run.sh").read_text(encoding="utf-8")
     assert "missing or invalid SOC" in run_sh

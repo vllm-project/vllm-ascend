@@ -25,9 +25,7 @@ def test_lookup_last_good_by_name_uses_latest_success(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        name="llama", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(name="llama", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.link == "new"
@@ -39,9 +37,7 @@ def test_lookup_last_good_by_yaml_basename(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        config_yaml="llama.yaml", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(config_yaml="llama.yaml", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.name == "llama"
@@ -183,9 +179,7 @@ def test_lookup_prefers_exact_new_schema_row_over_legacy(tmp_path: Path):
         encoding="utf-8",
     )
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(name="m", config_yaml="m.yaml", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.vllm_ascend_commit == "asc-exact"
@@ -204,9 +198,7 @@ def test_lookup_ignores_partially_keyed_rows_and_uses_legacy_fallback(tmp_path: 
         encoding="utf-8",
     )
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(name="m", config_yaml="m.yaml", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.vllm_ascend_commit == "asc-l"
@@ -225,18 +217,8 @@ def test_lookup_requires_all_supplied_dimensions_to_match(tmp_path: Path):
     )
     table = GoodTable(str(table_path))
 
-    assert (
-        table.lookup_last_good(
-            name="shared", config_yaml="other.yaml", soc="a2", scene="single_node"
-        )
-        is None
-    )
-    assert (
-        table.lookup_last_good(
-            name="other", config_yaml="model.yaml", soc="a2", scene="single_node"
-        )
-        is None
-    )
+    assert table.lookup_last_good(name="shared", config_yaml="other.yaml", soc="a2", scene="single_node") is None
+    assert table.lookup_last_good(name="other", config_yaml="model.yaml", soc="a2", scene="single_node") is None
 
 
 def test_lookup_skips_success_rows_without_commit(tmp_path: Path):
@@ -310,12 +292,7 @@ def test_lookup_last_good_returns_none_for_missing_or_failed_case(tmp_path: Path
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)
 
-    assert (
-        GoodTable(str(table_path)).lookup_last_good(
-            name="missing", soc="a2", scene="single_node"
-        )
-        is None
-    )
+    assert GoodTable(str(table_path)).lookup_last_good(name="missing", soc="a2", scene="single_node") is None
 
 
 def test_norm_detects_surplus_csv_columns():

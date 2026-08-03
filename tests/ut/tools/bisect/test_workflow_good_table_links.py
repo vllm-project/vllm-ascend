@@ -116,9 +116,7 @@ def test_weekly_bisect_workflows_propagate_good_table_dimensions(name: str):
 
 def test_age_gate_filters_scene_like_python_lookup():
     """aop_commit_age.sh must not let a different scene's row satisfy the gate."""
-    age_script = (REPO_ROOT / "tests" / "e2e" / "nightly" / "scripts" / "aop_commit_age.sh").read_text(
-        encoding="utf-8"
-    )
+    age_script = (REPO_ROOT / "tests" / "e2e" / "nightly" / "scripts" / "aop_commit_age.sh").read_text(encoding="utf-8")
     assert 'scene == "" || NF < 9 || $8 == scene' in age_script
 
 
