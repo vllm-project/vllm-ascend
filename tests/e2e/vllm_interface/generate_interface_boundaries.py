@@ -47,6 +47,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+try:
+    import _interface_boundary_schema as _boundary_schema
+except ModuleNotFoundError as error:
+    if error.name != "_interface_boundary_schema":
+        raise
+    from tests.e2e.vllm_interface import _interface_boundary_schema as _boundary_schema
+
 SCHEMA_VERSION = 6
 GENERATOR_VERSION = "0.36.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
@@ -2104,7 +2111,6 @@ class ModuleInfo:
     functions: dict[str, CallableInfo]
     loose_functions: dict[str, list[CallableInfo]]
     star_imports: tuple[str, ...]
-    typed_lazy_exports: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -3245,7 +3251,6 @@ class RepositoryIndex:
                 functions=functions,
                 loose_functions=dict(loose_functions),
                 star_imports=tuple(star_imports),
-                typed_lazy_exports=typed_lazy_exports,
             )
             self.modules[module] = module_info
             for local_name, target in imports.items():
@@ -9467,7 +9472,11 @@ class InterfaceBoundaryGenerator:
                 finding = self.findings[index]
                 member_name = finding.target_expression.rsplit(".", 1)[-1]
                 bindings[member_name].append(index)
-                replacement = self._finding_downstream_callable(finding)
+                replacement = self._downstream_callable(
+                    finding.downstream_file,
+                    finding.downstream_owner,
+                    finding.downstream_name,
+                )
                 if replacement is not None:
                     binding_dependencies[member_name].update(self._self_member_references(replacement))
 
@@ -9477,7 +9486,13 @@ class InterfaceBoundaryGenerator:
                 if relation.relation == "monkey_patch"
                 and relation.upstream_file == owner.file
                 and relation.upstream_owner == owner.name
-                for replacement in [self._relation_downstream_callable(relation)]
+                for replacement in [
+                    self._downstream_callable(
+                        relation.downstream_file,
+                        relation.downstream_owner,
+                        relation.downstream_name,
+                    )
+                ]
                 if replacement is not None
                 for member in self._self_member_references(replacement)
             }
@@ -9517,32 +9532,19 @@ class InterfaceBoundaryGenerator:
                         ),
                     )
 
-    def _finding_downstream_callable(
+    def _downstream_callable(
         self,
-        finding: CandidateFinding,
+        downstream_file: str,
+        downstream_owner: str | None,
+        downstream_name: str,
     ) -> CallableInfo | None:
         return next(
             (
                 candidate
                 for candidate in self.downstream.callables.values()
-                if candidate.file == finding.downstream_file
-                and candidate.owner == finding.downstream_owner
-                and candidate.name == finding.downstream_name
-            ),
-            None,
-        )
-
-    def _relation_downstream_callable(
-        self,
-        relation: Relation,
-    ) -> CallableInfo | None:
-        return next(
-            (
-                candidate
-                for candidate in self.downstream.callables.values()
-                if candidate.file == relation.downstream_file
-                and candidate.owner == relation.downstream_owner
-                and candidate.name == relation.downstream_name
+                if candidate.file == downstream_file
+                and candidate.owner == downstream_owner
+                and candidate.name == downstream_name
             ),
             None,
         )
@@ -9608,143 +9610,23 @@ def _relation_payloads(
     findings: Iterable[CandidateFinding] = (),
     external_sources: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    grouped: dict[
-        tuple[str, str, str | None, str, str, str | None, str],
-        list[Relation],
-    ] = defaultdict(list)
-    for relation in relations:
-        signature_key = json.dumps(
-            relation.upstream_signature,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        signature_contract_key = json.dumps(
-            _signature_contract_payload(relation.upstream_signature_contract),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        grouped[
-            (
-                relation.upstream_package,
-                relation.upstream_file,
-                relation.upstream_owner,
-                relation.upstream_name,
-                signature_key,
-                relation.upstream_descriptor_kind,
-                signature_contract_key,
-            )
-        ].append(relation)
+    return _boundary_schema.relation_payloads(
+        relations,
+        vllm_sha=vllm_sha,
+        ascend_sha=ascend_sha,
+        findings=findings,
+        external_sources=external_sources,
+        schema_version=SCHEMA_VERSION,
+        generator_version=GENERATOR_VERSION,
+        supported_relations=SUPPORTED_RELATIONS,
+        signature_contract_payload=_signature_contract_payload,
+    )
 
-    payloads: list[dict[str, Any]] = []
-    relation_count = 0
-    for key in sorted(
-        grouped,
-        key=lambda item: (
-            item[0],
-            item[1],
-            item[2] or "",
-            item[3],
-            item[4],
-            item[6],
-        ),
-    ):
-        (
-            source_package,
-            upstream_file,
-            owner,
-            name,
-            signature_key,
-            upstream_descriptor_kind,
-            signature_contract_key,
-        ) = key
-        consumers = []
-        evidence_records = []
-        for relation in sorted(
-            grouped[key],
-            key=lambda item: (
-                item.relation,
-                item.downstream_file,
-                item.downstream_owner or "",
-                item.downstream_name,
-            ),
-        ):
-            consumers.append(
-                [
-                    relation.relation,
-                    relation.downstream_file,
-                    relation.downstream_owner,
-                    relation.downstream_name,
-                    relation.downstream_signature,
-                    relation.downstream_descriptor_kind,
-                    relation.installed_descriptor_kind,
-                    _signature_contract_payload(relation.downstream_signature_contract),
-                    _signature_contract_payload(relation.installed_signature_contract),
-                ]
-            )
-            evidence_records.append(
-                {
-                    "consumer": [
-                        relation.relation,
-                        relation.downstream_file,
-                        relation.downstream_owner,
-                        relation.downstream_name,
-                    ],
-                    "occurrences": [evidence.as_dict() for evidence in relation.evidence],
-                }
-            )
-            relation_count += 1
-        payloads.append(
-            {
-                "p": source_package,
-                "u": [
-                    upstream_file,
-                    owner,
-                    name,
-                    json.loads(signature_key),
-                    upstream_descriptor_kind,
-                    json.loads(signature_contract_key),
-                ],
-                "c": consumers,
-                "e": evidence_records,
-            }
-        )
-
-    finding_payloads = [
-        {"f": finding.as_dict()}
-        for finding in sorted(
-            findings,
-            key=lambda item: (
-                item.status,
-                item.reason_code,
-                item.relation,
-                item.downstream_file,
-                item.evidence_line,
-                item.target_expression,
-            ),
-        )
-    ]
-    finding_statuses = Counter(payload["f"]["status"] for payload in finding_payloads)
-    meta = {
-        "_meta": {
-            "schema": SCHEMA_VERSION,
-            "generator": GENERATOR_VERSION,
-            "vllm": vllm_sha,
-            "vllm_ascend": ascend_sha,
-            "external_sources": dict(sorted((external_sources or {}).items())),
-            "contracts": len(payloads),
-            "relations": relation_count,
-            "findings": len(finding_payloads),
-            "findings_by_status": dict(sorted(finding_statuses.items())),
-            "scope": sorted(SUPPORTED_RELATIONS),
-        }
-    }
-    return [meta, *payloads, *finding_payloads]
 
 
 def _write_jsonl(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
-    text = "\n".join(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) for payload in payloads)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{text}\n", encoding="utf-8")
+    _boundary_schema.write_jsonl(path, payloads)
+
 
 
 def _load_compact_relations(path: Path) -> list[Relation]:
@@ -9801,31 +9683,15 @@ def _load_compact_relations(path: Path) -> list[Relation]:
 
 
 def _relation_label(relation: Relation) -> dict[str, Any]:
-    return {
-        "relation": relation.relation,
-        "upstream": {
-            "package": relation.upstream_package,
-            "file": relation.upstream_file,
-            "owner": relation.upstream_owner,
-            "name": relation.upstream_name,
-        },
-        "downstream": {
-            "file": relation.downstream_file,
-            "owner": relation.downstream_owner,
-            "name": relation.downstream_name,
-        },
-    }
+    return _boundary_schema.relation_label(relation)
+
 
 
 def _downstream_label(
     key: tuple[str, str, str, str],
 ) -> dict[str, Any]:
-    return {
-        "relation": key[0],
-        "file": key[1],
-        "owner": key[2] or None,
-        "name": key[3],
-    }
+    return _boundary_schema.downstream_label(key)
+
 
 
 def compare_relations(
@@ -9833,186 +9699,13 @@ def compare_relations(
     baseline: Sequence[Relation],
     findings: Sequence[CandidateFinding],
 ) -> dict[str, Any]:
-    finding_statuses = Counter(finding.status for finding in findings)
-    generated_exact = {relation.exact_key(): relation for relation in generated}
-    baseline_exact = {relation.exact_key(): relation for relation in baseline}
-    generated_exact_aliases = {key: relation for relation in generated for key in relation.comparison_exact_keys()}
-    baseline_exact_aliases = {key: relation for relation in baseline for key in relation.comparison_exact_keys()}
-    generated_downstream: dict[
-        tuple[str, str, str, str],
-        list[Relation],
-    ] = defaultdict(list)
-    baseline_downstream: dict[
-        tuple[str, str, str, str],
-        list[Relation],
-    ] = defaultdict(list)
-    for relation in generated:
-        for key in relation.comparison_downstream_keys():
-            generated_downstream[key].append(relation)
-    for relation in baseline:
-        for key in relation.comparison_downstream_keys():
-            baseline_downstream[key].append(relation)
-
-    exact_matches = {
-        key
-        for key in baseline_exact
-        if any(alias in generated_exact_aliases for alias in baseline_exact[key].comparison_exact_keys())
-    }
-    descriptor_kind_changes = []
-    for key in sorted(exact_matches):
-        baseline_relation = baseline_exact[key]
-        baseline_kinds = (
-            baseline_relation.upstream_descriptor_kind,
-            baseline_relation.downstream_descriptor_kind,
-            baseline_relation.installed_descriptor_kind,
-        )
-        if baseline_kinds == (None, None, None):
-            continue
-        generated_relation = next(
-            (
-                relation
-                for relation in generated
-                if any(alias in relation.comparison_exact_keys() for alias in baseline_relation.comparison_exact_keys())
-            ),
-            None,
-        )
-        if generated_relation is None:
-            continue
-        generated_kinds = (
-            generated_relation.upstream_descriptor_kind,
-            generated_relation.downstream_descriptor_kind,
-            generated_relation.installed_descriptor_kind,
-        )
-        if generated_kinds != baseline_kinds:
-            descriptor_kind_changes.append(
-                {
-                    "relation": _relation_label(generated_relation),
-                    "baseline": list(baseline_kinds),
-                    "generated": list(generated_kinds),
-                }
-            )
-    signature_contract_changes = []
-    for key in sorted(exact_matches):
-        baseline_relation = baseline_exact[key]
-        baseline_contracts = (
-            baseline_relation.upstream_signature_contract,
-            baseline_relation.downstream_signature_contract,
-            baseline_relation.installed_signature_contract,
-        )
-        if baseline_contracts == (None, None, None):
-            continue
-        generated_relation = next(
-            (
-                relation
-                for relation in generated
-                if any(alias in relation.comparison_exact_keys() for alias in baseline_relation.comparison_exact_keys())
-            ),
-            None,
-        )
-        if generated_relation is None:
-            continue
-        generated_contracts = (
-            generated_relation.upstream_signature_contract,
-            generated_relation.downstream_signature_contract,
-            generated_relation.installed_signature_contract,
-        )
-        if generated_contracts == baseline_contracts:
-            continue
-        signature_contract_changes.append(
-            {
-                "relation": _relation_label(generated_relation),
-                "baseline": {
-                    "upstream": _signature_contract_payload(baseline_contracts[0]),
-                    "downstream": _signature_contract_payload(baseline_contracts[1]),
-                    "installed": _signature_contract_payload(baseline_contracts[2]),
-                },
-                "generated": {
-                    "upstream": _signature_contract_payload(generated_contracts[0]),
-                    "downstream": _signature_contract_payload(generated_contracts[1]),
-                    "installed": _signature_contract_payload(generated_contracts[2]),
-                },
-            }
-        )
-    different_upstream = []
-    baseline_downstream_keys = {relation.downstream_key() for relation in baseline}
-    for key in sorted(baseline_downstream_keys & set(generated_downstream)):
-        generated_targets = sorted(relation.upstream_key() for relation in generated_downstream[key])
-        baseline_targets = sorted(relation.upstream_key() for relation in baseline_downstream[key])
-        if generated_targets != baseline_targets:
-            different_upstream.append(
-                {
-                    "downstream": {
-                        "relation": key[0],
-                        "file": key[1],
-                        "owner": key[2] or None,
-                        "name": key[3],
-                    },
-                    "baseline_upstream": baseline_targets,
-                    "generated_upstream": generated_targets,
-                }
-            )
-
-    old_only_keys = set(baseline_exact) - exact_matches
-    new_only_keys = {
-        key
-        for key, relation in generated_exact.items()
-        if not any(alias in baseline_exact_aliases for alias in relation.comparison_exact_keys())
-    }
-    generated_downstream_keys = {relation.downstream_key() for relation in generated}
-    covered_downstream_keys = {key for key in baseline_downstream_keys if key in generated_downstream}
-    missing_downstream_keys = baseline_downstream_keys - covered_downstream_keys
-    new_downstream_keys = {
-        key
-        for key in generated_downstream_keys
-        if not any(
-            alias in baseline_downstream
-            for relation in generated
-            if relation.downstream_key() == key
-            for alias in relation.comparison_downstream_keys()
-        )
-    }
-    downstream_coverage = (
-        len(covered_downstream_keys) / len(baseline_downstream_keys) * 100 if baseline_downstream_keys else 100.0
+    return _boundary_schema.compare_relations(
+        generated,
+        baseline,
+        findings,
+        signature_contract_payload=_signature_contract_payload,
     )
-    report = {
-        "summary": {
-            "generated_relations": len(generated),
-            "baseline_relations": len(baseline),
-            "exact_matches": len(exact_matches),
-            "descriptor_kind_changes": len(descriptor_kind_changes),
-            "signature_contract_changes": len(signature_contract_changes),
-            "same_downstream_different_upstream": len(different_upstream),
-            "old_only": len(old_only_keys),
-            "new_only": len(new_only_keys),
-            "findings": len(findings),
-            "unresolved": finding_statuses["review"],
-            "upstream_risks": finding_statuses["risk"],
-            "expected": finding_statuses["expected"],
-            "excluded": finding_statuses["excluded"],
-            "verified_findings": finding_statuses["verified"],
-            "generator_issues": sum(finding.generator_issue for finding in findings),
-            "generated_downstream_endpoints": len(generated_downstream_keys),
-            "baseline_downstream_endpoints": len(baseline_downstream_keys),
-            "covered_downstream_endpoints": len(covered_downstream_keys),
-            "missing_downstream_endpoints": len(missing_downstream_keys),
-            "new_downstream_endpoints": len(new_downstream_keys),
-            "downstream_coverage_percent": round(
-                downstream_coverage,
-                2,
-            ),
-            "generated_by_relation": dict(sorted(Counter(relation.relation for relation in generated).items())),
-            "baseline_by_relation": dict(sorted(Counter(relation.relation for relation in baseline).items())),
-        },
-        "same_downstream_different_upstream": different_upstream,
-        "descriptor_kind_changes": descriptor_kind_changes,
-        "signature_contract_changes": signature_contract_changes,
-        "old_only": [_relation_label(baseline_exact[key]) for key in sorted(old_only_keys)],
-        "new_only": [_relation_label(generated_exact[key]) for key in sorted(new_only_keys)],
-        "missing_downstream": [_downstream_label(key) for key in sorted(missing_downstream_keys)],
-        "new_downstream": [_downstream_label(key) for key in sorted(new_downstream_keys)],
-        "findings": [finding.as_dict() for finding in findings],
-    }
-    return report
+
 
 
 def _git_head(repo_root: Path) -> str:

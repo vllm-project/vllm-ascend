@@ -519,6 +519,45 @@ def test_comparison_uses_patch_site_as_a_legacy_alias() -> None:
     assert report["summary"]["new_downstream_endpoints"] == 0
 
 
+def test_comparison_keeps_first_match_when_patch_aliases_collide() -> None:
+    common = {
+        "relation": "monkey_patch",
+        "upstream_file": "vllm/core.py",
+        "upstream_owner": "Engine",
+        "upstream_name": "step",
+        "upstream_signature": None,
+        "downstream_owner": None,
+        "downstream_name": "replacement",
+        "downstream_signature": None,
+        "evidence_file": "vllm_ascend/plugin.py",
+        "evidence_line": 8,
+    }
+    baseline = generator.Relation(
+        downstream_file="vllm_ascend/plugin.py",
+        upstream_descriptor_kind="ordinary",
+        **common,
+    )
+    generated = [
+        generator.Relation(
+            downstream_file="vllm_ascend/first.py",
+            upstream_descriptor_kind="property",
+            evidence=(generator.RelationEvidence(file="vllm_ascend/plugin.py", line=8),),
+            **common,
+        ),
+        generator.Relation(
+            downstream_file="vllm_ascend/second.py",
+            upstream_descriptor_kind="staticmethod",
+            evidence=(generator.RelationEvidence(file="vllm_ascend/plugin.py", line=9),),
+            **common,
+        ),
+    ]
+
+    report = generator.compare_relations(generated, [baseline], [])
+
+    assert report["summary"]["exact_matches"] == 1
+    assert report["descriptor_kind_changes"][0]["generated"][0] == "property"
+
+
 def test_local_definition_shadows_an_imported_name(tmp_path: Path) -> None:
     vllm_root = tmp_path / "vllm-repo"
     _write(vllm_root, "vllm/__init__.py", "")
