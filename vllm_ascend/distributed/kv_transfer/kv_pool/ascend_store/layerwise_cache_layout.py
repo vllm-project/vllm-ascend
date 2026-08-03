@@ -53,7 +53,7 @@ class LayerwiseCacheEntry:
 @dataclass(frozen=True)
 class LayerwiseReuseLayout:
     layer_entries: dict[int, tuple[LayerwiseCacheEntry, ...]]
-    storage_slots: list[list[int]]
+    shared_buffer_layers: list[list[int]]
     prefetch_layer_map: dict[int, int]
     independent_layers: list[int]
     num_prefetch_layers: int
@@ -229,15 +229,15 @@ def build_layerwise_reuse_layout(
         else:
             signature_buckets.append((signature, [physical_layer]))
 
-    storage_slots = [[layer] for layer in independent_layers]
+    shared_buffer_layers = [[layer] for layer in independent_layers]
     prefetch_layer_map: dict[int, int] = {}
     for _, bucket_layers in signature_buckets:
-        slot_count = min(base_layout.num_shared_buffers, len(bucket_layers))
-        for slot_index in range(slot_count):
-            slot_layers = bucket_layers[slot_index::slot_count]
-            storage_slots.append(slot_layers)
-            for owner_index in range(1, len(slot_layers)):
-                prefetch_layer_map[slot_layers[owner_index]] = slot_layers[owner_index - 1]
+        num_shared_buffers = min(base_layout.num_shared_buffers, len(bucket_layers))
+        for buffer_index in range(num_shared_buffers):
+            layers_sharing_buffer = bucket_layers[buffer_index::num_shared_buffers]
+            shared_buffer_layers.append(layers_sharing_buffer)
+            for owner_index in range(1, len(layers_sharing_buffer)):
+                prefetch_layer_map[layers_sharing_buffer[owner_index]] = layers_sharing_buffer[owner_index - 1]
 
     if prefetch_layer_map:
         unsupported_entries = [
@@ -255,7 +255,7 @@ def build_layerwise_reuse_layout(
 
     return LayerwiseReuseLayout(
         layer_entries=layer_entries,
-        storage_slots=storage_slots,
+        shared_buffer_layers=shared_buffer_layers,
         prefetch_layer_map=prefetch_layer_map,
         independent_layers=independent_layers,
         num_prefetch_layers=base_layout.num_prefetch_layers,
@@ -267,7 +267,7 @@ def apply_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
 ) -> None:
-    """Rewrite logical layer tensors into shared physical KV cache slots."""
+    """Rewrite logical layer tensors to use shared physical KV buffers."""
     extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
     if extra_config is None:
         return
@@ -307,18 +307,21 @@ def apply_layerwise_kv_cache_plan(
 
     tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
     new_tensors: list[KVCacheTensor] = []
-    for physical_layers in reuse_layout.storage_slots:
-        reference_entries = reuse_layout.layer_entries[physical_layers[0]]
-        for entry_index in range(len(reference_entries)):
-            shared_by = [reuse_layout.layer_entries[layer][entry_index].layer_name for layer in physical_layers]
+    for layers_sharing_buffer in reuse_layout.shared_buffer_layers:
+        first_layer = layers_sharing_buffer[0]
+        num_cache_entries = len(reuse_layout.layer_entries[first_layer])
+        for entry_index in range(num_cache_entries):
+            shared_by = [reuse_layout.layer_entries[layer][entry_index].layer_name for layer in layers_sharing_buffer]
             component_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
-            slot_sizes = {tensor.size for tensor in component_tensors}
-            if len(slot_sizes) != 1:
-                raise ValueError("Layers sharing a layerwise slot must have equal tensor sizes for every cache entry.")
+            tensor_sizes = {tensor.size for tensor in component_tensors}
+            if len(tensor_sizes) != 1:
+                raise ValueError(
+                    "Layers sharing layerwise KV buffers must have equal tensor sizes for every cache entry."
+                )
             reference_spec = layer_specs[shared_by[0]]
             if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
                 raise ValueError(
-                    "Layers sharing a layerwise slot must have identical cache specs for every cache entry."
+                    "Layers sharing layerwise KV buffers must have identical cache specs for every cache entry."
                 )
             new_tensors.append(
                 KVCacheTensor(
@@ -328,8 +331,8 @@ def apply_layerwise_kv_cache_plan(
             )
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(
-        "Layerwise KV cache reuse merged %d descriptors into %d descriptors across %d physical buffers.",
+        "Layerwise KV cache reuse merged %d descriptors into %d descriptors using %d buffer assignments.",
         len(old_tensors),
         len(new_tensors),
-        len(reuse_layout.storage_slots),
+        len(reuse_layout.shared_buffer_layers),
     )
