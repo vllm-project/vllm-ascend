@@ -6815,7 +6815,7 @@ class Child(Base):
     ) == (
         "override",
         "vllm.base.Base.state",
-        "review",
+        "risk",
         "descriptor_kind_mismatch",
         False,
         True,
