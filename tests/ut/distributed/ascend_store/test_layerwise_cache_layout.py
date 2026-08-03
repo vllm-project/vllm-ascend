@@ -117,7 +117,7 @@ def test_default_layout_keeps_one_buffer_per_layer():
     assert len(layout.storage_indices) == 27
 
 
-def test_reuse_layout_matches_round_robin_storage_slots():
+def test_reuse_layout_matches_round_robin_buffer_assignments():
     layout = build_layerwise_cache_layout(27, {"layerwise_num_shared_buffers": 6})
 
     assert layout.has_layer_reuse is True
@@ -269,7 +269,7 @@ def test_layout_includes_mtp_layers():
     )
 
     assert 4 in layout.layer_entries
-    assert layout.storage_slots == [[0], [1, 3], [2, 4]]
+    assert layout.shared_buffer_layers == [[0], [1, 3], [2, 4]]
     assert layout.prefetch_layer_map == {3: 1, 4: 2}
 
 
@@ -320,7 +320,7 @@ def test_complete_physical_cache_signature_controls_reuse():
         },
     )
 
-    assert layout.storage_slots == [[0, 2, 4], [1, 3, 5]]
+    assert layout.shared_buffer_layers == [[0, 2, 4], [1, 3, 5]]
     assert layout.prefetch_layer_map == {
         2: 0,
         4: 2,
