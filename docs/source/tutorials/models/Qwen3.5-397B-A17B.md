@@ -312,8 +312,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 export VLLM_ENGINE_READY_TIMEOUT_S=30000
 export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
@@ -388,8 +388,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 # The value of node0_ip must be consistent with local_ip on the first decode node.
 node0_ip="xxxx"
@@ -470,8 +470,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 # The value of node0_ip must be consistent with local_ip on the first decode node.
 node0_ip="xxxx"

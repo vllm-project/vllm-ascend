@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing prefill performance in Pipeline Parallelism scenarios. This guide demonstrates deployment with DeepSeek-V3.1 on 1 Atlas 800T A3 server (64G × 16).
+vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing prefill performance in Pipeline Parallelism scenarios. This feature is supported starting from version `v0.19.1rc1`. This guide demonstrates deployment with DeepSeek-V3.1 on 1 Atlas 800T A3 server (64G × 16).
 
 For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md).
 
@@ -12,7 +12,7 @@ For design details, see the [Design Document](../../developer_guide/Design_Docum
 
 ### Model Weight
 
-- `DeepSeek-V3.1-w8a8` (Quantized version): 1 Atlas 800T A3 (64G × 16) node
+- `DeepSeek-V3.1-W8A8` (Quantized version): 1 Atlas 800T A3 (64G × 16) node
 
 Download to shared directory such as `/mnt/weight/`
 
@@ -103,6 +103,8 @@ vllm serve /mnt/weight/DeepSeek-V3.1-w8a8 \
   }'
 ```
 
+The server has started successfully if the log outputs: `vLLM API server started on 0.0.0.0:8003`.
+
 ### Key Parameters
 
 - `--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required)
@@ -162,7 +164,7 @@ Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) f
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
+To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy prefill instance in Ascend Atlas 800T A3 server (64G × 16), the configuration and performance data are as follows.
 
 **Fixed-length requests, concurrency=1**:
 
