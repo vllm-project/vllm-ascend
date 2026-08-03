@@ -81,7 +81,7 @@ def setup_vllm_config_mock(mocker: MockerFixture):
     mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
     mock_vllm_config.model_config.max_model_len = 2048
 
-    mocker.patch("vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config", return_value=mock_vllm_config)
+    mocker.patch("vllm_ascend.ops.fused_moe.routed_experts.get_current_vllm_config", return_value=mock_vllm_config)
 
 
 @pytest.fixture
@@ -133,10 +133,14 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=MagicMock(enable_multistream_moe=False, expert_map_path=None),
         ),
         patch(
-            "vllm_ascend.ops.fused_moe.fused_moe.init_eplb_config",
+            "vllm_ascend.ops.fused_moe.routed_experts.get_ascend_config",
+            return_value=MagicMock(enable_multistream_moe=False, expert_map_path=None),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.routed_experts.init_eplb_config",
             return_value=(torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]), None, 0),
         ),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=mock_forward_context_obj),
+        patch("vllm_ascend.ops.fused_moe.routed_experts.get_forward_context", return_value=mock_forward_context_obj),
         patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=mock_forward_context_obj),
         patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher", return_value=None),

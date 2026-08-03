@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide provides step-by-step instructions to verify this features in resource-constrained environments.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide provides step-by-step instructions to verify this feature in resource-constrained environments.
 
 Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend {{vllm_ascend_version}} (with vLLM {{vllm_version}}) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture (one Prefiller and one Decoder on the same node). Assume the IP address is 192.0.0.1.
 
@@ -100,14 +100,14 @@ First, we need to obtain the Mooncake project. Refer to the following command:
 git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
-(Optional) Replace go install url if the network is poor.
+(Optional) Replace go install URL if the network is poor.
 
 ```shell
 cd Mooncake
 sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
 ```
 
-Install mpi.
+Install MPI.
 
 ```shell
 apt-get install mpich libmpich-dev -y
@@ -222,7 +222,7 @@ We can run the following scripts to launch a server on the prefiller/decoder NPU
       }'
     ```
 
-If you want to run "2P1D", please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
+If you want to run "2P1D" (two Prefiller and one Decoder), please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
 
 ## Example Proxy for Deployment
 
@@ -240,9 +240,9 @@ python load_balance_proxy_server_example.py \
 
 |Parameter  | Meaning |
 | --- | --- |
-| --port | Port of proxy |
-| --prefiller-port | All ports of prefill |
-| --decoder-ports | All ports of decoder |
+| --port | Proxy port |
+| --prefiller-port | All prefiller ports |
+| --decoder-ports | All decoder ports |
 
 ## Verification
 

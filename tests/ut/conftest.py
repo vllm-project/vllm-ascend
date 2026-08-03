@@ -81,6 +81,7 @@ if not _npu_available:
     except RuntimeError:
         pass
     torch.npu = MagicMock()
+    torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = MagicMock
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
@@ -91,6 +92,11 @@ mooncake_engine = types.ModuleType("mooncake.engine")
 mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
 mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules.setdefault("mooncake.engine", mooncake_engine)
+
+build_info = types.ModuleType("vllm_ascend._build_info")
+build_info.__spec__ = importlib.util.spec_from_loader("vllm_ascend._build_info", loader=None)
+setattr(build_info, "__device_type__", "A2")  # noqa: B010
+sys.modules.setdefault("vllm_ascend._build_info", build_info)
 
 from vllm_ascend.utils import (  # noqa: E402
     adapt_patch,

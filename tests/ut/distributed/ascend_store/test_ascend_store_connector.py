@@ -90,6 +90,19 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         return config
 
+    def test_pp_handshake_metadata_is_ignored(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        metadata = {
+            (0, 0): MagicMock(),
+            (1, 0): MagicMock(),
+        }
+        original_metadata = metadata.copy()
+
+        result = connector.set_xfer_handshake_metadata_pp_aware(metadata)
+
+        self.assertIsNone(result)
+        self.assertEqual(metadata, original_metadata)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
         config = self._make_vllm_config()

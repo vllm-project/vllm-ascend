@@ -156,9 +156,6 @@ msgid ""
 "inside containers."
 msgstr "这些设置必须在宿主机操作系统上以 root 权限应用，而非在容器内部。"
 
-msgid "Set CPU Frequency Governor to `performance`"
-msgstr "将 CPU 频率调节器设置为 `performance`"
-
 msgid ""
 "- Forces all CPU cores to run under the `performance` governor\n"
 "- Disables dynamic frequency scaling (e.g., `ondemand`, `powersave`)"
@@ -258,3 +255,6 @@ msgstr "目的"
 
 msgid "Benefits"
 msgstr "优势"
+
+msgid "#### 4.1 Set CPU Frequency Governor to `performance`"
+msgstr "#### 4.1 将CPU频率调节器设置为`performance`"
