@@ -125,6 +125,30 @@ def test_resolve_good_raises_when_no_matching_success_row(tmp_path: Path):
 
     with pytest.raises(SystemExit, match="No successful good-table row"):
         bisector._resolve_good()
+def test_parse_args_accepts_internal_pytest_replay_path():
+    args = _parse_args(
+        [
+            "--scene",
+            "single_node",
+            "--test-path",
+            "tests/e2e/weekly/single_node/models/test_case.py",
+        ]
+    )
+
+    assert args.config_yaml is None
+    assert args.test_path == "tests/e2e/weekly/single_node/models/test_case.py"
+
+
+@pytest.mark.parametrize(
+    "replay_args",
+    [
+        [],
+        ["--config-yaml", "case.yaml", "--test-path", "tests/e2e/test_case.py"],
+    ],
+)
+def test_parse_args_requires_exactly_one_replay_source(replay_args: list[str]):
+    with pytest.raises(SystemExit):
+        _parse_args(["--scene", "single_node", *replay_args])
 
 
 def test_resolve_num_nodes_prefers_explicit_value(tmp_path: Path):

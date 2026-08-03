@@ -289,10 +289,14 @@ class Bisector:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Auto-bisect a nightly test failure to the first bad commit.")
     p.add_argument("--scene", required=True, choices=list(SCENES))
-    p.add_argument(
+    replay = p.add_mutually_exclusive_group(required=True)
+    replay.add_argument(
         "--config-yaml",
-        required=True,
         help="CONFIG_YAML_PATH of the failing case file; the whole file (all test_cases) is run each trial",
+    )
+    replay.add_argument(
+        "--test-path",
+        help="internal: repository-relative pytest entry for a pytest-driven single-node nightly case",
     )
     p.add_argument(
         "--name",
@@ -375,6 +379,8 @@ def _resolve_num_nodes(args: argparse.Namespace, repo_dir: Path) -> int:
         return args.num_nodes
     if args.scene != SCENE_MULTI:
         return 1
+    if getattr(args, "test_path", None):
+        raise SystemExit("--test-path is only supported for single-node bisect")
     import yaml  # local import: only needed for multi-node
 
     bases = [args.config_base_path] if args.config_base_path else list(_MULTI_CONFIG_BASES)
@@ -395,10 +401,17 @@ def _resolve_num_nodes(args: argparse.Namespace, repo_dir: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     repo_dir = Path(args.repo_dir)
+    if args.test_path:
+        test_path = Path(args.test_path)
+        resolved_test = (repo_dir / test_path).resolve()
+        allowed_root = (repo_dir / "tests/e2e").resolve()
+        if test_path.is_absolute() or test_path.suffix != ".py" or not resolved_test.is_relative_to(allowed_root):
+            raise SystemExit("--test-path must be a repository-relative Python file under tests/e2e")
     num_nodes = _resolve_num_nodes(args, repo_dir)
     inp = BisectInput(
         scene=args.scene,
         config_yaml=args.config_yaml,
+        test_path=args.test_path,
         name=args.name,
         soc=args.soc,
         bad_commit=args.bad_commit,

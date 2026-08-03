@@ -107,6 +107,15 @@ BISECT_CMD=(
 )
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")
+[ -n "$TESTS" ] && BISECT_CMD+=(--test-path "$TESTS")
+[ -n "$CONFIG" ] && [ -n "$TESTS" ] && {
+  echo "ERROR: both config_file_path and tests were provided; cannot select bisect replay mode"
+  exit 1
+}
+[ -z "$CONFIG" ] && [ -z "$TESTS" ] && {
+  echo "ERROR: neither config_file_path nor tests was provided for bisect replay"
+  exit 1
+}
 [ -n "$NAME" ] && BISECT_CMD+=(--name "$NAME")
 [ -n "$SOC" ] && BISECT_CMD+=(--soc "$SOC")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
