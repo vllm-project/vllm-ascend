@@ -48,6 +48,7 @@ class NPUInputBatch(InputBatch):
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
+        use_replayssm: bool = False,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ):
         self.is_pooling_model = is_pooling_model
@@ -108,6 +109,19 @@ class NPUInputBatch(InputBatch):
             pin_memory=pin_memory,
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
+
+        # Mamba2 ReplaySSM decode ring origin (num_computed at each request's
+        # last full-state write). ReplaySSM is a Triton/CUDA-only feature; NPU
+        # keeps the flag False so the base-class decode paths that read these
+        # attributes stay inactive, but the attributes must still exist.
+        self.use_replayssm = use_replayssm
+        self.replayssm_decode_base_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.replayssm_decode_base = self.replayssm_decode_base_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
