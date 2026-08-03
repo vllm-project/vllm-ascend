@@ -20,7 +20,17 @@ generator problem.
   call to the decorated function; reported signatures are also public
   introspection interfaces. Checking only the outer entry hid real breaks.
 - Test evidence: all 199 isolated generator and independent-auditor tests pass;
-  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+  Ruff and `git diff --check` pass.
+- Fixed-source evidence: all 971 endpoints and all persisted contracts remain
+  unchanged from v0.31. Four source risks are newly visible: one reported
+  signature changes positional meaning in `chunk_gated_delta_rule`; two Merged
+  QKV LoRA overrides drop the optional `decorate` input and one also requires
+  formerly optional `model_config`; one QKV LoRA override also requires that
+  formerly optional input. Findings rise from 173 to 177 and risks from 116 to
+  120; reviews remain 20 and generator issues remain zero. Manual source review
+  confirmed all four; the compatible Sharded QKV variant is not reported.
+  The independent audit still classifies all 1,019 candidates with no missing
+  or conflicting site. Runtime was about 660 seconds.
 
 ## v0.31.0 - model the pinned `torch.compiler.disable` wrapper
 
