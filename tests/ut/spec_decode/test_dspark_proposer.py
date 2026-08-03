@@ -41,6 +41,19 @@ _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
 
 
+@pytest.fixture(autouse=True)
+def _stub_device_properties(monkeypatch):
+    """CPU CI has no NPU: ``init_device_properties_triton`` is skipped when
+    ``HAS_TRITON`` is false, leaving ``_NUM_VECTORCORE`` unset, so
+    ``get_vectorcore_num`` asserts. ``set_inputs_first_pass`` sizes the kernel
+    grid via ``_compute_num_programs`` -> ``get_vectorcore_num``; stub the
+    device-property globals so the grid computation runs on CPU. The kernel
+    itself is mocked per-test, and the small inputs here yield a ``(1,)`` grid
+    either way (matching ``test_kernel_called_with_has_num_rejected``)."""
+    monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_AICORE", 8)
+    monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
+
+
 class _DSparkProposerTestBase:
     """Shared helpers for ``AscendDSparkProposer`` tests."""
 
