@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.30.0"
+GENERATOR_VERSION = "0.31.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -100,6 +100,15 @@ _PINNED_TRANSPARENT_SIGNATURE_DECORATORS: dict[
         "vllm",
         "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
     ): frozenset({"vllm.tracing.instrument"}),
+}
+_PINNED_WRAPS_SIGNATURE_DECORATORS: dict[
+    tuple[str, str],
+    frozenset[str],
+] = {
+    (
+        "torch",
+        "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+    ): frozenset({"torch.compiler.disable"}),
 }
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
     "abc.ABC": (),
@@ -4366,6 +4375,24 @@ class InterfaceBoundaryGenerator:
             )
             if pinned_version is not None:
                 provenance.append(f"{label}@{pinned_version}")
+                continue
+
+            pinned_wrapper_version = next(
+                (
+                    version
+                    for package, version in self.source_versions.items()
+                    if reference
+                    in _PINNED_WRAPS_SIGNATURE_DECORATORS.get(
+                        (package, version),
+                        (),
+                    )
+                ),
+                None,
+            )
+            if pinned_wrapper_version is not None and not isinstance(decorator, ast.Call):
+                runtime_entry_signature = ["sync", [], [], "args", [], "kwargs"]
+                forwarded_targets.append(callable_info.qualified_name)
+                provenance.append(f"{label}:sha_wrapped@{pinned_wrapper_version}")
                 continue
 
             if expression is not None and expression.rsplit(".", 1)[-1] in {

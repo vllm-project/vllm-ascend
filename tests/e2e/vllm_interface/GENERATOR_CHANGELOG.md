@@ -4,6 +4,30 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.31.0 - model the pinned `torch.compiler.disable` wrapper
+
+- Red-test checkpoint: `01dea70ec`. The reduced local PyTorch snapshot proves
+  its commit identity but intentionally contains only the `torch.nn.Module`
+  source used by interface discovery, so `torch.compiler.disable` could not be
+  analysed locally and remained the only non-Triton unknown transform.
+- Exact source evidence at PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0`: `torch/compiler/__init__.py`
+  delegates `disable` to `torch._dynamo.disable`; the default recursive path in
+  `torch/_dynamo/decorators.py` uses `DisableContext`; and
+  `torch/_dynamo/eval_frame.py` builds a synchronous `*args/**kwargs` wrapper
+  and applies `functools.wraps(fn)` when wrapping is enabled (the default).
+- Change: for that exact SHA only, record the wrapper runtime entry signature,
+  preserve the decorated function's reported signature, and retain the
+  forwarded callable. An unregistered SHA remains unknown.
+- Safety boundary: the adapter handles direct `@torch.compiler.disable` only.
+  Decorator calls with explicit options and every other PyTorch version fail
+  closed until separately proven.
+- Reason: the exact external implementation is known even though the local
+  source snapshot is deliberately reduced; a SHA-pinned adapter preserves that
+  evidence without claiming cross-version stability.
+- Test evidence: all 197 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+
 ## v0.30.0 - derive simple decorator wrapper signatures from source
 
 - Red-test checkpoint: `15cb137ba`. Direct decorators such as `tensor_cache`
