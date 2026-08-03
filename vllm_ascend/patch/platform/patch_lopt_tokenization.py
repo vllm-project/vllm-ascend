@@ -117,7 +117,7 @@ def _chat_params_for_lopt(renderer: _LoptRenderer, params: ChatParams) -> ChatPa
     if _get_lopt(renderer) is None:
         return params
 
-    chat_template_kwargs = dict(params.chat_template_kwargs)
+    chat_template_kwargs = dict(params.chat_template_kwargs or {})
     chat_template_kwargs["tokenize"] = False
     return replace(params, chat_template_kwargs=chat_template_kwargs)
 
