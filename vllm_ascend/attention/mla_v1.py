@@ -1410,13 +1410,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                 block_size = cache_kv_c.shape[1]
                 cache_kv_c_for_load = cache_kv_c.view(
                     -1,
-                    num_heads * latent_kv_dim // 32,
+                    num_heads,
+                    latent_kv_dim // 32,
                     block_size,
                     32,
                 )
                 cache_k_pe_for_load = cache_k_pe.view(
                     -1,
-                    num_heads * rope_dim // 16,
+                    num_heads,
+                    rope_dim // 16,
                     block_size,
                     16,
                 )
@@ -1443,11 +1445,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
             if is_a3_c8_cache:
-                # npu_gather_pa_kv_cache requires its key/value cache pair to
-                # have one dtype. A3 C8 keeps the latent cache in INT8 and
-                # the RoPE cache in BF16, so gather each cache independently.
-                # The operator has mandatory key/value outputs; the duplicate
-                # output of each same-cache gather is intentionally discarded.
+                # npu_gather_pa_kv_cache requires matching dtypes for the
+                # key/value cache pair. A3 C8 stores latent cache in INT8 and
+                # RoPE cache in BF16, so gather the two PA_NZ caches separately.
                 kv_c_unused = torch.empty_like(kv_c_normed)
                 k_pe_unused = torch.empty_like(k_pe)
                 DeviceOperator.kv_cache_load(
