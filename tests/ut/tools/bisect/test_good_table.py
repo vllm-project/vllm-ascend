@@ -1,6 +1,8 @@
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from tools.bisect.good_table import GoodTable, _norm
 
 
@@ -23,7 +25,9 @@ def test_lookup_last_good_by_name_uses_latest_success(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)
 
-    entry = GoodTable(str(table_path)).lookup_last_good(name="llama")
+    entry = GoodTable(str(table_path)).lookup_last_good(
+        name="llama", soc="a2", scene="single_node"
+    )
 
     assert entry is not None
     assert entry.link == "new"
@@ -35,7 +39,9 @@ def test_lookup_last_good_by_yaml_basename(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)
 
-    entry = GoodTable(str(table_path)).lookup_last_good(config_yaml="llama.yaml")
+    entry = GoodTable(str(table_path)).lookup_last_good(
+        config_yaml="llama.yaml", soc="a2", scene="single_node"
+    )
 
     assert entry is not None
     assert entry.name == "llama"
@@ -134,30 +140,76 @@ def test_lookup_filters_by_scene(tmp_path: Path):
         table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a2", scene="multi_node").vllm_ascend_commit
         == "asc-m"
     )
-    assert table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a2", scene="double_node") is None
+    with pytest.raises(ValueError, match="invalid scene"):
+        table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a2", scene="double_node")
 
 
-def test_lookup_without_dimensions_matches_new_schema_rows(tmp_path: Path):
+def test_lookup_requires_soc_and_scene(tmp_path: Path):
+    table_path = tmp_path / "good_table.csv"
+    _write_table(table_path)
+    table = GoodTable(str(table_path))
+
+    with pytest.raises(TypeError):
+        table.lookup_last_good(name="llama")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        table.lookup_last_good(name="llama", soc="a2")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        table.lookup_last_good(name="llama", scene="single_node")  # type: ignore[call-arg]
+
+
+def test_lookup_rejects_placeholder_soc_and_invalid_scene(tmp_path: Path):
+    table_path = tmp_path / "good_table.csv"
+    _write_table(table_path)
+    table = GoodTable(str(table_path))
+
+    for bad_soc in ("", "unknown", "UNKNOWN", "none", "null"):
+        with pytest.raises(ValueError, match="valid soc"):
+            table.lookup_last_good(name="llama", soc=bad_soc, scene="single_node")
+    for bad_scene in ("", "double_node", "multi-card"):
+        with pytest.raises(ValueError, match="invalid scene"):
+            table.lookup_last_good(name="llama", soc="a2", scene=bad_scene)
+
+
+def test_lookup_prefers_exact_new_schema_row_over_legacy(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     table_path.write_text(
         dedent(
             """
             name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time
-            shared,cases/a2.yaml,a2,success,vllm-a2,asc-a2,a2,single_node,2026-01-01 01:00:00 +0800
-            shared,cases/a3.yaml,a3,success,vllm-a3,asc-a3,a3,single_node,2026-01-02 01:00:00 +0800
+            m,cases/m.yaml,legacy,success,vllm-legacy,asc-legacy,,,2026-01-03 01:00:00 +0800
+            m,cases/m.yaml,exact,success,vllm-exact,asc-exact,a2,single_node,2026-01-01 01:00:00 +0800
             """
         ).lstrip(),
         encoding="utf-8",
     )
-    table = GoodTable(str(table_path))
 
-    entry = table.lookup_last_good(name="shared")
-    assert entry is not None
-    assert entry.vllm_ascend_commit == "asc-a3"
+    entry = GoodTable(str(table_path)).lookup_last_good(
+        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
+    )
 
-    entry = table.lookup_last_good(name="shared", config_yaml="a2.yaml")
     assert entry is not None
-    assert entry.vllm_ascend_commit == "asc-a2"
+    assert entry.vllm_ascend_commit == "asc-exact"
+
+
+def test_lookup_ignores_partially_keyed_rows_and_uses_legacy_fallback(tmp_path: Path):
+    table_path = tmp_path / "good_table.csv"
+    table_path.write_text(
+        dedent(
+            """
+            name,yaml/path,link,status,vLLM Git information,VLLM-Ascend Git information,soc,scene,time
+            m,cases/m.yaml,partial,success,vllm-p,asc-p,a2,,2026-01-02 01:00:00 +0800
+            m,cases/m.yaml,legacy,success,vllm-l,asc-l,,,2026-01-01 01:00:00 +0800
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    entry = GoodTable(str(table_path)).lookup_last_good(
+        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
+    )
+
+    assert entry is not None
+    assert entry.vllm_ascend_commit == "asc-l"
 
 
 def test_lookup_requires_all_supplied_dimensions_to_match(tmp_path: Path):
@@ -173,8 +225,18 @@ def test_lookup_requires_all_supplied_dimensions_to_match(tmp_path: Path):
     )
     table = GoodTable(str(table_path))
 
-    assert table.lookup_last_good(name="shared", config_yaml="other.yaml") is None
-    assert table.lookup_last_good(name="other", config_yaml="model.yaml") is None
+    assert (
+        table.lookup_last_good(
+            name="shared", config_yaml="other.yaml", soc="a2", scene="single_node"
+        )
+        is None
+    )
+    assert (
+        table.lookup_last_good(
+            name="other", config_yaml="model.yaml", soc="a2", scene="single_node"
+        )
+        is None
+    )
 
 
 def test_lookup_skips_success_rows_without_commit(tmp_path: Path):
@@ -236,14 +298,24 @@ def test_lookup_tolerates_mixed_time_formats(tmp_path: Path):
 
 
 def test_lookup_missing_table_returns_none(tmp_path: Path):
-    assert GoodTable(str(tmp_path / "no_such_good_table.csv")).lookup_last_good(name="llama") is None
+    assert (
+        GoodTable(str(tmp_path / "no_such_good_table.csv")).lookup_last_good(
+            name="llama", soc="a2", scene="single_node"
+        )
+        is None
+    )
 
 
 def test_lookup_last_good_returns_none_for_missing_or_failed_case(tmp_path: Path):
     table_path = tmp_path / "good_table.csv"
     _write_table(table_path)
 
-    assert GoodTable(str(table_path)).lookup_last_good(name="missing") is None
+    assert (
+        GoodTable(str(table_path)).lookup_last_good(
+            name="missing", soc="a2", scene="single_node"
+        )
+        is None
+    )
 
 
 def test_norm_detects_surplus_csv_columns():

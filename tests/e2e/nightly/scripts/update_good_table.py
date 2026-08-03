@@ -48,6 +48,22 @@ HEADER = [
     "time",
 ]
 
+INVALID_SOC_VALUES = {"", "unknown", "none", "null"}
+
+
+def non_empty(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("value must not be empty")
+    return value
+
+
+def valid_soc(value: str) -> str:
+    value = non_empty(value)
+    if value.lower() in INVALID_SOC_VALUES:
+        raise argparse.ArgumentTypeError(f"invalid soc placeholder: {value!r}")
+    return value
+
 
 def git_head(repo_dir: str) -> str:
     try:
@@ -174,7 +190,21 @@ def _same_case(row: dict[str, str], *, soc: str, scene: str, test_path: str) -> 
     return row_soc == soc and row_scene == scene
 
 
+def _validate_new_row(new_row: dict[str, str]) -> None:
+    """Reject writes that would produce an incomplete composite key."""
+    soc = new_row.get("soc", "").strip()
+    scene = new_row.get("scene", "").strip()
+    test_path = new_row.get("yaml/path", "").strip()
+    if not soc or soc.lower() in INVALID_SOC_VALUES:
+        raise ValueError(f"invalid soc for good-table key: {soc!r}")
+    if scene not in ("single_node", "multi_node"):
+        raise ValueError(f"invalid scene for good-table key: {scene!r}")
+    if not test_path:
+        raise ValueError("yaml/path must not be empty for good-table key")
+
+
 def update_table(csv_path: str, new_row: dict[str, str]) -> bool:
+    _validate_new_row(new_row)
     with table_lock(csv_path):
         is_new = not os.path.isfile(csv_path)
         rows = load_rows(csv_path)
@@ -193,20 +223,24 @@ def update_table(csv_path: str, new_row: dict[str, str]) -> bool:
         return is_new
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Update good_table.csv on test success")
     parser.add_argument("--cache-csv", required=True)
     parser.add_argument("--test-name", required=True)
     parser.add_argument("--test-path", required=True)
     parser.add_argument("--config-base-path", default="")
-    parser.add_argument("--scene", default="single_node", choices=["single_node", "multi_node"])
-    parser.add_argument("--soc", required=True)
+    parser.add_argument("--scene", required=True, choices=["single_node", "multi_node"])
+    parser.add_argument("--soc", required=True, type=valid_soc)
     parser.add_argument("--run-link", required=True)
     parser.add_argument("--vllm-dir", default="/vllm-workspace/vllm")
     parser.add_argument("--vllm-ascend-dir", default="/vllm-workspace/vllm-ascend")
     parser.add_argument("--vllm-ascend-version", default="")
     parser.add_argument("--vllm-version", default="")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     vllm_hash = args.vllm_version.strip() or git_head(args.vllm_dir)
     vllm_ascend_hash = args.vllm_ascend_version.strip() or git_head(args.vllm_ascend_dir)

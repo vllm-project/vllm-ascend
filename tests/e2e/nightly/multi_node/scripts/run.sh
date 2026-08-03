@@ -272,6 +272,10 @@ run_tests_with_log() {
 aop_pipeline() {
     local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
     local table="${GOOD_TABLE:-}"
+    if [[ -z "$BISECT_SOC" || "$BISECT_SOC" == "unknown" ]]; then
+        echo "ERROR: missing or invalid SOC for AOP lookup"
+        return 1
+    fi
     # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
     local case_name="${BENCHMARK_JOB_NAME#*-}"
     if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then

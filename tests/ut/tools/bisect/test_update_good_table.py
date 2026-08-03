@@ -1,7 +1,15 @@
 import csv
 from pathlib import Path
 
-from tests.e2e.nightly.scripts.update_good_table import HEADER, load_rows, resolve_test_path, update_table
+import pytest
+
+from tests.e2e.nightly.scripts.update_good_table import (
+    HEADER,
+    build_parser,
+    load_rows,
+    resolve_test_path,
+    update_table,
+)
 
 
 def _row(*, name: str, path: str, soc: str, scene: str, commit: str) -> dict[str, str]:
@@ -16,6 +24,69 @@ def _row(*, name: str, path: str, soc: str, scene: str, commit: str) -> dict[str
         "scene": scene,
         "time": "2026-07-29 10:00:00 +08:00",
     }
+
+
+def _base_args(*, soc: str = "a2", scene: str = "single_node") -> list[str]:
+    return [
+        "--cache-csv",
+        "good_table.csv",
+        "--test-name",
+        "m",
+        "--test-path",
+        "cases/model.yaml",
+        "--config-base-path",
+        "cases",
+        "--scene",
+        scene,
+        "--soc",
+        soc,
+        "--run-link",
+        "https://example.invalid/run",
+    ]
+
+
+def test_parser_requires_soc_and_rejects_placeholders():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([arg for arg in _base_args() if arg != "a2" and arg != "--soc"])
+    for bad_soc in ("", "unknown", "UNKNOWN", "none", "null"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(_base_args(soc=bad_soc))
+
+
+def test_parser_requires_scene_and_rejects_invalid_values():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([arg for arg in _base_args() if arg != "single_node" and arg != "--scene"])
+    for bad_scene in ("", "double_node", "multi-card"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(_base_args(scene=bad_scene))
+
+
+def test_parser_accepts_valid_dimension_combinations():
+    parser = build_parser()
+    a2 = parser.parse_args(_base_args(soc="a2", scene="single_node"))
+    assert a2.soc == "a2"
+    assert a2.scene == "single_node"
+    a3 = parser.parse_args(_base_args(soc="a3", scene="multi_node"))
+    assert a3.soc == "a3"
+    assert a3.scene == "multi_node"
+
+
+def test_update_table_rejects_incomplete_composite_key(tmp_path: Path):
+    table = tmp_path / "good_table.csv"
+    with pytest.raises(ValueError, match="invalid soc"):
+        update_table(str(table), _row(name="m", path="cases/model.yaml", soc="", scene="single_node", commit="a2"))
+    with pytest.raises(ValueError, match="invalid soc"):
+        update_table(
+            str(table),
+            _row(name="m", path="cases/model.yaml", soc="unknown", scene="single_node", commit="a2"),
+        )
+    with pytest.raises(ValueError, match="invalid scene"):
+        update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="", commit="a2"))
+    with pytest.raises(ValueError, match="yaml/path"):
+        update_table(str(table), _row(name="m", path="", soc="a2", scene="single_node", commit="a2"))
+    assert not table.exists()
 
 
 def test_update_replaces_only_same_composite_key(tmp_path: Path):

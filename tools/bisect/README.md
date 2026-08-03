@@ -110,7 +110,8 @@ python -m tools.bisect.auto_bisect \
     --coord-dir /shared/nightly_bisect/coord
 ```
 
-Common flags: `--good-commit` (skip the table), `--soc`,
+Common flags: `--good-commit` (skip the table), `--soc` (required hardware
+generation for the good-table key),
 `--config-base-path`
 (internal/external DP configs), `--native-check {per-commit,since-build}`,
 `--force-initial-build`, `--fail-confirm-retries`, `--no-verify-good`,

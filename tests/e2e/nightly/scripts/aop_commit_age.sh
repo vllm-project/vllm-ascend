@@ -33,6 +33,20 @@ if [ -z "$CONFIG_NAME" ]; then
   exit 1
 fi
 
+if [[ -z "$BISECT_SOC" || "$BISECT_SOC" == "unknown" ]]; then
+  echo "ERROR: valid soc is required for commit-age lookup"
+  exit 1
+fi
+
+case "$BISECT_SCENE" in
+  single_node|multi_node)
+    ;;
+  *)
+    echo "ERROR: invalid scene: '$BISECT_SCENE'"
+    exit 1
+    ;;
+esac
+
 if ! [[ "$MAX_AGE_DAYS" =~ ^[0-9]+$ ]]; then
   echo "ERROR: max_age_days must be a non-negative integer, got '${MAX_AGE_DAYS}'"
   exit 1

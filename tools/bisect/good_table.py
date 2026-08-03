@@ -51,6 +51,23 @@ COL_SCENE = "scene"
 COL_TIME = "time"
 
 _TIME_FORMATS = ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S")
+VALID_SCENES = ("single_node", "multi_node")
+INVALID_SOC_VALUES = {"", "unknown", "none", "null"}
+
+
+def valid_soc(value: str) -> str:
+    """Return a stripped soc that is safe to use in the composite key."""
+    value = value.strip()
+    if not value or value.lower() in INVALID_SOC_VALUES:
+        raise ValueError(f"valid soc is required for good-table lookup, got {value!r}")
+    return value
+
+
+def valid_scene(value: str) -> str:
+    value = value.strip()
+    if value not in VALID_SCENES:
+        raise ValueError(f"invalid scene {value!r}; expected one of {VALID_SCENES}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -161,13 +178,7 @@ class GoodTable:
         entry: GoodEntry,
         name: str | None,
         config_yaml: str | None,
-        soc: str | None,
-        scene: str | None,
     ) -> bool:
-        if soc and entry.soc and entry.soc != soc:
-            return False
-        if scene and entry.scene and entry.scene != scene:
-            return False
         if name and entry.name != name:
             return False
         if config_yaml:
@@ -180,23 +191,45 @@ class GoodTable:
     def lookup_last_good(
         self,
         *,
+        soc: str,
+        scene: str,
         name: str | None = None,
         config_yaml: str | None = None,
-        soc: str | None = None,
-        scene: str | None = None,
     ) -> GoodEntry | None:
         """Latest ``success`` row for the case, or None.
 
-        Every supplied identity dimension is required to match. Legacy rows
-        without ``soc``/``scene`` remain eligible. The newest success row by
-        ``time`` wins; its ``vllm_ascend_commit`` is the good bisect endpoint.
+        ``soc`` and ``scene`` are required request dimensions. Rows in the new
+        nine-column schema are matched exactly; legacy seven-column rows
+        (without soc/scene) are only used as a fallback while they migrate and
+        produce a warning. The newest success row by ``time`` wins; its
+        ``vllm_ascend_commit`` is the good bisect endpoint.
         """
-        rows = [
-            e
-            for e in self._read_all()
-            if self._matches(e, name, config_yaml, soc, scene) and e.is_success and e.vllm_ascend_commit
-        ]
-        if not rows:
+        soc = valid_soc(soc)
+        scene = valid_scene(scene)
+        exact: list[GoodEntry] = []
+        legacy: list[GoodEntry] = []
+        for entry in self._read_all():
+            if not self._matches(entry, name, config_yaml):
+                continue
+            if not entry.is_success or not entry.vllm_ascend_commit:
+                continue
+            if entry.soc == soc and entry.scene == scene:
+                exact.append(entry)
+            elif not entry.soc and not entry.scene:
+                legacy.append(entry)
+            # Rows with a partially filled key (only one of soc/scene) never
+            # match; the writer always stores both.
+        if exact:
+            best = max(exact, key=lambda e: _parse_time(e.time))
+        elif legacy:
+            logger.warning(
+                "No exact good-table row for soc=%r scene=%r; falling back to a "
+                "legacy row (it will be migrated on the next successful write)",
+                soc,
+                scene,
+            )
+            best = max(legacy, key=lambda e: _parse_time(e.time))
+        else:
             logger.warning(
                 "No successful good-table row for name=%r config_yaml=%r soc=%r scene=%r",
                 name,
@@ -205,7 +238,6 @@ class GoodTable:
                 scene,
             )
             return None
-        best = max(rows, key=lambda e: _parse_time(e.time))
         logger.info(
             "Good baseline from table: %s @ %s (vllm-ascend=%s, vllm=%s)",
             best.name,

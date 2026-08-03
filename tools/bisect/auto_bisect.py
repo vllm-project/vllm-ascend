@@ -47,7 +47,7 @@ from tools.bisect.config import (
     TrialResult,
     Verdict,
 )
-from tools.bisect.good_table import GoodTable
+from tools.bisect.good_table import GoodTable, valid_soc
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
 
@@ -299,7 +299,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
     )
-    p.add_argument("--soc", default=None, help="hardware generation used to select the matching good-table row")
+    p.add_argument(
+        "--soc",
+        required=True,
+        type=valid_soc,
+        help="hardware generation used to select the matching good-table row",
+    )
     p.add_argument("--bad-commit", default=os.getenv("VLLM_ASCEND_REF", "HEAD"))
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
     p.add_argument("--config-base-path", default=os.getenv("CONFIG_BASE_PATH"))

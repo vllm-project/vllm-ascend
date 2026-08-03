@@ -33,6 +33,20 @@ COORD_DIR="${11:-}"
 NAME="${12:-}"
 SOC="${13:-}"
 
+if [[ -z "$SOC" || "$SOC" == "unknown" ]]; then
+  echo "ERROR: valid soc is required for good-table lookup"
+  exit 1
+fi
+
+case "$SCENE" in
+  single_node|multi_node)
+    ;;
+  *)
+    echo "ERROR: invalid scene: '$SCENE'"
+    exit 1
+    ;;
+esac
+
 echo "================================================"
 echo " PROCESS - needs attention"
 echo "   Failure type : ${FT}"

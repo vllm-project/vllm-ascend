@@ -21,6 +21,8 @@ def test_parse_args_maps_no_assume_built_head_flag():
             "single_node",
             "--config-yaml",
             "case.yaml",
+            "--soc",
+            "a2",
             "--good-commit",
             "good",
             "--no-assume-built-head",
@@ -34,6 +36,33 @@ def test_parse_args_maps_no_assume_built_head_flag():
     assert args.good_commit == "good"
     assert args.no_assume_built_head is True
     assert args.native_check == "since-build"
+
+
+def test_parse_args_requires_soc():
+    with pytest.raises(SystemExit):
+        _parse_args(
+            [
+                "--scene",
+                "single_node",
+                "--config-yaml",
+                "case.yaml",
+            ]
+        )
+
+
+def test_parse_args_rejects_empty_or_placeholder_soc():
+    for bad_soc in ("", "unknown", "none", "null"):
+        with pytest.raises(SystemExit):
+            _parse_args(
+                [
+                    "--scene",
+                    "single_node",
+                    "--config-yaml",
+                    "case.yaml",
+                    "--soc",
+                    bad_soc,
+                ]
+            )
 
 
 def _bisector_with_good_table(
