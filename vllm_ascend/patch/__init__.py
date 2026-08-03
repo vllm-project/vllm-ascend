@@ -98,11 +98,13 @@
 #       scope are owned by downstream instances rather than patched upstream
 #       classes; upstream torch.distributed communication runs over HCCL.
 #    Related PR (if no, explain why):
-#       No. The current delivery uses a downstream patch so it does not depend
-#       on an upstream interface being accepted within the release window.
+#       https://github.com/vllm-project/vllm/pull/49700
+#    Related RFC:
+#       https://github.com/vllm-project/vllm/issues/49702
 #    Future Plan:
-#       Replace this patch with an upstream EplbDeviceBackend interface while
-#       retaining the NPU operator, communicator, load mask, and weight views.
+#       Remove this patch once the upstream `EplbPlatformBackend` interface is
+#       available in the supported vLLM version. Retain only the NPU backend,
+#       operator, communicator, load normalization, and weight views.
 #
 # ** 6. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
