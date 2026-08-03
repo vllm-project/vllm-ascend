@@ -34,6 +34,9 @@ from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
 
 
+_W8A8_DYNAMIC_MATMUL_CHUNK_SIZE = 1024
+
+
 @register_scheme("W8A8_DYNAMIC", "moe")
 class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
     """310P-only FusedMoE method for Ascend W8A8_DYNAMIC.
@@ -199,14 +202,33 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
 
         # NOTE(310P):
         # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight.data,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=bias,
-            output_dtype=x.dtype,
-        )
+        if quantized_x.shape[0] <= _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE:
+            output = torch_npu.npu_quant_matmul(
+                quantized_x,
+                layer.weight.data,
+                layer.weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias,
+                output_dtype=x.dtype,
+            )
+        else:
+            # QuantBatchMatmulV3 on 310P can raise an AI Core exception for
+            # large token dimensions. Split only affected prefills into a size
+            # known to use the stable kernel.
+            output = torch.cat(
+                [
+                    torch_npu.npu_quant_matmul(
+                        quantized_x[start : start + _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE],
+                        layer.weight.data,
+                        layer.weight_scale,
+                        pertoken_scale=pertoken_scale[start : start + _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE],
+                        bias=bias,
+                        output_dtype=x.dtype,
+                    )
+                    for start in range(0, quantized_x.shape[0], _W8A8_DYNAMIC_MATMUL_CHUNK_SIZE)
+                ],
+                dim=0,
+            )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
         return output
