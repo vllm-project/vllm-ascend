@@ -215,11 +215,15 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image]
+    # needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+      needs.parse-trigger.outputs.run == 'true'
+    # if: >-
+    #   always() &&
+    #   needs.parse-trigger.outputs.run == 'true' &&
+    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -254,11 +258,15 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+      needs.parse-trigger.outputs.run == 'true'
+    # needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    # if: >-
+    #   always() &&
+    #   needs.parse-trigger.outputs.run == 'true' &&
+    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -293,11 +301,15 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+      needs.parse-trigger.outputs.run == 'true'
+    # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    # if: >-
+    #   always() &&
+    #   needs.parse-trigger.outputs.run == 'true' &&
+    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 9
@@ -323,11 +335,15 @@ jobs:
 
   multi-card-tests:
     name: multi-card
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+      needs.parse-trigger.outputs.run == 'true'
+    # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    # if: >-
+    #   always() &&
+    #   needs.parse-trigger.outputs.run == 'true' &&
+    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
