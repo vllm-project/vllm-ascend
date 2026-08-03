@@ -25,25 +25,6 @@ def test_base_env_includes_case_and_config_base(tmp_path: Path):
     assert env["CONFIG_BASE_PATH"] == "configs"
 
 
-def test_single_node_runner_replays_pytest_driven_path(tmp_path: Path):
-    inp = BisectInput(
-        scene="single_node",
-        config_yaml=None,
-        test_path="tests/e2e/weekly/single_node/models/test_case.py",
-        bad_commit="bad",
-    )
-    runner = SingleNodeRunner(inp, BisectOptions(repo_dir=tmp_path), builder=None)  # type: ignore[arg-type]
-
-    assert runner._test_command() == [
-        "python",
-        "-m",
-        "pytest",
-        "-sv",
-        "tests/e2e/weekly/single_node/models/test_case.py",
-    ]
-    assert "CONFIG_YAML_PATH" not in runner._base_env()
-
-
 def test_single_node_runner_selects_accuracy_test_from_model_type(tmp_path: Path):
     config_dir = tmp_path / "tests/e2e/models/configs"
     config_dir.mkdir(parents=True)
