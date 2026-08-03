@@ -111,8 +111,11 @@ class SequenceParallelRuntimeState:
         """Return a new state after validating an explicit layer transition."""
         if activation is self.activation:
             return self
-        if not self.active:
-            raise ValueError("activation cannot be sharded while sequence parallelism is inactive")
+        if not self.active and (
+            self.activation is SequenceParallelActivationState.SEQUENCE_SHARDED
+            or activation is SequenceParallelActivationState.SEQUENCE_SHARDED
+        ):
+            raise ValueError("activation cannot be sequence-sharded while sequence parallelism is inactive")
         if activation not in _VALID_ACTIVATION_TRANSITIONS[self.activation]:
             raise ValueError(f"invalid sequence-parallel transition: {self.activation.value} -> {activation.value}")
         return replace(self, activation=activation)

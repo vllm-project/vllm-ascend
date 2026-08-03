@@ -277,3 +277,17 @@ def test_inactive_runtime_state_rejects_sharding_transition():
 
     with pytest.raises(ValueError, match="inactive"):
         state.transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)
+
+
+def test_inactive_runtime_state_tracks_plain_tp_partial_sum():
+    state = SequenceParallelRuntimeState.create(
+        active=False,
+        world_size=2,
+        num_tokens=8,
+    )
+
+    partial = state.transition_to(SequenceParallelActivationState.TP_PARTIAL)
+    full = partial.transition_to(SequenceParallelActivationState.FULL)
+
+    assert partial.activation is SequenceParallelActivationState.TP_PARTIAL
+    assert full.activation is SequenceParallelActivationState.FULL
