@@ -188,28 +188,6 @@ jobs:
           echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
           echo "vllm_ascend_branches: >>${{ needs.setup-vars.outputs.vllm_ascend_branches }}<<"
 
-  multi-node-tests:
-    name: multi-node
-    # needs: [parse-trigger, setup-vars]
-    # if: needs['parse-trigger'].outputs.run == 'true'
-    if: true
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: "A5"
-      runner: linux-aarch64-a5-8
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
-      ascend_log_prefix: nightly-a5
-      config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-      name: Qwen3-235B-W8A8-EPLB
-      replicas: 2
-      size: 2
-      should_run: "true"
-      request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      filter_expr: "all"
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-
   single-node-tests:
     name: single-node
     needs: [parse-trigger, setup-vars]
@@ -226,26 +204,26 @@ jobs:
       aop_single_enabled: ${{ inputs.aop_enabled }}
       filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
 
-multi-node-tests:
-  name: multi-node
-  needs: [parse-trigger, setup-vars]
-  # ========= 删除外层所有if条件 =========
-  uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-  with:
-    soc_version: "A5"
-    runner: linux-aarch64-a5-8
-    image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
-    ascend_log_prefix: nightly-a5
-    config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-    name: Qwen3-235B-W8A8-EPLB
-    replicas: 2
-    size: 2
-    should_run: ${{ needs['parse-trigger'].outputs.run }}
-    request_id: ${{ inputs.request_id }}
-    vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
-    filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
-  secrets:
-    KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+  multi-node-tests:
+    name: multi-node
+    needs: [parse-trigger, setup-vars]
+    # ========= 删除外层所有if条件 =========
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: "A5"
+      runner: linux-aarch64-a5-8
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+      ascend_log_prefix: nightly-a5
+      config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+      name: Qwen3-235B-W8A8-EPLB
+      replicas: 2
+      size: 2
+      should_run: ${{ needs['parse-trigger'].outputs.run }}
+      request_id: ${{ inputs.request_id }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
+      filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
