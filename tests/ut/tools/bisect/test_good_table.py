@@ -95,16 +95,19 @@ def test_lookup_filters_by_soc(tmp_path: Path):
     )
     table = GoodTable(str(table_path))
 
-    assert table.lookup_last_good(
-        name="shared", config_yaml="model.yaml", soc="a2", scene="single_node"
-    ).vllm_ascend_commit == "asc-a2"
-    assert table.lookup_last_good(
-        name="shared", config_yaml="model.yaml", soc="a3", scene="single_node"
-    ).vllm_ascend_commit == "asc-a3"
     assert (
-        table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a4", scene="single_node")
-        is None
+        table.lookup_last_good(
+            name="shared", config_yaml="model.yaml", soc="a2", scene="single_node"
+        ).vllm_ascend_commit
+        == "asc-a2"
     )
+    assert (
+        table.lookup_last_good(
+            name="shared", config_yaml="model.yaml", soc="a3", scene="single_node"
+        ).vllm_ascend_commit
+        == "asc-a3"
+    )
+    assert table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a4", scene="single_node") is None
 
 
 def test_lookup_filters_by_scene(tmp_path: Path):
@@ -121,16 +124,17 @@ def test_lookup_filters_by_scene(tmp_path: Path):
     )
     table = GoodTable(str(table_path))
 
-    assert table.lookup_last_good(
-        name="shared", config_yaml="model.yaml", soc="a2", scene="single_node"
-    ).vllm_ascend_commit == "asc-s"
-    assert table.lookup_last_good(
-        name="shared", config_yaml="model.yaml", soc="a2", scene="multi_node"
-    ).vllm_ascend_commit == "asc-m"
     assert (
-        table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a2", scene="double_node")
-        is None
+        table.lookup_last_good(
+            name="shared", config_yaml="model.yaml", soc="a2", scene="single_node"
+        ).vllm_ascend_commit
+        == "asc-s"
     )
+    assert (
+        table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a2", scene="multi_node").vllm_ascend_commit
+        == "asc-m"
+    )
+    assert table.lookup_last_good(name="shared", config_yaml="model.yaml", soc="a2", scene="double_node") is None
 
 
 def test_lookup_without_dimensions_matches_new_schema_rows(tmp_path: Path):
@@ -186,9 +190,7 @@ def test_lookup_skips_success_rows_without_commit(tmp_path: Path):
         encoding="utf-8",
     )
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(name="m", config_yaml="m.yaml", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.vllm_ascend_commit == "asc-old"
@@ -207,9 +209,7 @@ def test_lookup_accepts_status_spelling_variants(tmp_path: Path):
         encoding="utf-8",
     )
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(name="m", config_yaml="m.yaml", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.vllm_ascend_commit == "asc-p"
@@ -229,9 +229,7 @@ def test_lookup_tolerates_mixed_time_formats(tmp_path: Path):
         encoding="utf-8",
     )
 
-    entry = GoodTable(str(table_path)).lookup_last_good(
-        name="m", config_yaml="m.yaml", soc="a2", scene="single_node"
-    )
+    entry = GoodTable(str(table_path)).lookup_last_good(name="m", config_yaml="m.yaml", soc="a2", scene="single_node")
 
     assert entry is not None
     assert entry.vllm_ascend_commit == "asc-a"

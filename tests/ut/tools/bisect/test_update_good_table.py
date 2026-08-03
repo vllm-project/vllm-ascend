@@ -62,7 +62,9 @@ def test_update_migrates_matching_legacy_row(tmp_path: Path):
 def test_update_creates_table_with_header_and_reports_new(tmp_path: Path):
     table = tmp_path / "good_table.csv"
 
-    is_new = update_table(str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="a2"))
+    is_new = update_table(
+        str(table), _row(name="m", path="cases/model.yaml", soc="a2", scene="single_node", commit="a2")
+    )
 
     assert is_new is True
     with table.open(newline="", encoding="utf-8") as f:
