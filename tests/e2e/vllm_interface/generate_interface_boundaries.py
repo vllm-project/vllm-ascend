@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.26.0"
+GENERATOR_VERSION = "0.28.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -2068,6 +2068,7 @@ class CallableInfo:
     descriptor_kind: str | None = "ordinary"
     descriptor_variants: tuple[str | None, ...] = ()
     decorator_references: tuple[str | None, ...] = ()
+    decorator_forwarded_targets: tuple[tuple[str, ...], ...] | None = None
     property_accessor_nodes: tuple[ast.AST | None, ast.AST | None, ast.AST | None] | None = field(
         default=None,
         compare=False,
@@ -4301,23 +4302,35 @@ class InterfaceBoundaryGenerator:
         references = callable_info.decorator_references
         if len(references) != len(decorators):
             references = tuple(None for _ in decorators)
+        captured_targets = callable_info.decorator_forwarded_targets
+        if captured_targets is None or len(captured_targets) != len(decorators):
+            forwarded_target_variants: tuple[tuple[str, ...] | None, ...] = tuple(None for _ in decorators)
+        else:
+            forwarded_target_variants = captured_targets
 
         repository = self._repository_for_callable(callable_info)
-        for decorator, reference in reversed(tuple(zip(decorators, references))):
+        for decorator, reference, captured in reversed(tuple(zip(decorators, references, forwarded_target_variants))):
             expression = _expression_name(decorator.func if isinstance(decorator, ast.Call) else decorator)
             label = reference or expression or "<dynamic-decorator>"
             if reference == "functools.wraps" and isinstance(decorator, ast.Call) and decorator.args:
                 target_expression = _expression_name(decorator.args[0])
-                target_name = None
-                if repository is not None and target_expression is not None:
-                    target_name = self._canonical_reference(
-                        repository.resolve_reference(
-                            callable_info.module,
-                            target_expression,
+                target_names = captured
+                if target_names is None:
+                    resolved_name = None
+                    if repository is not None and target_expression is not None:
+                        resolved_name = self._canonical_reference(
+                            repository.resolve_reference(
+                                callable_info.module,
+                                target_expression,
+                            )
                         )
-                    )
+                    target_names = (resolved_name,) if resolved_name is not None else ()
+                target_name = target_names[0] if len(target_names) == 1 else None
                 target_callable = self._callable_info(target_name) if target_name is not None else None
-                provenance.append(f"functools.wraps:{target_name or target_expression or '<unknown>'}")
+                target_label = target_name
+                if target_label is None and len(target_names) > 1:
+                    target_label = f"<ambiguous:{'|'.join(target_names)}>"
+                provenance.append(f"functools.wraps:{target_label or target_expression or '<unknown>'}")
                 if target_name is not None:
                     forwarded_targets.append(target_name)
                 if target_callable is None:
@@ -7121,6 +7134,36 @@ class InterfaceBoundaryGenerator:
                 _tag_guard_names(module_info.tree.body),
             )
 
+    def _capture_decorator_forwarded_targets(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AsyncFunctionDef | ast.FunctionDef,
+        references: tuple[str | None, ...],
+        context: PatchScanContext,
+    ) -> tuple[tuple[str, ...], ...] | None:
+        """Freeze statically known ``wraps`` arguments at definition time."""
+
+        decorators = tuple(node.decorator_list)
+        if len(references) != len(decorators):
+            return None
+        captured: list[tuple[str, ...]] = []
+        for decorator, reference in zip(decorators, references):
+            if reference != "functools.wraps" or not isinstance(decorator, ast.Call) or not decorator.args:
+                captured.append(())
+                continue
+            target_expression = _expression_name(decorator.args[0])
+            targets = (
+                self._resolve_patch_references(
+                    module_info,
+                    target_expression,
+                    context,
+                )
+                if target_expression is not None
+                else set()
+            )
+            captured.append(tuple(sorted(self._canonical_reference(target) for target in targets)))
+        return tuple(captured)
+
     def _scan_patch_statements(
         self,
         module_info: ModuleInfo,
@@ -7189,6 +7232,10 @@ class InterfaceBoundaryGenerator:
                 )
 
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                decorator_references = self.downstream._decorator_references_by_node.get(
+                    id(node),
+                    (),
+                )
                 callable_info = CallableInfo(
                     qualified_name=(f"{module_info.name}.{'.'.join((*context.scope, node.name))}"),
                     module=module_info.name,
@@ -7205,9 +7252,12 @@ class InterfaceBoundaryGenerator:
                         ),
                         ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
                     ),
-                    decorator_references=self.downstream._decorator_references_by_node.get(
-                        id(node),
-                        (),
+                    decorator_references=decorator_references,
+                    decorator_forwarded_targets=self._capture_decorator_forwarded_targets(
+                        module_info,
+                        node,
+                        decorator_references,
+                        context,
                     ),
                 )
                 context.bindings.pop(node.name, None)

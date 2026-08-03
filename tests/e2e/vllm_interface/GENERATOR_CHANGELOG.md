@@ -4,6 +4,27 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.28.0 - resolve local `functools.wraps` targets
+
+- Red-test checkpoint: `60ac6e3f8`. A local wrapper such as
+  `original = Target.run; @wraps(original)` was reported as an unknown
+  signature transform because repository-level name lookup interpreted
+  `original` as a module member instead of the active local binding.
+- Change: while scanning a function definition, freeze every statically known
+  `wraps` argument from the current control-flow context. The runtime contract
+  uses that captured upstream callable to expose the exact reported signature
+  and forwarded target.
+- Definition-time rule: later reassignment of the local variable does not
+  change the captured target, matching Python decorator evaluation.
+- Safety boundary: zero or multiple reachable targets remain unknown. The
+  generator records no forwarded target and does not choose one branch.
+- Reason: an exact local assignment is direct AST evidence and should not be a
+  generator review; conditional or dynamic assignments are not exact evidence.
+- Test evidence: all 191 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. Fixed-source regeneration is intentionally
+  deferred until the adjacent wrapper-factory case is handled, so the
+  approximately 11-minute audit is run once for the complete iteration.
+
 ## v0.27.0 - deduplicate descriptor-derived receiver findings
 
 - Red-test checkpoint: `9799e7037`. A classmethod replaced by a zero-argument
