@@ -235,6 +235,13 @@ jobs:
       needs['parse-trigger'].outputs.run == 'true'
     runs-on: linux-aarch64-a5-8
     steps:
+    # 新增：安装gh cli ARM版本
+      - name: Install GitHub CLI
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/githubcli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
       - name: Trigger all multi-node test cases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -273,6 +280,12 @@ jobs:
       needs['parse-trigger'].outputs.run == 'true'
     runs-on: linux-aarch64-a5-8
     steps:
+      - name: Install GitHub CLI
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/githubcli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
       - name: Trigger all single-node test cases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -311,6 +324,12 @@ jobs:
       needs['parse-trigger'].outputs.run == 'true'
     runs-on: linux-aarch64-a5-8
     steps:
+      - name: Install GitHub CLI
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/githubcli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
       - name: Trigger all double-node test cases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -349,6 +368,12 @@ jobs:
       needs['parse-trigger'].outputs.run == 'true'
     runs-on: linux-aarch64-a5-8
     steps:
+      - name: Install GitHub CLI
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/githubcli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
       - name: Trigger all multi-card test cases
         env:
           GH_TOKEN: ${{ github.token }}
