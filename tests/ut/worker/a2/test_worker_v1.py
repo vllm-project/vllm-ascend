@@ -1489,3 +1489,69 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         engine.shutdown.assert_called_once()
+
+    def test_get_draft_model_returns_none_without_drafter(self):
+        worker = self._make_worker(engine=MagicMock())
+        worker.model_runner.drafter = None
+        self.assertIsNone(worker._get_draft_model())
+
+    def test_get_draft_model_prefers_proposer_get_model(self):
+        worker = self._make_worker(engine=MagicMock())
+        draft = MagicMock()
+        draft.load_weights = MagicMock()
+        drafter = MagicMock()
+        drafter.get_model.return_value = draft
+        worker.model_runner.drafter = drafter
+
+        self.assertIs(worker._get_draft_model(), draft)
+        drafter.get_model.assert_called_once()
+
+    def test_get_draft_model_falls_back_to_drafter_model(self):
+        worker = self._make_worker(engine=MagicMock())
+        draft = MagicMock()
+        draft.load_weights = MagicMock()
+        # No get_model on proposer.
+        drafter = MagicMock(spec=["model"])
+        drafter.model = draft
+        worker.model_runner.drafter = drafter
+
+        self.assertIs(worker._get_draft_model(), draft)
+
+    def test_get_draft_model_rejects_model_without_load_weights(self):
+        worker = self._make_worker(engine=MagicMock())
+        draft = object()
+        drafter = MagicMock()
+        drafter.get_model.return_value = draft
+        worker.model_runner.drafter = drafter
+
+        self.assertIsNone(worker._get_draft_model())
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_binds_draft_via_set_draft_model(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        draft = MagicMock()
+        draft.load_weights = MagicMock()
+        draft_cfg = MagicMock()
+        drafter = MagicMock()
+        drafter.get_model.return_value = draft
+        drafter.draft_model_config = draft_cfg
+        worker.model_runner.drafter = drafter
+        worker.vllm_config = MagicMock()
+
+        worker.start_weight_update()
+
+        engine.set_draft_model.assert_called_once_with(draft, draft_cfg)
+        engine.start_weight_update.assert_called_once_with()
+        self.assertTrue(worker._weight_update_active)
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_binds_none_when_no_draft(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.model_runner.drafter = None
+        worker.vllm_config = MagicMock(speculative_config=None)
+
+        worker.start_weight_update()
+
+        engine.set_draft_model.assert_called_once_with(None, None)
