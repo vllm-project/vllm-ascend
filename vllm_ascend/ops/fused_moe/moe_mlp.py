@@ -96,6 +96,68 @@ def _require_single_tensor_for_swiglu_quant(
     return tensor_or_list
 
 
+def _as_tensor_list(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
+    return tensor_or_list if isinstance(tensor_or_list, list) else [tensor_or_list]
+
+
+def _validate_expert_tensor_lists(*, weights: list[torch.Tensor], scales: list[torch.Tensor], op_name: str) -> None:
+    if not weights:
+        raise ValueError(f"{op_name}: expert weight list must not be empty.")
+    if not scales:
+        raise ValueError(f"{op_name}: expert scale list must not be empty.")
+    if len(weights) != len(scales):
+        raise ValueError(
+            f"{op_name}: expected one scale per physical expert, "
+            f"but got weights={len(weights)} and scales={len(scales)}."
+        )
+
+
+def _prepare_dequant_swiglu_weight_scale(
+    w1: list[torch.Tensor] | torch.Tensor, w1_scale: list[torch.Tensor] | torch.Tensor
+) -> torch.Tensor:
+    if not isinstance(w1, list) and not isinstance(w1_scale, list):
+        weight_scale = w1_scale
+    else:
+        weights = _as_tensor_list(w1)
+        scales = _as_tensor_list(w1_scale)
+        _validate_expert_tensor_lists(weights=weights, scales=scales, op_name="npu_dequant_swiglu_quant")
+
+        if len(scales) == 1:
+            weight_scale = scales[0]
+        else:
+            scale_shape = scales[0].shape
+            for index, scale in enumerate(scales):
+                if scale.dim() not in (1, 2):
+                    raise ValueError(
+                        "npu_dequant_swiglu_quant: physical expert scales must be 1D or 2D, "
+                        f"but scale[{index}] has shape {tuple(scale.shape)}."
+                    )
+                if scale.shape != scale_shape:
+                    raise ValueError(
+                        "npu_dequant_swiglu_quant: all physical expert scales must have the same shape, "
+                        f"but scale[0] has shape {tuple(scale_shape)} "
+                        f"and scale[{index}] has shape {tuple(scale.shape)}."
+                    )
+
+            weight_scale = torch.stack([scale.reshape(-1) for scale in scales], dim=0)
+    if weight_scale.dtype != torch.float32:
+        weight_scale = weight_scale.to(torch.float32)
+    if weight_scale.dim() == 1:
+        weight_scale = weight_scale.reshape(1, -1)
+    return weight_scale
+
+
+def _prepare_grouped_matmul_scales(
+    weight: list[torch.Tensor] | torch.Tensor,
+    weight_scale: list[torch.Tensor] | torch.Tensor,
+    output_dtype: torch.dtype,
+) -> list[torch.Tensor]:
+    weights = _as_tensor_list(weight)
+    scales = _as_tensor_list(weight_scale)
+    _validate_expert_tensor_lists(weights=weights, scales=scales, op_name="npu_grouped_matmul")
+    return [scale.to(output_dtype) if scale.dtype != output_dtype else scale for scale in scales]
+
+
 def quant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: list[torch.Tensor] | torch.Tensor,
@@ -205,7 +267,7 @@ def quant_apply_mlp(
             gmm1_kwargs = {
                 "x": [hidden_states],
                 "weight": w1 if isinstance(w1, list) else [w1],
-                "scale": [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale],
+                "scale": _prepare_grouped_matmul_scales(w1, w1_scale, _output_dtype),
                 "bias": None,
                 "per_token_scale": [pertoken_scale],
                 "split_item": 2,
@@ -226,8 +288,6 @@ def quant_apply_mlp(
                 hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
             )
         else:
-            if w1_scale[0].dtype != torch.float32:
-                w1_scale[0] = w1_scale[0].to(torch.float32)
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
@@ -243,7 +303,7 @@ def quant_apply_mlp(
             # act_fn: swiglu
             dequant_swiglu_kwargs = {
                 "x": hidden_states,
-                "weight_scale": w1_scale[0],
+                "weight_scale": _prepare_dequant_swiglu_weight_scale(w1, w1_scale),
                 "activation_scale": pertoken_scale,
                 "bias": None,
                 "quant_scale": None,
@@ -390,7 +450,7 @@ def quant_apply_mlp(
             gmm1_kwargs = {
                 "x": [hidden_states],
                 "weight": w1 if isinstance(w1, list) else [w1],
-                "scale": [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale],
+                "scale": _prepare_grouped_matmul_scales(w1, w1_scale, _output_dtype),
                 "bias": bias1,
                 "per_token_scale": [pertoken_scale],
                 "split_item": 2,
