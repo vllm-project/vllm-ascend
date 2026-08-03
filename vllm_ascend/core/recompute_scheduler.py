@@ -305,15 +305,12 @@ class RecomputeScheduler(Scheduler):
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
                             if preempted_encoder_inputs:
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
+                                    preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
