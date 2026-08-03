@@ -4,6 +4,22 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.33.0 - classify exact descriptor mismatches as risks
+
+- Red-test checkpoint: `ec891527d`. A proven property-to-method change was
+  emitted as a review even though both descriptor kinds were exact and the
+  access protocol had definitely changed.
+- Change: `descriptor_kind_mismatch` is a risk. Conditional and unknown
+  descriptor kinds remain reviews because their installed protocol is not
+  statically proven.
+- Safety boundary: this changes only finding status. Relation endpoints,
+  descriptor evidence, signature contracts, and finding count are unchanged.
+- Reason: property, classmethod, staticmethod, and ordinary methods bind
+  differently. Once both kinds are known and unequal, this is a concrete
+  downstream compatibility risk rather than an analysis uncertainty.
+- Test evidence: all 199 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+
 ## v0.32.0 - compare wrapper-hidden signature views
 
 - Red-test checkpoint: `478ca859f`. Exact forwarding wrappers on both sides

@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.32.0"
+GENERATOR_VERSION = "0.33.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -4740,6 +4740,7 @@ class InterfaceBoundaryGenerator:
             reason = "a dynamic decorator or binding prevents an exact descriptor kind from being proven statically"
         else:
             return
+        status = "risk" if reason_code == "descriptor_kind_mismatch" else "review"
         self.findings.append(
             CandidateFinding(
                 relation=relation.relation,
@@ -4749,7 +4750,7 @@ class InterfaceBoundaryGenerator:
                 target_expression=target_expression,
                 evidence_line=evidence_line,
                 reason=reason,
-                status="review",
+                status=status,
                 reason_code=reason_code,
                 generator_issue=False,
                 evidence_scope=evidence_scope,
