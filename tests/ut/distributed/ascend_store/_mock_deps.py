@@ -391,6 +391,7 @@ for _pkg, _path in _vllm_ascend_package_paths.items():
         sys.modules[_pkg] = _make_pkg(_pkg, _path)
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
+_distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
 _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
     return_value=0
 )
