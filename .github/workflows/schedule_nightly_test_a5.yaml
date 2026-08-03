@@ -381,10 +381,10 @@ jobs:
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
-    needs: [multi-node-tests, double-node-tests]
+    needs: [multi-node-runner, double-node-runner]
     if: >-
       always() &&
-      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+      (needs.multi-node-runner.result != 'skipped' || needs.double-node-runner.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
         run: |
@@ -393,7 +393,7 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a5.zip
-    needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
+    needs: [parse-trigger, single-node-runner, multi-node-runner, double-node-runner, multi-card-runner]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
