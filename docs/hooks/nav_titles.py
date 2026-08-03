@@ -106,6 +106,10 @@ TITLES = {
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3.1", "zh": "DeepSeek-V3.1"},
     "tutorials/models/DeepSeek-V3.2.md": {"en": "DeepSeek-V3.2", "zh": "DeepSeek-V3.2"},
     "tutorials/models/DeepSeek-V4-Flash.md": {"en": "DeepSeek-V4-Flash", "zh": "DeepSeek-V4-Flash"},
+    "tutorials/models/DeepSeek-V4-Flash-DSpark.md": {
+        "en": "DeepSeek-V4-Flash DSpark",
+        "zh": "DeepSeek-V4-Flash DSpark",
+    },
     "tutorials/models/DeepSeek-V4-Pro.md": {"en": "DeepSeek-V4-Pro", "zh": "DeepSeek-V4-Pro"},
     "tutorials/models/DeepSeekOCR2.md": {"en": "DeepSeekOCR2", "zh": "DeepSeekOCR2"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x", "zh": "GLM-4.x"},

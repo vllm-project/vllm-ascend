@@ -25,6 +25,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
 
+For DSpark deployment, see [DeepSeek-V4-Flash DSpark](./DeepSeek-V4-Flash-DSpark.md).
+
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
@@ -86,9 +88,6 @@ Select an image based on your machine type and start the docker image on your no
     ```bash
     # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    
-    # deepseek-v4-flash-dspark uses the following image
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     
     docker run --rm \
         --name vllm-ascend \
@@ -166,9 +165,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
-        --safetensors-load-strategy 'prefetch' \
         --no-enable-prefix-caching \
-        --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
         --port 8900 \
         --block-size 128 \
@@ -184,41 +182,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         "enable_dsa_cp": true,
         "multistream_overlap_shared_expert":true}'
     ```
-
-=== "A2 series with dspark"
-
-    Run the following script to execute online inference.
-
-    ```shell
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE=AIV
-
-    vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
-        --max-model-len 800000 \
-        --max-num-batched-tokens 8192 \
-        --served-model-name dsv4-dspark \
-        --gpu-memory-utilization 0.9 \
-        --max-num-seqs 32 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 8 \
-        --enable-expert-parallel \
-        --tokenizer-mode deepseek_v4 \
-        --tool-call-parser deepseek_v4 \
-        --enable-auto-tool-choice \
-        --reasoning-parser deepseek_v4 \
-        --no-disable-hybrid-kv-cache-manager \
-        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-        --quantization ascend \
-        --port 8000 \
-        --block-size 128 \
-        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-    ```
-    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
 
 === "A3 series"
 
@@ -248,8 +211,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
-        --safetensors-load-strategy 'prefetch' \
-        --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
         --port 8900 \
         --block-size 128 \
@@ -269,7 +231,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
+- `--speculative-config` configures MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
@@ -472,9 +434,8 @@ Before you start, please:
             --max-num-batched-tokens 8192 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --no-enable-prefix-caching \
-            --safetensors-load-strategy 'prefetch' \
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
             --trust-remote-code \
             --block-size 128 \
@@ -545,10 +506,9 @@ Before you start, please:
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
-            --safetensors-load-strategy 'prefetch' \
             --trust-remote-code \
             --tokenizer-mode deepseek_v4 \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
@@ -731,8 +691,7 @@ Before you start, please:
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --safetensors-load-strategy 'prefetch' \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -808,8 +767,7 @@ Before you start, please:
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --safetensors-load-strategy 'prefetch' \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -871,6 +829,7 @@ Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
+- `speculative-config`: For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
 
