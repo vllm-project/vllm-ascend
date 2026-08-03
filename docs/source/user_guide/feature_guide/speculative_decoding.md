@@ -515,6 +515,7 @@ SD methods need to verify K tokens for each sequence during decoding. As BS incr
 
 - Variable concurrency workload using same deployment. K would decrease as concurrency increases.
 - During RL rollout where we start off with high BS but then end up with small BS due to very few long tail request which end up generating a lot of tokens stalling the progress of the current rollout. Here K would go up during the end of rollout.
+- Currently supports MTP, eagle3, dflash, ngram, etc, Suffix itself is' per request dynamic ', and the outer dynamic K is redundant/conflicting for it.This is an upstream constraint, and vLLM itself will also collapse, not a unique problem of Ascend. dspark、MTP+DCP+DSD Currently not supported.
 
 ### `--speculative-config` schema
 
