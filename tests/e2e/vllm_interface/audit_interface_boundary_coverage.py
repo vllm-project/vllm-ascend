@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-AUDIT_VERSION = "0.5.0"
+AUDIT_VERSION = "0.6.0"
 RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 STATUSES = frozenset({"verified", "risk", "expected", "excluded", "review"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -196,6 +196,16 @@ class MroResult:
     reason: str | None = None
 
 
+@dataclass
+class FunctionRecord:
+    module: str
+    is_package: bool
+    file: str
+    scope: tuple[str, ...]
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    definition_state: FlowState
+
+
 @dataclass(frozen=True)
 class CandidateSite:
     relation: str
@@ -308,6 +318,8 @@ class IndependentCandidateScanner:
         self._callables: set[str] = set()
         self._aliases: dict[str, set[str]] = {}
         self._star_imports: dict[str, set[str]] = {}
+        self._functions: dict[str, FunctionRecord] = {}
+        self._active_helper_calls: set[str] = set()
         self._parse_errors: list[str] = []
         self._mro_cache: dict[str, MroResult] = {}
 
@@ -458,6 +470,14 @@ class IndependentCandidateScanner:
                 qualified = f"{module}.{'.'.join((*scope, node.name))}"
                 current.bindings[node.name] = {qualified}
                 self._callables.add(qualified)
+                self._functions[qualified] = FunctionRecord(
+                    module=module,
+                    is_package=is_package,
+                    file=relative_file,
+                    scope=(*scope, node.name),
+                    node=node,
+                    definition_state=current.clone(),
+                )
                 if collect_candidates:
                     self._scan_statements(
                         module=module,
@@ -630,6 +650,12 @@ class IndependentCandidateScanner:
                             {*raw_targets, *resolved_targets},
                             "setattr",
                         )
+                if collect_candidates:
+                    self._scan_helper_invocation(
+                        caller_module=module,
+                        call=call,
+                        caller_state=current,
+                    )
 
         if module_scope:
             for name, targets in current.bindings.items():
@@ -666,6 +692,11 @@ class IndependentCandidateScanner:
     ) -> None:
         raw_value = _expression_name(value)
         references = self._resolve_expression(module, raw_value, state) if raw_value else set()
+        if isinstance(value, ast.Call) and value.args:
+            function_name = _expression_name(value.func)
+            function_targets = self._resolve_expression(module, function_name, state)
+            if "sys.modules.get" in function_targets:
+                references.update(_string_values(value.args[0], state))
         strings = _string_values(value, state)
         boolean = _main_condition_value(value, state) if value is not None else None
         for target in targets:
@@ -683,6 +714,75 @@ class IndependentCandidateScanner:
                 state.booleans[target.id] = {boolean}
             else:
                 state.booleans.pop(target.id, None)
+
+    def _scan_helper_invocation(
+        self,
+        *,
+        caller_module: str,
+        call: ast.Call,
+        caller_state: FlowState,
+    ) -> None:
+        """Rescan one local helper with module arguments bound at its call site."""
+
+        function_name = _expression_name(call.func)
+        targets = self._resolve_expression(caller_module, function_name, caller_state)
+        records = [self._functions[target] for target in sorted(targets) if target in self._functions]
+        for record in records:
+            qualified_name = f"{record.module}.{'.'.join(record.scope)}"
+            if qualified_name in self._active_helper_calls:
+                continue
+            positional_parameters = [
+                *record.node.args.posonlyargs,
+                *record.node.args.args,
+            ]
+            if len(call.args) > len(positional_parameters):
+                continue
+            argument_nodes: dict[str, ast.AST] = {
+                parameter.arg: argument
+                for parameter, argument in zip(positional_parameters, call.args)
+            }
+            invalid_keywords = False
+            parameter_names = {parameter.arg for parameter in positional_parameters}
+            parameter_names.update(parameter.arg for parameter in record.node.args.kwonlyargs)
+            for keyword in call.keywords:
+                if keyword.arg is None or keyword.arg not in parameter_names or keyword.arg in argument_nodes:
+                    invalid_keywords = True
+                    break
+                argument_nodes[keyword.arg] = keyword.value
+            if invalid_keywords:
+                continue
+
+            helper_state = record.definition_state.clone()
+            for parameter, argument in argument_nodes.items():
+                expression = _expression_name(argument)
+                references = self._resolve_expression(
+                    caller_module,
+                    expression,
+                    caller_state,
+                )
+                if references:
+                    helper_state.bindings[parameter] = references
+                strings = _string_values(argument, caller_state)
+                if strings:
+                    helper_state.strings[parameter] = strings
+                boolean = _main_condition_value(argument, caller_state)
+                if boolean is not None:
+                    helper_state.booleans[parameter] = {boolean}
+
+            self._active_helper_calls.add(qualified_name)
+            try:
+                self._scan_statements(
+                    module=record.module,
+                    is_package=record.is_package,
+                    relative_file=record.file,
+                    statements=record.node.body,
+                    state=helper_state,
+                    scope=record.scope,
+                    collect_candidates=True,
+                    module_scope=False,
+                )
+            finally:
+                self._active_helper_calls.remove(qualified_name)
 
     def _resolve_expression(self, module: str, expression: str | None, state: FlowState) -> set[str]:
         if not expression:

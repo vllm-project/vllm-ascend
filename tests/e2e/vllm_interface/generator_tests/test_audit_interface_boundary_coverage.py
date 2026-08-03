@@ -989,6 +989,6 @@ if cached_module is not None:
     patches = [candidate for candidate in candidates if candidate.relation == "monkey_patch"]
 
     assert len(patches) == 1
-    assert patches[0].line == 10
+    assert patches[0].line == 11
     assert patches[0].scope is None
     assert "vllm.cache.hook" in patches[0].targets
