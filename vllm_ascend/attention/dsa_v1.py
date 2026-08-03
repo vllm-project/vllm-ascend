@@ -1,7 +1,7 @@
 import math
 from contextlib import nullcontext  # For limit_core_num conditional context management
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Callable, ClassVar, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -71,28 +71,28 @@ def dsv4_dsa_compressor_stream() -> torch.npu.Stream:
     return _DSV4_DSA_COMPRESSOR_STREAM
 
 
-# Conditionally record event (enabled flag controls whether to enable)
-def record_event(enabled: bool, event: torch.npu.Event | None) -> None:
-    if enabled and event is not None:
+# Record event when the CSA stream path creates one.
+def record_event(event: torch.npu.Event | None) -> None:
+    if event is not None:
         event.record()
 
 
-# Conditionally wait for event (enabled flag controls whether to enable)
-def wait_event(enabled: bool, event: torch.npu.Event | None) -> None:
-    if enabled and event is not None:
+# Wait for event when the CSA stream path creates one.
+def wait_event(event: torch.npu.Event | None) -> None:
+    if event is not None:
         torch.npu.current_stream().wait_event(event)
 
 
-# Conditionally record tensor to stream (for memory safety in multi-stream scenarios)
-def record_stream(enabled: bool, stream: torch.npu.Stream | None, *tensors: torch.Tensor | None) -> None:
-    if not enabled or stream is None:
+# Record tensor ownership for memory safety in multi-stream scenarios.
+def record_stream(stream: torch.npu.Stream | None, *tensors: torch.Tensor | None) -> None:
+    if stream is None:
         return
     for tensor in tensors:
         if tensor is not None:
             tensor.record_stream(stream)
 
 
-# Conditionally limit core count (core resource allocation on A3 chip)
+# Conditionally limit core count for CSA multi-stream segments.
 def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
     if not enabled:
         return nullcontext()
@@ -1429,6 +1429,13 @@ class AscendDSAImpl(DSAAttentionImpl):
     understand this class
     """
 
+    _CSA_TOTAL_AIC_NUM_BY_DEVICE: ClassVar[dict[AscendDeviceType, int]] = {
+        AscendDeviceType.A3: 24,
+        AscendDeviceType.A5: 32,
+    }
+    _CSA_COMPRESSOR_AIC_NUM: ClassVar[int] = 16
+    _CSA_AIV_TO_AIC_RATIO: ClassVar[int] = 2
+
     def __init__(
         self,
         n_heads: int,
@@ -1487,12 +1494,18 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.vllm_config = get_current_vllm_config()
         # CSA event dict for managing synchronization events between streams
         self._csa_events: dict[str, torch.npu.Event] = {}
-        # A3 chip hardware configuration parameters for core control
-        self._a3_total_aic_num = 24  # Total AIC cores on A3 chip
-        self._a3_aiv_to_aic_ratio = 2  # AIV to AIC ratio, AIV cores = AIC cores * 2
-        self._csa_compressor_aic_num = 16  # Cores allocated to Compressor
-        self._csa_q_aic_num = self._a3_total_aic_num - self._csa_compressor_aic_num  # Q computation allocated 8 cores
-        self._csa_kv_aic_num = self._a3_total_aic_num // 2  # KV computation allocated 12 cores
+        # CSA core-control profile. A3 and A5 share the same stream plan; A5
+        # differs only in total AIC count.
+        self._csa_total_aic_num = self._CSA_TOTAL_AIC_NUM_BY_DEVICE.get(get_ascend_device_type())
+        self._csa_aiv_to_aic_ratio = self._CSA_AIV_TO_AIC_RATIO
+        if self._csa_total_aic_num is None:
+            self._csa_compressor_aic_num = 0
+            self._csa_q_aic_num = 0
+            self._csa_kv_aic_num = 0
+        else:
+            self._csa_compressor_aic_num = self._CSA_COMPRESSOR_AIC_NUM
+            self._csa_q_aic_num = self._csa_total_aic_num - self._csa_compressor_aic_num
+            self._csa_kv_aic_num = self._csa_total_aic_num // 2
 
         # indexer param
         if self.indexer is not None:
@@ -1538,20 +1551,19 @@ class AscendDSAImpl(DSAAttentionImpl):
             False,
         )
 
-    # Determine whether to enable CSA multi-stream optimization
-    # Conditions: multistream enabled + compress ratio 4 + decode stage + not skip_topk + not A5 chip
+    # A3 and A5 share the same CSA stream ordering and core profile.
     def _enable_csa_multistream(self, is_prefill: bool) -> bool:
         return (
             self.multistream_dsv4_dsa_overlap
             and self.compress_ratio == 4
             and not is_prefill
             and not self.skip_topk
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
+            and self._csa_total_aic_num is not None
         )
 
-    # Determine whether to enable core limit (A3 chip only)
+    # Determine whether to enable CSA core limit.
     def _enable_csa_limit_core(self, is_prefill: bool) -> bool:
-        return self._enable_csa_multistream(is_prefill) and get_ascend_device_type() == AscendDeviceType.A3
+        return self._enable_csa_multistream(is_prefill)
 
     # Get or create named event (for inter-stream synchronization)
     def _csa_event(self, name: str) -> torch.npu.Event:
@@ -1950,7 +1962,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return q, qr, qr_pertoken_scale
 
-    # Complete Q RMS Norm and RoPE operations (supports core limit)
+    # Complete Q RMS Norm and RoPE operations.
     def _finish_dsa_q(
         self,
         q: torch.Tensor,
@@ -1960,8 +1972,8 @@ class AscendDSAImpl(DSAAttentionImpl):
     ) -> torch.Tensor:
         with limit_core_num(
             enable_limit_core,
-            self._csa_q_aic_num,  # Use 8 AIC cores
-            self._csa_q_aic_num * self._a3_aiv_to_aic_ratio,
+            self._csa_q_aic_num,
+            self._csa_q_aic_num * self._csa_aiv_to_aic_ratio,
         ):
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -1973,8 +1985,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
         return q
 
-    # CSA decode MLA prolog stage, implements Q/KV dual-stream parallel computation
-    # Modified: added wait_kv_done parameter to support delayed wait for KV completion
+    # CSA decode MLA prolog stage, implements Q/KV dual-stream parallel computation.
     def _mla_prolog_csa_decode(
         self,
         hidden_states: torch.Tensor,
@@ -1982,9 +1993,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin: torch.Tensor,
         swa_kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
-        launch_after_q_b=None,  # Callback hook: triggered after Q_b matmul completion
+        launch_after_q_b: Callable[[torch.Tensor, torch.Tensor | None, torch.npu.Stream, torch.npu.Stream], None],
         enable_limit_core: bool = False,
-        wait_kv_done: bool = True,  # Control whether to immediately wait for KV completion
     ):
         """CSA decode MLA prolog with a Q_b completion launch point.
 
@@ -1992,32 +2002,27 @@ class AscendDSAImpl(DSAAttentionImpl):
         Q RMS/RoPE, matching the CSA stream start point used by recipes.
         """
         main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()  # Auxiliary stream for KV computation
-        kv_done_event = self._csa_event("kv_done")  # KV completion event
+        aux_stream = dsv4_dsa_overlap_stream()
+        kv_done_event = self._csa_event("kv_done")
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
-        # Main stream: Q quantization
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
         e_q_quant_done = main_stream.record_event()
 
-        # Auxiliary stream: parallel KV quantization
-        record_stream(True, aux_stream, hidden_states)
+        record_stream(aux_stream, hidden_states)
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_q_quant_done)
             kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
 
-        # Main stream: Q_a matmul
         wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
         main_stream.wait_stream(aux_stream)
 
-        # Auxiliary stream: parallel KV matmul
         e_part2_start = main_stream.record_event()
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_part2_start)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
-        # Main stream: Q normalize
         if is_w8a8:
             qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 wq_a_result, self.q_norm.weight, epsilon=self.eps
@@ -2030,14 +2035,13 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         main_stream.wait_stream(aux_stream)
 
-        # Auxiliary stream: parallel KV norm + RoPE + scatter to cache
         e_part3_start = main_stream.record_event()
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_part3_start)
             with limit_core_num(
                 enable_limit_core,
-                self._csa_kv_aic_num,  # Use 12 AIC cores
-                self._csa_kv_aic_num * self._a3_aiv_to_aic_ratio,
+                self._csa_kv_aic_num,
+                self._csa_kv_aic_num * self._csa_aiv_to_aic_ratio,
             ):
                 kv = self.kv_norm(kv)
                 assert self.rope_head_dim is not None
@@ -2050,9 +2054,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                     partial_slice=[self.nope_head_dim, self.head_dim],
                 )
                 DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
-            record_event(True, kv_done_event)  # Record KV completion event
+            record_event(kv_done_event)
 
-        # Main stream: Q_b matmul
         if is_w8a8:
             q = torch_npu.npu_quant_matmul(
                 q_b_quant,
@@ -2065,17 +2068,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
 
-        # Callback hook: triggered after Q_b completion (to launch Compressor and indexer)
-        if launch_after_q_b is not None:
-            launch_after_q_b(qr, qr_pertoken_scale, main_stream, aux_stream)
-
-        # Complete Q RMS and RoPE
+        launch_after_q_b(qr, qr_pertoken_scale, main_stream, aux_stream)
         q = self._finish_dsa_q(q, cos, sin, enable_limit_core)
-        # Modified: conditional wait for KV completion, support delayed wait to improve parallelism
-        if wait_kv_done:
-            wait_event(True, kv_done_event)
 
-        return q, qr, qr_pertoken_scale, kv_done_event  # Modified: return kv_done_event
+        return q, qr, qr_pertoken_scale, kv_done_event
 
     # Launch C4A Compressor on independent stream (Compressor with compress ratio=4)
     def _launch_csa_c4a_compressor(
@@ -2091,21 +2087,20 @@ class AscendDSAImpl(DSAAttentionImpl):
         compress_slot_mapping: torch.Tensor,
         enable_limit_core: bool,
     ) -> torch.npu.Event:
-        compressor_stream = dsv4_dsa_compressor_stream()  # Get dedicated Compressor stream
+        compressor_stream = dsv4_dsa_compressor_stream()
         cmpr_start_event = self._csa_event("c4a_cmpr_start")
         cmpr_done_event = self._csa_event("c4a_cmpr_done")
         coff = 2 if self.compressor_overlap else 1
 
-        record_stream(True, compressor_stream, hidden_states)
-        record_event(True, cmpr_start_event)
+        record_stream(compressor_stream, hidden_states)
+        record_event(cmpr_start_event)
         with npu_stream_switch(compressor_stream, enabled=True):
-            wait_event(True, cmpr_start_event)
+            wait_event(cmpr_start_event)
             with limit_core_num(
                 enable_limit_core,
-                self._csa_compressor_aic_num,  # Use 16 AIC cores
-                self._csa_compressor_aic_num * self._a3_aiv_to_aic_ratio,
+                self._csa_compressor_aic_num,
+                self._csa_compressor_aic_num * self._csa_aiv_to_aic_ratio,
             ):
-                # Execute Compressor computation
                 compressed_kv = torch.ops._C_ascend.compressor(
                     hidden_states,
                     self.compressor_wkv.weight,
@@ -2129,7 +2124,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
                 if compressed_kv.shape[0] > 0:
                     DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
-            record_event(True, cmpr_done_event)  # Record Compressor completion event
+            record_event(cmpr_done_event)
         return cmpr_done_event
 
     # Launch Long-term Indexer query vector computation on auxiliary stream
@@ -2148,19 +2143,18 @@ class AscendDSAImpl(DSAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.npu.Event]:
         li_q_start_event = self._csa_event("li_q_start")
         li_q_done_event = self._csa_event("li_q_done")
-        record_stream(True, aux_stream, qr, qr_pertoken_scale)
-        record_event(True, li_q_start_event)
+        record_stream(aux_stream, qr, qr_pertoken_scale)
+        record_event(li_q_start_event)
 
         q_quant = None
         q_scale = None
         with npu_stream_switch(aux_stream, enabled=True):
-            wait_event(True, li_q_start_event)
+            wait_event(li_q_start_event)
             with limit_core_num(
                 enable_limit_core,
-                self._csa_q_aic_num,  # Use 8 AIC cores
-                self._csa_q_aic_num * self._a3_aiv_to_aic_ratio,
+                self._csa_q_aic_num,
+                self._csa_q_aic_num * self._csa_aiv_to_aic_ratio,
             ):
-                # Long-term Indexer query projection
                 if _is_w8a8_dynamic(self.inderxer_wq_b) and qr_pertoken_scale is not None:
                     q = torch_npu.npu_quant_matmul(
                         qr,
@@ -2173,7 +2167,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 else:
                     q = self.inderxer_wq_b(qr)
                 q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
-                # Apply RoPE
                 torch.ops._C_ascend.inplace_partial_rotary_mul(
                     q.unsqueeze(1),
                     cos,
@@ -2183,15 +2176,15 @@ class AscendDSAImpl(DSAAttentionImpl):
                 )
                 q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
 
-            wait_event(True, cmpr_done_event)  # Wait for Compressor completion
+            wait_event(cmpr_done_event)
             with limit_core_num(
                 enable_limit_core,
                 self._csa_q_aic_num,
-                self._csa_q_aic_num * self._a3_aiv_to_aic_ratio,
+                self._csa_q_aic_num * self._csa_aiv_to_aic_ratio,
             ):
                 q_quant, q_scale = DeviceOperator.indexer_quantize_query(q)
-            record_stream(True, main_stream, q_quant, q_scale)
-            record_event(True, li_q_done_event)  # Record LI query completion event
+            record_stream(main_stream, q_quant, q_scale)
+            record_event(li_q_done_event)
 
         assert q_quant is not None
         assert q_scale is not None
@@ -2219,8 +2212,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         with limit_core_num(
             enable_limit_core,
-            self._csa_compressor_aic_num,  # Use 16 AIC cores
-            self._csa_compressor_aic_num * self._a3_aiv_to_aic_ratio,
+            self._csa_compressor_aic_num,
+            self._csa_compressor_aic_num * self._csa_aiv_to_aic_ratio,
         ):
             # Calculate indexer weights
             weights = self.weights_proj(hidden_states) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
@@ -2570,8 +2563,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 )[0]
         return attn_output
 
-    # Top-level orchestration function for CSA multi-stream decode
-    # Modified: optimize main stream start, delay KV wait, launch li_main_decode early
+    # Top-level orchestration function for CSA multi-stream decode.
     def _forward_decode_csa_multistream(
         self,
         hidden_states: torch.Tensor,
@@ -2599,22 +2591,19 @@ class AscendDSAImpl(DSAAttentionImpl):
             compressor_decode_metadata,
         )
 
-        # Initialize event and result variables
         cmpr_done_event: torch.npu.Event | None = None
         li_q_quant: torch.Tensor | None = None
         li_q_scale: torch.Tensor | None = None
         li_q_done_event: torch.npu.Event | None = None
-        li_main_result = None  # Store li_main_decode result
+        li_main_result = None
 
-        # Callback function: triggered after Q_b matmul completion
         def launch_after_q_b(
             qr: torch.Tensor,
             qr_pertoken_scale: torch.Tensor | None,
             main_stream: torch.npu.Stream,
             aux_stream: torch.npu.Stream,
         ) -> None:
-            nonlocal cmpr_done_event, li_q_quant, li_q_scale, li_q_done_event, li_main_result  # Added li_main_result
-            # Launch Compressor (on independent stream)
+            nonlocal cmpr_done_event, li_q_quant, li_q_scale, li_q_done_event, li_main_result
             cmpr_done_event = self._launch_csa_c4a_compressor(
                 hidden_states,
                 compress_kv_cache,
@@ -2627,7 +2616,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 compress_slot_mapping,
                 enable_limit_core,
             )
-            # Launch Long-term Indexer query (on auxiliary stream)
             li_q_quant, li_q_scale, li_q_done_event = self._launch_csa_li_query(
                 qr,
                 qr_pertoken_scale,
@@ -2640,7 +2628,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 enable_limit_core,
                 hidden_states.dtype,
             )
-            # Launch li_main_decode early, non-blocking main stream
             li_main_result = self._run_csa_li_main_decode(
                 hidden_states,
                 indexer_state_cache,
@@ -2653,8 +2640,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 enable_limit_core,
             )
 
-        # Execute MLA prolog (Q/KV dual-stream parallel)
-        # Modified: wait_kv_done=False, delay waiting for KV completion
         q, _, _, kv_done_event = self._mla_prolog_csa_decode(
             hidden_states,
             cos,
@@ -2663,20 +2648,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             swa_decode_metadata.slot_mapping,
             launch_after_q_b=launch_after_q_b,
             enable_limit_core=enable_limit_core,
-            wait_kv_done=False,  # Delayed wait to improve parallelism
         )
 
-        # Verify callback tasks completed
         assert cmpr_done_event is not None
         assert li_q_quant is not None
         assert li_q_scale is not None
         assert li_q_done_event is not None
-        assert li_main_result is not None  # Verify li_main_result
-        weights, indexer_k_cache, indexer_scale_cache, indexer_kv_scale_metadata = li_main_result  # Use result directly
+        assert li_main_result is not None
+        weights, indexer_k_cache, indexer_scale_cache, indexer_kv_scale_metadata = li_main_result
 
-        # Wait for LI query completion
-        wait_event(True, li_q_done_event)
-        # Execute indexer QKV attention
+        wait_event(li_q_done_event)
         compress_topk_idxs = self._indexer_qli(
             li_q_quant,
             weights,
@@ -2690,10 +2671,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.use_index_cache:
             self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
-        # Wait for Compressor completion
-        wait_event(True, cmpr_done_event)
-        # Wait for KV cache write completion (delayed here to improve parallelism)
-        wait_event(True, kv_done_event)
+        wait_event(cmpr_done_event)
+        wait_event(kv_done_event)
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
@@ -2735,7 +2714,6 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if self.compress_ratio == 4:
             # sorted keys: [attn, compressor.state_cache, indexer.compressor.state_cache, indexer.k_cache, swa_cache]
-            # Modified: added indexer_kv_state_metadata unpacking (previously ignored)
             (
                 compressor_attn_metadata,
                 compressor_kv_state_metadata,
