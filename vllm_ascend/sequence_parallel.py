@@ -39,6 +39,15 @@ class SequenceParallelActivationState(Enum):
     SEQUENCE_SHARDED = "sequence_sharded"
 
 
+class SequenceParallelCollective(Enum):
+    """Communication selected for an explicit activation transition."""
+
+    ALL_REDUCE = "all_reduce"
+    REDUCE_SCATTER = "reduce_scatter"
+    ALL_GATHER = "all_gather"
+    LOCAL_SHARD = "local_shard"
+
+
 _VALID_ACTIVATION_TRANSITIONS = {
     SequenceParallelActivationState.FULL: {
         SequenceParallelActivationState.TP_PARTIAL,
@@ -119,6 +128,67 @@ class SequenceParallelRuntimeState:
         if activation not in _VALID_ACTIVATION_TRANSITIONS[self.activation]:
             raise ValueError(f"invalid sequence-parallel transition: {self.activation.value} -> {activation.value}")
         return replace(self, activation=activation)
+
+
+@dataclass(frozen=True)
+class SequenceParallelTransitionPlan:
+    """A validated communication step between activation ownership states."""
+
+    collective: SequenceParallelCollective
+    input_state: SequenceParallelRuntimeState
+    output_state: SequenceParallelRuntimeState
+    pad_size: int = 0
+    unpad_size: int = 0
+
+
+def plan_partial_reduction(state: SequenceParallelRuntimeState) -> SequenceParallelTransitionPlan:
+    """Plan AllReduce for plain TP or ReduceScatter for active SP."""
+    if state.activation is not SequenceParallelActivationState.TP_PARTIAL:
+        raise ValueError("partial reduction requires a tp_partial activation")
+
+    if state.active:
+        output_state = state.transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)
+        return SequenceParallelTransitionPlan(
+            collective=SequenceParallelCollective.REDUCE_SCATTER,
+            input_state=state,
+            output_state=output_state,
+            pad_size=state.pad_size,
+        )
+
+    output_state = state.transition_to(SequenceParallelActivationState.FULL)
+    return SequenceParallelTransitionPlan(
+        collective=SequenceParallelCollective.ALL_REDUCE,
+        input_state=state,
+        output_state=output_state,
+    )
+
+
+def plan_sequence_gather(state: SequenceParallelRuntimeState) -> SequenceParallelTransitionPlan:
+    """Plan AllGather and removal of padding from a sequence shard."""
+    if state.activation is not SequenceParallelActivationState.SEQUENCE_SHARDED:
+        raise ValueError("sequence gather requires a sequence_sharded activation")
+
+    output_state = state.transition_to(SequenceParallelActivationState.FULL)
+    return SequenceParallelTransitionPlan(
+        collective=SequenceParallelCollective.ALL_GATHER,
+        input_state=state,
+        output_state=output_state,
+        unpad_size=state.pad_size,
+    )
+
+
+def plan_local_sequence_shard(state: SequenceParallelRuntimeState) -> SequenceParallelTransitionPlan:
+    """Plan local padding and chunking of a replicated activation."""
+    if state.activation is not SequenceParallelActivationState.FULL:
+        raise ValueError("local sequence shard requires a full activation")
+
+    output_state = state.transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)
+    return SequenceParallelTransitionPlan(
+        collective=SequenceParallelCollective.LOCAL_SHARD,
+        input_state=state,
+        output_state=output_state,
+        pad_size=state.pad_size,
+    )
 
 
 @dataclass(frozen=True)

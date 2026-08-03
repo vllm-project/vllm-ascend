@@ -22,7 +22,11 @@ from vllm_ascend.sequence_parallel import (
     DENSE_SP_MIN_TOKENS,
     MOE_SP_MIN_TOKENS,
     SequenceParallelActivationState,
+    SequenceParallelCollective,
     SequenceParallelRuntimeState,
+    plan_local_sequence_shard,
+    plan_partial_reduction,
+    plan_sequence_gather,
     resolve_sequence_parallel_policy,
 )
 
@@ -291,3 +295,78 @@ def test_inactive_runtime_state_tracks_plain_tp_partial_sum():
 
     assert partial.activation is SequenceParallelActivationState.TP_PARTIAL
     assert full.activation is SequenceParallelActivationState.FULL
+
+
+def test_partial_reduction_selects_reduce_scatter_for_sp():
+    partial = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=4,
+        num_tokens=10,
+    ).transition_to(SequenceParallelActivationState.TP_PARTIAL)
+
+    plan = plan_partial_reduction(partial)
+
+    assert plan.collective is SequenceParallelCollective.REDUCE_SCATTER
+    assert plan.pad_size == 2
+    assert plan.output_state.activation is SequenceParallelActivationState.SEQUENCE_SHARDED
+
+
+def test_partial_reduction_selects_all_reduce_for_plain_tp():
+    partial = SequenceParallelRuntimeState.create(
+        active=False,
+        world_size=4,
+        num_tokens=10,
+    ).transition_to(SequenceParallelActivationState.TP_PARTIAL)
+
+    plan = plan_partial_reduction(partial)
+
+    assert plan.collective is SequenceParallelCollective.ALL_REDUCE
+    assert plan.pad_size == 0
+    assert plan.output_state.activation is SequenceParallelActivationState.FULL
+
+
+def test_sequence_gather_plans_unpadding():
+    sharded = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=4,
+        num_tokens=10,
+    ).transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)
+
+    plan = plan_sequence_gather(sharded)
+
+    assert plan.collective is SequenceParallelCollective.ALL_GATHER
+    assert plan.unpad_size == 2
+    assert plan.output_state.activation is SequenceParallelActivationState.FULL
+
+
+def test_local_sequence_shard_plans_padding():
+    state = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=4,
+        num_tokens=10,
+    )
+
+    plan = plan_local_sequence_shard(state)
+
+    assert plan.collective is SequenceParallelCollective.LOCAL_SHARD
+    assert plan.pad_size == 2
+    assert plan.output_state.activation is SequenceParallelActivationState.SEQUENCE_SHARDED
+
+
+@pytest.mark.parametrize(
+    ("planner", "activation"),
+    [
+        (plan_partial_reduction, SequenceParallelActivationState.FULL),
+        (plan_sequence_gather, SequenceParallelActivationState.FULL),
+        (plan_local_sequence_shard, SequenceParallelActivationState.TP_PARTIAL),
+    ],
+)
+def test_transition_planners_reject_wrong_input_state(planner, activation):
+    state = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=2,
+        num_tokens=8,
+    ).transition_to(activation)
+
+    with pytest.raises(ValueError):
+        planner(state)
