@@ -322,3 +322,6 @@ a5:
         config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
   multi_card:
     test_config: []
+  accuracy:
+    nightly: []
+    pr_only: []
