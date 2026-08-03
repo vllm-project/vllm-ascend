@@ -11,6 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.sequence_parallel import SequenceParallelRuntimeState
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -130,9 +131,7 @@ def set_ascend_forward_context(
         forward_context.flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
 
         forward_context.pad_size = 0
-        if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
-            pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
-            forward_context.pad_size = pad_size
+        forward_context.padded_length = None
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -156,13 +155,25 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             dp_meta = forward_context.dp_metadata
             max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
-            if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
-                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
-                pad_size = padded_length - num_tokens
-                forward_context.padded_length = padded_length
-                forward_context.pad_size = pad_size
         else:
             max_tokens_across_dp = num_tokens
+
+        sequence_parallel_state = SequenceParallelRuntimeState.create(
+            active=flash_comm_v1_enabled,
+            world_size=tp_world_size,
+            num_tokens=int(num_tokens or 0),
+            max_num_tokens=int(max_tokens_across_dp or 0),
+        )
+        forward_context.sequence_parallel_state = sequence_parallel_state
+        forward_context.pad_size = sequence_parallel_state.pad_size
+        if flash_comm_v1_enabled and dp_world_size > 1 and forward_context.dp_metadata is not None:
+            forward_context.padded_length = sequence_parallel_state.padded_num_tokens
+
+        if forward_context.flashcomm_v2_enabled and not flash_comm_v1_enabled:
+            padded_length_for_comm = (int(max_tokens_across_dp) + tp_world_size - 1) // tp_world_size * tp_world_size
+            forward_context.pad_size = padded_length_for_comm - int(num_tokens)
+            if dp_world_size > 1 and forward_context.dp_metadata is not None:
+                forward_context.padded_length = padded_length_for_comm
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
         forward_context.max_tokens_across_pcp = max_tokens_across_pcp
@@ -315,6 +326,7 @@ class _ExtraForwardContextProxy:
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",
+        "sequence_parallel_state",
         "flashcomm_v2_enabled",
         "pad_size",
         "padded_length",

@@ -254,6 +254,36 @@ class TestNPUPlatform(TestBase):
         self.assertFalse(kwargs["in_profile_run"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
+        self.assertFalse(kwargs["sequence_parallel_state"].active)
+
+    def test_set_additional_forward_context_uses_sp_runtime_geometry(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        dp_metadata = MagicMock(num_tokens_across_dp_cpu=torch.tensor([7, 10]))
+
+        with (
+            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
+            patch("vllm_ascend.platform.is_moe_model", return_value=True),
+            patch("vllm_ascend.platform.enable_sp", return_value=True),
+            patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
+            patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
+            patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=2)),
+            patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
+            patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=object()),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=dp_metadata,
+                num_tokens=7,
+            )
+
+        state = kwargs["sequence_parallel_state"]
+        self.assertTrue(state.active)
+        self.assertEqual(state.padded_num_tokens, 12)
+        self.assertEqual(state.local_num_tokens, 3)
+        self.assertEqual(kwargs["pad_size"], 5)
+        self.assertEqual(kwargs["padded_length"], 12)
 
     def test_set_additional_forward_context_reads_v2_profile_override(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

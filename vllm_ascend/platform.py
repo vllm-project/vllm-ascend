@@ -32,6 +32,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.sequence_parallel import SequenceParallelRuntimeState
 
 # isort: off
 from vllm_ascend.utils import (
@@ -741,21 +742,31 @@ class NPUPlatform(Platform):
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        pad_size = 0
-        padded_length = None
-        if flash_comm_v1_enabled or flashcomm_v2_enabled:
-            pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
-
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
-            if flash_comm_v1_enabled or flashcomm_v2_enabled:
-                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
-                pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
+
+        sequence_parallel_state = SequenceParallelRuntimeState.create(
+            active=flash_comm_v1_enabled,
+            world_size=tp_world_size,
+            num_tokens=int(num_tokens or 0),
+            max_num_tokens=int(max_tokens_across_dp or 0),
+        )
+        pad_size = sequence_parallel_state.pad_size
+        padded_length = (
+            sequence_parallel_state.padded_num_tokens
+            if flash_comm_v1_enabled and dp_world_size > 1 and dp_metadata is not None
+            else None
+        )
+        if flashcomm_v2_enabled and not flash_comm_v1_enabled:
+            padded_length_for_comm = (int(max_tokens_across_dp) + tp_world_size - 1) // tp_world_size * tp_world_size
+            pad_size = padded_length_for_comm - int(num_tokens)
+            if dp_world_size > 1 and dp_metadata is not None:
+                padded_length = padded_length_for_comm
         mc2_mask = None
         padded_num_tokens = None
         if num_tokens is not None:
@@ -774,6 +785,7 @@ class NPUPlatform(Platform):
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
             "flash_comm_v1_enabled": flash_comm_v1_enabled,
+            "sequence_parallel_state": sequence_parallel_state,
             "flashcomm_v2_enabled": flashcomm_v2_enabled,
             "pad_size": pad_size,
             "padded_length": padded_length,
