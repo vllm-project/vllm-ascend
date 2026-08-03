@@ -26,7 +26,18 @@ generator problem.
   source snapshot is deliberately reduced; a SHA-pinned adapter preserves that
   evidence without claiming cross-version stability.
 - Test evidence: all 197 isolated generator and independent-auditor tests pass;
-  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+  Ruff and `git diff --check` pass.
+- Fixed-source evidence: all 971 relation endpoints remain exact matches with
+  v0.30 and exactly one contract changes. Findings fall from 174 to 173 and
+  reviews from 21 to 20; risks remain 116 and generator issues remain zero.
+  The five remaining unknown signature transforms are all Triton JIT
+  callables. The independent audit still classifies all 1,019 candidates with
+  no missing or conflicting site. Runtime was about 657 seconds.
+- Follow-up found during contract review: compatibility currently checks only
+  the outer runtime-entry signature. A broad forwarding wrapper can therefore
+  hide an incompatible reported or source-definition signature. This is a
+  separate compatibility-checking gap and is not accepted as solved by the
+  pinned adapter.
 
 ## v0.30.0 - derive simple decorator wrapper signatures from source
 
