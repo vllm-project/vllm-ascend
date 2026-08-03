@@ -219,25 +219,24 @@ jobs:
         filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
 
   multi-node-tests:
-    name: multi-node
-    needs: [parse-trigger, setup-vars]
-    # ========= 删除外层所有if条件 =========
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: "A5"
-      runner: linux-aarch64-a5-8
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
-      ascend_log_prefix: nightly-a5
-      config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-      name: Qwen3-235B-W8A8-EPLB
-      replicas: 2
-      size: 2
-      should_run: ${{ needs['parse-trigger'].outputs.run }}
-      request_id: ${{ inputs.request_id }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
-      filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      name: multi-node
+      needs: [parse-trigger, setup-vars]
+      strategy:
+        fail-fast: false
+        max-parallel: 3
+        matrix:
+          test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
+      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+      with:
+        soc_version: a5
+        runner: ${{ matrix.test_config.os }}
+        config_file_path: ${{ matrix.test_config.config_file_path }}
+        size: ${{ matrix.test_config.size }}
+        name: ${{ matrix.test_config.name }}
+        should_run: ${{ needs['parse-trigger'].outputs.run }}
+        request_id: ${{ inputs.request_id }}
+        vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
+        filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
