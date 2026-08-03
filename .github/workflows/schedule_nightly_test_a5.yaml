@@ -227,143 +227,157 @@ jobs:
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
-  multi-node-tests:
-    name: multi-node
+  multi-node-runner:
+    name: multi-node-runner
     needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true'
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a5
-      runner: linux-aarch64-a5-8
-      test_config_json: ${{ needs.setup-vars.outputs.multi_node }}
-      vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches)[0] }}
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      request_id: ${{ inputs.request_id || '' }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-
-  double-node-tests:
-    name: double-node
+      needs['parse-trigger'].outputs.run == 'true'
+    runs-on: linux-aarch64-a5-8
+    steps:
+      - name: Trigger all multi-node test cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          CASE_JSON: ${{ needs.setup-vars.outputs.multi_node }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import os
+          cases = json.loads(os.environ["CASE_JSON"])
+          base_cmd = [
+              "gh", "workflow", "run", ".github/workflows/_e2e_nightly_multi_node.yaml",
+              "--repo", os.environ["REPO"], "--ref", os.environ["REF"]
+          ]
+          for case in cases:
+              args = [
+                  "-f", f"name={case['name']}",
+                  "-f", f"config_file_path={case['config_file_path']}",
+                  "-f", "soc_version=a5",
+                  "-f", "runner=linux-aarch64-a5-8"
+              ]
+              if "size" in case:
+                  args.extend(["-f", f"size={case['size']}"])
+              full_cmd = base_cmd + args
+              print(f"Trigger multi-node case: {case['name']}")
+              subprocess.run(full_cmd, check=False)
+          PY
+  
+  single-node-runner:
+    name: single-node-runner
     needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true'
-    # needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
-    # if: >-
-    #   always() &&
-    #   needs.parse-trigger.outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a5
-      runner: linux-aarch64-a5-8
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      request_id: ${{ inputs.request_id || '' }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-
-  single-node-tests:
-    name: single-node
+      needs['parse-trigger'].outputs.run == 'true'
+    runs-on: linux-aarch64-a5-8
+    steps:
+      - name: Trigger all single-node test cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          CASE_JSON: ${{ needs.setup-vars.outputs.single_node }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import os
+          cases = json.loads(os.environ["CASE_JSON"])
+          base_cmd = [
+              "gh", "workflow", "run", ".github/workflows/_e2e_nightly_single_node.yaml",
+              "--repo", os.environ["REPO"], "--ref", os.environ["REF"]
+          ]
+          for case in cases:
+              args = [
+                  "-f", f"name={case['name']}",
+                  "-f", f"config_file_path={case['config_file_path']}",
+                  "-f", "soc_version=a5",
+                  "-f", "runner=linux-aarch64-a5-8"
+              ]
+              if "size" in case:
+                  args.extend(["-f", f"size={case['size']}"])
+              full_cmd = base_cmd + args
+              print(f"Trigger single-node case: {case['name']}")
+              subprocess.run(full_cmd, check=False)
+          PY
+  
+  double-node-runner:
+    name: double-node-runner
     needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true'
-    # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
-    # if: >-
-    #   always() &&
-    #   needs.parse-trigger.outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      max-parallel: 9
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      name: ${{ matrix.test_config.name }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-      request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      aop_single_enabled: ${{ inputs.aop_enabled }}
-
-  multi-card-tests:
-    name: multi-card
+      needs['parse-trigger'].outputs.run == 'true'
+    runs-on: linux-aarch64-a5-8
+    steps:
+      - name: Trigger all double-node test cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          CASE_JSON: ${{ needs.setup-vars.outputs.double_node }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import os
+          cases = json.loads(os.environ["CASE_JSON"])
+          base_cmd = [
+              "gh", "workflow", "run", ".github/workflows/_e2e_nightly_double_node.yaml",
+              "--repo", os.environ["REPO"], "--ref", os.environ["REF"]
+          ]
+          for case in cases:
+              args = [
+                  "-f", f"name={case['name']}",
+                  "-f", f"config_file_path={case['config_file_path']}",
+                  "-f", "soc_version=a5",
+                  "-f", "runner=linux-aarch64-a5-8"
+              ]
+              if "size" in case:
+                  args.extend(["-f", f"size={case['size']}"])
+              full_cmd = base_cmd + args
+              print(f"Trigger double-node case: {case['name']}")
+              subprocess.run(full_cmd, check=False)
+          PY
+  
+  multi-card-runner:
+    name: multi-card-runner
     needs: [setup-vars, parse-trigger]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true'
-    # needs: [setup-vars, parse-trigger, build-image, double-node-tests]
-    # if: >-
-    #   always() &&
-    #   needs.parse-trigger.outputs.run == 'true' &&
-    #   (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
-      tests: ${{ matrix.test_config.tests }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      name: ${{ matrix.test_config.name }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-      request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      aop_single_enabled: ${{ inputs.aop_enabled }}
-    secrets:
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      needs['parse-trigger'].outputs.run == 'true'
+    runs-on: linux-aarch64-a5-8
+    steps:
+      - name: Trigger all multi-card test cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          CASE_JSON: ${{ needs.setup-vars.outputs.multi_card }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import os
+          cases = json.loads(os.environ["CASE_JSON"])
+          base_cmd = [
+              "gh", "workflow", "run", ".github/workflows/_e2e_nightly_multi_card.yaml",
+              "--repo", os.environ["REPO"], "--ref", os.environ["REF"]
+          ]
+          for case in cases:
+              args = [
+                  "-f", f"name={case['name']}",
+                  "-f", f"config_file_path={case['config_file_path']}",
+                  "-f", "soc_version=a5",
+                  "-f", "runner=linux-aarch64-a5-8"
+              ]
+              if "size" in case:
+                  args.extend(["-f", f"size={case['size']}"])
+              full_cmd = base_cmd + args
+              print(f"Trigger multi-card case: {case['name']}")
+              subprocess.run(full_cmd, check=False)
+          PY
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
