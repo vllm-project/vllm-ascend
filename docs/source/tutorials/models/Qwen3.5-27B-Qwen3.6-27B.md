@@ -6,7 +6,7 @@ Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models i
 
 This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
-It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`. Support for Atlas inference products starts from `vllm-ascend:v0.23.0rc1`.
+It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`. Support for Atlas 300I DUO starts from `vllm-ascend:v0.23.0rc1`.
 
 ## 2 Supported Features
 
@@ -20,13 +20,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 **Qwen3.5-27B**
 
-- `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)
-- `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
+- `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)
+- `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
 
 **Qwen3.6-27B**
 
-- `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)
-- `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
+- `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)
+- `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -40,7 +40,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas inference products, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas 300I DUO, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
 
 === "A3 series"
 
@@ -112,7 +112,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
         -it $IMAGE bash
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     Start the docker image on each node.
 
@@ -160,7 +160,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
     !!! note
 
-        On Atlas inference products, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
+        On Atlas 300I DUO, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
 
         ```bash
         pip uninstall -y triton-ascend triton
@@ -180,7 +180,7 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). On Atlas inference products, at least 2 devices are required. The quantized versions need to start with the `--quantization ascend` parameter.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). On Atlas 300I DUO, at least 2 devices are required. The quantized versions need to start with the `--quantization ascend` parameter.
 
 Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwen3_5_mtp` speculative decoding method can be used for both.
 
@@ -287,7 +287,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path.The quantized versions need to start with the `--quantization ascend` parameter.
 
@@ -353,13 +353,13 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory; The Qwen3.6-27B model supports up to 262144.
     - `--max-num-seqs` indicates the maximum number of concurrent requests. Configure it as needed—setting it too high may cause OOM.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
-    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas inference products, only `float16` is supported.
-    - `--dtype float16` must be set on Atlas inference products. These devices only support the FP16 data type.
-    - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas inference products, it is recommended to set `num_speculative_tokens` to `1`.
+    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I DUO, only `float16` is supported.
+    - `--dtype float16` must be set on Atlas 300I DUO. These devices only support the FP16 data type.
+    - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas 300I DUO, it is recommended to set `num_speculative_tokens` to `1`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
-    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas inference products because `enable_npugraph_ex` is not supported on this platform.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -379,7 +379,7 @@ For functional testing (e.g., `completions` and `chat.completions` curl examples
 
 !!! note
 
-    Multi-node PD separation deployment is **not supported** on Atlas inference products.
+    Multi-node PD separation deployment is **not supported** on Atlas 300I DUO.
 
 For high-concurrency production scenarios, multi-node PD (Prefill-Decode) separation can be used to scale the service. The recommended approach is to use Mooncake for deployment: [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
 
@@ -800,7 +800,7 @@ After about several minutes, you can get the performance evaluation result.
 >
 > **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256K+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
 >
-> **Atlas inference products**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128K** and **256K** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
+> **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128K** and **256K** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
 
 #### Table 1: Scenario Overview
 

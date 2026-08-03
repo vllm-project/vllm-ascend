@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,12 +9,16 @@ from torch import nn
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
-from vllm_ascend.ops.fused_moe.fused_moe import (
-    AscendMoERunner,
+from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+from vllm_ascend.ops.fused_moe.routed_experts import (
+    AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
+    FusedMoEResult,
     make_eplb_placement_config,
     use_multistage_eplb_load,
 )
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -76,6 +81,55 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method.maybe_make_prepare_finalize() is None
 
 
+def test_ascend_routed_experts_owns_unquantized_method(monkeypatch):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.tid2eid = object()
+    moe_config = MagicMock()
+    monkeypatch.setattr(
+        AscendUnquantizedFusedMoEMethod,
+        "dispatch_forward",
+        lambda self, compile_native=False: self.forward_native,
+    )
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False)),
+    )
+
+    method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
+
+    assert isinstance(method, AscendUnquantizedFusedMoEMethod)
+    assert method.moe is moe_config
+    assert method.tid2eid is routed_experts.tid2eid
+
+
+def test_ascend_routed_experts_passes_tid2eid_to_quant_config():
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.tid2eid = object()
+    quant_config = MagicMock()
+    moe_config = MagicMock()
+
+    method = routed_experts._get_quant_method("model.layers.0.mlp", quant_config, moe_config)
+
+    assert method is quant_config.get_quant_method.return_value
+    quant_config.get_quant_method.assert_called_once_with(
+        routed_experts,
+        "model.layers.0.mlp",
+        tid2eid=routed_experts.tid2eid,
+    )
+
+
+def test_ascend_routed_experts_accepts_tid2eid_parameter_before_module_init(monkeypatch):
+    tid2eid = nn.Parameter(torch.zeros(2, 2), requires_grad=False)
+    parent_init = MagicMock(side_effect=RuntimeError("stop after parent init"))
+    monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
+
+    with pytest.raises(RuntimeError, match="stop after parent init"):
+        AscendRoutedExperts(tid2eid=tid2eid)
+
+    parent_init.assert_called_once()
+
+
 def test_process_weights_after_loading_uses_version_specific_layout(
     monkeypatch,
 ):
@@ -85,8 +139,8 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
 
-    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
-    monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", lambda weight: weight)
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(routed_experts_module, "maybe_trans_nz", lambda weight: weight)
     upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
     monkeypatch.setattr(
         upstream_method_base,
@@ -115,15 +169,15 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     moe_comm_method.fused_experts.return_value = routed_out
 
     monkeypatch.setattr(
-        fused_moe_module,
+        routed_experts_module,
         "_EXTRA_CTX",
         SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method),
     )
-    monkeypatch.setattr(fused_moe_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
-    monkeypatch.setattr(fused_moe_module, "get_forward_context", lambda: SimpleNamespace(input_ids=None))
-    monkeypatch.setattr(fused_moe_module, "get_current_vllm_config", lambda: None)
+    monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(input_ids=None))
+    monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     select_experts = MagicMock(return_value=(topk_weights, topk_ids))
-    monkeypatch.setattr(fused_moe_module, "select_experts", select_experts)
+    monkeypatch.setattr(routed_experts_module, "select_experts", select_experts)
 
     result = method.apply(
         layer=layer,
@@ -178,6 +232,96 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
+@pytest.mark.parametrize("return_with_event", [False, True])
+def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_event):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    hidden_states = torch.randn(2, 4)
+    prepared_hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 3)
+    prepared_router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    finalized = torch.randn(2, 4)
+    quant_method = MagicMock()
+    quant_method.quant_method = SimpleNamespace(quant_type=QuantType.NONE)
+    quant_method.apply.return_value = SimpleNamespace(
+        routed_out=routed_out,
+        expert_tokens=None,
+        group_list_type=1,
+        before_dispatch_evt=None,
+        before_gmm2_evt=None,
+        before_combine_evt=None,
+        swiglu_limit=0.0,
+    )
+    routed_experts.enable_npugraph_ex_static_kernel = False
+    routed_experts.enable_shared_expert_dp = False
+    routed_experts.quant_method = quant_method
+    routed_experts.top_k = 2
+    routed_experts.renormalize = True
+    routed_experts.use_grouped_topk = False
+    routed_experts.moe_config = SimpleNamespace(num_experts=4)
+    routed_experts.ascend_expert_map = None
+    routed_experts.topk_group = None
+    routed_experts.num_expert_group = None
+    routed_experts.custom_routing_function = None
+    routed_experts.scoring_func = "softmax"
+    routed_experts.routed_scaling_factor = 1.0
+    routed_experts.e_score_correction_bias = None
+    routed_experts.activation = "gelu"
+    routed_experts.apply_router_weight_on_input = True
+    routed_experts.log2phy = None
+    routed_experts.global_redundant_expert_num = 0
+    routed_experts.dynamic_eplb = False
+    routed_experts.return_with_event = return_with_event
+    moe_comm_method = MagicMock()
+    moe_comm_method.prepare.return_value = SimpleNamespace(
+        hidden_states=prepared_hidden_states,
+        router_logits=prepared_router_logits,
+        mc2_mask=None,
+        padded_hidden_states_shape=torch.Size([2, 4]),
+        pertoken_scale=None,
+    )
+    moe_comm_method.finalize.return_value = finalized
+    monkeypatch.setattr(
+        routed_experts_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            in_profile_run=False,
+            moe_comm_method=moe_comm_method,
+            flash_comm_v1_enabled=False,
+            eplb_heat_collection_status=False,
+        ),
+    )
+    monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))
+
+    result = routed_experts.forward_impl(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+    )
+
+    if return_with_event:
+        assert isinstance(result, FusedMoEResult)
+        assert result.routed_out is finalized
+    else:
+        assert result is finalized
+    moe_comm_method.prepare.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        replace_allreduce=False,
+        enable_shared_expert_dp=False,
+        quant_type=QuantType.NONE,
+    )
+    quant_method.apply.assert_called_once()
+    assert quant_method.apply.call_args.kwargs["layer"] is routed_experts
+    assert quant_method.apply.call_args.kwargs["x"] is prepared_hidden_states
+    assert quant_method.apply.call_args.kwargs["router_logits"] is prepared_router_logits
+    assert quant_method.apply.call_args.kwargs["activation"] == "gelu"
+    moe_comm_method.finalize.assert_called_once_with(
+        hidden_states=routed_out,
+        reduce_results=False,
+        padded_hidden_states_shape=torch.Size([2, 4]),
+    )
+
+
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None
@@ -190,17 +334,17 @@ class _Gate(nn.Module):
 
 @pytest.mark.parametrize("with_gate", [False, True])
 def test_shared_experts_part2_applies_optional_gate(with_gate):
-    runner = AscendMoERunner.__new__(AscendMoERunner)
-    nn.Module.__init__(runner)
-    runner._shared_experts = SimpleNamespace(
+    shared_experts_layer = SimpleNamespace(
         act_fn=nn.Identity(),
         down_proj=_Projection(),
         expert_gate=_Gate() if with_gate else None,
     )
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = shared_experts_layer
     hidden_states = torch.randn(3, 4)
     shared_gate_up = torch.randn(3, 4)
 
-    output = runner._shared_experts_part2(hidden_states, shared_gate_up)
+    output = shared_experts.part2(hidden_states, shared_gate_up)
 
     expected = shared_gate_up * 2.0 + 1.0
     if with_gate:
@@ -209,14 +353,14 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])
-def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_experts):
+def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_experts):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
-    runner._shared_experts = object() if has_shared_experts else None
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
+    ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
     routed_result = SimpleNamespace(
         routed_out=routed_out,
         before_dispatch_evt=None,
@@ -224,24 +368,30 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
         before_combine_evt=None,
         swiglu_limit=0.0,
     )
-    runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
-    runner._forward_shared_experts = MagicMock(return_value=shared_out)
+    runner.routed_experts = SimpleNamespace(
+        forward_impl=MagicMock(return_value=routed_result if has_shared_experts else routed_out)
+    )
+    runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     current_stream = MagicMock()
 
     monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
     monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
 
-    result = runner.shared_forward_impl(hidden_states, router_logits)
+    result = runner._forward_impl(hidden_states, router_logits, shared_experts_input=None)
 
-    runner.no_shared_forward_impl.assert_called_once_with(
-        hidden_states,
-        router_logits,
-        return_with_event=True,
-    )
     if has_shared_experts:
+        runner.routed_experts.forward_impl.assert_called_once_with(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
         assert result[0] is shared_out
         assert result[1] is routed_out
-        runner._forward_shared_experts.assert_called_once()
+        ascend_shared_experts.forward.assert_called_once()
     else:
+        runner.routed_experts.forward_impl.assert_called_once_with(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
         assert result is routed_out
-        runner._forward_shared_experts.assert_not_called()
+        ascend_shared_experts.forward.assert_not_called()
