@@ -9145,3 +9145,46 @@ else:
         and finding.supplemental
         for finding in findings
     )
+
+
+def test_v027_known_descriptor_mismatch_owns_receiver_binding_failure(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    @classmethod
+    def enabled(cls):
+        return False
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Target
+
+
+def mock_true():
+    return True
+
+
+Target.enabled = mock_true
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
+    assert (
+        patch.upstream_descriptor_kind,
+        patch.downstream_descriptor_kind,
+        patch.installed_descriptor_kind,
+    ) == ("classmethod", "ordinary", "ordinary")
+    assert [finding.reason_code for finding in findings] == ["descriptor_kind_mismatch"]
