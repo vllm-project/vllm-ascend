@@ -93,6 +93,11 @@ mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", lo
 mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules.setdefault("mooncake.engine", mooncake_engine)
 
+build_info = types.ModuleType("vllm_ascend._build_info")
+build_info.__spec__ = importlib.util.spec_from_loader("vllm_ascend._build_info", loader=None)
+setattr(build_info, "__device_type__", "A2")  # noqa: B010
+sys.modules.setdefault("vllm_ascend._build_info", build_info)
+
 from vllm_ascend.utils import (  # noqa: E402
     adapt_patch,
     clear_enable_sp,
