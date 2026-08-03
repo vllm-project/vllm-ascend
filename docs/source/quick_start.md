@@ -34,7 +34,7 @@ This section guides you through container-based environment setup and large mode
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
     | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
-    | TorchNPU      | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | TorchNPU      | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
@@ -54,7 +54,7 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
  |---------------|----------------------------------|-------------------------------------------|
  | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
  | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
- | TorchNPU      | == 2.10.0               | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | TorchNPU      | == 2.10.0.post4         | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
  | torch         | == 2.10.0               | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
