@@ -22,7 +22,7 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -34,12 +34,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.25.1"):
-    from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -54,6 +49,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -67,17 +63,18 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         # The following features are not yet supported in Ascend NPU model runner v2:
-        # - Context parallelism (prefill or decode)
         # - Dynamic EPLB
-        parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
-
         if self.ascend_config.eplb_config.dynamic_eplb:
             raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        self.use_aclgraph = (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not self.model_config.enforce_eager
+        )
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
@@ -136,6 +133,16 @@ class NPUModelRunner(GPUModelRunner):
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
 
+            # GPUModelRunner constructs the community PCP manager while initializing
+            # the KV cache. Replace it with the Ascend subclass.
+            self.pcp_manager = maybe_build_ascend_pcp_manager(
+                self.vllm_config,
+                self.device,
+                self.supports_mm_inputs,
+                self.req_states,
+                self.block_tables,
+            )
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         """Override GPUModelRunner.profile_run for Ascend NPUs.
@@ -169,13 +176,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        # batch_idx -> req_id
-        if vllm_version_is("0.25.1"):
-            # vllm 0.25.1 does not have sort_batch_req_ids;
-            # TODO: remove this patch when main2main is applied.
-            req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore
-        else:
-            req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
@@ -360,6 +361,8 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
+
+        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

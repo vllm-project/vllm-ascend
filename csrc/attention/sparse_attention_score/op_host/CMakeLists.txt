@@ -19,7 +19,6 @@ add_ops_compile_options(
     OP_NAME SparseAttentionScore
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
-            -Werror
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)

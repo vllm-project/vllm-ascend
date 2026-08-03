@@ -2,6 +2,16 @@ name: Image_oncall
 on:
   workflow_call:
     inputs:
+      quay_repo:
+        description: 'Quay repository for final images'
+        required: false
+        type: string
+        default: 'quay.io/ascend/vllm-ascend'
+      quay_temp_repo:
+        description: 'Quay repository for temp images'
+        required: false
+        type: string
+        default: 'quay.io/atlas-ci/vllm-atlas-temp'    
       suffix:
         description: 'The tag subfix to use'
         required: true
@@ -57,6 +67,66 @@ on:
         required: false
         type: boolean
         default: false
+      build_type:
+        description: 'Build type (release/daily)'
+        required: false
+        type: string
+        default: 'release'
+      memcache_version:
+        description: 'Memcache version'
+        required: false
+        type: string
+        default: '1.2.0'
+      memcache_date:
+        description: 'Memcache date'
+        required: false
+        type: string
+        default: '20260725.3'
+      memfabric_version:
+        description: 'Memfabric version'
+        required: false
+        type: string
+        default: '1.2.0'
+      memfabric_date:
+        description: 'Memfabric date'
+        required: false
+        type: string
+        default: '20260725.3'
+      torch_npu_version:
+        description: 'Torch NPU version'
+        required: false
+        type: string
+        default: '26.1.0'
+      torch_npu_date:
+        description: 'Torch NPU date'
+        required: false
+        type: string
+        default: '20260715.4'
+      cann_quay_url:
+        description: 'CANN Quay URL'
+        required: false
+        type: string
+        default: 'quay.io/atlas_inference/cann'
+      cann_version:
+        description: 'CANN version'
+        required: false
+        type: string
+        default: '2026.07.29'
+      triton_ascend_version:
+        description: 'Triton Ascend version'
+        required: false
+        type: string
+        default: ''
+      triton_ascend_package_version:
+        description: 'Triton Ascend package version'
+        required: false
+        type: string
+        default: '3.2.2'
+      build_args:
+        description: 'Additional build arguments for Docker build'
+        required: false
+        type: string
+        default: ''
     secrets:
         QUAY_PASSWORD:
             description: 'Quay password for pushing images'
@@ -70,8 +140,8 @@ defaults:
     shell: bash -el {0}
 
 env:
-  QUAY_REPO: quay.io/ascend/vllm-ascend
-  QUAY_TEMP_REPO: quay.io/atlas-ci/vllm-atlas-temp
+  QUAY_REPO: ${{ inputs.quay_repo }}
+  QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
   CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
 
 jobs:
@@ -271,6 +341,16 @@ jobs:
           PIP_INDEX_URL=https://pypi.org/simple
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           VLLM_COMMIT=${{ inputs.vllm_commit }}
+          BUILD_TYPE=${{ inputs.build_type || 'release' }}
+          MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
+          MEMCACHE_DATE=${{ inputs.memcache_date || '20260725.3' }}
+          MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
+          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260725.3' }}
+          TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
+          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
+          TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
+          TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
+          ${{ inputs.build_args }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
@@ -293,6 +373,10 @@ jobs:
           TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
         else
           TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            DATE=$(date +'%Y%m%d')
+            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-${DATE}-temp"
+          fi
         fi
         echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
         docker buildx imagetools create \
@@ -361,6 +445,32 @@ jobs:
             echo "SUFFIX=" >> $GITHUB_ENV
           fi
 
+      # ===== New: Generate custom tags for daily scenario =====
+      - name: Generate daily tags
+        id: daily_tags
+        if: ${{ inputs.build_type == 'daily' }}
+        run: |
+          # Get current date in YYYYMMDD format
+          DATE=$(date +'%Y%m%d')
+          # Get CANN version and convert to lowercase (e.g., 2026.07.29 -> 2026.07.29)
+          CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
+          # Get the base tag pattern (e.g., main)
+          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          # Get the suffix
+          SUFFIX="${{ inputs.suffix }}"
+          
+          # Construct the daily tag: nightly-{PATTERN}-{SUFFIX}-cann{VERSION}-{DATE}
+          # Example: nightly-main-310p-openeuler-cann2026.07.29-20260729
+          if [ -n "$SUFFIX" ]; then
+            DAILY_TAG="nightly-${PATTERN}-${SUFFIX}-cann${CANN_VERSION}-${DATE}"
+          else
+            DAILY_TAG="nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
+          fi
+          
+          echo "Generated daily tag: $DAILY_TAG"
+          echo "daily_tag=$DAILY_TAG" >> $GITHUB_OUTPUT
+      # =========================================================
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v6
@@ -389,6 +499,10 @@ jobs:
             type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }},suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+            
+            # ===== New: Daily scenario specific tags =====
+            type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
+            # =============================================
           flavor:
             latest=false
 
@@ -406,6 +520,9 @@ jobs:
         env:
           IMAGE: ${{ env.QUAY_TEMP_REPO }}
           TAGS: ${{ steps.meta.outputs.tags }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+          SCHEDULE_TAG_PATTERN: ${{ inputs.schedule_tag_pattern }}
+          SUFFIX: ${{ env.SUFFIX }}
         run: |
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
 
@@ -413,11 +530,34 @@ jobs:
           echo "Current tags:"
           echo "$TAGS"
 
+          # For daily builds, skip the plain schedule tag (e.g. nightly-main-310p-openeuler)
+          # because it's redundant with the daily tag that includes CANN version + date
+          UNWANTED_TAG="nightly-${SCHEDULE_TAG_PATTERN}${SUFFIX}"
+
           for tag in $TAGS; do
+            if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.QUAY_REPO }}:${UNWANTED_TAG}" ]; then
+              echo "Skipping unwanted schedule tag: $tag"
+              continue
+            fi
             echo "Creating tag $tag"
             docker buildx imagetools create \
               -t "$tag" \
               $DIGESTS
+          done
+
+      - name: Clean up temp tags
+        if: ${{ inputs.build_type == 'daily' }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+          SUFFIX=""
+          if [ -n "${{ inputs.suffix }}" ]; then
+            SUFFIX="-${{ inputs.suffix }}"
+          fi
+          DATE=$(date +'%Y%m%d')
+          for arch in amd64 arm64; do
+            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${arch}-${DATE}-temp"
+            skopeo delete --creds "${{ inputs.quay_temp_username }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
+              "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
           done
 
   merge-image-temp:
@@ -468,3 +608,35 @@ jobs:
           docker buildx imagetools create \
             -t "$TAG" \
             $DIGESTS
+
+          # ===== Daily scenario: also push daily tag =====
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            DATE=$(date +'%Y%m%d')
+            CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
+            PATTERN="${{ inputs.schedule_tag_pattern }}"
+            if [ -n "${{ inputs.suffix }}" ]; then
+              DAILY_TAG="${IMAGE}:nightly-${PATTERN}-${{ inputs.suffix }}-cann${CANN_VERSION}-${DATE}"
+            else
+              DAILY_TAG="${IMAGE}:nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
+            fi
+            echo "Creating daily tag: $DAILY_TAG"
+            docker buildx imagetools create \
+              -t "$DAILY_TAG" \
+              $DIGESTS
+          fi
+
+      - name: Clean up temp tags
+        if: ${{ inputs.build_type == 'daily' }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+          SUFFIX=""
+          if [ -n "${{ inputs.suffix }}" ]; then
+            SUFFIX="-${{ inputs.suffix }}"
+          fi
+          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+          for arch in amd64 arm64; do
+            TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${arch}-temp"
+            skopeo delete --creds "${{ inputs.quay_temp_username }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
+              "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
+          done

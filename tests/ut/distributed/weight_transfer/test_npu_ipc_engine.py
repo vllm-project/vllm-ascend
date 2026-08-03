@@ -141,19 +141,40 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     )
 
     engine = object.__new__(NPUIPCWeightTransferEngine)
-    received = {}
-
-    def load_weights(weights):
-        received["weights"] = weights
+    received: dict[str, list[tuple[str, torch.Tensor]]] = {}
+    engine.model = MagicMock()
+    engine.device = MagicMock(index=device_index)
+    engine.model.load_weights.side_effect = lambda weights: received.update(weights=weights)
 
     with (
         _patch_rebuild_npu_tensor(fake_rebuild),
-        patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid),
-        patch("torch.accelerator.current_device_index", return_value=device_index),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid) as mock_uuid,
     ):
-        engine.receive_weights(update_info, load_weights)
+        engine.receive_weights(update_info)
 
+    mock_uuid.assert_called_once_with(device_index)
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
     # Index 6 (device index) overwritten with the receiver's device.
     assert seen["args"][6] == device_index
+
+
+def test_start_weight_update_initializes_layerwise_reload():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+
+    with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as mock_initialize:
+        engine.start_weight_update()
+
+    mock_initialize.assert_called_once_with(engine.model)
+
+
+def test_finish_weight_update_finalizes_layerwise_reload():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.model_config = MagicMock()
+
+    with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as mock_finalize:
+        engine.finish_weight_update()
+
+    mock_finalize.assert_called_once_with(engine.model, engine.model_config)
