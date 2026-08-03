@@ -4,6 +4,37 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## post-v0.36 architecture refactor - centralize state and separate schema reporting
+
+- State/cleanup implementation: `17e60d5a8`; schema/report extraction:
+  `e115b2409`. The generator version remains `0.36.0` because this is a
+  behavior-preserving refactor, not a mapping-semantics change.
+- Problem: `PatchScanContext` resolution tables were still updated directly at
+  several call sites, representative and variant repository indexes had no
+  fail-closed consistency check, and JSONL serialization/comparison remained
+  coupled to the 10,000-line source analyzer. A small set of private functions,
+  cached fields, and parsed string constants had no consumer.
+- Change: state-table updates now use explicit context operations; repository
+  indexes validate representative/variant consistency; confirmed dead code and
+  unconsumed fields were removed. JSONL encoding, deterministic writing, and
+  baseline comparison moved to `_interface_boundary_schema.py`, while the
+  original module retains source-compatible facade functions. Descriptor and
+  signature comparisons reuse one first-match-preserving alias match.
+- Safety boundary: MRO, patch flow, control flow, descriptor inference,
+  signature contracts, ordering, schema version, and generator version are
+  unchanged. The independent auditor still does not import generator code.
+- Fixed-source evidence: generation from vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`, vllm-ascend
+  `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0` took 782.4 seconds. The complete
+  JSONL remains byte-for-byte identical to v0.36 with SHA-256
+  `725504ef474f4cf52f6a1a06a12a0440b56c6d7ff8861a7a39e47cd48a815cc5`:
+  972 exact relation matches, 173 identical findings, and zero descriptor,
+  signature, old-only, or new-only changes.
+- Independent audit v0.7 still classifies all 1,023 candidates, with zero
+  missing, conflicting, orphan, or generator-issue sites. All 213 isolated
+  generator/auditor tests and all 1,918 legacy CPU boundary tests pass.
+
 ## v0.36.0 - do not apply class descriptors to instance patches
 
 - Red-test checkpoint: `7f707669a`; implementation: `992b32ac0`.
