@@ -314,17 +314,6 @@ class KernelComputeWy {
     }
     PipeBarrier<PIPE_V>();
   }
-  // dst = diag(beta * exp(a)) * k. Folding both scalars into one product on the scalar
-  // unit halves the vector ops (one Muls per row instead of two) and drops the rowTmp hop.
-  __aicore__ inline void BuildKBetaExpFloat(LocalTensor<float> dst, const LocalTensor<float> kLocal,
-                                            const LocalTensor<float> betaLocal, const LocalTensor<float> expGLocal,
-                                            uint32_t headDim, uint32_t lda) const {
-    for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
-      Muls(dst[row * lda], kLocal[row * lda], betaLocal.GetValue(row) * expGLocal.GetValue(row), headDim);
-    }
-    PipeBarrier<PIPE_V>();
-  }
-
   __aicore__ inline void CastFloatRowsToHalf(LocalTensor<half> dst, const LocalTensor<float> src, uint32_t rows,
                                              uint32_t cols, uint32_t srcLda) {
     if (srcLda == cols) {
@@ -380,7 +369,8 @@ class KernelComputeWy {
 
     // RHS halves: βV in vFloat, γ·Kβ in kBeta (in-place doubling targets).
     BroadcastMulRowsFloat(vFloat, vFloat, betaLocal, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
-    BuildKBetaExpFloat(kBeta, kFloat, betaLocal, expGLocal, kHeadDim_, alignK_);
+    // kBeta already contains βK for the Gram matmul; only apply γ = exp(a) in place.
+    BroadcastMulRowsFloat(kBeta, kBeta, expGLocal, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
 
     // Nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
     // UploadP uses qHalf (>=64*64). U R-half uses vHalf (>=64*V); W R-half uses kHalf (>=64*K).
