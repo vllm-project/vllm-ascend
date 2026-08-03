@@ -4,6 +4,50 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.34.0 - model exact Triton kernel launch contracts
+
+- Red-test checkpoint: `4b843ea62`. Five monkey patches decorated with
+  `@triton.jit` were treated as ordinary Python calls with an unknown
+  decorator transform, even though Triton launches them through
+  `kernel[grid](...)`.
+- Exact source evidence: vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9` pins Triton 3.7.1 and
+  vllm-ascend `81d3450128528be2c343232fcc28220814a15fd6`
+  pins Triton-Ascend 3.2.1. In both exact implementations,
+  `KernelInterface.__getitem__` forwards launch arguments to `run`, and
+  `JITFunction` binds them against the decorated function signature.
+  `Heuristics.run` injects its named values before forwarding to the JIT
+  function.
+- Change: exact pinned `@triton.jit` callables use the
+  `triton_kernel_launch` protocol. Literal `@triton.heuristics({...})` keys
+  become optional generated launch parameters; parameters after the first
+  generated positional slot become keyword-only because passing them
+  positionally would occupy the generated slot and collide with the injected
+  keyword.
+- Safety boundary: the adapter is enabled only for the two exact source SHAs
+  and the canonical vLLM Triton decorators. Unknown SHAs, dynamic heuristic
+  dictionaries, unknown keyword arguments, generated positional-only
+  parameters, or an incomplete decorator stack remain reviews. No Triton code
+  is imported or executed.
+- Reason: the old Python-call model produced five analysis uncertainties and
+  hid one real replacement break. The launch protocol is known from exact
+  dependency source, so keeping all five unknown was a generator limitation.
+- Fixed-source evidence: relation endpoints remain unchanged at 971: 192
+  inheritance, 124 monkey patches, and 655 overrides. Four compatible Triton
+  replacements lose their old `unknown_signature_transform` review.
+  `postprocess_mamba_fused_kernel` changes from that review to a
+  `signature_incompatible` risk because the downstream launch contract lacks
+  upstream inputs. Findings fall from 177 to 173, reviews from five to zero,
+  risks rise from 135 to 136, and generator issues remain zero. Runtime was
+  about 652 seconds.
+- Independent-audit checkpoint: `1a34fe1b5`; implementation: `5b0ccc715`.
+  The audit now follows direct local-helper module arguments and
+  `sys.modules.get("vllm...")` aliases. These were auditor blind spots, not
+  mapping errors. Audit v0.6 classifies all 1,021 candidates with zero missing,
+  conflicting, orphan, or generator-issue sites.
+- Test evidence: all 204 isolated generator and independent-auditor tests
+  pass; Ruff and `git diff --check` pass.
+
 ## v0.33.0 - classify exact descriptor mismatches as risks
 
 - Red-test checkpoint: `ec891527d`. A proven property-to-method change was

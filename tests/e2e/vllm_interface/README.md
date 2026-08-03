@@ -30,6 +30,7 @@ vllm-ascend source pair. It currently discovers:
 - direct inheritance from a statically resolved vLLM class;
 - verified overrides whose effective parent implementation is resolved through the combined MRO;
 - generated dataclass constructors, typed lazy exports, patch save/restore lifecycle, and field-mutation findings;
+- exact, source-pinned Triton `kernel[grid](...)` launch signatures, including literal heuristic-generated parameters;
 - optional exact external source indexes for methods inherited by a vLLM class, without treating external-only overrides as vLLM edges.
 
 The POC targets vLLM main. Branches guarded by an exact `vllm_version_is("<tag>")` check are treated as release-only;
@@ -41,12 +42,13 @@ is kept in the main output as a finding instead of being silently dropped. Findi
 expected injection, an excluded inactive branch, and a static-analysis review. The optional unresolved output mirrors
 these findings for convenient review. It is AST-only and requires neither an NPU nor package imports.
 
-Schema version 4 stores verified relations under `u`/`c`, candidate findings under `f`, the definition source package
+Schema version 6 stores verified relations under `u`/`c`, candidate findings under `f`, the definition source package
 under `p`, the replacement definition file
 in each consumer, and patch evidence separately under `e`. Each finding includes `status`, `reason_code`, and whether it
 represents a generator limitation. Evidence includes the assignment file and line, lexical scope, guards, patch kind,
-and every statically discovered assignment occurrence. Python parse failures stop generation instead of silently
-reducing coverage.
+and every statically discovered assignment occurrence. Signature contracts separately record source definitions,
+runtime entries, reported signatures, receiver-bound calls, and access protocols. Python parse failures stop generation
+instead of silently reducing coverage.
 
 An external source root must be reproducible. The generator accepts either a Git checkout whose HEAD equals the expected
 SHA or a `.interface-source.json` snapshot manifest that records the exact upstream commit and SHA-256 of every included
