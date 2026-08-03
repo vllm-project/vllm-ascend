@@ -15,12 +15,19 @@ To learn more about the theory and implementation details of context parallel, p
 
 ## Supported Scenarios
 
-Currently context parallel can be used together with most other features, supported features are as follows:
+CP(Context Parallel) supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
 
-|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | SpecDecode <br> (MTP) | PD <br> disaggregation | MLAPO |
-| ------- | ----- | ----- | ------ | ------ | ----- | ----- | ----- |
-| **PCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅|
-| **DCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅ |
+| Device | Attention Backend | Chunked Prefill + CP | Prefix Caching + CP | Graph Mode + CP | P/D Disaggregation + CP | MLAPO + CP | Speculative Decoding + CP |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Ascend A2/A3 | MLA/GQA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported (MLA)<br>— Not applicable (GQA) | 🟢 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend A2/A3 | SFA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported |
+| Ascend 950 | MLA/GQA | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental (MLA)<br>— Not applicable (GQA) | 🔵 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend 950 | SFA | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported |
+
+- 🟢 **Supported**: Combining the feature with DCP is supported.
+- 🔵 **Experimental**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
+- 🔴 **Not supported**: Combining the feature with DCP is not supported.
+- **Not applicable**: The feature does not apply to this attention backend.
 
 ## How to use Context Parallel
 
@@ -79,7 +86,7 @@ The total world size is `tensor_parallel_size` * `prefill_context_parallel_size`
 
 ## Experimental Results
 
-To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
+To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregated instances in the environment of 64 cards Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
 
 - DeepSeek-R1-W8A8:
 

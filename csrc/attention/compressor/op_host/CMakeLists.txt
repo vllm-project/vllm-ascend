@@ -19,7 +19,6 @@ add_ops_compile_options(
         OP_NAME Compressor
                 OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
-                -Werror
                 -mllvm -cce-aicore-hoist-movemask=false
                 --op_relocatable_kernel_binary=true
 )
@@ -38,3 +37,4 @@ if (NOT BUILD_OPS_RTY_KERNEL)
     endforeach()
 
 endif()
+

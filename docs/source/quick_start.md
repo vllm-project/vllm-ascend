@@ -5,7 +5,7 @@
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](tutorials/models/Qwen3-30B-A3B.md).
-- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
 
 ## Prerequisites
 
@@ -371,8 +371,8 @@ There are two ways to start vLLM on Ascend NPU:
     <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
     ```bash
-      VLLM_PID=$(pgrep -f "vllm serve")
-      kill -2 "$VLLM_PID"
+    VLLM_PID=$(pgrep -f "vllm serve")
+    kill -2 "$VLLM_PID"
     ```
 
     The output is as below:
