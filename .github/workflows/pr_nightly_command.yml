@@ -49,6 +49,8 @@ jobs:
       aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
       command: ${{ steps.resolve.outputs.command }}
       build_type: ${{ steps.resolve.outputs.build_type }}
+      cann_version: ${{ steps.resolve.outputs.cann_version }}
+      cann_date: ${{ steps.resolve.outputs.cann_date }}
     steps:
       - name: Install system dependencies
         run: |
@@ -133,6 +135,8 @@ jobs:
           AOP_ENABLED="false"
           IS_A3_560T="false"
           BUILD_TYPE="release"
+          CANN_VERSION="2026.07.29"
+          CANN_DATE="20260729"
           NEXT_IS_BRANCH=0
           for WORD in $ALL_ARGS; do
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
@@ -149,6 +153,16 @@ jobs:
             elif [ "$NEXT_IS_BUILD_TYPE" = "1" ]; then
               BUILD_TYPE="$WORD"
               NEXT_IS_BUILD_TYPE=0
+            elif [ "$WORD" = "--cann-version" ]; then
+              NEXT_IS_CANN_VERSION=1
+            elif [ "$NEXT_IS_CANN_VERSION" = "1" ]; then
+              CANN_VERSION="$WORD"
+              NEXT_IS_CANN_VERSION=0
+            elif [ "$WORD" = "--cann-date" ]; then
+              NEXT_IS_CANN_DATE=1
+            elif [ "$NEXT_IS_CANN_DATE" = "1" ]; then
+              CANN_DATE="$WORD"
+              NEXT_IS_CANN_DATE=0
             else
               if [ -z "$TEST_CASES" ]; then
                 TEST_CASES="$WORD"
@@ -171,6 +185,8 @@ jobs:
             echo "branch=$BRANCH"
             echo "aop_enabled=$AOP_ENABLED"
             echo "build_type=$BUILD_TYPE"
+            echo "cann_version=$CANN_VERSION"
+            echo "cann_date=$CANN_DATE"
           } >> "$GITHUB_OUTPUT"
 
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
@@ -247,12 +263,14 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f build_type='${{ needs.authorize.outputs.build_type }}'
+            -f build_type='${{ needs.authorize.outputs.build_type }}' \
+            -f cann_version='${{ needs.authorize.outputs.cann_version }}' \
+            -f cann_date='${{ needs.authorize.outputs.cann_date }}'
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', build_type='${{ needs.authorize.outputs.build_type }}'"
+          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', build_type='${{ needs.authorize.outputs.build_type }}', cann_version='${{ needs.authorize.outputs.cann_version }}', cann_date='${{ needs.authorize.outputs.cann_date }}'"
 
   dispatch-a3:
     name: Trigger Nightly-A3
@@ -289,12 +307,14 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f build_type='${{ needs.authorize.outputs.build_type }}'
+            -f build_type='${{ needs.authorize.outputs.build_type }}' \
+            -f cann_version='${{ needs.authorize.outputs.cann_version }}' \
+            -f cann_date='${{ needs.authorize.outputs.cann_date }}'
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', build_type='${{ needs.authorize.outputs.build_type }}'"
+          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', build_type='${{ needs.authorize.outputs.build_type }}', cann_version='${{ needs.authorize.outputs.cann_version }}', cann_date='${{ needs.authorize.outputs.cann_date }}'"
 
   dispatch-a3-560t:
     name: Trigger Nightly-A3-560T
@@ -331,12 +351,14 @@ jobs:
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f build_type='${{ needs.authorize.outputs.build_type }}'
+            -f build_type='${{ needs.authorize.outputs.build_type }}' \
+            -f cann_version='${{ needs.authorize.outputs.cann_version }}' \
+            -f cann_date='${{ needs.authorize.outputs.cann_date }}'
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "a3_560t_run_id=$A3_560T_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', build_type='${{ needs.authorize.outputs.build_type }}'"
+          echo "Dispatched Nightly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', build_type='${{ needs.authorize.outputs.build_type }}', cann_version='${{ needs.authorize.outputs.cann_version }}', cann_date='${{ needs.authorize.outputs.cann_date }}'"
 
   dispatch-weekly-a2:
     name: Trigger Weekly-A2

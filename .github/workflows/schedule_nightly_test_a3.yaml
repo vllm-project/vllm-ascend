@@ -61,6 +61,16 @@ on:
         options:
           - release
           - daily
+      cann_version:
+        description: 'CANN version embedded in the daily image tag (e.g. 2026.07.29). Only effective when build_type=daily and build-image is skipped.'
+        required: false
+        default: '2026.07.29'
+        type: string
+      cann_date:
+        description: 'Date suffix (YYYYMMDD, e.g. 20260729) of the published daily image to pull. Only effective when build_type=daily and build-image is skipped.'
+        required: false
+        default: '20260729'
+        type: string
 
 permissions:
   contents: read
@@ -130,6 +140,8 @@ jobs:
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
       build_type: ${{ steps.export.outputs.build_type }}
+      cann_version: ${{ steps.export.outputs.cann_version }}
+      cann_date: ${{ steps.export.outputs.cann_date }}
     steps:
       - id: export
         run: |
@@ -139,6 +151,8 @@ jobs:
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
             echo "build_type=${{ inputs.build_type }}"
+            echo "cann_version=${{ inputs.cann_version }}"
+            echo "cann_date=${{ inputs.cann_date }}"
           } >> $GITHUB_OUTPUT
 
       - name: Checkout repository
@@ -181,6 +195,7 @@ jobs:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
+      cann_version: ${{ inputs.cann_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -213,7 +228,7 @@ jobs:
           ||
           (
             needs.setup-vars.outputs.build_type == 'daily' &&
-            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, needs.setup-vars.outputs.cann_version, needs.setup-vars.outputs.cann_date)
             ||
             format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
           )
@@ -263,7 +278,7 @@ jobs:
           ||
           (
             needs.setup-vars.outputs.build_type == 'daily' &&
-            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, needs.setup-vars.outputs.cann_version, needs.setup-vars.outputs.cann_date)
             ||
             format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
           )
@@ -312,7 +327,7 @@ jobs:
           ||
           (
             needs.setup-vars.outputs.build_type == 'daily' &&
-            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, needs.setup-vars.outputs.cann_version, needs.setup-vars.outputs.cann_date)
             ||
             format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
           )
@@ -352,7 +367,7 @@ jobs:
           ||
           (
             needs.setup-vars.outputs.build_type == 'daily' &&
-            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, '2026.07.29', '20260729')
+            format('swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend:daily-{0}-a3-cann{1}-{2}', matrix.vllm_ascend_branch, needs.setup-vars.outputs.cann_version, needs.setup-vars.outputs.cann_date)
             ||
             format('swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-{0}-a3', matrix.vllm_ascend_branch)
           )
