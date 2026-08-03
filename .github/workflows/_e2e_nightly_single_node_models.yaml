@@ -50,6 +50,11 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: main
+        description: branch namespace used to select the matching Good-table
       testcase_timeout:
         required: false
         default: 120
@@ -309,7 +314,7 @@ jobs:
         if: ${{ always() && inputs.aop_single_enabled && steps.report.outcome == 'failure' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
-          GOOD_TABLE: /root/.cache/vllm-ascend/nightly/good_table.csv
+          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv
           BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
           BISECT_BAD_COMMIT: ${{ inputs.bisect_bad_commit }}
           BISECT_FAIL_CONFIRM_RETRIES: ${{ inputs.bisect_fail_confirm_retries }}
