@@ -19,7 +19,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -32,19 +31,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         speculator: Any = None,
-        # vllm v0.25.1 passes ``causal=self.dflash_causal`` here while the
-        # vllm main branch removed it from ``init_cudagraph_manager`` and moved
-        # it into ``capture()`` instead. Accepting ``causal`` via ``**kwargs``
-        # keeps us compatible with both pinned versions; it is simply forwarded
-        # to the upstream ``__init__`` which only consumes it on v0.25.1.
-        **kwargs: Any,
     ):
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
             decode_query_len,
-            **kwargs,
         )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
@@ -75,31 +67,16 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
     ) -> None:
         """Capture ACL graphs for DFlash."""
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
-            # On vllm v0.25.1, ``causal`` is forwarded via ``__init__`` and the
-            # upstream ``DFlashCudaGraphManager.capture`` does not accept it.
-            # On vllm main, ``causal`` was moved into ``capture()``, so forward
-            # it there. Gate on the pinned vllm version to stay compatible.
-            if vllm_version_is("0.25.1"):
-                super().capture(
-                    forward_fn,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    max_model_len,
-                    progress_bar_desc,
-                )
-            else:
-                super().capture(
-                    forward_fn,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    max_model_len,
-                    causal,
-                    progress_bar_desc,
-                )
+            super().capture(
+                forward_fn,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                max_model_len,
+                causal,
+                progress_bar_desc,
+            )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

@@ -5,7 +5,7 @@
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](tutorials/models/Qwen3-30B-A3B.md).
-- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
 
 ## Prerequisites
 
@@ -15,13 +15,14 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- Atlas inference products
+- Atlas 300I DUO
+- Atlas 200I Pro
 
 ## Requirements
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas inference products.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas 300I DUO.
 - Software:
 
     === "Atlas A2 inference products / Atlas A3 inference products"
@@ -34,7 +35,7 @@ This section guides you through container-based environment setup and large mode
         | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
         | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
 
-    === "Atlas inference products"
+    === "Atlas 300I DUO"
 
         | Software      | Supported version                | Note                                      |
         |---------------|----------------------------------|-------------------------------------------|
@@ -45,11 +46,11 @@ This section guides you through container-based environment setup and large mode
         | NNAL          | == 9.1.0-beta.1                 | Required for libatb.so, enables advanced tensor operations |
         | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
-!!! note "Atlas inference products"
+!!! note "Atlas 300I DUO"
 
-    Atlas inference products use `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
+    Atlas 300I DUO uses `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
 
-    Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+    Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
     Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 
@@ -118,9 +119,9 @@ Before using containers, make sure Docker is installed on your system. If Docker
     apt-get update -y && apt-get install -y curl
     ```
 
-=== "Ubuntu (Atlas inference products)"
+=== "Ubuntu (Atlas 300I DUO)"
 
-    The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+    The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
     ```bash
 
@@ -208,9 +209,9 @@ Before using containers, make sure Docker is installed on your system. If Docker
     yum update -y && yum install -y curl
     ```
 
-=== "openEuler (Atlas inference products)"
+=== "openEuler (Atlas 300I DUO)"
 
-    The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+    The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
     ```bash
 
@@ -369,8 +370,8 @@ There are two ways to start vLLM on Ascend NPU:
     <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
     ```bash
-      VLLM_PID=$(pgrep -f "vllm serve")
-      kill -2 "$VLLM_PID"
+    VLLM_PID=$(pgrep -f "vllm serve")
+    kill -2 "$VLLM_PID"
     ```
 
     The output is as below:

@@ -9,11 +9,11 @@ from torch import nn
 from vllm_ascend._310p.fused_moe import fused_moe as fused_moe_310_module
 from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendMoERunner310,
+    AscendRoutedExperts310,
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -29,18 +29,31 @@ def _build_weight_layer():
     )
 
 
-def test_runner_310_installs_specialized_unquantized_method_and_comm():
+def test_routed_experts_310_owns_specialized_unquantized_method(monkeypatch):
+    routed_experts = AscendRoutedExperts310.__new__(AscendRoutedExperts310)
+    routed_experts.tid2eid = object()
+    moe_config = MagicMock()
+    monkeypatch.setattr(
+        AscendUnquantizedFusedMoEMethod310,
+        "dispatch_forward",
+        lambda self, compile_native=False: self.forward_native,
+    )
+
+    method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
+
+    assert isinstance(method, AscendUnquantizedFusedMoEMethod310)
+    assert method.moe is moe_config
+
+
+def test_runner_310_installs_specialized_comm():
     runner = _build_runner()
     moe_config = MagicMock()
     runner.moe_config = moe_config
-    runner._get_quant_type = MagicMock(return_value=QuantType.NONE)
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
-    quant_method = object()
     comm_method = object()
 
     with (
         patch.object(AscendMoERunner, "__init__", return_value=None) as parent_init,
-        patch.object(fused_moe_310_module, "AscendUnquantizedFusedMoEMethod310", return_value=quant_method),
         patch.object(fused_moe_310_module, "AllGatherCommImpl310", return_value=comm_method),
         patch.dict(fused_moe_310_module._MoECommMethods, clear=False),
     ):
@@ -52,8 +65,7 @@ def test_runner_310_installs_specialized_unquantized_method_and_comm():
             routed_experts,
         )
 
-        assert routed_experts.quant_method is quant_method
-        assert runner.quant_type == QuantType.NONE
+        assert routed_experts.quant_method is None
         assert runner.multistream_overlap_shared_expert is False
         assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
         parent_init.assert_called_once()
@@ -127,7 +139,7 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
         before_combine_evt=None,
         swiglu_limit=0.0,
     )
-    runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
+    runner.routed_experts = SimpleNamespace(no_shared_forward_impl=MagicMock(return_value=routed_result))
     runner._forward_shared_experts = MagicMock(return_value=shared_out)
     current_stream = MagicMock()
 
@@ -136,9 +148,9 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
 
     result = runner.shared_forward_impl(hidden_states, router_logits)
 
-    runner.no_shared_forward_impl.assert_called_once_with(
-        hidden_states,
-        router_logits,
+    runner.routed_experts.no_shared_forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
         return_with_event=True,
     )
     if has_shared_experts:

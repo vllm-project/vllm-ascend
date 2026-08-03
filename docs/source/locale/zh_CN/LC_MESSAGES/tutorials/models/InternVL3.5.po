@@ -68,13 +68,6 @@ msgstr "### 3.1 模型权重"
 msgid "require 1 Atlas 800 A3 (64G × 16) node:"
 msgstr "需要 1 个 Atlas 800 A3 (64G × 16) 节点："
 
-msgid ""
-"- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64G × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)\n"
-"- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64G × 16) node [Download model weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
-msgstr ""
-"- `InternVL3_5-38B-w8a8`：需要 1 个 Atlas 800 A3 (64G × 16) 节点 [下载模型权重](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)\n"
-"- `InternVL3_5-241B-A28B-w8a8`：需要 1 个 Atlas 800 A3 (64G × 16) 节点 [下载模型权重](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
-
 msgid "## 4 Installation"
 msgstr "## 4 安装"
 
@@ -102,11 +95,6 @@ msgid ""
 "[installation](../../installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
-msgid ""
-"If you want to deploy multi-node environment, you need to set up environment"
-" on each node."
-msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
-
 msgid "## 5 Online Service Deployment"
 msgstr "## 5 在线服务部署"
 
@@ -116,19 +104,8 @@ msgstr "### 5.1 单节点在线部署"
 msgid "=== \"InternVL3_5-38B\""
 msgstr "=== \"InternVL3_5-38B\""
 
-msgid ""
-"- Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 "
-"(64G × 16) ."
-msgstr "- 量化模型 `InternVL3_5-38B-w8a8` 可以部署在 1 个 Atlas 800 A3 (64G × 16) 上。"
-
 msgid "=== \"InternVL3_5-241B-A28B\""
 msgstr "=== \"InternVL3_5-241B-A28B\""
-
-msgid ""
-"- Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas "
-"800 A3 (64G × 16) ."
-msgstr ""
-"- 量化模型 `InternVL3_5-241B-A28B-w8a8` 可以部署在 1 个 Atlas 800 A3 (64G × 16) 上。"
 
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
@@ -200,19 +177,35 @@ msgstr ""
 msgid "### 8.2 Using vLLM Benchmark"
 msgstr "### 8.2 使用 vLLM Benchmark"
 
-msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
-"more details."
-msgstr ""
-"有关更多详细信息，请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
-
 msgid "## 9 FAQ"
 msgstr "## 9 常见问题解答"
 
-msgid ""
-"- Common Issues Tip: If you encounter issues, Refer to "
-"[FAQs](../../faqs.md)."
-msgstr "- 常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
-
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
+
+msgid ""
+"- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)\n"
+"- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
+msgstr ""
+"- `InternVL3_5-38B-w8a8`：需要1个Atlas 800 A3（64GB × 16）节点 [下载模型权重](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)\n"
+"- `InternVL3_5-241B-A28B-w8a8`：需要1个Atlas 800 A3（64GB × 16）节点 [下载模型权重](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
+
+msgid ""
+"- Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 "
+"(64G × 16) node."
+msgstr "- 量化模型 `InternVL3_5-38B-w8a8` 可以部署在1个Atlas 800 A3（64G × 16）节点上。"
+
+msgid ""
+"- Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas "
+"800 A3 (64G × 16) node."
+msgstr "- 量化模型 `InternVL3_5-241B-A28B-w8a8` 可以部署在1个Atlas 800 A3（64G × 16）节点上。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr "更多详细信息请参考 [vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid ""
+"- Common Issues Tip: If you encounter issues, refer to "
+"[FAQs](../../faqs.md)."
+msgstr "- 常见问题提示：如果遇到问题，请参考 [常见问题](../../faqs.md)。"

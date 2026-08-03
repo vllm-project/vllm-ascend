@@ -1,0 +1,183 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3.6-35B-A3B-in16k-out1k-0-128-32"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_BUFFSIZE: "1024"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "36"
+      - "--max-model-len"
+      - "20000"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,40,48,64,76,80,88,96,100,104,108,112,116,120,136,140,144],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--profiler-config"
+      - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1024
+        batch_size: 32
+        request_rate: 0.6
+        baseline: 548.2128
+        threshold: 0.97
+  - name: "Qwen3.6-35B-A3B-in984k-out1k-0-4-2"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    envs:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "200"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_GDN_FAST_PATH: "1"
+      VLLM_ASCEND_GDN_MAX_PADDING_RATIO: "2.0"
+      VLLM_ASCEND_GDN_MAX_H_OVERALLOC_RATIO: "2.0"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--hf-overrides"
+      - '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}}}'
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--max-model-len"
+      - "1010000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-num-seqs"
+      - "128"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--trust-remote-code"
+      - "--async-scheduling"
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_in1007616_bs16_prefix0_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 1024
+        batch_size: 2
+        request_rate: 0
+        baseline: 2.2225
+        threshold: 0.97
+  - name: "Qwen3.6-35B-A3B-in128k-out1k-90-60-15"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    envs:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_BUFFSIZE: "1024"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_DISABLE_COMPILE_CACHE: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "36"
+      - "--max-model-len"
+      - "140000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,40,48,64,76,80,88,96,100,104,108,112,116,120,136,140,144],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--profiler-config"
+      - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 60
+        max_out_len: 1024
+        batch_size: 15
+        request_rate: 0
+        baseline: 223.2484
+        threshold: 0.97

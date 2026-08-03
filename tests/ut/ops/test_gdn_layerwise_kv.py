@@ -29,7 +29,6 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNPrefillMetadata,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 class _Linear(nn.Module):
@@ -97,9 +96,6 @@ def _run_gdn_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
 ) -> torch.Tensor:
-    if vllm_version_is("0.25.1"):
-        result = model(hidden_states, output)
-        return output if result is None else result
     return model(hidden_states)
 
 
