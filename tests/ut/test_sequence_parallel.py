@@ -21,6 +21,8 @@ import pytest
 from vllm_ascend.sequence_parallel import (
     DENSE_SP_MIN_TOKENS,
     MOE_SP_MIN_TOKENS,
+    SequenceParallelActivationState,
+    SequenceParallelRuntimeState,
     resolve_sequence_parallel_policy,
 )
 
@@ -162,3 +164,100 @@ def test_negative_num_tokens_is_rejected():
 
     with pytest.raises(ValueError, match="num_tokens"):
         policy.should_shard(-1)
+
+
+def test_runtime_state_calculates_local_geometry():
+    state = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=4,
+        num_tokens=10,
+    )
+
+    assert state.padded_num_tokens == 12
+    assert state.local_num_tokens == 3
+    assert state.pad_size == 2
+    assert state.activation is SequenceParallelActivationState.FULL
+
+
+def test_runtime_state_uses_dp_maximum_for_padding():
+    state = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=4,
+        num_tokens=7,
+        max_num_tokens=10,
+    )
+
+    assert state.padded_num_tokens == 12
+    assert state.local_num_tokens == 3
+    assert state.pad_size == 5
+
+
+def test_inactive_runtime_state_does_not_pad():
+    state = SequenceParallelRuntimeState.create(
+        active=False,
+        world_size=4,
+        num_tokens=10,
+        max_num_tokens=15,
+    )
+
+    assert state.padded_num_tokens == 10
+    assert state.local_num_tokens == 10
+    assert state.pad_size == 0
+
+
+def test_runtime_state_tracks_explicit_transitions():
+    state = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=2,
+        num_tokens=8,
+    )
+
+    partial = state.transition_to(SequenceParallelActivationState.TP_PARTIAL)
+    sharded = partial.transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)
+    full = sharded.transition_to(SequenceParallelActivationState.FULL)
+
+    assert state.activation is SequenceParallelActivationState.FULL
+    assert partial.activation is SequenceParallelActivationState.TP_PARTIAL
+    assert sharded.activation is SequenceParallelActivationState.SEQUENCE_SHARDED
+    assert full.activation is SequenceParallelActivationState.FULL
+
+
+def test_runtime_state_rejects_implicit_partial_transition():
+    state = SequenceParallelRuntimeState.create(
+        active=True,
+        world_size=2,
+        num_tokens=8,
+    ).transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)
+
+    with pytest.raises(ValueError, match="sequence_sharded -> tp_partial"):
+        state.transition_to(SequenceParallelActivationState.TP_PARTIAL)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"active": True, "world_size": 1, "num_tokens": 8},
+        {"active": True, "world_size": 0, "num_tokens": 8},
+        {"active": True, "world_size": 2, "num_tokens": -1},
+        {
+            "active": True,
+            "world_size": 2,
+            "num_tokens": 8,
+            "max_num_tokens": 7,
+        },
+    ],
+)
+def test_runtime_state_rejects_invalid_geometry(kwargs):
+    with pytest.raises(ValueError):
+        SequenceParallelRuntimeState.create(**kwargs)
+
+
+def test_inactive_runtime_state_rejects_sharding_transition():
+    state = SequenceParallelRuntimeState.create(
+        active=False,
+        world_size=2,
+        num_tokens=8,
+    )
+
+    with pytest.raises(ValueError, match="inactive"):
+        state.transition_to(SequenceParallelActivationState.SEQUENCE_SHARDED)

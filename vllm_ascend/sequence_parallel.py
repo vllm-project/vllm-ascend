@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,6 +23,93 @@ if TYPE_CHECKING:
 
 DENSE_SP_MIN_TOKENS = 1000
 MOE_SP_MIN_TOKENS = 1
+
+
+class SequenceParallelActivationState(Enum):
+    """Ownership of an activation at an SP-aware layer boundary."""
+
+    FULL = "full"
+    TP_PARTIAL = "tp_partial"
+    SEQUENCE_SHARDED = "sequence_sharded"
+
+
+_VALID_ACTIVATION_TRANSITIONS = {
+    SequenceParallelActivationState.FULL: {
+        SequenceParallelActivationState.TP_PARTIAL,
+        SequenceParallelActivationState.SEQUENCE_SHARDED,
+    },
+    SequenceParallelActivationState.TP_PARTIAL: {
+        SequenceParallelActivationState.FULL,
+        SequenceParallelActivationState.SEQUENCE_SHARDED,
+    },
+    SequenceParallelActivationState.SEQUENCE_SHARDED: {
+        SequenceParallelActivationState.FULL,
+    },
+}
+
+
+@dataclass(frozen=True)
+class SequenceParallelRuntimeState:
+    """Per-forward SP geometry and current activation ownership."""
+
+    active: bool
+    world_size: int
+    num_tokens: int
+    padded_num_tokens: int
+    local_num_tokens: int
+    pad_size: int
+    activation: SequenceParallelActivationState = SequenceParallelActivationState.FULL
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        active: bool,
+        world_size: int,
+        num_tokens: int,
+        max_num_tokens: int | None = None,
+    ) -> "SequenceParallelRuntimeState":
+        if world_size < 1:
+            raise ValueError("world_size must be positive")
+        if num_tokens < 0:
+            raise ValueError("num_tokens must be non-negative")
+        if max_num_tokens is None:
+            max_num_tokens = num_tokens
+        if max_num_tokens < num_tokens:
+            raise ValueError("max_num_tokens must not be smaller than num_tokens")
+        if active and world_size == 1:
+            raise ValueError("active sequence parallelism requires world_size > 1")
+
+        if active:
+            padded_num_tokens = ((max_num_tokens + world_size - 1) // world_size) * world_size
+            local_num_tokens = padded_num_tokens // world_size
+            pad_size = padded_num_tokens - num_tokens
+        else:
+            padded_num_tokens = num_tokens
+            local_num_tokens = num_tokens
+            pad_size = 0
+
+        return cls(
+            active=active,
+            world_size=world_size,
+            num_tokens=num_tokens,
+            padded_num_tokens=padded_num_tokens,
+            local_num_tokens=local_num_tokens,
+            pad_size=pad_size,
+        )
+
+    def transition_to(
+        self,
+        activation: SequenceParallelActivationState,
+    ) -> "SequenceParallelRuntimeState":
+        """Return a new state after validating an explicit layer transition."""
+        if activation is self.activation:
+            return self
+        if not self.active:
+            raise ValueError("activation cannot be sharded while sequence parallelism is inactive")
+        if activation not in _VALID_ACTIVATION_TRANSITIONS[self.activation]:
+            raise ValueError(f"invalid sequence-parallel transition: {self.activation.value} -> {activation.value}")
+        return replace(self, activation=activation)
 
 
 @dataclass(frozen=True)
