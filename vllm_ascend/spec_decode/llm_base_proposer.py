@@ -273,6 +273,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         Q = self._load_quarot_rotation(target_model_path)
         if Q is None:
             return
+        # Keep Q alive until the shared embedding/lm_head boundaries are fixed
+        # below.  A draft without its own embedding/lm_head must not directly
+        # consume the rotated target tensors: its trained layers live in the
+        # original, unrotated basis.
+        Q = Q.to(self.device).to(torch.float32)
+        self._quarot_rotation = Q
         draft_model = getattr(self.model, "model", None)
         fc = getattr(draft_model, "fc", None) if draft_model is not None else None
         if fc is None:
@@ -289,18 +295,62 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             return
         num_features = in_features // H
-        Q = Q.to(fc_weight.device).to(torch.float32)
         # Apply Q to each H-sized block of the in_features axis (block-diagonal
         # rotation) without materializing the mostly-zero block-diagonal matrix.
         fc_f32 = fc_weight.data.to(torch.float32).reshape(out_features, num_features, H)
         fc_rot = torch.matmul(fc_f32, Q)  # [out, num_features, H]
-        fc_weight.data = fc_rot.reshape(out_features, in_features).to(fc_weight.dtype)
+        fc_weight.data.copy_(fc_rot.reshape(out_features, in_features).to(fc_weight.dtype))
         logger.info(
             "[spec_decode/quarot] Anti-rotated draft fc.weight with QuaRot Q "
             "(num_features=%d, fc=%s).",
             num_features,
             tuple(fc_weight.shape),
         )
+
+    def _copy_unrotated_shared_weight(
+        self,
+        draft_layer: nn.Module,
+        target_layer: nn.Module,
+        label: str,
+    ) -> bool:
+        """Copy a rotated target weight into an unrotated draft-owned layer.
+
+        With row-vector hidden states, the target exports rotated weights as
+        ``W_rot = W @ Q``.  The draft was trained in the original basis, so a
+        target embedding/lm_head shared with it must use
+        ``W = W_rot @ Q.T``.  Never mutate the target layer in-place.
+        """
+        Q = getattr(self, "_quarot_rotation", None)
+        if Q is None:
+            return False
+        draft_weight = getattr(draft_layer, "weight", None)
+        target_weight = getattr(target_layer, "weight", None)
+        if not isinstance(draft_weight, torch.Tensor) or not isinstance(target_weight, torch.Tensor):
+            logger.warning(
+                "[spec_decode/quarot] Cannot anti-rotate shared %s: weight tensor missing.",
+                label,
+            )
+            return False
+        if draft_weight.shape != target_weight.shape or target_weight.shape[-1] != Q.shape[0]:
+            logger.warning(
+                "[spec_decode/quarot] Cannot anti-rotate shared %s: draft=%s, target=%s, Q=%s.",
+                label,
+                tuple(draft_weight.shape),
+                tuple(target_weight.shape),
+                tuple(Q.shape),
+            )
+            return False
+
+        target_f32 = target_weight.data.to(torch.float32)
+        unrotated = torch.matmul(target_f32, Q.T)
+        draft_weight.data.copy_(unrotated.to(draft_weight.dtype))
+        logger.info(
+            "[spec_decode/quarot] Copied and anti-rotated shared %s with Q.T "
+            "(weight=%s).",
+            label,
+            tuple(draft_weight.shape),
+        )
+        return True
 
     @staticmethod
     def _load_quarot_rotation(target_model_path: str):
@@ -321,12 +371,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return None
         try:
             with open(desc_path) as f: desc = json.load(f)
-            if not desc.get("is_rot_used", False):
-                return None
-            rel = desc["optional"]["quarot"]["rotation_map"]["global_rotation"]
-        except (KeyError, ValueError, OSError) as e:
-            logger.warning("[spec_decode/quarot] is_rot_used=True but a key is missing in %s "
-                   "(verify schema: %s); skipping.", desc_path, e)
+            rel = (
+                desc.get("optional", {})
+                .get("quarot", {})
+                .get("rotation_map", {})
+                .get("global_rotation", "optional/quarot.safetensors")
+            )
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "[spec_decode/quarot] Failed to read %s (%s); skipping draft fc anti-rotation.",
+                desc_path,
+                e,
+            )
             return None
 
         q_path = Path(target_model_path) / rel
@@ -336,6 +392,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                            q_path,
             )
             return None
+        logger.info(
+            "[spec_decode/quarot] Loading global_rotation from %s "
+            "without requiring is_rot_used=true.",
+            q_path,
+        )
         try:
             return load_file(q_path)["global_rotation"]
         except Exception as e:
@@ -447,6 +508,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
+        # All three QuaRot boundaries (aux fc, embedding, lm_head) have now
+        # been handled. Release the temporary full-precision Q before graph
+        # capture and KV-cache allocation.
+        self._quarot_rotation = None
 
         if (
             self.parallel_drafting
@@ -531,9 +596,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
 
             if share_embeddings:
-                if hasattr(self.model.model, "embed_tokens"):
-                    del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+                draft_embed_tokens = getattr(self.model.model, "embed_tokens", None)
+                if draft_embed_tokens is not None and self._copy_unrotated_shared_weight(
+                    draft_embed_tokens,
+                    target_embed_tokens,
+                    "draft embed_tokens.weight",
+                ):
+                    logger.info(
+                        "[spec_decode/quarot] Keeping a draft-owned, anti-rotated "
+                        "embedding instead of aliasing the rotated target embedding."
+                    )
+                else:
+                    if hasattr(self.model.model, "embed_tokens"):
+                        del self.model.model.embed_tokens
+                    self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
                 "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
@@ -568,16 +644,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
+                target_lm_head = None
                 if hasattr(model, "lm_head"):
-                    self.model.lm_head = model.lm_head
+                    target_lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                    self.model.lm_head = model.get_language_model().lm_head
-                else:
+                    target_lm_head = model.get_language_model().lm_head
+                if target_lm_head is None:
                     logger.warning(
                         "[spec_decode/base] Target model has no accessible lm_head"
                         " for sharing. Draft model will use its own lm_head."
                         " This may cause incorrect logits if the draft lm_head"
                         " is not trained."
+                    )
+                elif not self._copy_unrotated_shared_weight(
+                    self.model.lm_head,
+                    target_lm_head,
+                    "draft lm_head.weight",
+                ):
+                    self.model.lm_head = target_lm_head
+                else:
+                    logger.info(
+                        "[spec_decode/quarot] Keeping a draft-owned, anti-rotated "
+                        "lm_head instead of aliasing the rotated target lm_head."
                     )
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
