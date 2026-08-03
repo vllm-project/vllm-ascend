@@ -19,8 +19,13 @@
 # **Please note**: current A5 resource pool's maximum allowed concurrency is 5*16 NPUs
 # We will limit the concurrency of jobs on A5 to avoid the risk of insufficient resources
 name: Nightly-A5
-
 on:
+  workflow_call:
+    inputs:
+      test_config_json:
+        required: true
+        type: string
+        default: "[]"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
