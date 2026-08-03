@@ -17,6 +17,7 @@
 # limitations under the License.
 #
 
+# Static capacity prediction: the largest 2B BF16 case fits a 16 GiB vNPU.
 import os
 
 import pytest

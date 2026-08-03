@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# Static capacity prediction: 3B BF16 plus LoRA fits a 16 GiB vNPU.
 from unittest.mock import patch
 
 import vllm

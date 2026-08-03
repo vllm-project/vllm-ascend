@@ -267,7 +267,7 @@
     - vllm_ascend/kv_offload
   tests:
     - tests/ut/kv_offload
-    - tests/e2e/pull_request/one_card/test_cpu_offloading.py
+    - tests/e2e/pull_request/quarter_card/test_cpu_offloading.py
 
 # Lora
 - name: lora
@@ -335,7 +335,7 @@
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/one_card/test_minicpm.py
+    - tests/e2e/pull_request/quarter_card/test_minicpm.py
 
 - name: ops_moe
   optional: false
@@ -345,7 +345,7 @@
     - vllm_ascend/ops/mla.py
   tests:
     - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
-    - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
+    - tests/e2e/pull_request/half_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py
@@ -361,7 +361,7 @@
     - vllm_ascend/ops/conv.py
     - vllm_ascend/ops/mm_encoder_attention.py
   tests:
-    - tests/e2e/pull_request/one_card/test_vlm.py
+    - tests/e2e/pull_request/half_card/test_vlm.py
     - tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py
 
 - name: ops_deepseek_v4
@@ -490,8 +490,8 @@
     - vllm_ascend/spec_decode/eagle_proposer.py
     - vllm_ascend/models/llama_eagle3_vwn.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_eagle.py
-    - tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_eagle.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_mtp_eagle_correctness.py
     - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
     - tests/e2e/pull_request/eight_card/test_glm5_2.py
@@ -513,7 +513,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/ngram_proposer.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_ngram.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_ngram.py
 
 - name: spec_decode_ngram_npu
   optional: false
@@ -521,7 +521,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/ngram_proposer_npu.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_ngram_npu.py
 
 - name: spec_decode_suffix
   optional: false
@@ -529,7 +529,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/suffix_proposer.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_suffix.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_suffix.py
 
 - name: spec_decode_draft
   optional: false
@@ -537,7 +537,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/draft_proposer.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_draft_parallel.py
 
 - name: spec_decode_dflash
   optional: false
@@ -545,7 +545,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/dflash_proposer.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_dflash.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_dflash.py
 
 - name: spec_decode_dspark_one_card
   optional: false
@@ -553,7 +553,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_dspark.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_dspark.py
 
 - name: spec_decode_dynamic
   optional: false
@@ -572,7 +572,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/extract_hidden_states_proposer.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_extract_hidden_states.py
 
 - name: spec_decode_medusa
   optional: false
@@ -608,6 +608,7 @@
     - tests/e2e/pull_request/quarter_card/test_guided_decoding.py
     - tests/e2e/pull_request/quarter_card/test_multi_instance.py
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/half_card/model_runner_v2
     - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py
     - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
     - tests/e2e/pull_request/two_card/test_prefix_caching.py
@@ -626,6 +627,7 @@
   tests:
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/half_card/model_runner_v2
     - tests/e2e/pull_request/two_card/model_runner_v2
     - tests/e2e/pull_request/four_card/model_runner_v2
     - tests/e2e/pull_request/eight_card/model_runner_v2
@@ -902,6 +904,8 @@ estimated_times:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  tests/ut/attention/a2/test_mla_precision.py:
+    default: a2_half_x1
   tests/e2e/pull_request/quarter_card:
     default: a2_quarter_x1
   tests/e2e/pull_request/half_card:

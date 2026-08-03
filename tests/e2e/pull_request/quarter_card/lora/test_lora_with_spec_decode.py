@@ -3,6 +3,7 @@ This script contains:
 1. test lora with speculative decoding for batch inference
 """
 
+# Static capacity prediction: the 1.7B target and draft fit a 16 GiB vNPU.
 import random
 
 import numpy as np

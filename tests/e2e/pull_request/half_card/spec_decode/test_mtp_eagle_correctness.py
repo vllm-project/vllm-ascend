@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-"""Compare the short outputs of HF and vLLM when using greedy sampling."""
+"""Compare the short outputs of HF and vLLM on the predicted 32 GiB group."""
 
 from __future__ import annotations
 

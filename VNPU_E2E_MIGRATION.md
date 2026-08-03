@@ -1,165 +1,134 @@
-# vNPU E2E 迁移说明
+# vNPU 静态预测分组与测试记录
 
-本文记录 A2B3 vNPU 在 PR 选择性测试中的接入方式、测试分组依据和相对
-[PR #12171](https://github.com/vllm-project/vllm-ascend/pull/12171) 的用例变化。
+本文记录 A2B3 vNPU 的新一轮测试分组。分组只依据当前源码中的模型规模、
+精度、量化方式、KV cache、ACL Graph、显式张量、并发实例和硬件语义；不读取、
+引用或反推任何过往真实测试结果。
 
-本次迁移从 `upstream/main` 的 `e462c42a4` 重新开始。旧 PR 只作为历史实测
-证据，不复用它已经被 main 上新 cache 架构替代的 workflow 实现。
+## 约束与判断口径
 
-## 目标和边界
+- A2B3 整卡按 64 GiB 计算，1/4 卡和 1/2 卡的名义显存分别为 16 GiB、
+  32 GiB。
+- 测试文件是最小迁移单位，不使用 pytest nodeid 拆分。同一文件由静态峰值最高
+  的用例决定 runner。
+- BF16/FP16 权重按约 2 bytes/parameter、W8A8 按约 1 byte/parameter
+  估算；另外预留 KV cache、激活、图捕获、算子 workspace、草稿模型和运行时
+  常驻显存。
+- 1/4 卡主要承载不加载完整模型的合成测试和 0.5B–3B 模型；1/2 卡承载 7B/8B
+  BF16、约 16B W8A8 MoE、高 batch/KV 或目标模型加草稿模型的文件。
+- 只有当静态源码无法证明 vNPU 硬件语义等价时才保留物理整卡，不用旧运行结果
+  作为保留理由。
+- 表格的“本轮实测结果”初始统一为“待填”，用于本轮 CI 完成后记录，不预填旧数据。
 
-- 1/4 vNPU runner：`linux-aarch64-a2b3-v-quarter`，约 8 GiB NPU 显存、
-  6 个 CPU 核。
-- 1/2 vNPU runner：`linux-aarch64-a2b3-v-half`，约 16 GiB NPU 显存、
-  11 个 CPU 核。
-- 两种 vNPU 都是 A2B3、ARM64，并使用与 A2 整卡相同的
-  `9.0.1-910b-ubuntu22.04-py3.12` 镜像。
-- 迁移只改变测试资源路由，不拆分测试文件。同一文件按资源需求最大的用例
-  选择 runner。
-- 需要真实多卡通信、310P/A3 专用能力或物理 NPU 资源的测试保持原位置。
+## 1/4 卡 E2E（27 个文件）
 
-## csrc cache 接入
+| 测试文件 | 主要内容 | 静态预测依据 | 本轮实测结果 |
+| --- | --- | --- | --- |
+| `quarter_card/compile/test_graphex_norm_quant_fusion.py` | Norm/Quant GraphEx 融合 | 无预训练权重，显式 BF16 张量为算子级 | 待填 |
+| `quarter_card/compile/test_graphex_qknorm_rope_fusion.py` | QKNorm/RoPE GraphEx 融合 | 无预训练权重，Q/K/RoPE 张量远低于 GiB 级 | 待填 |
+| `quarter_card/compile/test_norm_quant_fusion.py` | Norm/Quant 编译融合 | 小型合成算子与张量 | 待填 |
+| `quarter_card/lora/test_ilama_lora.py` | iLlama 1B LoRA | FP16 主权重约 2 GiB，eager、1024 上下文 | 待填 |
+| `quarter_card/lora/test_llama32_lora.py` | Llama-3.2-3B LoRA | BF16 权重约 6 GiB，max_num_seqs=7、1024 上下文 | 待填 |
+| `quarter_card/lora/test_lora_with_spec_decode.py` | Qwen3-1.7B LoRA + Eagle3 | 主模型约 3.4 GiB，草稿头、LoRA、KV 和图预计仍低于 16 GiB | 待填 |
+| `quarter_card/lora/test_qwen3_multi_loras.py` | Qwen3-0.6B 多 LoRA | 主模型小，LoRA 增量小且 eager | 待填 |
+| `quarter_card/lora/test_qwen3_reranker_lora.py` | Qwen3-Reranker-0.6B pooling + LoRA | 0.6B 单实例，无长上下文或大 batch | 待填 |
+| `quarter_card/pooling/test_classification.py` | Qwen2.5-1.5B 分类 | HF FP32 与 vLLM 顺序运行，单阶段权重约 6 GiB | 待填 |
+| `quarter_card/pooling/test_embedding.py` | Qwen3-0.6B/E5/BGE embedding | 小模型逐个顺序运行，对照模型不并发常驻 | 待填 |
+| `quarter_card/pooling/test_scoring.py` | MiniLM/BGE scoring | 小型 FP16 pooling/cross-encoder | 待填 |
+| `quarter_card/test_attention_fa3.py` | Qwen3-0.6B FA3/FIA 对比 | 0.6B、短输入、小 capture size | 待填 |
+| `quarter_card/test_batch_job_aware_scheduler_e2e.py` | BatchJobAwareScheduler | 两个 Qwen3-0.6B engine 顺序创建，2048 上下文、0.7 显存比例 | 待填 |
+| `quarter_card/test_camem.py` | sleep/wake 显存管理 | Qwen3-0.6B 单实例 | 待填 |
+| `quarter_card/test_completion_with_prompt_embeds.py` | prompt embeddings | Qwen3-0.6B，embedding 对照与推理阶段不形成双模型 NPU 峰值 | 待填 |
+| `quarter_card/test_cpu_offloading.py` | CPU KV offload connector | 文件当前整体 skip；若启用，0.6B 且 NPU 显存比例 0.5 | 待填 |
+| `quarter_card/test_cpu_weight_offload.py` | 权重预取/卸载 | Qwen3-0.6B、512 上下文，部分权重驻 CPU | 待填 |
+| `quarter_card/test_guided_decoding.py` | structured output | Qwen3-0.6B，额外开销主要在 CPU 解析侧 | 待填 |
+| `quarter_card/test_minicpm.py` | MiniCPM 0.5B/2B | 最大 2B BF16 约 4 GiB，512 上下文、0.7 显存比例 | 待填 |
+| `quarter_card/test_minimax_m3_sparse_attn.py` | MiniMax M3 稀疏 attention | 不加载完整模型，只构造生产形状的 KV/index 合成张量 | 待填 |
+| `quarter_card/test_multi_instance.py` | 两个 Qwen3-0.6B 实例 | 两实例合计约 2.4 GiB 权重，单实例显存比例 0.4 | 待填 |
+| `quarter_card/test_qwen3_0_6b.py` | Qwen3-0.6B 基础图模式 | 小模型、1024 上下文 | 待填 |
+| `quarter_card/test_qwen3_5_0_8b.py` | Qwen3.5-0.8B + MTP | 0.8B 主模型、单 token 草稿、2048 上下文 | 待填 |
+| `quarter_card/test_qwen3_embedding_0_6b.py` | Qwen3-Embedding-0.6B | 0.6B pooling，capture size=4 | 待填 |
+| `quarter_card/test_sampler.py` | sampler/logprobs | Qwen3-0.6B；虽配置 8192 上下文和 capture 64，权重与 KV 仍预计小于 16 GiB | 待填 |
+| `quarter_card/test_simple_cpu_offload.py` | simple CPU offload | Qwen3-0.6B、eager、显存比例 0.5 | 待填 |
+| `quarter_card/test_xlite.py` | XLite eager/graph | Qwen3-0.6B、1024 上下文 | 待填 |
 
-main 已经提供统一的 CPU csrc cache 链路：
+## 1/2 卡 E2E（15 个文件）
 
-1. `select_tests.py` 从 runner 元数据收集 `csrc_cache_target`。
-2. `pr_test.yaml` 调用 `_ensure_csrc_cache.yaml` 检查目标 cache。
-3. cache 缺失时，`_build_csrc_cache.yaml` 在 `linux-arm64-cpu-16` 上使用
-   `SOC_VERSION=ascend910b1` 构建。
-4. `_selected_tests.yaml` 在 NPU runner 上按相同 key 恢复 cache，并用
-   `COMPILE_CUSTOM_KERNELS=0` 安装。
+| 测试文件 | 主要内容 | 静态预测依据 | 本轮实测结果 |
+| --- | --- | --- | --- |
+| `half_card/lora/test_olmoe_lora.py` | OLMoE-1B-7B LoRA | 总权重约 7B，BF16 权重接近 14 GiB，加 LoRA 与图超过 1/4 卡安全余量 | 待填 |
+| `half_card/model_runner_v2/test_basic.py` | V2 runner dense/Eagle/DFlash/DSpark/MTP | 文件原子化后由 8B BF16 主模型加草稿与图模式决定 | 待填 |
+| `half_card/spec_decode/test_dflash.py` | Qwen3-8B DFlash | 约 16 GiB 主权重，加 DFlash、4096 KV、batch 256 和图捕获 | 待填 |
+| `half_card/spec_decode/test_draft_parallel.py` | Llama-3.1-8B + PARD-1B | 主模型约 16 GiB、草稿约 2 GiB，加 KV/PIECEWISE Graph | 待填 |
+| `half_card/spec_decode/test_dspark.py` | Qwen3-8B DSpark | 8B BF16 主模型、草稿、4096 KV、batch 256 | 待填 |
+| `half_card/spec_decode/test_eagle.py` | Qwen3/Qwen3-VL-8B Eagle3 | 文件含 8B 文本和视觉主模型，单次还加载 Eagle3 草稿 | 待填 |
+| `half_card/spec_decode/test_extract_hidden_states.py` | hidden-state 提取 | 文件含 Qwen3-8B 实权重，另保存多层 hidden states | 待填 |
+| `half_card/spec_decode/test_mtp_eagle_correctness.py` | DeepSeek MTP smoke | BF16 MoE checkpoint、batch 256、图 capture 20，静态上不适合 16 GiB | 待填 |
+| `half_card/spec_decode/test_ngram.py` | Llama-3.1-8B n-gram | 8B BF16 主权重约占满 1/4 卡名义容量 | 待填 |
+| `half_card/spec_decode/test_ngram_npu.py` | Llama-3.1-8B NPU n-gram | 8B BF16、batch 256、2048 上下文、PIECEWISE Graph | 待填 |
+| `half_card/spec_decode/test_suffix.py` | Llama-3.1-8B suffix decode | 8B BF16 加 suffix cache、KV 和运行时 | 待填 |
+| `half_card/test_batch_invariant.py` | batch invariant/logprobs | 0.6B 权重虽小，但 batch 最高 144、8192 上下文、显存比例 0.95 | 待填 |
+| `half_card/test_multistream_overlap_shared_expert.py` | DeepSeek-V2-Lite-W8A8 多流共享 expert | 约 16B 总参数 W8A8，加 MoE workspace 和 capture 32 | 待填 |
+| `half_card/test_qwen3_8b_w8a8.py` | Qwen3-8B W8A8 + Eagle3 | 约 8 GiB 主权重，加草稿、4096 KV 与 FULL Graph，1/4 卡余量不足 | 待填 |
+| `half_card/test_vlm.py` | 7B/8B 视觉、音频、Whisper | 文件由 7B/8B BF16 多模态模型决定，需为编码器、KV 和图保留空间 | 待填 |
 
-half/quarter runner 复用目标 `a2-arm64-ubuntu`，对应 key 为：
+## A2 UT（34 个文件）
 
-```text
-vllm-ascend-build-v2-ARM64-9.0.1-910b-ubuntu22.04-py3.12-${CSRC_HASH}
-```
+A2 UT 仍以文件为单位。33 个文件预测放 1/4 卡；只有
+`test_mla_precision.py` 因生产级 MLA 投影矩阵及初始化临时副本放入 1/2 卡。
 
-vNPU 不再承担 cache miss 后的 csrc 编译。恢复失败时 job 直接报错退出，等待
-CPU cache 构建成功后重跑，避免 6/11 核 CPU 上的长时间编译。非 vNPU runner
-在 cache rollout 期间仍保留原有的 NPU 编译回退。
+| 测试文件 | 预测组 | 静态预测依据 | 本轮实测结果 |
+| --- | --- | --- | --- |
+| `tests/ut/attention/a2/test_attention_cp.py` | 1/4 卡 | 通信与 backend 以 mock 为主，小型张量 | 待填 |
+| `tests/ut/attention/a2/test_attention_cp_precision.py` | 1/4 卡 | 合成 Q/K/V，不加载权重 | 待填 |
+| `tests/ut/attention/a2/test_attention_v1.py` | 1/4 卡 | metadata/backend 单元测试，小张量 | 待填 |
+| `tests/ut/attention/a2/test_attention_v1_precision.py` | 1/4 卡 | 单层 Qwen3-8B 形状；显式 KV cache 约 4 GiB，无模型权重 | 待填 |
+| `tests/ut/attention/a2/test_common_cp.py` | 1/4 卡 | reshape/LSE 与 mock collective | 待填 |
+| `tests/ut/attention/a2/test_mla_cp.py` | 1/4 卡 | mock 通信与控制路径，无完整权重 | 待填 |
+| `tests/ut/attention/a2/test_mla_cp_precision.py` | 1/4 卡 | 合成 MLA 输入，无预训练权重 | 待填 |
+| `tests/ut/attention/a2/test_mla_precision.py` | 1/2 卡 | 多块生产级 MLA 投影矩阵及 `randn / sqrt` 临时副本，峰值逼近 16 GiB 边界 | 待填 |
+| `tests/ut/attention/a2/test_mla_v1.py` | 1/4 卡 | backend/metadata mock 和小型 cache | 待填 |
+| `tests/ut/attention/a2/test_sfa_cp_precision.py` | 1/4 卡 | 合成 sparse attention 张量，通信模拟 | 待填 |
+| `tests/ut/attention/a2/test_sfa_v1.py` | 1/4 卡 | 配置与小型 backend 张量 | 待填 |
+| `tests/ut/attention/a2/test_sfa_v1_precision.py` | 1/4 卡 | 合成输入，无完整 DeepSeek 权重 | 待填 |
+| `tests/ut/compilation/a2/test_acl_graph.py` | 1/4 卡 | NPUGraph/context/pool 均 mock | 待填 |
+| `tests/ut/device_allocator/a2/test_find_loaded_library.py` | 1/4 卡 | 进程库映射检查，无 NPU 大分配 | 待填 |
+| `tests/ut/eplb/core/a2/test_eplb_utils.py` | 1/4 卡 | CPU 侧 expert 映射逻辑 | 待填 |
+| `tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py` | 1/4 卡 | fake connector 生命周期 | 待填 |
+| `tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py` | 1/4 卡 | fake connector 生命周期 | 待填 |
+| `tests/ut/ops/a2/test_gdn_chunk_meta.py` | 1/4 卡 | 小型 metadata 张量 | 待填 |
+| `tests/ut/ops/a2/test_gdn_layerwise_kv.py` | 1/4 卡 | 小型 layerwise KV 合成张量 | 待填 |
+| `tests/ut/ops/a2/test_token_dispatcher.py` | 1/4 卡 | 小型 token/expert 张量，rank 模拟 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w4a16.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w4a4_flatquant.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w4a4_laos_dynamic.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w4a8.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w8a16.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w8a8_dynamic.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/quantization/methods/a2/test_w8a8_static.py` | 1/4 卡 | 算子级量化矩阵 | 待填 |
+| `tests/ut/sample/a2/test_gumbel_sampling.py` | 1/4 卡 | sampler 合成 logits | 待填 |
+| `tests/ut/spec_decode/a2/test_eagle_proposer.py` | 1/4 卡 | runner/model/graph context 大量 mock | 待填 |
+| `tests/ut/worker/a2/test_block_table.py` | 1/4 卡 | block table 小型 metadata | 待填 |
+| `tests/ut/worker/a2/test_model_runner_v1.py` | 1/4 卡 | runner 以 `__new__`/mock 构造，小型 cache | 待填 |
+| `tests/ut/worker/a2/test_model_runner_v1_with_device.py` | 1/4 卡 | 设备路径单元测试，无完整模型 | 待填 |
+| `tests/ut/worker/a2/test_worker_multi_instance.py` | 1/4 卡 | worker 状态与 mock 实例 | 待填 |
+| `tests/ut/worker/a2/test_worker_v1.py` | 1/4 卡 | worker 生命周期与 mock | 待填 |
 
-安装阶段仍按 runner CPU 配额设置 `MAX_JOBS`：
+## 保留物理整卡的文件
 
-| runner | `SOC_VERSION` | `MAX_JOBS` | cache miss |
-| --- | --- | ---: | --- |
-| 1/4 vNPU | `ascend910b1` | 6 | 直接失败，不本地编译 |
-| 1/2 vNPU | `ascend910b1` | 11 | 直接失败，不本地编译 |
-
-## 分组口径
-
-- 1/4 卡优先放无模型的合成张量测试、A2 UT，以及 0.6B/0.8B/1B 小模型。
-- 1/2 卡放 1.5B FP32 对照、3B/4B BF16、8B W8A8 或主模型加草稿模型的
-  用例。
-- BF16/FP16 权重按约 2 bytes/parameter 估算，W8A8 按约
-  1 byte/parameter 估算，并为 KV cache、ACL Graph、workspace 和运行时
-  常驻内存保留余量。
-- 模型虽小但依赖物理卡 SQ/CQ、NPU IPC 或真实多卡 HCCL 的用例不下沉。
-- 当前分桶数为 1/4 卡 6 桶、1/2 卡 5 桶；按 `estimated_times` 做贪心均衡。
-
-## 1/4 vNPU E2E
-
-| 测试文件 | 资源判断 |
+| 测试文件 | 保留原因 |
 | --- | --- |
-| `quarter_card/compile/test_graphex_norm_quant_fusion.py` | 无预训练模型，小型 BF16 合成张量 |
-| `quarter_card/compile/test_graphex_qknorm_rope_fusion.py` | 无预训练模型，Q/K/RoPE 张量为 MiB 级 |
-| `quarter_card/compile/test_norm_quant_fusion.py` | 无预训练模型，小算子融合测试 |
-| `quarter_card/lora/test_ilama_lora.py` | iLlama 1B，FP16 权重约 2 GiB |
-| `quarter_card/lora/test_qwen3_multi_loras.py` | Qwen3-0.6B，多 LoRA 增量较小 |
-| `quarter_card/pooling/test_embedding.py` | 最大约 0.6B，HF 与 vLLM 顺序运行 |
-| `quarter_card/pooling/test_scoring.py` | MiniLM/bge 小模型，FP16 pooling |
-| `quarter_card/test_attention_fa3.py` | Qwen3-0.6B，短上下文 |
-| `quarter_card/test_batch_job_aware_scheduler_e2e.py` | Qwen3-0.6B；两种 scheduler 顺序对比 |
-| `quarter_card/test_camem.py` | Qwen3-0.6B，sleep/wake |
-| `quarter_card/test_completion_with_prompt_embeds.py` | Qwen3-0.6B；embedding 对照主要在 CPU |
-| `quarter_card/test_cpu_weight_offload.py` | Qwen3-0.6B，部分权重主动卸载到 CPU |
-| `quarter_card/test_guided_decoding.py` | Qwen3-0.6B，主要增加 CPU 侧解析 |
-| `quarter_card/test_minimax_m3_sparse_attn.py` | 不加载 MiniMax M3 权重；仅生产形状的合成 KV/index 张量和稀疏算子 |
-| `quarter_card/test_multi_instance.py` | 两个 Qwen3-0.6B 实例，总显存预算受 0.4 比例限制 |
-| `quarter_card/test_qwen3_0_6b.py` | Qwen3-0.6B，capture size 较小 |
-| `quarter_card/test_qwen3_5_0_8b.py` | Qwen3.5-0.8B，预计仍低于 8 GiB |
-| `quarter_card/test_qwen3_embedding_0_6b.py` | Qwen3-Embedding-0.6B |
-| `quarter_card/test_sampler.py` | Qwen3-0.6B，实际输入较短 |
-| `quarter_card/test_simple_cpu_offload.py` | Qwen3-0.6B，NPU 显存比例为 0.5 |
-| `quarter_card/test_xlite.py` | Qwen3-0.6B，短上下文 |
+| `one_card/model_runner_v2/test_uva.py` | 验证 `pinned_mem_register`/UVA 语义；这不是显存容量问题，静态源码无法证明 vNPU 等价。 |
+| `one_card/test_npu_ipc_weight_transfer.py` | 同时验证跨进程 NPU IPC 权重共享和服务生命周期，需要物理设备 IPC 语义。 |
 
-其中以下两个文件是旧 PR 基线之后新增、此次重新分析后加入 1/4 vNPU 的用例：
+310P 专用、A3、多卡 HCCL 测试保持原 runner，不参与本次 A2B3 vNPU 容量采样。
 
-- `test_batch_job_aware_scheduler_e2e.py`：四类用例都使用 Qwen3-0.6B，
-  每次基线与目标 scheduler 顺序启动，不同时常驻两份模型。
-- `test_minimax_m3_sparse_attn.py`：文件名对应 MiniMax M3，但没有加载完整模型。
-  最大生产形状使用 10240 token 的分页 KV/index cache，实际分配规模远小于
-  8 GiB，适合先在 1/4 vNPU 验证。
+## 本轮临时执行方式
 
-## 1/2 vNPU E2E
-
-| 测试文件 | 资源判断 |
-| --- | --- |
-| `half_card/lora/test_llama32_lora.py` | Llama-3.2-3B BF16 加 LoRA，8 GiB 余量不足 |
-| `half_card/lora/test_lora_with_spec_decode.py` | Qwen3-1.7B 主模型、Eagle3 草稿模型和 LoRA |
-| `half_card/pooling/test_classification.py` | Qwen2.5-1.5B 的 HF FP32 对照约 6 GiB |
-| `half_card/test_qwen3_8b_w8a8.py` | 8B W8A8 主模型加 Eagle3、KV cache 和 FULL Graph |
-
-## A2 UT
-
-`tests/ut/**/a2/test_*.py` 统一路由到 1/4 vNPU。当前共有 34 个文件，主要使用
-mock、小型合成张量或配置对象，不加载完整预训练权重，也不建立真实多卡
-HCCL，因此不需要占用 A2 物理整卡。
-
-相对旧 PR 基线，数量仍为 34，但集合发生了变化：
-
-- 新增 `tests/ut/ops/a2/test_gdn_layerwise_kv.py`：GDN layerwise KV 的小型
-  metadata/cache 张量测试，适合 1/4 vNPU。
-- 删除 `tests/ut/worker/a2/test_kvcomp_utils.py`：不再进入任何 runner。
-
-其余修改过的 A2 UT 没有新增完整模型或真实多卡依赖，继续使用 1/4 vNPU。
-
-## 保持原 runner 的新增/删除用例
-
-旧 PR 基线之后新增的多卡 E2E 不迁入 vNPU：
-
-- `four_card/spec_decode/test_dspark_deepseekv4.py`：保留四卡语义。
-- `two_card/lora/test_qwen35_densemodel_lora_tp.py`：覆盖 TP=1/2、
-  fully-sharded LoRA 与 ACL Graph 组合，保留双卡语义。
-- `two_card/lora/test_qwen3moe_lora.py`：保留两卡 LoRA/TP 语义；它替代了已删除
-  的 `two_card/lora/test_qwen3moe_lora_tp.py`。
-- `two_card/test_gemma4.py`、`two_card/test_xlite.py`：保留两卡语义。
-
-已删除的 `four_card/context_parallel/test_prefix_caching_cp.py` 不再调度。
-
-以下单卡文件也继续留在物理整卡：
-
-| 测试范围 | 保留原因 |
-| --- | --- |
-| `one_card/lora/test_qwen3_reranker_lora.py` | 历史 vNPU 实测在 ACL Graph capture 出现 SQ/CQ 资源分配失败 |
-| `one_card/test_minicpm.py` | 文件同时包含 2B 模型，历史半卡仍在 graph capture 失败 |
-| `one_card/lora/test_olmoe_lora.py` | MoE 总权重约 7B，16 GiB 缺少可靠余量 |
-| `one_card/model_runner_v2/test_basic.py`、`one_card/spec_decode/` | 文件包含 8B BF16 主模型和草稿模型 |
-| `one_card/test_batch_invariant.py` | 高 batch、长 prompt 的 KV cache 峰值较大 |
-| `one_card/test_npu_ipc_weight_transfer.py` | 依赖物理 NPU IPC 能力，不是显存大小问题 |
-| `one_card/test_vlm.py` | 文件包含 7B/8B 多模态、音频模型 |
-| `one_card/model_runner_v2/test_uva.py`、`one_card/test_cpu_offloading.py` | 当前整体 skip，迁移不能产生有效 vNPU 覆盖 |
-
-## 验证要求
-
-本地可验证的内容：
-
-- YAML/JSON/Python/Shell 格式和静态检查；
-- `test_select_tests.py` 的 half/quarter 路由、分桶和 cache target 输出；
-- `coverage.py` 对迁移后路径的完整性检查；
-- main2main 固定用例路径存在。
-
-本地 macOS 没有 Ascend NPU，以下项目必须由 CI 实测：
-
-- CPU 构建的 A2 csrc cache 能被两种 vNPU 恢复；
-- vNPU cache miss 会快速失败，不会进入本地 csrc 编译；
-- 1/4 卡 21 个 E2E、34 个 A2 UT 和 1/2 卡 4 个 E2E 的真实通过率；
-- 新迁入的 BatchJobAwareScheduler 与 MiniMax M3 稀疏算子用例；
-- pytest skip 不计为通过，OOM、SQ/CQ 和硬件能力失败需要单独记录并回退。
-
-旧 PR 的
-[run 29482312479](https://github.com/vllm-project/vllm-ascend/actions/runs/29482312479)
-和
-[run 29487123938](https://github.com/vllm-project/vllm-ascend/actions/runs/29487123938)
-可作为分组的历史证据，但不能替代当前 main、当前 cache artifact 和当前测试
-集合上的重新验证。
+- PR 的选择命令临时传入 `--npu-types a2_quarter a2_half`。选择器仍先按正常
+  模块依赖收集测试，再只输出 1/4 和 1/2 两类 runner；CPU、物理整卡、310P、
+  A3 和多卡组本轮不执行。
+- 该过滤只接入 `pr_test.yaml`，不会改变 `/e2e` 命令、定时覆盖率任务或选择器
+  的默认行为。完成本轮容量采样后应删除该参数。
+- `run_selected_tests.sh` 对每个文件单独调用 pytest。某个文件失败时记录状态和
+  日志并继续执行同一分桶内剩余文件；全部文件结束后统一打印汇总，并以首个非零
+  状态退出，确保既收集完整结果又不掩盖失败。

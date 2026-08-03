@@ -280,7 +280,8 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }}
+            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
+            --npu-types a2_quarter a2_half  # Temporary vNPU capacity sampling.
 
       - name: Set no-tests output when source paths unchanged
         id: noop
