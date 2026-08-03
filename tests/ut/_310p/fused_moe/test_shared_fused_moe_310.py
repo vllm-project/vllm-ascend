@@ -135,6 +135,44 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
     assert layer.w2_weight.is_contiguous() is True
 
 
+def test_unquantized_apply_310_uses_preselected_experts():
+    method = AscendUnquantizedFusedMoEMethod310.__new__(AscendUnquantizedFusedMoEMethod310)
+    expert_map = torch.tensor([0, 1], dtype=torch.int32)
+    layer = SimpleNamespace(
+        w13_weight=torch.randn(2, 4, 6),
+        w2_weight=torch.randn(2, 6, 4),
+        ascend_expert_map=expert_map,
+        apply_router_weight_on_input=True,
+    )
+    hidden_states = torch.randn(3, 6)
+    topk_weights = torch.rand(3, 2)
+    topk_ids = torch.tensor([[0, 1], [1, 0], [0, 1]], dtype=torch.int32)
+    expected_output = object()
+    comm_method = MagicMock()
+    comm_method.fused_experts.return_value = expected_output
+
+    with patch.object(
+        fused_moe_310_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_method=comm_method),
+    ):
+        output = method.apply(
+            layer=layer,
+            x=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
+        )
+
+    assert output is expected_output
+    fused_experts_input = comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+    assert fused_experts_input.topk_weights is topk_weights
+    assert fused_experts_input.topk_ids is topk_ids
+    assert fused_experts_input.routing.expert_map is expert_map
+    assert fused_experts_input.routing.apply_router_weight_on_input is True
+
+
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None

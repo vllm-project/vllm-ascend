@@ -50,16 +50,16 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
             eplb_state=eplb_state,
         )
-        self.renormalize = renormalize
-        self.use_grouped_topk = use_grouped_topk
-        self.num_expert_group = num_expert_group
-        self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
-        self.scoring_func = scoring_func
-        self.routed_scaling_factor = routed_scaling_factor
-        self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts if num_logical_experts is not None else global_num_experts
         self.tid2eid = tid2eid
 
