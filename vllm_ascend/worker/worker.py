@@ -601,7 +601,7 @@ class NPUWorker(WorkerBase):
                 factor = num_layers / num_tensors
                 self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
                 logger.info(
-                    "Layerwise KV cache reuse uses %d slots for %d layers; scale logical KV budget by %.3f.",
+                    "Layerwise KV cache reuse uses %d buffers for %d layers; scale logical KV budget by %.3f.",
                     num_tensors,
                     num_layers,
                     factor,
