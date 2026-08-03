@@ -123,6 +123,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
+        token_top_ks: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -151,6 +152,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             num_experts=num_logical_experts,
             tid2eid=self.tid2eid,
             input_ids=input_ids,
+            token_top_ks=token_top_ks,
         )
         try:
             _vllm_config = get_current_vllm_config()
@@ -279,6 +281,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.init_eplb(n_shared_experts)
 
         vllm_config = get_current_vllm_config()
+        self._spec_k_full_top_k = False
 
         if (
             self.custom_routing_function is None
@@ -288,6 +291,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype
             )
+
+    def _initialize_spec_k_layer(self, moe_layer_index: int, num_moe_layers: int) -> None:
+        spec_k_config = get_ascend_config().spec_k_config
+        if not spec_k_config.enabled:
+            return
+
+        full_top_k_range = slice(*spec_k_config.full_top_k_layer_range)
+        self._spec_k_full_top_k = moe_layer_index in range(*full_top_k_range.indices(num_moe_layers))
 
     def init_eplb(self, n_shared_experts):
         ascend_config = get_ascend_config()
@@ -414,6 +425,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         return_with_event: bool = False,
     ):
         forward_context = get_forward_context()
+        token_top_ks = _EXTRA_CTX.token_top_ks
+        if not torch.is_tensor(token_top_ks) or self._spec_k_full_top_k:
+            token_top_ks = None
+        elif token_top_ks.ndim != 1:
+            raise ValueError(f"Spec-K token top-k tensor must be 1D, got {token_top_ks.shape}.")
+
         # When static kernels are enabled, the forward pass runs twice
         # (compilation + capture), causing moe_layer_index to overflow.
         if self.enable_npugraph_ex_static_kernel and forward_context.all_moe_layers:
@@ -430,15 +447,18 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            token_top_ks=token_top_ks,
             replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
+        token_top_ks = prepare_output.token_top_ks
         mc2_mask = prepare_output.mc2_mask
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
+        spec_k_args = {"token_top_ks": token_top_ks} if token_top_ks is not None else {}
 
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
             layer=self,
@@ -462,6 +482,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask,
+            **spec_k_args,
         )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:

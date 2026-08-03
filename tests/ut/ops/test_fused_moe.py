@@ -229,6 +229,50 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
+def test_spec_k_uses_moe_ordinal_after_runner_registration(monkeypatch):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    nn.Module.__init__(routed_experts)
+    routed_experts.quant_method = SimpleNamespace(
+        quant_method=SimpleNamespace(quant_type=QuantType.NONE),
+    )
+
+    ascend_config = SimpleNamespace(
+        spec_k_config=SimpleNamespace(
+            enabled=True,
+            full_top_k_layer_range=(1, 2, 1),
+        ),
+        multistream_overlap_shared_expert=False,
+    )
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            # Physical layers 1 and 3 are the two registered MoE layers.
+            static_all_moe_layers=["model.layers.1.mlp", "model.layers.3.mlp"],
+        )
+    )
+
+    def parent_init(self, layer_name, moe_config, router, routed_experts, *args):
+        nn.Module.__init__(self)
+        self.moe_config = moe_config
+        self.routed_experts = routed_experts
+
+    monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", parent_init)
+    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(fused_moe_module, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(fused_moe_module, "get_tp_group", lambda: None)
+    monkeypatch.setattr(fused_moe_module, "get_dp_group", lambda: None)
+    monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", lambda _: None)
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+
+    AscendMoERunner(
+        layer_name="model.layers.3.mlp",
+        moe_config=SimpleNamespace(hidden_dim=4, ep_size=1),
+        router=None,
+        routed_experts=routed_experts,
+    )
+
+    assert routed_experts._spec_k_full_top_k is True
+
+
 def test_routed_experts_no_shared_forward_impl_runs_current_flow(monkeypatch):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     hidden_states = torch.randn(2, 4)

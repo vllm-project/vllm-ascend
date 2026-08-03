@@ -20,6 +20,7 @@ from functools import wraps
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -98,6 +99,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_output_transform,
             routed_scaling_factor,
         )
+        ascend_config = get_ascend_config()
+        if ascend_config.spec_k_config.enabled:
+            moe_layer_names = get_current_vllm_config().compilation_config.static_all_moe_layers
+            try:
+                moe_layer_index = moe_layer_names.index(layer_name)
+            except ValueError as exc:
+                raise ValueError(f"Spec-K MoE layer {layer_name!r} was not registered.") from exc
+            self.routed_experts._initialize_spec_k_layer(
+                moe_layer_index,
+                len(moe_layer_names),
+            )
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
 
@@ -109,7 +121,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        ascend_config = get_ascend_config()
         self._shared_experts = shared_experts
 
         self.multistream_overlap_shared_expert = (
