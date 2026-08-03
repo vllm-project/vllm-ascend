@@ -36,9 +36,21 @@ a3:
       - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
         config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
         size: 4
-      - name: DeepSeek-V4-flash-w8a8-PD
-        config_file_path: DeepSeek-V4-flash-w8a8-PD.yaml
+      - name: DeepSeek-V4-flash-w8a8-PD-no-prefix
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-no-prefix.yaml
         size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-prefix
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
+        size: 2
+      - name: DeepSeek-V4-Pro-w4a8-1M-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-PD-no-prefix
+        config_file_path: DeepSeek-V4-Pro-w4a8-PD-no-prefix.yaml
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        size: 4
       - name: kimi-k2_5-w4a8-ep-128k-1k-TPOT50
         config_file_path: Kimi-K2.5-W4A8-128k-1k-TPOT50.yaml
         size: 4
@@ -69,6 +81,32 @@ a3:
       - name: QWEN3_235B_PD
         config_file_path: QWEN3_235B_PD.yaml
         size: 3
+      - name: Kimi-K2.6-W4A8-3.5k-1.5k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-3.5k-1.5k-TPOT50-PD.yaml
+        size: 2
+      - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
+        size: 2
+      - name: Kimi-K2.6-W4A8-128k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-128k-1k-TPOT50-PD.yaml
+        size: 2
+      - name: Kimi-K2.6-W4A8-254k-1k-TPOT20-PD
+        config_file_path: Kimi-K2.6-W4A8-254k-1k-TPOT20-PD.yaml
+        size: 2
+      - name: Kimi-K2.7-W4A8-3.5k-1.5k-TPOT50-PD
+        config_file_path: Kimi-K2.7-W4A8-3.5k-1.5k-TPOT50-PD.yaml
+        size: 2
+      - name: Kimi-K2.7-W4A8-64k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.7-W4A8-64k-1k-TPOT50-PD.yaml
+        size: 2
+      - name: Kimi-K2.7-W4A8-128k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.7-W4A8-128k-1k-TPOT50-PD.yaml
+        size: 2
+      - name: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD
+        config_file_path: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD.yaml
+        size: 2
+
+
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
@@ -134,6 +172,18 @@ a3:
       - name: Qwq_32b_A3
         os: linux-aarch64-a3-16
         config_file_path: Qwq_32b_A3.yaml
+      - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
+        os: linux-aarch64-a3-2
+        config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml
+      - name: Qwen3.6-35B-A3B-w4a8-A3
+        os: linux-aarch64-a3-2
+        config_file_path: Qwen3.6-35B-A3B-w4a8-A3.yaml
+      - name: Kimi-K2.6-w4a8-A3
+        os: linux-aarch64-a3-16
+        config_file_path: Kimi-K2.6-w4a8-A3.yaml
+      - name: Kimi-K2.7-w4a8-A3
+        os: linux-aarch64-a3-16
+        config_file_path: Kimi-K2.7-w4a8-A3.yaml
 
 310p:
   single_node:
