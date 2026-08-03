@@ -1122,3 +1122,46 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         and any(target.endswith(".graph_capture") for target in candidate.targets)
         for candidate in candidates
     )
+
+
+def test_v035_scanner_does_not_rescan_upstream_context_manager_body(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/capture.py",
+        """
+from contextlib import contextmanager
+
+
+@contextmanager
+def upstream_context():
+    result = object()
+    result.value = 1
+    yield result
+""",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.capture import upstream_context
+
+
+def run():
+    with upstream_context():
+        pass
+""",
+    )
+
+    candidates = auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+
+    assert not any(
+        candidate.relation == "monkey_patch"
+        and candidate.file == "vllm/capture.py"
+        for candidate in candidates
+    )
