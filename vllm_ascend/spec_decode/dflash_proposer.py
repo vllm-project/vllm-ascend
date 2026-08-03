@@ -16,7 +16,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 _COPY_EXPAND_TILE_SIZE = 256
 
 
-def _compute_num_programs(total_input_tokens: int, num_query_total: int) -> int:
+def _compute_num_programs(num_context_total: int, num_query_total: int) -> int:
     """Number of programs to launch for copy_and_expand_dflash_and_dspark_inputs_kernel:
     one program per TILE_SIZE chunk of the larger work range, capped at the
     vector-core count (the kernel grid-strides, so any count fully covers the work).
@@ -27,11 +27,11 @@ def _compute_num_programs(total_input_tokens: int, num_query_total: int) -> int:
     """
     init_device_properties_triton()
     # The kernel runs two independent grid-stride loops, over
-    # [0, total_input_tokens) and [0, num_query_total); each is fully covered for
+    # [0, num_context_total) and [0, num_query_total); each is fully covered for
     # any program count (a too-small count just iterates more). Only the larger
     # bound decides how many programs do real work, so size on max(...). Using
     # the sum would launch extra programs that are idle in *both* loops.
-    num_blocks_needed = triton.cdiv(max(total_input_tokens, num_query_total), _COPY_EXPAND_TILE_SIZE)
+    num_blocks_needed = triton.cdiv(max(num_context_total, num_query_total), _COPY_EXPAND_TILE_SIZE)
     return min(num_blocks_needed, get_vectorcore_num())
 
 
