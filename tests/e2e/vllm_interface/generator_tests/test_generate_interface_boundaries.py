@@ -142,6 +142,61 @@ class Child(VllmBase):
     return vllm_root, ascend_root
 
 
+def test_patch_scan_context_keeps_resolution_tables_synchronized() -> None:
+    context = generator.PatchScanContext(
+        bindings={"owner": {"old.Target"}},
+        binding_alternatives={"owner": {"old.Target"}},
+        unknown_bindings={"owner"},
+        upstream_binding_provenance={"owner": {"vllm.OldTarget"}},
+        upstream_binding_history={"owner"},
+    )
+
+    context.replace_reference_candidates("owner", {"vllm.NewTarget"})
+
+    assert context.bindings["owner"] == {"vllm.NewTarget"}
+    assert context.binding_alternatives["owner"] == {"vllm.NewTarget"}
+    assert context.unknown_bindings == {"owner"}
+    assert context.upstream_binding_provenance == {"owner": {"vllm.OldTarget"}}
+    assert context.upstream_binding_history == {"owner"}
+
+
+def test_patch_scan_context_shadows_every_inherited_local_value() -> None:
+    context = generator.PatchScanContext(
+        bindings={"owner": {"vllm.Target"}},
+        binding_alternatives={"owner": {"vllm.Target"}},
+        unknown_bindings={"owner"},
+        upstream_binding_provenance={"owner": {"vllm.Target"}},
+        upstream_binding_history={"owner"},
+        strings={"owner": {"Target"}},
+        local_callables={"owner": []},
+        runtime_modules={"owner": {"vllm.target"}},
+    )
+
+    context.shadow_function_local("owner")
+
+    assert context.bindings == {"owner": set()}
+    assert "owner" not in context.binding_alternatives
+    assert "owner" not in context.unknown_bindings
+    assert "owner" not in context.upstream_binding_provenance
+    assert "owner" not in context.upstream_binding_history
+    assert "owner" not in context.strings
+    assert "owner" not in context.local_callables
+    assert "owner" not in context.runtime_modules
+    assert context.parameter_names == {"owner"}
+
+
+def test_repository_index_rejects_representative_variant_drift(
+    source_pair: tuple[Path, Path],
+) -> None:
+    vllm_root, _ = source_pair
+    index = generator.RepositoryIndex(vllm_root, "vllm")
+    qualified_name = next(iter(index.callable_variants))
+    index.callables.pop(qualified_name)
+
+    with pytest.raises(RuntimeError, match="callable representative"):
+        index._validate_index_consistency()
+
+
 def test_generates_exact_patch_inheritance_and_override(
     source_pair: tuple[Path, Path],
 ) -> None:

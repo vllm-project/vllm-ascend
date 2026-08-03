@@ -1307,9 +1307,6 @@ class IndependentCandidateScanner:
                 pending.extend(replacements)
         return results or {qualified_name}
 
-    def _class_candidates(self, qualified_name: str) -> list[ClassRecord]:
-        return [self._classes[target] for target in self._expand_alias(qualified_name) if target in self._classes]
-
     def _package_name(self, qualified_name: str) -> str | None:
         matches = [
             package

@@ -1046,14 +1046,6 @@ def _scope_decorator_reference_tuple(
     )
 
 
-def _possible_method_nodes(
-    node: ast.ClassDef,
-    tag_guard_names: set[str],
-) -> dict[str, ast.AST]:
-    """Index methods that can exist on the active main-version path."""
-    return {name: candidates[0] for name, candidates in _possible_method_variants(node, tag_guard_names).items()}
-
-
 def _possible_method_variants(
     node: ast.ClassDef,
     tag_guard_names: set[str],
@@ -1274,22 +1266,6 @@ def _canonical_guard_text(text: str) -> tuple[str, bool, str]:
     except SyntaxError:
         return f"opaque:{text}", True, text
     return _canonical_guard(node)
-
-
-def _call_guard_polarity(text: str, call_name: str) -> bool | None:
-    """Return whether a stored guard requires a direct call to be truthy."""
-
-    try:
-        node = ast.parse(text, mode="eval").body
-    except SyntaxError:
-        return None
-    truth = True
-    while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        truth = not truth
-        node = node.operand
-    if isinstance(node, ast.Call) and _expression_name(node.func) == call_name:
-        return truth
-    return None
 
 
 def _main_expression_calls(
@@ -1774,22 +1750,6 @@ def _main_ast_walk(tree: ast.AST) -> Iterable[ast.AST]:
     yield from walk(tree)
 
 
-def _string_assignment(
-    node: ast.AST,
-) -> tuple[str, str] | None:
-    target: ast.AST | None = None
-    value: ast.AST | None = None
-    if isinstance(node, ast.Assign) and len(node.targets) == 1:
-        target = node.targets[0]
-        value = node.value
-    elif isinstance(node, ast.AnnAssign):
-        target = node.target
-        value = node.value
-    if isinstance(target, ast.Name) and isinstance(value, ast.Constant) and isinstance(value.value, str):
-        return target.id, value.value
-    return None
-
-
 def _resolve_bound_reference(
     module: str,
     expression: str,
@@ -2143,7 +2103,6 @@ class ModuleInfo:
     classes: dict[str, ClassInfo]
     functions: dict[str, CallableInfo]
     loose_functions: dict[str, list[CallableInfo]]
-    string_constants: dict[str, tuple[str, ...]]
     star_imports: tuple[str, ...]
     typed_lazy_exports: dict[str, str]
 
@@ -2421,11 +2380,43 @@ class PatchScanContext:
             guards=self.guards if guards is None else guards,
         )
 
-    def bind_exact(self, name: str, references: Iterable[str]) -> None:
-        """Replace one name with an exact value and its latest provenance."""
+    def replace_reference_candidates(
+        self,
+        name: str,
+        references: Iterable[str],
+    ) -> None:
+        """Synchronize the exact and alternative resolution tables only.
+
+        Helper invocation replay and lexical definition binding deliberately
+        preserve the surrounding provenance and unknown-state semantics. This
+        low-level operation keeps the two resolution tables synchronized
+        without changing those other state dimensions.
+        """
         exact = set(references)
         self.bindings[name] = exact
         self.binding_alternatives[name] = set(exact)
+
+    def clear_reference_candidates(self, name: str) -> None:
+        """Remove a name from both resolution tables."""
+        self.bindings.pop(name, None)
+        self.binding_alternatives.pop(name, None)
+
+    def shadow_function_local(self, name: str) -> None:
+        """Tombstone one lexical local and clear every inherited value kind."""
+        self.bindings[name] = set()
+        self.binding_alternatives.pop(name, None)
+        self.strings.pop(name, None)
+        self.local_callables.pop(name, None)
+        self.runtime_modules.pop(name, None)
+        self.unknown_bindings.discard(name)
+        self.upstream_binding_provenance.pop(name, None)
+        self.upstream_binding_history.discard(name)
+        self.parameter_names.add(name)
+
+    def bind_exact(self, name: str, references: Iterable[str]) -> None:
+        """Replace one name with an exact value and its latest provenance."""
+        exact = set(references)
+        self.replace_reference_candidates(name, exact)
         self.unknown_bindings.discard(name)
         upstream = {reference for reference in exact if reference == "vllm" or reference.startswith("vllm.")}
         if upstream:
@@ -2531,7 +2522,6 @@ class PrivateHelperInvocation:
 
 @dataclass
 class PrivateHelperDefinition:
-    identity: str
     info: CallableInfo
     module_info: ModuleInfo
     tag_guard_names: frozenset[str]
@@ -2626,10 +2616,6 @@ class RepositoryIndex:
             int,
             tuple[str | None, ...],
         ] = {}
-        self._property_accessors_by_node: dict[
-            int,
-            tuple[ast.AST | None, ast.AST | None, ast.AST | None],
-        ] = {}
         self._class_alias_descriptor_kinds: dict[tuple[str, int], str | None] = {}
         self.parse_errors: list[dict[str, str]] = []
         self._parse()
@@ -2653,7 +2639,6 @@ class RepositoryIndex:
             classes: dict[str, ClassInfo] = {}
             functions: dict[str, CallableInfo] = {}
             loose_functions: dict[str, list[CallableInfo]] = defaultdict(list)
-            string_constants: dict[str, set[str]] = defaultdict(set)
             star_imports: list[str] = []
             annotated_exports: list[tuple[str, str]] = []
             tag_guard_names = _tag_guard_names(tree.body)
@@ -2707,10 +2692,6 @@ class RepositoryIndex:
                     if unconditional or target.id in module_must_names:
                         self.unconditional_exports.add(qualified_value)
                         self.unconditional_symbols.add(qualified_value)
-                string_assignment = _string_assignment(node)
-                if string_assignment:
-                    name, value = string_assignment
-                    string_constants[name].add(value)
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         local_name = alias.asname or alias.name.split(".", 1)[0]
@@ -2898,7 +2879,6 @@ class RepositoryIndex:
                             return
                         accessors = (nodes[0], nodes[1], nodes[2])
                         accessors_by_node[id(binding_node)] = accessors
-                        self._property_accessors_by_node[id(binding_node)] = accessors
 
                     for function_node in class_functions:
                         function_line = getattr(function_node, "lineno", 0)
@@ -2997,7 +2977,6 @@ class RepositoryIndex:
 
                         if resolved_accessors is not None:
                             property_accessors[id(function_node)] = resolved_accessors
-                            self._property_accessors_by_node[id(function_node)] = resolved_accessors
                     self.final_bindings.update(
                         {
                             f"{qualified_name}.{name}": alternatives
@@ -3265,7 +3244,6 @@ class RepositoryIndex:
                 classes=classes,
                 functions=functions,
                 loose_functions=dict(loose_functions),
-                string_constants={name: tuple(sorted(values)) for name, values in string_constants.items()},
                 star_imports=tuple(star_imports),
                 typed_lazy_exports=typed_lazy_exports,
             )
@@ -3280,6 +3258,19 @@ class RepositoryIndex:
         self._materialize_star_import_aliases()
         self._materialize_dataclass_initializers()
         self._materialize_class_callable_aliases()
+        self._validate_index_consistency()
+
+    def _validate_index_consistency(self) -> None:
+        """Fail closed when representative and variant indexes drift apart."""
+        for qualified_name, variants in self.callable_variants.items():
+            if not variants:
+                raise RuntimeError(f"empty callable variant index: {qualified_name}")
+            if self.callables.get(qualified_name) != variants[0]:
+                raise RuntimeError(f"callable representative does not match first variant: {qualified_name}")
+        missing_classes = self.class_variants.keys() - self.classes.keys()
+        if missing_classes:
+            names = ", ".join(sorted(missing_classes))
+            raise RuntimeError(f"class variants have no representative: {names}")
 
     def _aggregate_class_variants(self) -> None:
         """Merge same-name class definitions that can be final at runtime."""
@@ -4237,10 +4228,6 @@ class InterfaceBoundaryGenerator:
         )
         return self.relations, self.findings
 
-    def _resolve_downstream_reference(self, module: str, expression: str) -> str:
-        qualified = self.downstream.resolve_reference(module, expression)
-        return self._canonical_reference(qualified)
-
     def _canonical_reference(self, qualified_name: str) -> str:
         if qualified_name.startswith("vllm."):
             return self.upstream.canonical_name(qualified_name)
@@ -4988,21 +4975,6 @@ class InterfaceBoundaryGenerator:
             return {"unbound"} if "unbound" in kinds else set()
         return kinds
 
-    def _member_is_unconditional(
-        self,
-        owner: str,
-        member: str,
-    ) -> bool:
-        qualified_name = self._canonical_reference(f"{owner}.{member}")
-        if qualified_name.startswith("vllm_ascend."):
-            return qualified_name in self.downstream.unconditional_symbols
-        if qualified_name.startswith("vllm."):
-            return qualified_name in self.upstream.unconditional_symbols
-        for package, index in self.externals.items():
-            if qualified_name == package or qualified_name.startswith(f"{package}."):
-                return qualified_name in index.unconditional_symbols
-        return False
-
     def _source_package(self, qualified_name: str) -> str:
         if qualified_name == "vllm" or qualified_name.startswith("vllm."):
             return "vllm"
@@ -5702,7 +5674,6 @@ class InterfaceBoundaryGenerator:
                     ),
                 )
                 definitions[identity] = PrivateHelperDefinition(
-                    identity=identity,
                     info=info,
                     module_info=module_info,
                     tag_guard_names=frozenset(tag_guard_names),
@@ -5773,8 +5744,7 @@ class InterfaceBoundaryGenerator:
                     activation=invocation.activation,
                 )
                 for parameter, target in invocation.bindings:
-                    context.bindings[parameter] = {target}
-                    context.binding_alternatives[parameter] = {target}
+                    context.replace_reference_candidates(parameter, {target})
                 forwarded_calls: dict[
                     str,
                     list[
@@ -5979,8 +5949,7 @@ class InterfaceBoundaryGenerator:
                 qualified_name = f"{module_info.name}.{'.'.join((*context.scope, node.name))}"
                 identity = self._private_helper_node_identities.get(id(node))
                 bound_name = identity or qualified_name
-                context.bindings[node.name] = {bound_name}
-                context.binding_alternatives[node.name] = {bound_name}
+                context.replace_reference_candidates(node.name, {bound_name})
                 scope_identity = (
                     f"{module_info.name}:{getattr(node, 'lineno', 0)}:{getattr(node, 'col_offset', 0)}:{node.name}"
                 )
@@ -6008,8 +5977,7 @@ class InterfaceBoundaryGenerator:
                 continue
             if isinstance(node, ast.ClassDef):
                 qualified_name = f"{module_info.name}.{'.'.join((*context.scope, node.name))}"
-                context.bindings[node.name] = {qualified_name}
-                context.binding_alternatives[node.name] = {qualified_name}
+                context.replace_reference_candidates(node.name, {qualified_name})
                 scope_identity = (
                     f"{module_info.name}:{getattr(node, 'lineno', 0)}:{getattr(node, 'col_offset', 0)}:{node.name}"
                 )
@@ -7437,15 +7405,7 @@ class InterfaceBoundaryGenerator:
             # An empty lexical binding is a tombstone. Without it, resolution
             # falls back to the module import index and can reuse a shadowed
             # ``import ... as <parameter>`` value.
-            context.bindings[parameter] = set()
-            context.binding_alternatives.pop(parameter, None)
-            context.strings.pop(parameter, None)
-            context.local_callables.pop(parameter, None)
-            context.runtime_modules.pop(parameter, None)
-            context.unknown_bindings.discard(parameter)
-            context.upstream_binding_provenance.pop(parameter, None)
-            context.upstream_binding_history.discard(parameter)
-            context.parameter_names.add(parameter)
+            context.shadow_function_local(parameter)
 
     def _parameter_is_reassigned(
         self,
@@ -7597,8 +7557,7 @@ class InterfaceBoundaryGenerator:
                         context,
                     ),
                 )
-                context.bindings.pop(node.name, None)
-                context.binding_alternatives.pop(node.name, None)
+                context.clear_reference_candidates(node.name)
                 context.local_callables[node.name] = [callable_info]
                 scope_identity = (
                     f"{module_info.name}:{getattr(node, 'lineno', 0)}:{getattr(node, 'col_offset', 0)}:{node.name}"
@@ -7624,8 +7583,7 @@ class InterfaceBoundaryGenerator:
                             activation=invocation.activation,
                         )
                         for parameter, target in invocation.bindings:
-                            child.bindings[parameter] = {target}
-                            child.binding_alternatives[parameter] = {target}
+                            child.replace_reference_candidates(parameter, {target})
                         self._scan_patch_statements(
                             module_info,
                             node.body,
@@ -7643,8 +7601,7 @@ class InterfaceBoundaryGenerator:
 
             if isinstance(node, ast.ClassDef):
                 qualified_name = f"{module_info.name}.{node.name}"
-                context.bindings[node.name] = {qualified_name}
-                context.binding_alternatives[node.name] = {qualified_name}
+                context.replace_reference_candidates(node.name, {qualified_name})
                 context.local_callables[node.name] = [
                     CallableInfo(
                         qualified_name=qualified_name,
@@ -9607,9 +9564,6 @@ class InterfaceBoundaryGenerator:
 
     def _scope_name(self, context: PatchScanContext) -> str | None:
         return ".".join(context.scope) if context.scope else None
-
-    def _guard_text(self, node: ast.AST, *, truth: bool = True) -> str:
-        return _canonical_guard(node, truth=truth)[2]
 
     def _find_upstream_patch_target(
         self,
