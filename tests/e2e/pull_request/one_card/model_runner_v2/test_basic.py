@@ -250,21 +250,27 @@ def test_dspark_spec_decoding(
 
 @pytest.mark.parametrize("model", MTP_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_mtp_spec_decoding(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     # The MTP draft head has random weights, so acceptance is ~0 and there is
     # no trained golden to compare against -- this is a smoke test (assert only
-    # that the MTP MLA propose->verify loop produces output). Eager only for
-    # now: graph-mode MTP draft is not yet stabilized, so the cudagraph
-    # compilation_config matrix from the eagle/dflash/dspark tests is omitted.
-    # Remaining differences vs those tests are model-inherent: no separate
-    # draft `model` (MTP is unified), no golden, and `enable_expert_parallel`
-    # for the DeepSeek MoE target.
+    # that the MTP MLA propose->verify loop produces output).
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -283,6 +289,7 @@ def test_mtp_spec_decoding(
             "method": "mtp",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        compilation_config=compilation_config,
     ) as runner:
         outputs = runner.model.generate(prompts, sampling_params)
 
