@@ -34,6 +34,13 @@ class TestAscendConfig(TestBase):
         return wrapper
 
     @_clean_up_ascend_config
+    @patch.dict(
+        os.environ,
+        {
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1": "0",
+            "VLLM_ASCEND_ENABLE_FLASHCOMM": "0",
+        },
+    )
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
@@ -83,6 +90,8 @@ class TestAscendConfig(TestBase):
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_sequence_parallel_policy_resolves_flashcomm_env(self, mock_fix_incompatible_config):
+        from vllm_ascend.utils import enable_sp, enable_sp_by_pass
+
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 2
 
@@ -91,6 +100,8 @@ class TestAscendConfig(TestBase):
         self.assertTrue(policy.configured)
         self.assertTrue(policy.enabled)
         self.assertTrue(policy.legacy_flashcomm_enabled)
+        self.assertTrue(enable_sp())
+        self.assertFalse(enable_sp_by_pass())
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
