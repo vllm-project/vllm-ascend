@@ -626,52 +626,18 @@ class KVPoolWorker:
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
         physical_layers = set()
-        hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= hidden_layers:
-                logger.warning(
-                    "KVREG_LAYER_SKIPPED pp=%d tp=%d group=%d layer=%s "
-                    "physical_layer=%d hidden_layers=%d local_layers=%d",
-                    self.pp_rank,
-                    self.tp_rank,
-                    group_id,
-                    layer_name,
-                    phys,
-                    hidden_layers,
-                    self.num_layers,
-                )
+            if phys >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
                 continue
             physical_layers.add(phys)
             cache_or_caches = self.kv_caches[layer_name]
-            for cache_index, cache in enumerate(self._as_cache_tuple(cache_or_caches)):
+            for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
-                block_len, block_stride, region_len, block_size_scale = self._get_cache_block_metadata(cache)
+                block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
                 group_addrs.append(base_addr)
                 group_block_lens.append(block_len)
                 group_block_strides.append(block_stride)
-                logger.warning(
-                    "KVREG_CACHE pp=%d tp=%d group=%d layer=%s physical_layer=%d "
-                    "cache_index=%d shape=%s stride=%s dtype=%s element_size=%s "
-                    "base_addr=%s num_blocks=%s block_size_scale=%s "
-                    "block_len=%s block_stride=%s region_len=%s",
-                    self.pp_rank,
-                    self.tp_rank,
-                    group_id,
-                    layer_name,
-                    phys,
-                    cache_index,
-                    tuple(cache.shape),
-                    tuple(cache.stride()),
-                    cache.dtype,
-                    cache.element_size(),
-                    base_addr,
-                    self.num_blocks,
-                    block_size_scale,
-                    block_len,
-                    block_stride,
-                    region_len,
-                )
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides

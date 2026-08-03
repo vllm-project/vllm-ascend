@@ -371,51 +371,12 @@ class ChunkedTokenDatabase:
         if block_id is None:
             block_idx = start // group_block_size
             if block_idx >= len(block_ids):
-                group_metadata = self.metadata[kv_cache_group_id]
-                logger.warning(
-                    "KVSIZE_BLOCK_ID_MISSING pp=%d group=%d cache_role=%s "
-                    "start=%d end=%d group_block_size=%d block_idx=%d block_ids=%s",
-                    group_metadata.pp_rank,
-                    kv_cache_group_id,
-                    cache_role,
-                    start,
-                    end,
-                    group_block_size,
-                    block_idx,
-                    block_ids,
-                )
                 return addr_list, size_list, 0
             block_id = block_ids[block_idx]
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
-        group_metadata = self.metadata[kv_cache_group_id]
         length = len(group_block_len)
         if length == 0:
-            logger.warning(
-                "KVSIZE_EMPTY_BUFFERS pp=%d group=%d cache_role=%s start=%d end=%d "
-                "block_id=%d group_block_size=%d addrs=%s block_lens=%s block_strides=%s",
-                group_metadata.pp_rank,
-                kv_cache_group_id,
-                cache_role,
-                start,
-                end,
-                block_id,
-                group_block_size,
-                group_addrs,
-                group_block_len,
-                group_block_stride,
-            )
             return addr_list, size_list, block_id
-        if len(group_addrs) != length or (group_block_stride and len(group_block_stride) != length):
-            logger.warning(
-                "KVSIZE_METADATA_MISMATCH pp=%d group=%d cache_role=%s "
-                "addr_count=%d block_len_count=%d block_stride_count=%d",
-                group_metadata.pp_rank,
-                kv_cache_group_id,
-                cache_role,
-                len(group_addrs),
-                length,
-                len(group_block_stride) if group_block_stride else 0,
-            )
         for index, base_addr in enumerate(group_addrs):
             block_len = group_block_len[index % length]
             block_stride = group_block_stride[index % length] if group_block_stride else block_len
@@ -423,29 +384,6 @@ class ChunkedTokenDatabase:
             size = int(block_len / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
-            if size <= 0:
-                logger.warning(
-                    "KVSIZE_ZERO pp=%d group=%d cache_role=%s buffer_index=%d "
-                    "start=%d end=%d token_span=%d block_id=%d group_block_size=%d "
-                    "base_addr=%d addr=%d block_len=%d block_stride=%d "
-                    "size_numerator=%d size=%d",
-                    group_metadata.pp_rank,
-                    kv_cache_group_id,
-                    cache_role,
-                    index,
-                    start,
-                    end,
-                    end - start,
-                    block_id,
-                    group_block_size,
-                    base_addr,
-                    addr,
-                    block_len,
-                    block_stride,
-                    block_len * (end - start),
-                    size,
-                )
-
         return addr_list, size_list, block_id
 
     def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
