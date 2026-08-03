@@ -53,6 +53,14 @@
   tests:
     - tests/ut
 
+# E2E test harness
+- name: e2e_conftest
+  optional: true
+  source_file_dependencies:
+    - tests/e2e/conftest.py
+  tests:
+    - tests/ut/test_dp_vllm_runner.py
+
 # 310P
 - name: 310p
   optional: false
