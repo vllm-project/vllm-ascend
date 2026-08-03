@@ -6,8 +6,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.worker.v2.model_runner import (
-    NPUModelRunner,
     flashcomm_dispatch_wrapper,
+)
+from vllm_ascend.worker.v2.sp_utils import (
+    _all_gather_hidden_states,
+    _flashcomm_enabled,
 )
 
 
@@ -59,10 +62,10 @@ def test_all_gather_hidden_states_trims_flashcomm_padding():
     gathered_hidden_states = torch.arange(12).reshape(6, 2)
 
     with patch(
-        "vllm_ascend.worker.v2.model_runner.tensor_model_parallel_all_gather",
+        "vllm_ascend.worker.v2.sp_utils.tensor_model_parallel_all_gather",
         return_value=gathered_hidden_states,
     ):
-        result = NPUModelRunner._all_gather_hidden_states(
+        result = _all_gather_hidden_states(
             local_hidden_states,
             num_tokens=5,
         )
@@ -74,25 +77,25 @@ def test_flashcomm_dense_threshold_and_moe_behavior():
     config = _config()
     with (
         patch(
-            "vllm_ascend.worker.v2.model_runner.enable_sp",
+            "vllm_ascend.worker.v2.sp_utils.enable_sp",
             return_value=True,
         ),
         patch(
-            "vllm_ascend.worker.v2.model_runner.is_moe_model",
+            "vllm_ascend.worker.v2.sp_utils.is_moe_model",
             return_value=False,
         ),
     ):
-        assert not NPUModelRunner._flashcomm_enabled(config, 1000)
-        assert NPUModelRunner._flashcomm_enabled(config, 1001)
+        assert not _flashcomm_enabled(config, 1000)
+        assert _flashcomm_enabled(config, 1001)
 
     with (
         patch(
-            "vllm_ascend.worker.v2.model_runner.enable_sp",
+            "vllm_ascend.worker.v2.sp_utils.enable_sp",
             return_value=True,
         ),
         patch(
-            "vllm_ascend.worker.v2.model_runner.is_moe_model",
+            "vllm_ascend.worker.v2.sp_utils.is_moe_model",
             return_value=True,
         ),
     ):
-        assert NPUModelRunner._flashcomm_enabled(config, 1)
+        assert _flashcomm_enabled(config, 1)

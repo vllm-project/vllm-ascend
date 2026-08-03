@@ -23,7 +23,6 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -52,17 +51,19 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp, is_moe_model
+from vllm_ascend.utils import enable_sp
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
+from vllm_ascend.worker.v2.sp_utils import (
+    _all_gather_hidden_states_and_aux,
+    _flashcomm_enabled,
+)
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-
-FLASHCOMM_DENSE_TOKEN_THRESHOLD = 1000
 
 
 # TODO: remove this wrapper when vllm-ascend supports sequence parallel on model runner v2.
@@ -199,24 +200,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.block_tables,
             )
 
-    @staticmethod
-    def _flashcomm_enabled(vllm_config: VllmConfig, num_tokens: int) -> bool:
-        return enable_sp(vllm_config) and (is_moe_model(vllm_config) or num_tokens > FLASHCOMM_DENSE_TOKEN_THRESHOLD)
-
-    @staticmethod
-    def _all_gather_hidden_states(hidden_states: torch.Tensor, num_tokens: int):
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        return hidden_states[:num_tokens]
-
-    @classmethod
-    def _all_gather_hidden_states_and_aux(cls, hidden_states, num_tokens: int):
-        if isinstance(hidden_states, tuple):
-            return (
-                cls._all_gather_hidden_states(hidden_states[0], num_tokens),
-                [cls._all_gather_hidden_states(aux_hidden_state, num_tokens) for aux_hidden_state in hidden_states[1]],
-            )
-        return cls._all_gather_hidden_states(hidden_states, num_tokens)
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -239,11 +222,11 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.is_last_pp_rank
             and state is not None
-            and self._flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
+            and _flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
         ):
             num_tokens = state.input_batch.num_tokens
             assert state.hidden_states is not None
-            gathered_output = self._all_gather_hidden_states_and_aux(
+            gathered_output = _all_gather_hidden_states_and_aux(
                 (state.hidden_states, state.aux_hidden_states)
                 if state.aux_hidden_states is not None
                 else state.hidden_states,
