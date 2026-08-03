@@ -3982,7 +3982,16 @@ class Child(Base):
             "run",
         ),
     }
-    assert not findings
+    incompatibilities = [finding for finding in findings if finding.reason_code == "signature_incompatible"]
+    assert len(incompatibilities) == 2
+    assert {finding.target_expression for finding in incompatibilities} == {
+        "vllm.base.Base.run",
+        "vllm.base.Root.run",
+    }
+    assert all(
+        finding.status == "risk" and not finding.generator_issue and finding.supplemental
+        for finding in incompatibilities
+    )
 
 
 def test_terminating_if_arm_does_not_make_module_symbol_optional(
@@ -5608,7 +5617,13 @@ class Child(Base):
         "run",
         _v019_run_signature(("self", True), ("base_value", True)),
     )
-    assert not findings
+    assert len(findings) == 1
+    assert (
+        findings[0].reason_code,
+        findings[0].status,
+        findings[0].generator_issue,
+        findings[0].supplemental,
+    ) == ("signature_incompatible", "risk", False, True)
 
 
 def test_v020_handler_uses_state_at_exact_throwing_statement(
@@ -7031,7 +7046,7 @@ def test_v024_schema_v4_relations_load_with_unknown_descriptor_kinds(
     ) == (None, None, None)
 
 
-def test_v024_schema_v5_round_trips_descriptor_kinds(
+def test_v026_schema_v6_round_trips_descriptor_kinds_without_contracts(
     tmp_path: Path,
 ) -> None:
     relation = generator.Relation(
@@ -7056,11 +7071,11 @@ def test_v024_schema_v5_round_trips_descriptor_kinds(
         vllm_sha="upstream",
         ascend_sha="downstream",
     )
-    assert payloads[0]["_meta"]["schema"] == 5
-    assert payloads[1]["u"][-1] == "property"
-    assert payloads[1]["c"][0][-2:] == ["ordinary", "property"]
+    assert payloads[0]["_meta"]["schema"] == 6
+    assert payloads[1]["u"][4:] == ["property", None]
+    assert payloads[1]["c"][0][5:] == ["ordinary", "property", None, None]
 
-    mapping = tmp_path / "v5.jsonl"
+    mapping = tmp_path / "v6.jsonl"
     generator._write_jsonl(mapping, payloads)
     loaded = generator._load_compact_relations(mapping)
     assert len(loaded) == 1

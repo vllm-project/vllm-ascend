@@ -4,6 +4,45 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.26.0 - persist and compare runtime signature contracts (in progress)
+
+- Starting red-test checkpoint: `a1d5b6fa5`. Ten tests failed because the
+  runtime signature model introduced in v0.25 was still transient: contracts
+  were neither persisted nor compared, receiver binding collapsed invalid and
+  unknown cases, and exact signature compatibility was not checked.
+- Changes:
+  - schema v6 serializes and reloads the upstream, downstream-definition, and
+    installed runtime contracts without changing relation endpoint identity;
+  - grouping includes the upstream runtime contract, while relation comparison
+    reports contract changes separately and ignores the one-time schema-v5 to
+    schema-v6 migration when the baseline contains no contract;
+  - descriptor and signature allowlists are independent. A source-SHA-pinned
+    descriptor classification no longer silently proves that a decorator is
+    signature-transparent;
+  - receiver binding now keeps a varargs-only method exact, marks a callable
+    with no positional receiver slot invalid, and leaves the bound signature
+    unknown when the installed descriptor kind is unknown;
+  - exact upstream call shapes are bound against the installed downstream
+    signature in the compatibility direction. Missing optional keywords,
+    renamed keyword-capable parameters, extra downstream requirements, async
+    protocol changes, and missing `*args`/`**kwargs` acceptance become
+    supplemental `signature_incompatible` risks;
+  - known descriptor mismatches remain owned by the descriptor finding instead
+    of producing a duplicate derived signature risk;
+  - deduplication merges runtime contracts across occurrences. Different
+    reachable variants retain the relation but make its installed contract
+    unknown and add `conditional_signature_contract` review evidence.
+- Safety boundaries:
+  - compatibility is evaluated only when both runtime contracts are exact;
+  - unknown decorators and unknown descriptors are never guessed;
+  - a schema-v5 baseline remains readable and does not create a false contract
+    change solely because the new generator can now persist contracts;
+  - Findings supplement the verified relation; they do not delete the
+    downstream dependency edge.
+- Test evidence: all 188 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. Fixed-source regeneration and manual review
+  are still required before this checkpoint is accepted.
+
 ## v0.25.0 - runtime signature contracts (in progress)
 
 - Red-test checkpoint: `2e3445e46`.  Five tests first failed only because the

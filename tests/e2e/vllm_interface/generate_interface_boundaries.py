@@ -38,6 +38,7 @@ import argparse
 import ast
 import builtins
 import hashlib
+import inspect
 import json
 import subprocess
 from collections import Counter, defaultdict
@@ -46,8 +47,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 5
-GENERATOR_VERSION = "0.24.0"
+SCHEMA_VERSION = 6
+GENERATOR_VERSION = "0.26.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -75,6 +76,19 @@ _TRANSPARENT_DESCRIPTOR_DECORATORS = frozenset(
     }
 )
 _PINNED_ORDINARY_DESCRIPTOR_DECORATORS: dict[
+    tuple[str, str],
+    frozenset[str],
+] = {
+    (
+        "torch",
+        "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+    ): frozenset({"torch.inference_mode"}),
+    (
+        "vllm",
+        "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
+    ): frozenset({"vllm.tracing.instrument"}),
+}
+_PINNED_TRANSPARENT_SIGNATURE_DECORATORS: dict[
     tuple[str, str],
     frozenset[str],
 ] = {
@@ -1802,6 +1816,243 @@ class SignatureContract:
     protocol: str = "python_call"
     status: str = "exact"
     provenance: tuple[str, ...] = ("ast_definition",)
+
+
+def _signature_contract_payload(
+    contract: SignatureContract | None,
+) -> list[object] | None:
+    if contract is None:
+        return None
+    return [
+        contract.definition_signature,
+        contract.runtime_entry_signature,
+        contract.reported_signature,
+        contract.bound_call_signature,
+        list(contract.forwarded_targets),
+        contract.protocol,
+        contract.status,
+        list(contract.provenance),
+    ]
+
+
+def _signature_contract_from_payload(
+    payload: object,
+) -> SignatureContract | None:
+    if not isinstance(payload, list) or len(payload) < 8:
+        return None
+    forwarded_targets = payload[4]
+    provenance = payload[7]
+    if not isinstance(forwarded_targets, list) or not isinstance(provenance, list):
+        return None
+    if not isinstance(payload[5], str) or not isinstance(payload[6], str):
+        return None
+    return SignatureContract(
+        definition_signature=payload[0],
+        runtime_entry_signature=payload[1],
+        reported_signature=payload[2],
+        bound_call_signature=payload[3],
+        forwarded_targets=tuple(str(item) for item in forwarded_targets),
+        protocol=payload[5],
+        status=payload[6],
+        provenance=tuple(str(item) for item in provenance),
+    )
+
+
+def _one_json_value(values: Iterable[object]) -> tuple[object, bool]:
+    keyed = {json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")): value for value in values}
+    if len(keyed) == 1:
+        return next(iter(keyed.values())), True
+    return None, False
+
+
+def _merge_signature_contracts(
+    contracts: Sequence[SignatureContract | None],
+) -> tuple[SignatureContract | None, bool]:
+    if not contracts or all(contract is None for contract in contracts):
+        return None, False
+    if any(contract is None for contract in contracts):
+        present = [contract for contract in contracts if contract is not None]
+        definition, _ = _one_json_value(contract.definition_signature for contract in present)
+        return (
+            SignatureContract(
+                definition_signature=definition,
+                runtime_entry_signature=None,
+                reported_signature=None,
+                bound_call_signature=None,
+                forwarded_targets=tuple(
+                    sorted({target for contract in present for target in contract.forwarded_targets})
+                ),
+                protocol="unknown",
+                status="unknown",
+                provenance=tuple(
+                    dict.fromkeys(
+                        [
+                            *(item for contract in present for item in contract.provenance),
+                            "conditional_signature_variants",
+                        ]
+                    )
+                ),
+            ),
+            True,
+        )
+
+    present = [contract for contract in contracts if contract is not None]
+    semantic_payloads = [
+        [
+            contract.definition_signature,
+            contract.runtime_entry_signature,
+            contract.reported_signature,
+            contract.bound_call_signature,
+            list(contract.forwarded_targets),
+            contract.protocol,
+            contract.status,
+        ]
+        for contract in present
+    ]
+    _, one_semantic_contract = _one_json_value(semantic_payloads)
+    provenance = tuple(dict.fromkeys(item for contract in present for item in contract.provenance))
+    if one_semantic_contract:
+        first = present[0]
+        return replace(first, provenance=provenance), False
+
+    definition, _ = _one_json_value(contract.definition_signature for contract in present)
+    runtime_entry, _ = _one_json_value(contract.runtime_entry_signature for contract in present)
+    reported, _ = _one_json_value(contract.reported_signature for contract in present)
+    forwarded_targets = tuple(sorted({target for contract in present for target in contract.forwarded_targets}))
+    protocols = {contract.protocol for contract in present}
+    return (
+        SignatureContract(
+            definition_signature=definition,
+            runtime_entry_signature=runtime_entry,
+            reported_signature=reported,
+            bound_call_signature=None,
+            forwarded_targets=forwarded_targets,
+            protocol=next(iter(protocols)) if len(protocols) == 1 else "unknown",
+            status="unknown",
+            provenance=(*provenance, "conditional_signature_variants"),
+        ),
+        True,
+    )
+
+
+def _inspect_signature(
+    signature: list[object],
+) -> inspect.Signature | None:
+    if len(signature) != 6:
+        return None
+    positional_only, positional_or_keyword = signature[1], signature[2]
+    vararg, keyword_only, kwarg = signature[3], signature[4], signature[5]
+    if not all(isinstance(items, list) for items in (positional_only, positional_or_keyword, keyword_only)):
+        return None
+
+    parameters: list[inspect.Parameter] = []
+
+    def add_named(items: list[object], kind: inspect._ParameterKind) -> bool:
+        for item in items:
+            if not (
+                isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], bool)
+            ):
+                return False
+            parameters.append(
+                inspect.Parameter(
+                    item[0],
+                    kind,
+                    default=(inspect.Parameter.empty if item[1] else None),
+                )
+            )
+        return True
+
+    if not add_named(positional_only, inspect.Parameter.POSITIONAL_ONLY):
+        return None
+    if not add_named(positional_or_keyword, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        return None
+    if vararg is not None:
+        if not isinstance(vararg, str):
+            return None
+        parameters.append(inspect.Parameter(vararg, inspect.Parameter.VAR_POSITIONAL))
+    if not add_named(keyword_only, inspect.Parameter.KEYWORD_ONLY):
+        return None
+    if kwarg is not None:
+        if not isinstance(kwarg, str):
+            return None
+        parameters.append(inspect.Parameter(kwarg, inspect.Parameter.VAR_KEYWORD))
+    try:
+        return inspect.Signature(parameters)
+    except ValueError:
+        return None
+
+
+def _signature_call_witnesses(
+    signature: list[object],
+) -> list[tuple[list[object], dict[str, object]]]:
+    positional_only = signature[1]
+    positional_or_keyword = signature[2]
+    keyword_only = signature[4]
+    marker = {item[0]: object() for items in (positional_only, positional_or_keyword, keyword_only) for item in items}
+
+    witnesses: list[tuple[list[object], dict[str, object]]] = []
+    minimal_args = [marker[name] for name, required in positional_only if required]
+    minimal_kwargs = {name: marker[name] for name, required in [*positional_or_keyword, *keyword_only] if required}
+    witnesses.append((minimal_args, minimal_kwargs))
+
+    all_positional_args = [marker[name] for name, _ in [*positional_only, *positional_or_keyword]]
+    all_positional_kwargs = {name: marker[name] for name, _ in keyword_only}
+    witnesses.append((all_positional_args, all_positional_kwargs))
+
+    all_keyword_args = [marker[name] for name, _ in positional_only]
+    all_keyword_kwargs = {name: marker[name] for name, _ in [*positional_or_keyword, *keyword_only]}
+    witnesses.append((all_keyword_args, all_keyword_kwargs))
+
+    for split in range(len(positional_or_keyword) + 1):
+        args = [marker[name] for name, _ in positional_only]
+        args.extend(marker[name] for name, _ in positional_or_keyword[:split])
+        kwargs = {name: marker[name] for name, _ in [*positional_or_keyword[split:], *keyword_only]}
+        witnesses.append((args, kwargs))
+
+    if signature[3] is not None:
+        witnesses.append(([*all_positional_args, object(), object()], dict(all_positional_kwargs)))
+    if signature[5] is not None:
+        witnesses.append((list(all_keyword_args), {**all_keyword_kwargs, "__interface_extra_keyword__": object()}))
+
+    unique: dict[str, tuple[list[object], dict[str, object]]] = {}
+    for args, kwargs in witnesses:
+        shape = json.dumps(
+            [len(args), sorted(kwargs)],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        unique[shape] = (args, kwargs)
+    return list(unique.values())
+
+
+def _accepts_signature_contract(
+    upstream_signature: list[object],
+    installed_signature: list[object],
+) -> bool:
+    if upstream_signature[0] != installed_signature[0]:
+        return False
+    candidate = _inspect_signature(installed_signature)
+    if candidate is None:
+        return False
+    for args, kwargs in _signature_call_witnesses(upstream_signature):
+        try:
+            candidate.bind(*args, **kwargs)
+        except TypeError:
+            return False
+
+    upstream_positional = [*upstream_signature[1], *upstream_signature[2]]
+    installed_positional = [*installed_signature[1], *installed_signature[2]]
+    for index, upstream_parameter in enumerate(upstream_positional):
+        if index >= len(installed_positional):
+            break
+        installed_parameter = installed_positional[index]
+        upstream_is_positional_or_keyword = index >= len(upstream_signature[1])
+        installed_is_positional_only = index < len(installed_signature[1])
+        if upstream_is_positional_or_keyword and (
+            installed_is_positional_only or upstream_parameter[0] != installed_parameter[0]
+        ):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -3832,6 +4083,18 @@ class InterfaceBoundaryGenerator:
                 field_name: (next(iter(kinds)) if len(kinds) == 1 else "unknown")
                 for field_name, kinds in descriptor_sets.items()
             }
+            merged_signature_contracts: dict[str, SignatureContract | None] = {}
+            conditional_signature_contract = False
+            for field_name in (
+                "upstream_signature_contract",
+                "downstream_signature_contract",
+                "installed_signature_contract",
+            ):
+                merged_contract, conditional = _merge_signature_contracts(
+                    [getattr(relation, field_name) for relation in occurrences]
+                )
+                merged_signature_contracts[field_name] = merged_contract
+                conditional_signature_contract = conditional_signature_contract or conditional
             merged_relation = replace(
                 first,
                 evidence=tuple(
@@ -3849,6 +4112,7 @@ class InterfaceBoundaryGenerator:
                     )
                 ),
                 **merged_descriptor_kinds,
+                **merged_signature_contracts,
             )
             deduplicated[key] = merged_relation
             if any(len(kinds) > 1 for kinds in descriptor_sets.values()):
@@ -3864,6 +4128,32 @@ class InterfaceBoundaryGenerator:
                     conditional=True,
                     evidence_scope=(first_evidence.scope if first_evidence else None),
                     evidence_guards=(first_evidence.guards if first_evidence else ()),
+                )
+            if conditional_signature_contract:
+                first_evidence = merged_relation.evidence[0] if merged_relation.evidence else None
+                self.findings.append(
+                    CandidateFinding(
+                        relation=merged_relation.relation,
+                        downstream_file=merged_relation.downstream_file,
+                        downstream_owner=merged_relation.downstream_owner,
+                        downstream_name=merged_relation.downstream_name,
+                        target_expression=(
+                            first_evidence.target_expression
+                            if first_evidence and first_evidence.target_expression
+                            else f"{merged_relation.upstream_owner or ''}.{merged_relation.upstream_name}".lstrip(".")
+                        ),
+                        evidence_line=merged_relation.evidence_line,
+                        reason=(
+                            "different reachable branches install different runtime "
+                            "signature contracts for the same dependency edge"
+                        ),
+                        status="review",
+                        reason_code="conditional_signature_contract",
+                        generator_issue=False,
+                        evidence_scope=(first_evidence.scope if first_evidence else None),
+                        evidence_guards=(first_evidence.guards if first_evidence else ()),
+                        supplemental=True,
+                    )
                 )
         self.relations = sorted(
             deduplicated.values(),
@@ -3971,21 +4261,27 @@ class InterfaceBoundaryGenerator:
         *,
         descriptor_kind: str | None,
         binds_receiver: bool,
-    ) -> list[object] | None:
+    ) -> tuple[list[object] | None, str]:
         if signature is None:
-            return None
+            return None, "unknown"
         result = json.loads(json.dumps(signature))
-        if not binds_receiver or descriptor_kind not in {"classmethod", "ordinary", "property"}:
-            return result
+        if not binds_receiver:
+            return result, "exact"
+        if descriptor_kind == "staticmethod":
+            return result, "exact"
+        if descriptor_kind not in {"classmethod", "ordinary", "property"}:
+            return None, "unknown"
         positional_only = result[1]
         positional_or_keyword = result[2]
         if positional_only:
             positional_only.pop(0)
         elif positional_or_keyword:
             positional_or_keyword.pop(0)
+        elif result[3] is not None:
+            return result, "exact"
         else:
-            return None
-        return result
+            return None, "invalid"
+        return result, "exact"
 
     def _signature_contract(
         self,
@@ -4041,7 +4337,7 @@ class InterfaceBoundaryGenerator:
                     version
                     for package, version in self.source_versions.items()
                     if reference
-                    in _PINNED_ORDINARY_DESCRIPTOR_DECORATORS.get(
+                    in _PINNED_TRANSPARENT_SIGNATURE_DECORATORS.get(
                         (package, version),
                         (),
                     )
@@ -4067,11 +4363,16 @@ class InterfaceBoundaryGenerator:
 
         effective_kind = callable_info.descriptor_kind if descriptor_kind is None else descriptor_kind
         receiver_binding = callable_info.owner is not None if binds_receiver is None else binds_receiver
-        bound_call_signature = self._bound_call_signature(
+        bound_call_signature, binding_status = self._bound_call_signature(
             runtime_entry_signature,
             descriptor_kind=effective_kind,
             binds_receiver=receiver_binding,
         )
+        if status == "exact" and binding_status != "exact":
+            status = binding_status
+            provenance.append(
+                "invalid_receiver_binding" if binding_status == "invalid" else "unknown_descriptor_binding"
+            )
         return SignatureContract(
             definition_signature=definition_signature,
             runtime_entry_signature=runtime_entry_signature,
@@ -4099,6 +4400,15 @@ class InterfaceBoundaryGenerator:
         )
         if not any(contract is not None and contract.status != "exact" for contract in contracts):
             return
+        invalid_binding = any(contract is not None and contract.status == "invalid" for contract in contracts)
+        unknown_binding = any(
+            contract is not None and "unknown_descriptor_binding" in contract.provenance for contract in contracts
+        )
+        if unknown_binding and not invalid_binding:
+            # The descriptor finding already owns this uncertainty. Emitting a
+            # second signature finding for the same unknown binding would add
+            # noise without providing independent evidence.
+            return
         self.findings.append(
             CandidateFinding(
                 relation=relation.relation,
@@ -4108,11 +4418,78 @@ class InterfaceBoundaryGenerator:
                 target_expression=target_expression,
                 evidence_line=evidence_line,
                 reason=(
-                    "a decorator changes the runtime callable contract and "
-                    "its exact signature effect is not proven for this source version"
+                    "descriptor binding requires a receiver but the callable has no positional slot"
+                    if invalid_binding
+                    else (
+                        "the descriptor kind is conditional or unknown, so the bound runtime signature cannot be proven"
+                        if unknown_binding
+                        else (
+                            "a decorator changes the runtime callable contract and "
+                            "its exact signature effect is not proven for this source version"
+                        )
+                    )
                 ),
-                status="review",
-                reason_code="unknown_signature_transform",
+                status="risk" if invalid_binding else "review",
+                reason_code=(
+                    "invalid_receiver_binding"
+                    if invalid_binding
+                    else ("unknown_signature_binding" if unknown_binding else "unknown_signature_transform")
+                ),
+                generator_issue=False,
+                evidence_scope=evidence_scope,
+                evidence_guards=evidence_guards,
+                supplemental=True,
+            )
+        )
+
+    def _append_signature_compatibility_finding(
+        self,
+        relation: Relation,
+        *,
+        target_expression: str,
+        evidence_line: int,
+        evidence_scope: str | None = None,
+        evidence_guards: tuple[str, ...] = (),
+    ) -> None:
+        upstream = relation.upstream_signature_contract
+        installed = relation.installed_signature_contract
+        if (
+            upstream is None
+            or installed is None
+            or upstream.status != "exact"
+            or installed.status != "exact"
+            or upstream.bound_call_signature is None
+            or installed.bound_call_signature is None
+        ):
+            return
+        if (
+            relation.upstream_descriptor_kind is not None
+            and relation.installed_descriptor_kind is not None
+            and relation.upstream_descriptor_kind != relation.installed_descriptor_kind
+        ):
+            # A known descriptor mismatch already reports the access-protocol
+            # break. Do not duplicate it as a derived signature failure.
+            return
+        compatible = upstream.protocol == installed.protocol and _accepts_signature_contract(
+            upstream.bound_call_signature,
+            installed.bound_call_signature,
+        )
+        if compatible:
+            return
+        self.findings.append(
+            CandidateFinding(
+                relation=relation.relation,
+                downstream_file=relation.downstream_file,
+                downstream_owner=relation.downstream_owner,
+                downstream_name=relation.downstream_name,
+                target_expression=target_expression,
+                evidence_line=evidence_line,
+                reason=(
+                    "the installed downstream callable does not accept every "
+                    "call shape allowed by the upstream runtime contract"
+                ),
+                status="risk",
+                reason_code="signature_incompatible",
                 generator_issue=False,
                 evidence_scope=evidence_scope,
                 evidence_guards=evidence_guards,
@@ -4810,6 +5187,11 @@ class InterfaceBoundaryGenerator:
             conditional=(upstream_descriptor_conditional or downstream_descriptor_conditional),
         )
         self._append_signature_finding(
+            relation,
+            target_expression=upstream_name,
+            evidence_line=evidence_line,
+        )
+        self._append_signature_compatibility_finding(
             relation,
             target_expression=upstream_name,
             evidence_line=evidence_line,
@@ -7815,6 +8197,13 @@ class InterfaceBoundaryGenerator:
             evidence_scope=self._scope_name(context),
             evidence_guards=context.guard_texts,
         )
+        self._append_signature_compatibility_finding(
+            relation,
+            target_expression=evidence_target or target,
+            evidence_line=line,
+            evidence_scope=self._scope_name(context),
+            evidence_guards=context.guard_texts,
+        )
 
     def _field_patch_finding(
         self,
@@ -8527,12 +8916,17 @@ def _relation_payloads(
     external_sources: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     grouped: dict[
-        tuple[str, str, str | None, str, str, str | None],
+        tuple[str, str, str | None, str, str, str | None, str],
         list[Relation],
     ] = defaultdict(list)
     for relation in relations:
         signature_key = json.dumps(
             relation.upstream_signature,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        signature_contract_key = json.dumps(
+            _signature_contract_payload(relation.upstream_signature_contract),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -8544,6 +8938,7 @@ def _relation_payloads(
                 relation.upstream_name,
                 signature_key,
                 relation.upstream_descriptor_kind,
+                signature_contract_key,
             )
         ].append(relation)
 
@@ -8557,9 +8952,18 @@ def _relation_payloads(
             item[2] or "",
             item[3],
             item[4],
+            item[6],
         ),
     ):
-        source_package, upstream_file, owner, name, signature_key, upstream_descriptor_kind = key
+        (
+            source_package,
+            upstream_file,
+            owner,
+            name,
+            signature_key,
+            upstream_descriptor_kind,
+            signature_contract_key,
+        ) = key
         consumers = []
         evidence_records = []
         for relation in sorted(
@@ -8580,6 +8984,8 @@ def _relation_payloads(
                     relation.downstream_signature,
                     relation.downstream_descriptor_kind,
                     relation.installed_descriptor_kind,
+                    _signature_contract_payload(relation.downstream_signature_contract),
+                    _signature_contract_payload(relation.installed_signature_contract),
                 ]
             )
             evidence_records.append(
@@ -8603,6 +9009,7 @@ def _relation_payloads(
                     name,
                     json.loads(signature_key),
                     upstream_descriptor_kind,
+                    json.loads(signature_contract_key),
                 ],
                 "c": consumers,
                 "e": evidence_records,
@@ -8649,17 +9056,30 @@ def _write_jsonl(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
 
 def _load_compact_relations(path: Path) -> list[Relation]:
     relations = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        payload = json.loads(line)
+    payloads = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    schema_version = next(
+        (payload["_meta"].get("schema", 0) for payload in payloads if isinstance(payload.get("_meta"), dict)),
+        0,
+    )
+    for payload in payloads:
         if "_meta" in payload or "f" in payload:
             continue
         upstream = payload["u"]
         upstream_file, upstream_owner, upstream_name, upstream_signature = upstream[:4]
         upstream_descriptor_kind = upstream[4] if len(upstream) > 4 else None
+        upstream_signature_contract = (
+            _signature_contract_from_payload(upstream[5]) if schema_version >= 6 and len(upstream) > 5 else None
+        )
         for consumer in payload["c"]:
             relation, downstream_file, downstream_owner, downstream_name, downstream_signature = consumer[:5]
             downstream_descriptor_kind = consumer[5] if len(consumer) > 5 else None
             installed_descriptor_kind = consumer[6] if len(consumer) > 6 else None
+            downstream_signature_contract = (
+                _signature_contract_from_payload(consumer[7]) if schema_version >= 6 and len(consumer) > 7 else None
+            )
+            installed_signature_contract = (
+                _signature_contract_from_payload(consumer[8]) if schema_version >= 6 and len(consumer) > 8 else None
+            )
             if relation not in SUPPORTED_RELATIONS:
                 continue
             relations.append(
@@ -8679,6 +9099,9 @@ def _load_compact_relations(path: Path) -> list[Relation]:
                     upstream_descriptor_kind=upstream_descriptor_kind,
                     downstream_descriptor_kind=downstream_descriptor_kind,
                     installed_descriptor_kind=installed_descriptor_kind,
+                    upstream_signature_contract=upstream_signature_contract,
+                    downstream_signature_contract=downstream_signature_contract,
+                    installed_signature_contract=installed_signature_contract,
                 )
             )
     return relations
@@ -8775,6 +9198,48 @@ def compare_relations(
                     "generated": list(generated_kinds),
                 }
             )
+    signature_contract_changes = []
+    for key in sorted(exact_matches):
+        baseline_relation = baseline_exact[key]
+        baseline_contracts = (
+            baseline_relation.upstream_signature_contract,
+            baseline_relation.downstream_signature_contract,
+            baseline_relation.installed_signature_contract,
+        )
+        if baseline_contracts == (None, None, None):
+            continue
+        generated_relation = next(
+            (
+                relation
+                for relation in generated
+                if any(alias in relation.comparison_exact_keys() for alias in baseline_relation.comparison_exact_keys())
+            ),
+            None,
+        )
+        if generated_relation is None:
+            continue
+        generated_contracts = (
+            generated_relation.upstream_signature_contract,
+            generated_relation.downstream_signature_contract,
+            generated_relation.installed_signature_contract,
+        )
+        if generated_contracts == baseline_contracts:
+            continue
+        signature_contract_changes.append(
+            {
+                "relation": _relation_label(generated_relation),
+                "baseline": {
+                    "upstream": _signature_contract_payload(baseline_contracts[0]),
+                    "downstream": _signature_contract_payload(baseline_contracts[1]),
+                    "installed": _signature_contract_payload(baseline_contracts[2]),
+                },
+                "generated": {
+                    "upstream": _signature_contract_payload(generated_contracts[0]),
+                    "downstream": _signature_contract_payload(generated_contracts[1]),
+                    "installed": _signature_contract_payload(generated_contracts[2]),
+                },
+            }
+        )
     different_upstream = []
     baseline_downstream_keys = {relation.downstream_key() for relation in baseline}
     for key in sorted(baseline_downstream_keys & set(generated_downstream)):
@@ -8822,6 +9287,7 @@ def compare_relations(
             "baseline_relations": len(baseline),
             "exact_matches": len(exact_matches),
             "descriptor_kind_changes": len(descriptor_kind_changes),
+            "signature_contract_changes": len(signature_contract_changes),
             "same_downstream_different_upstream": len(different_upstream),
             "old_only": len(old_only_keys),
             "new_only": len(new_only_keys),
@@ -8846,6 +9312,7 @@ def compare_relations(
         },
         "same_downstream_different_upstream": different_upstream,
         "descriptor_kind_changes": descriptor_kind_changes,
+        "signature_contract_changes": signature_contract_changes,
         "old_only": [_relation_label(baseline_exact[key]) for key in sorted(old_only_keys)],
         "new_only": [_relation_label(generated_exact[key]) for key in sorted(new_only_keys)],
         "missing_downstream": [_downstream_label(key) for key in sorted(missing_downstream_keys)],
