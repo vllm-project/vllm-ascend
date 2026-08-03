@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-AUDIT_VERSION = "0.6.0"
+AUDIT_VERSION = "0.7.0"
 RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 STATUSES = frozenset({"verified", "risk", "expected", "excluded", "review"})
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
@@ -357,6 +357,12 @@ class IndependentCandidateScanner:
                 self._parse_errors.append(f"{relative_file}: {type(error).__name__}: {error}")
                 continue
             module, is_package = _module_name(package_name, package_root, path)
+            self._preindex_module_functions(
+                module,
+                is_package,
+                relative_file,
+                tree,
+            )
             state = FlowState()
             final_state = self._scan_statements(
                 module=module,
@@ -370,6 +376,35 @@ class IndependentCandidateScanner:
             )
             for local_name, targets in final_state.bindings.items():
                 self._aliases[f"{module}.{local_name}"] = set(targets)
+
+    def _preindex_module_functions(
+        self,
+        module: str,
+        is_package: bool,
+        relative_file: str,
+        tree: ast.Module,
+    ) -> None:
+        """Index later helpers without executing candidate collection twice."""
+
+        state = FlowState()
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                self._update_imports(module, is_package, node, state)
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified = f"{module}.{node.name}"
+                state.bindings[node.name] = {qualified}
+                self._functions[qualified] = FunctionRecord(
+                    module=module,
+                    is_package=is_package,
+                    file=relative_file,
+                    scope=(node.name,),
+                    node=node,
+                    definition_state=state.clone(),
+                )
+                continue
+            if isinstance(node, ast.ClassDef):
+                state.bindings[node.name] = {f"{module}.{node.name}"}
 
     def _scan_statements(
         self,
@@ -590,6 +625,14 @@ class IndependentCandidateScanner:
                 continue
 
             if isinstance(node, (ast.With, ast.AsyncWith)):
+                if collect_candidates:
+                    for item in node.items:
+                        if isinstance(item.context_expr, ast.Call):
+                            self._scan_helper_invocation(
+                                caller_module=module,
+                                call=item.context_expr,
+                                caller_state=current,
+                            )
                 body = self._scan_statements(
                     module=module,
                     is_package=is_package,
@@ -624,7 +667,13 @@ class IndependentCandidateScanner:
                                 {raw_target or "<dynamic>", *upstream_targets},
                                 "assignment",
                             )
-                self._update_assignments(module, targets, node.value, current)
+                self._update_assignments(
+                    module,
+                    targets,
+                    node.value,
+                    current,
+                    scope,
+                )
                 continue
 
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
@@ -689,14 +738,18 @@ class IndependentCandidateScanner:
         targets: Sequence[ast.AST],
         value: ast.AST | None,
         state: FlowState,
+        scope: tuple[str, ...],
     ) -> None:
         raw_value = _expression_name(value)
-        references = self._resolve_expression(module, raw_value, state) if raw_value else set()
-        if isinstance(value, ast.Call) and value.args:
-            function_name = _expression_name(value.func)
-            function_targets = self._resolve_expression(module, function_name, state)
-            if "sys.modules.get" in function_targets:
-                references.update(_string_values(value.args[0], state))
+        references = self._mro_selected_module_references(
+            module,
+            value,
+            state,
+            scope,
+        )
+        references.update(self._runtime_module_references(module, value, state))
+        if not references and raw_value:
+            references = self._resolve_expression(module, raw_value, state)
         strings = _string_values(value, state)
         boolean = _main_condition_value(value, state) if value is not None else None
         for target in targets:
@@ -714,6 +767,224 @@ class IndependentCandidateScanner:
                 state.booleans[target.id] = {boolean}
             else:
                 state.booleans.pop(target.id, None)
+
+    def _runtime_module_references(
+        self,
+        module: str,
+        value: ast.AST | None,
+        state: FlowState,
+    ) -> set[str]:
+        module_node: ast.AST | None = None
+        owner_node: ast.AST | None = None
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "get"
+            and value.args
+        ):
+            owner_node = value.func.value
+            module_node = value.args[0]
+        elif isinstance(value, ast.Subscript):
+            owner_node = value.value
+            module_node = value.slice
+        if owner_node is None or module_node is None:
+            return set()
+        owner = _expression_name(owner_node)
+        if self._resolve_expression(module, owner, state) != {"sys.modules"}:
+            return set()
+        names = _string_values(module_node, state)
+        expression = _expression_name(module_node)
+        if expression is not None:
+            names.update(self._resolve_expression(module, expression, state))
+        return {
+            name
+            for name in names
+            if name == "vllm" or name.startswith("vllm.")
+        }
+
+    def _mro_selected_module_references(
+        self,
+        module: str,
+        value: ast.AST | None,
+        state: FlowState,
+        scope: tuple[str, ...],
+    ) -> set[str]:
+        if not isinstance(value, ast.Call):
+            return set()
+        function_name = _expression_name(value.func)
+        targets = self._resolve_expression(module, function_name, state)
+        records = [
+            self._functions[target]
+            for target in sorted(targets)
+            if target in self._functions
+        ]
+        if len(records) != 1:
+            return set()
+        selector = self._mro_module_selector(records[0].node)
+        if selector is None:
+            return set()
+        receiver_parameter, selected_class_name = selector
+        positional = [
+            *records[0].node.args.posonlyargs,
+            *records[0].node.args.args,
+        ]
+        parameter_index = next(
+            (
+                index
+                for index, parameter in enumerate(positional)
+                if parameter.arg == receiver_parameter
+            ),
+            None,
+        )
+        if parameter_index is None or any(isinstance(argument, ast.Starred) for argument in value.args):
+            return set()
+        keyword_values = {
+            keyword.arg: keyword.value
+            for keyword in value.keywords
+            if keyword.arg is not None
+        }
+        if any(keyword.arg is None for keyword in value.keywords):
+            return set()
+        receiver = keyword_values.get(receiver_parameter)
+        if receiver is None and parameter_index < len(value.args):
+            receiver = value.args[parameter_index]
+        if receiver is None:
+            return set()
+        receiver_classes = self._receiver_class_references(
+            module,
+            receiver,
+            state,
+            scope,
+        )
+        if len(receiver_classes) != 1:
+            return set()
+        mro = self._strict_mro(next(iter(receiver_classes)))
+        if not mro.complete:
+            return set()
+        selected_owners = [
+            owner
+            for owner in mro.owners
+            if owner.rsplit(".", 1)[-1] == selected_class_name
+        ]
+        if len(selected_owners) != 1 or not selected_owners[0].startswith("vllm."):
+            return set()
+        return {selected_owners[0].rsplit(".", 1)[0]}
+
+    def _receiver_class_references(
+        self,
+        module: str,
+        value: ast.AST,
+        state: FlowState,
+        scope: tuple[str, ...],
+    ) -> set[str]:
+        if isinstance(value, ast.Name) and value.id in {"self", "cls"}:
+            for depth in range(len(scope), 0, -1):
+                candidate = f"{module}.{'.'.join(scope[:depth])}"
+                if candidate in self._classes:
+                    return {candidate}
+            return set()
+        expression = _expression_name(value)
+        return {
+            reference
+            for reference in self._resolve_expression(module, expression, state)
+            if reference in self._classes
+        }
+
+    @staticmethod
+    def _mro_module_selector(
+        function: ast.AsyncFunctionDef | ast.FunctionDef,
+    ) -> tuple[str, str] | None:
+        parameters = {
+            parameter.arg
+            for parameter in (
+                *function.args.posonlyargs,
+                *function.args.args,
+                *function.args.kwonlyargs,
+            )
+        }
+        returns = [node for node in function.body if isinstance(node, ast.Return)]
+        if len(returns) != 1:
+            return None
+        returned = returns[0].value
+        if not (
+            isinstance(returned, ast.Attribute)
+            and returned.attr == "__module__"
+            and isinstance(returned.value, ast.Name)
+        ):
+            return None
+        selected_name = returned.value.id
+        assignments: list[ast.AST | None] = []
+        for node in function.body:
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, ast.AnnAssign)
+                else []
+            )
+            if any(
+                isinstance(target, ast.Name) and target.id == selected_name
+                for target in targets
+            ):
+                assignments.append(node.value)
+        if len(assignments) != 1:
+            return None
+        next_call = assignments[0]
+        if not (
+            isinstance(next_call, ast.Call)
+            and isinstance(next_call.func, ast.Name)
+            and next_call.func.id == "next"
+            and 1 <= len(next_call.args) <= 2
+            and not next_call.keywords
+            and isinstance(next_call.args[0], ast.GeneratorExp)
+        ):
+            return None
+        generator = next_call.args[0]
+        if len(generator.generators) != 1 or not isinstance(generator.elt, ast.Name):
+            return None
+        comprehension = generator.generators[0]
+        if not (
+            isinstance(comprehension.target, ast.Name)
+            and comprehension.target.id == generator.elt.id
+            and not comprehension.is_async
+        ):
+            return None
+        receiver = comprehension.iter
+        if not (
+            isinstance(receiver, ast.Attribute)
+            and receiver.attr == "__mro__"
+            and isinstance(receiver.value, ast.Attribute)
+            and receiver.value.attr == "__class__"
+            and isinstance(receiver.value.value, ast.Name)
+            and receiver.value.value.id in parameters
+        ):
+            return None
+        loop_name = comprehension.target.id
+        class_names = set()
+        for condition in comprehension.ifs:
+            if not (
+                isinstance(condition, ast.Compare)
+                and len(condition.ops) == 1
+                and isinstance(condition.ops[0], ast.Eq)
+                and len(condition.comparators) == 1
+            ):
+                continue
+            for attribute, literal in (
+                (condition.left, condition.comparators[0]),
+                (condition.comparators[0], condition.left),
+            ):
+                if (
+                    isinstance(attribute, ast.Attribute)
+                    and attribute.attr == "__name__"
+                    and isinstance(attribute.value, ast.Name)
+                    and attribute.value.id == loop_name
+                    and isinstance(literal, ast.Constant)
+                    and isinstance(literal.value, str)
+                ):
+                    class_names.add(literal.value)
+        if len(class_names) != 1:
+            return None
+        return receiver.value.value.id, next(iter(class_names))
 
     def _scan_helper_invocation(
         self,

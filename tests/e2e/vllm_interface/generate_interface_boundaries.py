@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.34.0"
+GENERATOR_VERSION = "0.35.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -110,6 +110,7 @@ _PINNED_WRAPS_SIGNATURE_DECORATORS: dict[
         "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
     ): frozenset({"torch.compiler.disable"}),
 }
+_STDLIB_WRAPS_SIGNATURE_DECORATORS = frozenset({"contextlib.contextmanager"})
 _PINNED_TRITON_KERNEL_SOURCES = frozenset(
     {
         ("vllm", "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9"),
@@ -4188,8 +4189,38 @@ class InterfaceBoundaryGenerator:
                 relation.downstream_key(),
             ),
         )
+        unique_findings: dict[object, CandidateFinding] = {}
+        for finding in set(self.findings):
+            key: object = finding
+            if finding.supplemental:
+                key = (
+                    finding.relation,
+                    finding.downstream_file,
+                    finding.downstream_owner,
+                    finding.downstream_name,
+                    finding.target_expression,
+                    finding.reason,
+                    finding.status,
+                    finding.reason_code,
+                    finding.generator_issue,
+                    finding.supplemental,
+                    finding.upstream_descriptor_kind,
+                    finding.downstream_descriptor_kind,
+                    finding.installed_descriptor_kind,
+                )
+            previous = unique_findings.get(key)
+            if previous is None or (
+                finding.evidence_line,
+                finding.evidence_scope or "",
+                finding.evidence_guards,
+            ) < (
+                previous.evidence_line,
+                previous.evidence_scope or "",
+                previous.evidence_guards,
+            ):
+                unique_findings[key] = finding
         self.findings = sorted(
-            set(self.findings),
+            unique_findings.values(),
             key=lambda relation: (
                 relation.status,
                 relation.reason_code,
@@ -4374,6 +4405,12 @@ class InterfaceBoundaryGenerator:
                     provenance.append(
                         f"{label}:generated={','.join(generated_names)}@{repository_source[1]}"
                     )
+                continue
+            if reference in _STDLIB_WRAPS_SIGNATURE_DECORATORS and not isinstance(decorator, ast.Call):
+                runtime_entry_signature = ["sync", [], [], "args", [], "kwargs"]
+                reported_signature = definition_signature
+                forwarded_targets.append(callable_info.qualified_name)
+                provenance.append(f"{label}:stdlib_wrapped")
                 continue
             if reference == "functools.wraps" and isinstance(decorator, ast.Call) and decorator.args:
                 target_expression = _expression_name(decorator.args[0])
@@ -6526,7 +6563,12 @@ class InterfaceBoundaryGenerator:
         context: PatchScanContext,
     ) -> None:
         expression = _expression_name(value)
-        references = (
+        selected_modules = self._mro_selected_module_references(
+            module_info,
+            value,
+            context,
+        )
+        references = selected_modules or (
             self._resolve_patch_references(
                 module_info,
                 expression,
@@ -7929,6 +7971,11 @@ class InterfaceBoundaryGenerator:
             if isinstance(value, ast.Call)
             else None
         )
+        selected_modules = self._mro_selected_module_references(
+            module_info,
+            value,
+            context,
+        )
         string_values = self._string_values(value, context)
         expression = _expression_name(value)
         runtime_modules = self._runtime_module_references(
@@ -7942,7 +7989,8 @@ class InterfaceBoundaryGenerator:
             context,
         )
         references = (
-            runtime_modules
+            selected_modules
+            or runtime_modules
             or getattr_references
             or (
                 self._resolve_patch_references(
@@ -7986,26 +8034,28 @@ class InterfaceBoundaryGenerator:
         while isinstance(node, ast.Attribute):
             attributes.append(node.attr)
             node = node.value
-        module_name: str | None = None
+        module_names: set[str] = set()
         owner_node: ast.AST | None = None
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "get"
             and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
         ):
             owner_node = node.func.value
-            module_name = node.args[0].value
-        elif (
-            isinstance(node, ast.Subscript)
-            and isinstance(node.slice, ast.Constant)
-            and isinstance(node.slice.value, str)
-        ):
+            module_names = self._runtime_module_names(
+                module_info,
+                node.args[0],
+                context,
+            )
+        elif isinstance(node, ast.Subscript):
             owner_node = node.value
-            module_name = node.slice.value
-        if owner_node is None or not (module_name == "vllm" or module_name.startswith("vllm.")):
+            module_names = self._runtime_module_names(
+                module_info,
+                node.slice,
+                context,
+            )
+        if owner_node is None or not module_names:
             return set()
         owner = _expression_name(owner_node)
         if owner is None:
@@ -8017,7 +8067,232 @@ class InterfaceBoundaryGenerator:
         )
         if references != {"sys.modules"}:
             return set()
-        return {".".join((module_name, *reversed(attributes))) if attributes else module_name}
+        return {
+            ".".join((module_name, *reversed(attributes))) if attributes else module_name
+            for module_name in module_names
+        }
+
+    def _runtime_module_names(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST,
+        context: PatchScanContext,
+    ) -> set[str]:
+        names = self._string_values(node, context)
+        expression = _expression_name(node)
+        if expression is not None:
+            names.update(
+                self._resolve_patch_references(
+                    module_info,
+                    expression,
+                    context,
+                )
+            )
+        return {
+            name
+            for name in names
+            if name == "vllm" or name.startswith("vllm.")
+        }
+
+    def _mro_selected_module_references(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST | None,
+        context: PatchScanContext,
+    ) -> set[str]:
+        """Resolve a helper that returns one named class's MRO module."""
+
+        if not isinstance(node, ast.Call):
+            return set()
+        expression = _expression_name(node.func)
+        if expression is None:
+            return set()
+        references = self._resolve_patch_references(
+            module_info,
+            expression,
+            context,
+        )
+        helpers = [
+            helper
+            for reference in references
+            for helper in (self._callable_info(reference),)
+            if helper is not None
+            and helper.owner is None
+            and isinstance(helper.node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        ]
+        if len(helpers) != 1:
+            return set()
+        selector = self._mro_module_selector(helpers[0].node)
+        if selector is None:
+            return set()
+        receiver_parameter, selected_class_name = selector
+        positional = [*helpers[0].node.args.posonlyargs, *helpers[0].node.args.args]
+        parameter_index = next(
+            (
+                index
+                for index, parameter in enumerate(positional)
+                if parameter.arg == receiver_parameter
+            ),
+            None,
+        )
+        if parameter_index is None or any(isinstance(argument, ast.Starred) for argument in node.args):
+            return set()
+        keyword_values = {
+            keyword.arg: keyword.value
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        if any(keyword.arg is None for keyword in node.keywords):
+            return set()
+        receiver = keyword_values.get(receiver_parameter)
+        if receiver is None and parameter_index < len(node.args):
+            receiver = node.args[parameter_index]
+        if receiver is None:
+            return set()
+
+        receiver_classes = self._receiver_class_references(
+            module_info,
+            receiver,
+            context,
+        )
+        if len(receiver_classes) != 1:
+            return set()
+        mro = self._linearized_mro(next(iter(receiver_classes)))
+        if not mro.complete:
+            return set()
+        selected_owners = [
+            owner
+            for owner in mro.owners
+            if owner.rsplit(".", 1)[-1] == selected_class_name
+        ]
+        if len(selected_owners) != 1:
+            return set()
+        selected_owner = selected_owners[0]
+        if not selected_owner.startswith("vllm."):
+            return set()
+        return {selected_owner.rsplit(".", 1)[0]}
+
+    def _receiver_class_references(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST,
+        context: PatchScanContext,
+    ) -> set[str]:
+        if isinstance(node, ast.Name) and node.id in {"self", "cls"}:
+            for depth in range(len(context.scope), 0, -1):
+                candidate = f"{module_info.name}.{'.'.join(context.scope[:depth])}"
+                if self.downstream.find_class(candidate) is not None:
+                    return {candidate}
+            return set()
+        expression = _expression_name(node)
+        if expression is None:
+            return set()
+        return {
+            reference
+            for reference in self._resolve_patch_references(
+                module_info,
+                expression,
+                context,
+            )
+            if self._class_info(reference) is not None
+        }
+
+    @staticmethod
+    def _mro_module_selector(
+        function: ast.AsyncFunctionDef | ast.FunctionDef,
+    ) -> tuple[str, str] | None:
+        """Recognize ``next(cls in receiver.__mro__)`` then ``cls.__module__``."""
+
+        parameters = {
+            parameter.arg
+            for parameter in (
+                *function.args.posonlyargs,
+                *function.args.args,
+                *function.args.kwonlyargs,
+            )
+        }
+        scope_nodes = list(_function_scope_nodes(function))
+        returns = [node for node in scope_nodes if isinstance(node, ast.Return)]
+        if len(returns) != 1:
+            return None
+        returned = returns[0].value
+        if not (
+            isinstance(returned, ast.Attribute)
+            and returned.attr == "__module__"
+            and isinstance(returned.value, ast.Name)
+        ):
+            return None
+        selected_name = returned.value.id
+        assignments = []
+        for node in scope_nodes:
+            if isinstance(node, ast.Assign):
+                if any(isinstance(target, ast.Name) and target.id == selected_name for target in node.targets):
+                    assignments.append(node.value)
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == selected_name
+            ):
+                assignments.append(node.value)
+        if len(assignments) != 1:
+            return None
+        next_call = assignments[0]
+        if not (
+            isinstance(next_call, ast.Call)
+            and isinstance(next_call.func, ast.Name)
+            and next_call.func.id == "next"
+            and 1 <= len(next_call.args) <= 2
+            and not next_call.keywords
+            and isinstance(next_call.args[0], ast.GeneratorExp)
+        ):
+            return None
+        generator = next_call.args[0]
+        if len(generator.generators) != 1 or not isinstance(generator.elt, ast.Name):
+            return None
+        comprehension = generator.generators[0]
+        if not (
+            isinstance(comprehension.target, ast.Name)
+            and comprehension.target.id == generator.elt.id
+            and not comprehension.is_async
+        ):
+            return None
+        receiver = comprehension.iter
+        if not (
+            isinstance(receiver, ast.Attribute)
+            and receiver.attr == "__mro__"
+            and isinstance(receiver.value, ast.Attribute)
+            and receiver.value.attr == "__class__"
+            and isinstance(receiver.value.value, ast.Name)
+            and receiver.value.value.id in parameters
+        ):
+            return None
+        loop_name = comprehension.target.id
+        class_names = set()
+        for condition in comprehension.ifs:
+            if not (
+                isinstance(condition, ast.Compare)
+                and len(condition.ops) == 1
+                and isinstance(condition.ops[0], ast.Eq)
+                and len(condition.comparators) == 1
+            ):
+                continue
+            pairs = (
+                (condition.left, condition.comparators[0]),
+                (condition.comparators[0], condition.left),
+            )
+            for attribute, literal in pairs:
+                if (
+                    isinstance(attribute, ast.Attribute)
+                    and attribute.attr == "__name__"
+                    and isinstance(attribute.value, ast.Name)
+                    and attribute.value.id == loop_name
+                    and isinstance(literal, ast.Constant)
+                    and isinstance(literal.value, str)
+                ):
+                    class_names.add(literal.value)
+        if len(class_names) != 1:
+            return None
+        return receiver.value.value.id, next(iter(class_names))
 
     def _getattr_references(
         self,

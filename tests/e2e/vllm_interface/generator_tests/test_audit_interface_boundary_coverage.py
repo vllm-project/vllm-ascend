@@ -1055,9 +1055,10 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
     patches = [
         candidate
         for candidate in candidates
-        if candidate.relation == "monkey_patch" and any(target.endswith(".graph_capture") for target in candidate.targets)
+        if candidate.relation == "monkey_patch"
+        and any(target.endswith(".graph_capture") for target in candidate.targets)
     ]
 
     assert len(patches) == 2
     assert all(candidate.scope == "_replace_gpu_model_runner_function_wrapper" for candidate in patches)
-    assert all("vllm.parallel.graph_capture" in candidate.targets for candidate in patches)
+    assert all("vllm.runner.graph_capture" in candidate.targets for candidate in patches)
