@@ -197,7 +197,7 @@ def apply_layerwise_kv_cache_plan(
         )
     kv_cache_config.kv_cache_tensors = new_tensors
     logger.info(
-        "Layerwise KV cache reuse merged %d tensor descriptors into %d shared slots.",
+        "Layerwise KV cache reuse merged %d tensor descriptors into %d shared buffers.",
         len(old_tensors),
         len(new_tensors),
     )
