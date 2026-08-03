@@ -360,9 +360,6 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      test_frequency: nightly
-      soc_version: a2
       upload: false
 
   single-node-accuracy-tests-pr-only:
@@ -392,9 +389,6 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      test_frequency: nightly
-      soc_version: a2
       upload: false
 
   clear-pre-logs:
