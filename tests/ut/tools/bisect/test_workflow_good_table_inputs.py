@@ -1,7 +1,7 @@
-import regex as re
 from pathlib import Path
 
 import pytest
+import regex as re
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
