@@ -9088,6 +9088,94 @@ base.run = replacement
     )
 
 
+def test_v032_forwarding_wrappers_do_not_hide_reported_signature_break(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import torch
+
+
+@torch.compiler.disable
+def run(value, *, mode=None):
+    return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import torch
+import vllm.base as base
+
+
+@torch.compiler.disable
+def replacement(value, *, renamed=None):
+    return value
+
+
+base.run = replacement
+""",
+    )
+
+    _, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={
+            "torch": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+        },
+    ).generate()
+
+    assert [finding.reason_code for finding in findings] == ["signature_incompatible"]
+
+
+def test_v032_plain_source_wrappers_do_not_hide_definition_break(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+def guarded(function):
+    def wrapper(*args, **kwargs):
+        return function(*args, **kwargs)
+    return wrapper
+
+
+class Base:
+    @classmethod
+    @guarded
+    def run(cls, value, *, mode=None):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from vllm.base import Base, guarded
+
+
+class Child(Base):
+    @classmethod
+    @guarded
+    def run(cls, value, *, renamed=None):
+        return value
+""",
+    )
+
+    _, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert [finding.reason_code for finding in findings] == ["signature_incompatible"]
+
+
 def test_v025_outer_classmethod_keeps_descriptor_when_inner_signature_is_unknown(
     tmp_path: Path,
 ) -> None:
