@@ -256,6 +256,10 @@ not a strict graph-versus-eager A/B comparison, because the server-side maximum
 model length and sequence capacity differ. With `max-num-seqs=4`, the ACL Graph
 run queues part of the concurrency-8 burst, which increases TTFT.
 
+For the ACL Graph run, P99 TTFT, TPOT, and ITL were 5551.16 ms, 30.72 ms,
+and 125.66 ms, respectively. Graph capture completed in 12 seconds and used
+approximately 0.46 GiB of graph memory per NPU.
+
 ## Troubleshooting
 
 ### The model cannot be loaded without remote code
