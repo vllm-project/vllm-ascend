@@ -460,7 +460,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             # Select the fused CANN operator via env var. The fused op only
             # supports the non-PCP case; keep the Triton pipeline as default.
-            use_fused_chunk = get_ascend_config().enable_gdn_fused_chunk and get_pcp_group().world_size == 1
+            use_fused_chunk = get_ascend_config().enable_fused_chunk_gdn and get_pcp_group().world_size == 1
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
