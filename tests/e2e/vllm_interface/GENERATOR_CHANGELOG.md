@@ -4,6 +4,24 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.32.0 - compare wrapper-hidden signature views
+
+- Red-test checkpoint: `478ca859f`. Exact forwarding wrappers on both sides
+  expose broad `*args/**kwargs` runtime entries, so the compatibility checker
+  could incorrectly accept a renamed keyword in the decorated implementation.
+- Change: compatibility now checks three independently bound views: the outer
+  runtime entry, the introspection-reported signature, and the decorated source
+  definition. Duplicate signature pairs are evaluated once and one finding
+  lists every incompatible view.
+- Safety boundary: a view is compared only when both contracts and receiver
+  bindings are exact. Known descriptor mismatches still own their access
+  protocol failure and suppress a duplicate signature finding.
+- Reason: a wrapper may accept a call initially but fail when it forwards that
+  call to the decorated function; reported signatures are also public
+  introspection interfaces. Checking only the outer entry hid real breaks.
+- Test evidence: all 199 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+
 ## v0.31.0 - model the pinned `torch.compiler.disable` wrapper
 
 - Red-test checkpoint: `01dea70ec`. The reduced local PyTorch snapshot proves

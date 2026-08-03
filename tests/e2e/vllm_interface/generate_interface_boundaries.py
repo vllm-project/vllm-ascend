@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.31.0"
+GENERATOR_VERSION = "0.32.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -4620,11 +4620,61 @@ class InterfaceBoundaryGenerator:
             # A known descriptor mismatch already reports the access-protocol
             # break. Do not duplicate it as a derived signature failure.
             return
-        compatible = upstream.protocol == installed.protocol and _accepts_signature_contract(
+
+        incompatible_views: list[str] = []
+        compared_signatures: set[str] = set()
+
+        def compare_view(
+            label: str,
+            upstream_signature: list[object] | None,
+            installed_signature: list[object] | None,
+        ) -> None:
+            if upstream_signature is None or installed_signature is None:
+                return
+            comparison_key = json.dumps(
+                [upstream_signature, installed_signature],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if comparison_key in compared_signatures:
+                return
+            compared_signatures.add(comparison_key)
+            if not _accepts_signature_contract(
+                upstream_signature,
+                installed_signature,
+            ):
+                incompatible_views.append(label)
+
+        compare_view(
+            "runtime entry",
             upstream.bound_call_signature,
             installed.bound_call_signature,
         )
-        if compatible:
+        binds_receiver = relation.upstream_owner is not None
+        for label, attribute in (
+            ("reported", "reported_signature"),
+            ("definition", "definition_signature"),
+        ):
+            upstream_signature, upstream_status = self._bound_call_signature(
+                getattr(upstream, attribute),
+                descriptor_kind=relation.upstream_descriptor_kind,
+                binds_receiver=binds_receiver,
+            )
+            installed_signature, installed_status = self._bound_call_signature(
+                getattr(installed, attribute),
+                descriptor_kind=relation.installed_descriptor_kind,
+                binds_receiver=binds_receiver,
+            )
+            if upstream_status == "exact" and installed_status == "exact":
+                compare_view(
+                    label,
+                    upstream_signature,
+                    installed_signature,
+                )
+
+        if upstream.protocol != installed.protocol:
+            incompatible_views.insert(0, "access protocol")
+        if not incompatible_views:
             return
         self.findings.append(
             CandidateFinding(
@@ -4636,7 +4686,8 @@ class InterfaceBoundaryGenerator:
                 evidence_line=evidence_line,
                 reason=(
                     "the installed downstream callable does not accept every "
-                    "call shape allowed by the upstream runtime contract"
+                    "call shape allowed by the upstream contract; incompatible "
+                    f"views: {', '.join(incompatible_views)}"
                 ),
                 status="risk",
                 reason_code="signature_incompatible",
