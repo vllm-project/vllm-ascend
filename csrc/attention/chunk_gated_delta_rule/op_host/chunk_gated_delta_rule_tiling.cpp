@@ -141,9 +141,7 @@ ge::graphStatus ChunkGatedDeltaRuleTiling::DoOpTiling()
     tilingData_.interWorkspaceSz += sizeLow * nv * s * dk;                               // kg (BF16)
     tilingData_.interWorkspaceSz += sizeLow * nv * s * c;                                // qkt (BF16)
     if (tilingData_.stateIsFp32) {
-        tilingData_.interWorkspaceSz += sizeLow * nv * dv * dk;                           // stateBf16Wk (BF16, arch35)
-    } else if (socVersion_ != platform_ascendc::SocVersion::ASCEND950) {
-        tilingData_.interWorkspaceSz += sizeHigh * tilingData_.b * nv * dv * dk;         // highState_ (arch22: kernel unconditionally advances offset)
+        tilingData_.interWorkspaceSz += sizeLow * nv * dv * dk;   // curStateBf16_ (BF16 state workspace for AIC, FP32 path only)
     }
     tilingData_.interWorkspaceSz += sizeHigh * c * c * tilingData_.aiCoreNum * MASK_NUM; // mask (FP32)
 
@@ -357,10 +355,6 @@ ge::graphStatus ChunkGatedDeltaRuleTiling::AnalyzeDtype()
     OP_CHECK_IF(stateDtype != ge::DT_BF16 && stateDtype != ge::DT_FLOAT,
                 OP_LOGE(context_->GetNodeName(), "state dtype should be bfloat16 or float32"),
                 return ge::GRAPH_FAILED);
-    if (stateDtype == ge::DT_FLOAT && socVersion_ != platform_ascendc::SocVersion::ASCEND950) {
-        OP_LOGE(context_->GetNodeName(), "FP32 state is only supported on Ascend950");
-        return ge::GRAPH_FAILED;
-    }
     tilingData_.stateIsFp32 = (stateDtype == ge::DT_FLOAT) ? 1 : 0;
 
     auto actualSeqLengthsDtype = context_->GetInputDesc(ACTUAL_SEQ_LENGTHS_INDEX)->GetDataType();
