@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.35.0"
+GENERATOR_VERSION = "0.36.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -4880,7 +4880,11 @@ class InterfaceBoundaryGenerator:
                 and relation.upstream_descriptor_kind is None
                 and relation.installed_descriptor_kind is None
             )
-            or (relation.relation == "monkey_patch" and kinds == ("ordinary", "ordinary", None))
+            or (
+                relation.relation == "monkey_patch"
+                and relation.downstream_descriptor_kind == "ordinary"
+                and relation.installed_descriptor_kind is None
+            )
         ):
             return
         if conditional:
