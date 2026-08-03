@@ -9,6 +9,7 @@ from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
     AscendFusedTopKRouter as AscendFusedMoERouter,
 )
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
+from vllm_ascend.utils import is_310p
 
 
 def check_npu_moe_gating_top_k(
@@ -66,6 +67,22 @@ def create_ascend_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
+        )
+    if is_310p():
+        from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
+
+        return AscendGroupedTopKRouter310(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            num_fused_shared_experts=num_fused_shared_experts,
+            eplb_state=eplb_state,
         )
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         top_k=top_k,
