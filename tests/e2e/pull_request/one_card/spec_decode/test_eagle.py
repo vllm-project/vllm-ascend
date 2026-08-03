@@ -90,7 +90,8 @@ def test_qwen_eagle3_acceptance(
             [1, MAX_NUM_SEQS, dynamic_num_speculative_tokens]
         ]
 
-    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12])
+    cudagraph_mode = "FULL_DECODE_ONLY" if dynamic_num_speculative_tokens is None else "PIECEWISE"
+    compilation_config = CompilationConfig(cudagraph_mode=cudagraph_mode, cudagraph_capture_sizes=[12])
 
     with VllmRunner(
         main_model_name,

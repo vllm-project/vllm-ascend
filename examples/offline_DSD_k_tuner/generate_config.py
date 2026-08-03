@@ -7,8 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from manager import DynamicSpeculativeDecodingManager
 from transformers import AutoTokenizer
-
 from vllm import LLM
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep
@@ -16,14 +16,8 @@ from vllm.benchmarks.sweep.serve import SweepServeArgs, run_main
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.metrics.reader import Counter, Vector
-from manager import DynamicSpeculativeDecodingManager
-import sys
-import os
 
-
-DEFAULT_CUDAGRAPH_CAPTURE_SIZES = (
-    1, 2, 4, 6, 8, 16, 24, 32, 64, 96, 128, 256, 384, 512
-)
+DEFAULT_CUDAGRAPH_CAPTURE_SIZES = (1, 2, 4, 6, 8, 16, 24, 32, 64, 96, 128, 256, 384, 512)
 
 
 def build_compilation_config(
@@ -51,9 +45,12 @@ def build_serve_params(
     records: list[dict[str, object]] = []
 
     # Vanilla config (no speculative decoding)
-    records.append({"_benchmark_name": "vanilla",
-                    "max_num_seqs":max_vllm_batch_size,
-                })
+    records.append(
+        {
+            "_benchmark_name": "vanilla",
+            "max_num_seqs": max_vllm_batch_size,
+        }
+    )
 
     # Speculative decoding configs with varying num_speculative_tokens
     if method == "ngram":
@@ -61,7 +58,7 @@ def build_serve_params(
             records.append(
                 {
                     "_benchmark_name": f"ngram-k-{k}",
-                    "max_num_seqs":max_vllm_batch_size,
+                    "max_num_seqs": max_vllm_batch_size,
                     "speculative_config": {
                         "method": "ngram",
                         "num_speculative_tokens": k,
@@ -75,7 +72,7 @@ def build_serve_params(
             records.append(
                 {
                     "_benchmark_name": f"{method}-k-{k}",
-                    "max_num_seqs":max_vllm_batch_size,
+                    "max_num_seqs": max_vllm_batch_size,
                     "speculative_config": {
                         "method": method,
                         "model": draft_dir,
@@ -89,7 +86,7 @@ def build_serve_params(
             records.append(
                 {
                     "_benchmark_name": f"mtp-k-{k}",
-                    "max_num_seqs":max_vllm_batch_size,
+                    "max_num_seqs": max_vllm_batch_size,
                     "speculative_config": {
                         "method": "mtp",
                         "num_speculative_tokens": k,
@@ -147,9 +144,7 @@ def parse_itl_from_dataframe(result_df):
 
 def run_profiling_sweep(args):
     """Run profiling benchmarks using vllm bench sweep serve."""
-    compilation_config = build_compilation_config(
-        args.cudagraph_capture_sizes
-    )
+    compilation_config = build_compilation_config(args.cudagraph_capture_sizes)
 
     # Base serve command (static params shared across all serve configs)
     serve_cmd = [
@@ -249,9 +244,7 @@ def get_acceptance_rate_per_pos(args):
         # when using chat templates
         llm_prompts = [
             {
-                "prompt_token_ids": tokenizer.encode(
-                    prompt.prompt, add_special_tokens=False
-                ),
+                "prompt_token_ids": tokenizer.encode(prompt.prompt, add_special_tokens=False),
                 "multi_modal_data": prompt.multi_modal_data,
             }
             for prompt in prompts
@@ -293,7 +286,7 @@ def get_acceptance_rate_per_pos(args):
             "num_speculative_tokens": args.num_spec_tokens,
         }
     else:
-        raise ValueError(f"unknown method: {args.method}") 
+        raise ValueError(f"unknown method: {args.method}")
 
     llm = LLM(
         model=args.model_dir,
@@ -309,9 +302,7 @@ def get_acceptance_rate_per_pos(args):
         disable_chunked_mm_input=True,
         max_num_seqs=args.max_vllm_batch_size,
         allowed_local_media_path=args.allowed_local_media_path,
-        compilation_config=build_compilation_config(
-            args.cudagraph_capture_sizes
-        ),
+        compilation_config=build_compilation_config(args.cudagraph_capture_sizes),
     )
 
     metrics_names = [m.name for m in llm.get_metrics()]
@@ -376,12 +367,8 @@ def main():
         default="eagle",
         choices=["ngram", "eagle", "eagle3", "mtp"],
     )
-    parser.add_argument(
-        "--num-speculative-tokens-list", nargs="*", type=int, default=[1, 3, 5]
-    )
-    parser.add_argument(
-        "--batch-size-list", nargs="*", type=int, default=[1, 4, 16, 64, 256]
-    )
+    parser.add_argument("--num-speculative-tokens-list", nargs="*", type=int, default=[1, 3, 5])
+    parser.add_argument("--batch-size-list", nargs="*", type=int, default=[1, 4, 16, 64, 256])
     parser.add_argument(
         "--cudagraph-capture-sizes",
         nargs="+",
@@ -405,9 +392,9 @@ def main():
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--max-model-len", type=int, default=16384)
-    parser.add_argument("--temp", type=float, default=0)        
-    parser.add_argument("--top-p", type=float, default=1.0)     
-    parser.add_argument("--top-k", type=int, default=-1)         
+    parser.add_argument("--temp", type=float, default=0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--parallel-drafting", action="store_true")
     parser.add_argument("--allowed-local-media-path", type=str, default="")
@@ -425,9 +412,7 @@ def main():
     args.num_spec_tokens = max(args.num_speculative_tokens_list)
     args.eagle_dir = args.draft_dir
     args.result_dir = (
-        f"{args.result_dir}/tp-{args.tp}_temp-{args.temp}"
-        f"_top_p-{args.top_p}_top_k-{args.top_k}"
-        f"/{args.dataset_path}/"
+        f"{args.result_dir}/tp-{args.tp}_temp-{args.temp}_top_p-{args.top_p}_top_k-{args.top_k}/{args.dataset_path}/"
     )
 
     assert args.max_vllm_batch_size == max(args.batch_size_list), (
@@ -457,15 +442,11 @@ def main():
         acceptance_rate_per_pos=acceptance_rate_per_pos,
         vllm_max_batch_size=args.max_vllm_batch_size,
     )
-    num_speculative_tokens_per_batch_size = (
-        manager.get_num_speculative_tokens_per_batch_size()
-    )
+    num_speculative_tokens_per_batch_size = manager.get_num_speculative_tokens_per_batch_size()
 
     # Step 4: Save the dynamic speculative decoding configuration.
     dynamic_config = {
-        "num_speculative_tokens_per_batch_size": (
-            num_speculative_tokens_per_batch_size
-        ),
+        "num_speculative_tokens_per_batch_size": (num_speculative_tokens_per_batch_size),
         "batch_stats": batch_stats,
         "max_num_speculative_tokens": len(acceptance_rate_per_pos),
         "acceptance_rate_per_pos": acceptance_rate_per_pos,

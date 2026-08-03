@@ -61,11 +61,13 @@ def test_dflash_acceptance(
         ]
         dynamic_capture_size = len(prompts) * (dynamic_num_speculative_tokens + 1)
         capture_sizes = [dynamic_capture_size, 9, 18]
+        cudagraph_mode = "PIECEWISE"
     else:
         capture_sizes = [9, 18]
+        cudagraph_mode = "FULL_DECODE_ONLY"
 
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL_DECODE_ONLY",
+        cudagraph_mode=cudagraph_mode,
         cudagraph_capture_sizes=capture_sizes,
     )
 

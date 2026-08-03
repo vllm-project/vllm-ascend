@@ -73,8 +73,10 @@ def test_deepseek_mtp(
         ]
         dynamic_capture_size = len(example_prompts) * (dynamic_num_speculative_tokens + 1)
         capture_sizes = [dynamic_capture_size, 20]
+        effective_cudagraph_mode = "PIECEWISE"
     else:
         capture_sizes = [20]
+        effective_cudagraph_mode = cudagraph_mode
 
     with VllmRunner(
         model_name,
@@ -86,7 +88,7 @@ def test_deepseek_mtp(
         speculative_config=speculative_config,
         max_model_len=2000,
         compilation_config=CompilationConfig(
-            cudagraph_mode=cudagraph_mode,
+            cudagraph_mode=effective_cudagraph_mode,
             cudagraph_capture_sizes=capture_sizes,
         ),
     ) as spec_llm:

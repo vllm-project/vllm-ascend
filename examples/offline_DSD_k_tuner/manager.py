@@ -28,9 +28,7 @@ class DynamicSpeculativeDecodingManager:
         if 1 not in self.batch_stats:
             raise ValueError(f"BS 1 not found in {self.batch_stats.keys()}")
         if vllm_max_batch_size not in self.batch_stats:
-            raise ValueError(
-                f"max BS {vllm_max_batch_size} not found in {self.batch_stats.keys()}"
-            )
+            raise ValueError(f"max BS {vllm_max_batch_size} not found in {self.batch_stats.keys()}")
 
         for bs in self.available_batch_sizes:
             if bs <= 0:
@@ -51,7 +49,7 @@ class DynamicSpeculativeDecodingManager:
         for bs in self.available_batch_sizes:
             stats = self.batch_stats[bs]
             best_k = 0
-            best_goodput = 1.0 / stats.get(0, float('inf'))  # K=0: AL=1
+            best_goodput = 1.0 / stats.get(0, float("inf"))  # K=0: AL=1
 
             for k in sorted(stats.keys()):
                 if k == 0:
@@ -60,7 +58,7 @@ class DynamicSpeculativeDecodingManager:
                 if itl <= 0:
                     continue
                 al = self._compute_accepted_length(k)
-                goodput = al / itl       # https://arxiv.org/pdf/2406.14066  Goodput
+                goodput = al / itl  # https://arxiv.org/pdf/2406.14066  Goodput
                 if goodput > best_goodput:
                     best_goodput = goodput
                     best_k = k
@@ -77,9 +75,7 @@ class DynamicSpeculativeDecodingManager:
 
     def get_num_speculative_tokens_per_batch_size(self) -> list[list[int]]:
         """Return merged inclusive batch-size ranges for the optimal K table."""
-        sampled_batch_sizes = [
-            bs for bs in self._sorted_bs_keys if bs <= self.vllm_max_batch_size
-        ]
+        sampled_batch_sizes = [bs for bs in self._sorted_bs_keys if bs <= self.vllm_max_batch_size]
         ranges: list[list[int]] = []
 
         for index, range_start in enumerate(sampled_batch_sizes):
