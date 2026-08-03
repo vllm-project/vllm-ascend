@@ -1,15 +1,27 @@
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
 test_name: "GLM-5.1-w8a8c8-128k-1k-90-50-PD"
 model: "Eco-Tech/GLM-5.1-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
+=======
+test_name: "GLM-5.1-744B-128k-1k-90-50-PD"
+model: "gdydems/GLM-5.1-w8a8c8"
+num_nodes: 4
+npu_per_node: 16
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
 
 
 routing:
   type: "disaggregated_prefill"
   groups:
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     prefiller: [ 0, 1 ]
     decoder: [ 2, 3 ]
+=======
+    prefiller: [0, 1]
+    decoder: [2, 3]
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
 
 config:
   - node_index: 0
@@ -18,8 +30,12 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     tp_size: 2
     cp_size: 4
+=======
+    tp_size: 8
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -28,22 +44,34 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 2
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     tp_size: 2
     cp_size: 4
+=======
+    tp_size: 8
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
     port_start: 7100
     dp_rpc_port: 13321
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     dp_size: 16
     dp_size_local: 8
     dp_rank_start: 0
     tp_size: 2
+=======
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     dp_address: "${NODE_2_IP}"
 
   - node_index: 3
     port_start: 7100
     dp_rpc_port: 13321
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     dp_size: 16
     dp_size_local: 8
     dp_rank_start: 8
@@ -55,6 +83,19 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+=======
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 4
+    tp_size: 4
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
@@ -67,7 +108,11 @@ templates:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       HCCL_BUFFSIZE: "1536"
+=======
+      HCCL_BUFFSIZE: "400"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -83,8 +128,11 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --prefill-context-parallel-size
       - ${CP_SIZE}
+=======
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -93,6 +141,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - "147456"
       - --kv-cache-dtype
       - "int8"
@@ -100,6 +149,11 @@ templates:
       - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
+=======
+      - "202752"
+      - --additional-config
+      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}'
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -120,15 +174,27 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+=======
+        "engine_id": "0",
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                             "tp_size": 2
                     },
                     "decode": {
                             "dp_size": 16,
                             "tp_size": 2
+=======
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                     }
             }
         }'
@@ -136,7 +202,11 @@ templates:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       HCCL_BUFFSIZE: "1536"
+=======
+      HCCL_BUFFSIZE: "400"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -152,8 +222,11 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --prefill-context-parallel-size
       - ${CP_SIZE}
+=======
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -162,6 +235,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - "147456"
       - --kv-cache-dtype
       - "int8"
@@ -169,6 +243,11 @@ templates:
       - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
+=======
+      - "202752"
+      - --additional-config
+      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}'
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -189,15 +268,27 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+=======
+        "engine_id": "1",
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                             "tp_size": 2
                     },
                     "decode": {
                             "dp_size": 16,
                             "tp_size": 2
+=======
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                     }
             }
         }'
@@ -206,6 +297,10 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+=======
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -227,25 +322,35 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - "147456"
+=======
+      - "202752"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --max-num-batched-tokens
       - "164"
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --kv-cache-dtype
       - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
+=======
+      - --additional-config
+      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --trust-remote-code
       - --max-num-seqs
       - "32"
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --quantization
       - "ascend"
       - --enable-auto-tool-choice
@@ -254,19 +359,37 @@ templates:
       - --reasoning-parser
       - "glm45"
       - --enable-prefix-caching
+=======
+      - --quantization ascend
+      - --enable-auto-tool-choice
+      - --tool-call-parser glm47
+      - --reasoning-parser glm45
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+=======
+        "engine_id": "2",
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                             "tp_size": 2
                     },
                     "decode": {
                             "dp_size": 16,
                             "tp_size": 2
+=======
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                     }
             }
         }'
@@ -275,6 +398,10 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+=======
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -296,25 +423,35 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - "147456"
+=======
+      - "202752"
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --max-num-batched-tokens
       - "164"
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --kv-cache-dtype
       - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
+=======
+      - --additional-config
+      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --trust-remote-code
       - --max-num-seqs
       - "32"
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --quantization
       - "ascend"
       - --enable-auto-tool-choice
@@ -323,19 +460,37 @@ templates:
       - --reasoning-parser
       - "glm45"
       - --enable-prefix-caching
+=======
+      - --quantization ascend
+      - --enable-auto-tool-choice
+      - --tool-call-parser glm47
+      - --reasoning-parser glm45
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+=======
+        "engine_id": "3",
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                             "tp_size": 2
                     },
                     "decode": {
                             "dp_size": 16,
                             "tp_size": 2
+=======
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
                     }
             }
         }'
@@ -343,6 +498,7 @@ templates:
 
 
 benchmarks:
+<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
@@ -376,3 +532,16 @@ benchmarks:
     request_rate: 1.52
     baseline: 923.60
     threshold: 0.97
+=======
+      perf:
+      case_type: performance
+      dataset_path_local: /mnt/share/g60049161/datasets/
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 512
+      max_out_len: 1024
+      batch_size: 128
+      request_rate: 3.15
+      baseline: 28
+      threshold: 0.97
+>>>>>>> 798a65b8b (update GLM5.1-w8a8c8 weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
