@@ -190,11 +190,11 @@ msgstr "libatb.so 所需，支持高级张量运算"
 
 #: ../../source/quick_start.md:41
 msgid ""
-"Atlas 300I DUO uses CANN 9.1.0 beta and `float16`. Use the `-310p` image "
+"Atlas 300I DUO uses CANN 9.1.0 and `float16`. Use the `-310p` image "
 "suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does "
 "not support `triton` or `triton-ascend`."
 msgstr ""
-"Atlas 300I DUO 使用 CANN 9.1.0 beta 和 `float16`。对于 Ubuntu 使用 `-310p` 镜像后缀，对于 "
+"Atlas 300I DUO 使用 CANN 9.1.0 和 `float16`。对于 Ubuntu 使用 `-310p` 镜像后缀，对于 "
 "openEuler 使用 `-310p-openeuler`。Atlas 300I DUO 不支持 `triton` 或 `triton-"
 "ascend`。"
 

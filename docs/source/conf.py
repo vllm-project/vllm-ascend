@@ -95,9 +95,9 @@ myst_substitutions = {
     # CANN version for main branch
     "main_cann_version": "9.1.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0.post4",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0.post2",
     # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.2",
+    "main_triton_ascend_version": "3.2.1",
 }
 
 # For cross-file header anchors
