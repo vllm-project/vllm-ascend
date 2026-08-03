@@ -344,7 +344,8 @@ jobs:
             "${{ inputs.name || inputs.config_file_path || inputs.tests }}" \
             "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv" \
             "${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
-            "${{ inputs.soc_version }}"
+            "${{ inputs.soc_version }}" \
+            "single_node"
 
       - name: Skip - old commit
         if: >-

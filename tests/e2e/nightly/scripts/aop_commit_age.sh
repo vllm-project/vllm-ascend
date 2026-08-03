@@ -12,6 +12,7 @@
 #       $2 = csv_path
 #       $3 = max_age_days (default: 3)
 #       $4 = soc (optional; filters new-schema rows)
+#       $5 = scene (optional; filters new-schema rows)
 #
 # Writes to $GITHUB_OUTPUT:
 #   commit_age_days  - days since last success
@@ -25,6 +26,7 @@ CONFIG_NAME="${1:-}"
 CSV_PATH="${GOOD_TABLE:-$2}"
 MAX_AGE_DAYS="${3:-3}"
 BISECT_SOC="${4:-}"
+BISECT_SCENE="${5:-}"
 
 if [ -z "$CONFIG_NAME" ]; then
   echo "ERROR: no config name provided"
@@ -47,11 +49,12 @@ if [ ! -f "$CSV_PATH" ]; then
   exit 0
 fi
 
-# Match the name and, for new-schema rows, the current SoC. Legacy seven-column
-# rows have no SoC and remain eligible during migration.
-ROWS=$(awk -F',' -v name="$CONFIG_NAME" -v soc="$BISECT_SOC" '
+# Match the name and, for new-schema rows, the current SoC and scene. Legacy
+# seven-column rows have no dimensions and remain eligible during migration.
+ROWS=$(awk -F',' -v name="$CONFIG_NAME" -v soc="$BISECT_SOC" -v scene="$BISECT_SCENE" '
   NR > 1 && $1 == name && tolower($4) == "success" &&
-  (soc == "" || NF < 9 || $7 == soc) { print }
+  (soc == "" || NF < 9 || $7 == soc) &&
+  (scene == "" || NF < 9 || $8 == scene) { print }
 ' "$CSV_PATH")
 
 if [ -z "$ROWS" ]; then

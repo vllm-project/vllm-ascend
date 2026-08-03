@@ -3,6 +3,7 @@ set -euo pipefail
 
 BISECT_SOC="${1:-}"
 MAX_GOOD_AGE_DAYS="${2:-3}"
+BISECT_SCENE="${3:-multi_node}"
 
 # Color definitions
 GREEN="\033[0;32m"
@@ -350,12 +351,14 @@ aop_pipeline() {
         return 1
     fi
 
-    # Match the name and, for new-schema rows, the current SoC. Legacy
-    # seven-column rows have no SoC and remain eligible during migration.
+    # Match the name and, for new-schema rows, the current SoC and scene.
+    # Legacy seven-column rows have no dimensions and remain eligible during
+    # migration.
     local success_rows
-    success_rows=$(awk -F',' -v name="$case_name" -v soc="$BISECT_SOC" '
+    success_rows=$(awk -F',' -v name="$case_name" -v soc="$BISECT_SOC" -v scene="$BISECT_SCENE" '
         NR > 1 && $1 == name && tolower($4) == "success" &&
-        (soc == "" || NF < 9 || $7 == soc) { print }
+        (soc == "" || NF < 9 || $7 == soc) &&
+        (scene == "" || NF < 9 || $8 == scene) { print }
     ' "$table")
     if [ -z "$success_rows" ]; then
         echo "  No success row found for '${case_name}'"
