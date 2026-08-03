@@ -17,12 +17,12 @@ This document describes how to install vllm-ascend manually.
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
     | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
-    | TorchNPU      | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | TorchNPU      | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
-Atlas 300I DUO continues to use its platform-specific CANN 9.1.0 beta package; refer to the 310P table below for its requirements.
+Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
 ```
 
 ::::
@@ -30,10 +30,10 @@ Atlas 300I DUO continues to use its platform-specific CANN 9.1.0 beta package; r
 
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
- | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
+ | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
  | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
- | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
- | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
+ | TorchNPU      | == 2.10.0               | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | torch         | == 2.10.0               | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
@@ -226,7 +226,7 @@ or build from **source code**:
 ```{note}
 To install `triton-ascend`, run:
 
-pip install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
 ```
