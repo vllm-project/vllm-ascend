@@ -50,6 +50,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.patch.platform.patch_swa_inflight_free import _inflight as _swa_inflight
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -205,7 +206,6 @@ class RecomputeScheduler(Scheduler):
                 # they are all rejected.
                 and request.num_computed_tokens + 2 - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
-                or request.num_computed_tokens >= self.max_model_len
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
@@ -293,11 +293,38 @@ class RecomputeScheduler(Scheduler):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+                        self.running.remove(preempted_req)
+                        if preempted_req in scheduled_running_reqs:
+                            preempted_req_id = preempted_req.request_id
+                            scheduled_running_reqs.remove(preempted_req)
+                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                            req_to_new_blocks.pop(preempted_req_id)
+                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                                preempted_req_id, None
+                            )
+                            if preempted_encoder_inputs:
+                                # Restore encoder compute budget if the preempted
+                                # request had encoder inputs scheduled in this step.
+                                num_embeds_to_restore = sum(
+                                    preempted_req.get_num_encoder_embeds(i)
+                                    for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_embeds_to_restore
+                            req_index -= 1
+                    else:
+                        preempted_req = self.running.pop()
+
                     # NOTE: We add the preempted_req to recomputed_reqs in kv_consumer to
                     # drop the request to PD proxy.
                     transfer_config = self.vllm_config.kv_transfer_config
                     if transfer_config is not None and not transfer_config.is_kv_producer:
-                        recomputed_req = self.running.pop()
+                        recomputed_req = preempted_req
                         recomputed_req_id = recomputed_req.request_id
                         recomputed_block_ids = self.kv_cache_manager.get_block_ids(recomputed_req_id)
                         recomputed_num_computed_tokens = recomputed_req.num_computed_tokens
@@ -345,30 +372,6 @@ class RecomputeScheduler(Scheduler):
                         if recomputed_req == request:
                             break
                     else:
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            preempted_req = max(
-                                self.running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
-                            self.running.remove(preempted_req)
-                            if preempted_req in scheduled_running_reqs:
-                                preempted_req_id = preempted_req.request_id
-                                scheduled_running_reqs.remove(preempted_req)
-                                token_budget += num_scheduled_tokens.pop(preempted_req_id)
-                                req_to_new_blocks.pop(preempted_req_id)
-                                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                                preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
-                                if preempted_encoder_inputs:
-                                    # Restore encoder compute budget if the preempted
-                                    # request had encoder inputs scheduled in this step.
-                                    num_embeds_to_restore = sum(
-                                        preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                    )
-                                    encoder_compute_budget += num_embeds_to_restore
-                                req_index -= 1
-                        else:
-                            preempted_req = self.running.pop()
-
                         self._preempt_request(preempted_req, scheduled_timestamp)
                         preempted_reqs.append(preempted_req)
                         logger.info(
@@ -993,8 +996,13 @@ class RecomputeScheduler(Scheduler):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
-            if request is not None:
+            if request is not None and hasattr(request, "num_in_flight_tokens"):
                 request.num_in_flight_tokens -= num_tokens_scheduled
+            remaining_inflight = _swa_inflight.get(req_id, 0) - num_tokens_scheduled
+            if remaining_inflight <= 0:
+                _swa_inflight.pop(req_id, None)
+            else:
+                _swa_inflight[req_id] = remaining_inflight
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
