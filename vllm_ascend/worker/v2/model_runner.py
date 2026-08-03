@@ -120,7 +120,7 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # NOTE: In GPUModelRunner, decode_query_len is initialized in execute_model(),
+        # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
         self.decode_query_len = self.num_speculative_steps + 1
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
@@ -369,26 +369,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return input_batch
 
-    def postprocess(
-        self,
-        input_batch,
-        sampled_tokens,
-        num_sampled,
-        num_rejected,
-    ):
-        """Override GPUModelRunner.postprocess for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
-        super().postprocess(
-            input_batch,
-            sampled_tokens,
-            num_sampled,
-            num_rejected,
-        )
-
-        self._copy_num_computed_tokens_to_cpu()
-
     def postprocess_sampled(
         self,
         idx_mapping,
@@ -397,7 +377,10 @@ class NPUModelRunner(GPUModelRunner):
         num_rejected,
         query_start_loc=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs."""
+        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
+        npu attention backends need seq_lens_cpu to work.
+        so we need to copy num_computed_tokens back to cpu here.
+        """
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,
