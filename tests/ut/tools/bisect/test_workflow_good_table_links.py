@@ -25,6 +25,12 @@ SCHEDULE_WORKFLOWS = [
     "schedule_weekly_test_a3.yaml",
 ]
 
+WEEKLY_WORKFLOWS = [
+    "schedule_weekly_test_310p.yaml",
+    "schedule_weekly_test_a2.yaml",
+    "schedule_weekly_test_a3.yaml",
+]
+
 
 def _read(name: str) -> str:
     return (WORKFLOW_DIR / name).read_text(encoding="utf-8")
@@ -87,6 +93,25 @@ def test_models_template_has_no_good_table_or_aop():
     assert "aop_commit_age" not in text
     assert "update_good_table" not in text
     assert "good_table" not in text
+
+
+@pytest.mark.parametrize("name", WEEKLY_WORKFLOWS)
+def test_weekly_workflows_keep_dispatch_only_trigger_semantics(name: str):
+    """Weekly is dispatched by an external scheduler; no schedule-event logic."""
+    text = _read(name)
+    assert "eventName === 'schedule'" not in text
+    assert "github.event_name == 'schedule'" not in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["schedule_weekly_test_310p.yaml", "schedule_weekly_test_a3.yaml"],
+)
+def test_weekly_bisect_workflows_propagate_good_table_dimensions(name: str):
+    text = _read(name)
+    assert "test_frequency: weekly" in text
+    assert "soc_version:" in text
+    assert "request_id" in text
 
 
 def test_age_gate_filters_scene_like_python_lookup():

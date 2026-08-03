@@ -74,12 +74,14 @@ passes the PR SHA for the tested code. Consequently, workflow-file changes in a
 PR take effect only after they are merged; the PR's test configuration and code
 are still checked out at the PR SHA.
 
-Weekly scheduled workflows run at `0 2 * * 0` (Sunday 10:00 Beijing time).
-Scheduled runs select `all`, test `main`, and enable AOP automatically for the
-single/multi-node workflows that support bisect. The A2 accuracy-model workflow
-uses a different runner and is not yet bisect-capable. Nightly workflows
-currently expose `workflow_dispatch` and are started by the existing
-external/manual dispatch path.
+Weekly workflows are triggered through `workflow_dispatch` by an external
+scheduler. They keep the existing trigger semantics: the caller supplies the
+branch, `request_id`, test scope and `aop_enabled`; the workflows only add the
+good-table dimensions (`test_frequency: weekly` and `soc_version`) so read and
+write paths stay consistent. The A2 accuracy-model workflow uses a different
+runner and is not bisect-capable. Nightly workflows also expose
+`workflow_dispatch` and are started by the existing external/manual dispatch
+path.
 
 ## Usage
 

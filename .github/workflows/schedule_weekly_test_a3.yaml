@@ -84,6 +84,8 @@ env:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
+    if: >-
+      github.event_name == 'workflow_dispatch'
     runs-on: linux-aarch64-a3-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
@@ -96,9 +98,7 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = context.eventName === 'schedule'
-              ? 'all'
-              : '${{ inputs.test_cases }}'.trim();
+            const testCases = '${{ inputs.test_cases }}'.trim();
 
             core.setOutput('ref', context.sha || 'unknown');
 
@@ -130,7 +130,7 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ github.event_name == 'schedule' && 'main' || inputs.vllm_ascend_branch }}"
+            input_branch="${{ inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
@@ -207,7 +207,7 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       request_id: ${{ inputs.request_id || '' }}
-      aop_multi_enabled: ${{ github.event_name == 'schedule' || inputs.aop_enabled }}
+      aop_multi_enabled: ${{ inputs.aop_enabled }}
       testcase_timeout: 600
       should_run: >-
         ${{
@@ -249,7 +249,7 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       request_id: ${{ inputs.request_id || '' }}
-      aop_multi_enabled: ${{ github.event_name == 'schedule' || inputs.aop_enabled }}
+      aop_multi_enabled: ${{ inputs.aop_enabled }}
       testcase_timeout: 600
       should_run: >-
         ${{
@@ -296,7 +296,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      aop_single_enabled: ${{ github.event_name == 'schedule' || inputs.aop_enabled }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
