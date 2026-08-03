@@ -4,7 +4,7 @@
 
 | 通路 | API/入口 | 支持情况 |
 | --- | --- | --- |
-| Kimi K3 / vllm-ascend 单算子入口 | `torch.ops._C_ascend.mla_prolog` | 支持（需为 Ascend950 构建并安装自定义算子包） |
+| vllm-ascend 单算子入口 | `torch.ops._C_ascend.npu_mla_prolog_v3` | 支持 |
 | aclnn | `aclnnMlaPrologV3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3WeightNz` | 支持 |
 | Ascend C `<<<>>>` | `mla_prolog_v3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
 
@@ -168,7 +168,7 @@ ACL_CHECK(aclrtSynchronizeStream(stream));
 
 ```python
 query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
-    torch.ops._C_ascend.mla_prolog(
+    torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
         rmsnorm_gamma_cq, rmsnorm_gamma_ckv, rope_sin, rope_cos,
         kv_cache, kr_cache,  # mutable
@@ -222,13 +222,13 @@ kv_cache = torch.zeros(2, 128, 1, hckv, device=device, dtype=dtype)
 kr_cache = torch.zeros(2, 128, 1, dr, device=device, dtype=dtype)
 cache_index = torch.arange(t, device=device, dtype=torch.int64)
 
-query, query_rope, *_ = torch.ops._C_ascend.mla_prolog(
+query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
     token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
     gamma_cq, gamma_ckv, rope_sin, rope_cos, kv_cache, kr_cache,
     cache_index=cache_index, cache_mode="PA_BSND")
 # RoPE disabled: pass empty tensors for both rope inputs
 empty_rope = torch.empty(0, device=device, dtype=dtype)
-q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.mla_prolog(
+q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
     token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
     gamma_cq, gamma_ckv, empty_rope, empty_rope, kv_cache.clone(), kr_cache.clone(),
     cache_index=cache_index, cache_mode="PA_BSND")

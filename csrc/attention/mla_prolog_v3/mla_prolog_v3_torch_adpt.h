@@ -13,8 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef MLA_PROLOG_TORCH_ADPT_H
-#define MLA_PROLOG_TORCH_ADPT_H
+#ifndef MLA_PROLOG_V3_TORCH_ADPT_H
+#define MLA_PROLOG_V3_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
@@ -168,8 +168,8 @@ ConstructMlaPrologV3Outputs(const at::Tensor &token_x, const at::Tensor &weight_
 
 }  // namespace
 
-// Torch schema name is mla_prolog; underlying aclnn op is MlaPrologV3.
-inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_prolog(
+// Torch schema name is npu_mla_prolog_v3 (aligned with torch_npu); underlying aclnn op is MlaPrologV3.
+inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3(
     const at::Tensor &token_x,
     const at::Tensor &weight_dq,
     const at::Tensor &weight_uq_qr,
@@ -283,4 +283,4 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> ml
 
 }  // namespace vllm_ascend
 
-#endif  // MLA_PROLOG_TORCH_ADPT_H
+#endif  // MLA_PROLOG_V3_TORCH_ADPT_H

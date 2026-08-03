@@ -1458,7 +1458,7 @@ void npu_scatter_nd_update_v2_meta(
 }
 
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_prolog_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3_meta(
     const at::Tensor &token_x,
     const at::Tensor &weight_dq,
     const at::Tensor &weight_uq_qr,
@@ -2028,8 +2028,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-    // MLA prolog (MlaPrologV3), Ascend950-only
-    ops.impl("mla_prolog", &vllm_ascend::meta::mla_prolog_meta);
+    // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu
+    ops.impl("npu_mla_prolog_v3", &vllm_ascend::meta::npu_mla_prolog_v3_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o

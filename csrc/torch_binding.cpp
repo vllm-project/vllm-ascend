@@ -51,7 +51,7 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
-#include "attention/mla_prolog_v3/mla_prolog_torch_adpt.h"
+#include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2528,9 +2528,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
 
-    // mla_prolog: torch schema name; underlying aclnn op is MlaPrologV3 (950-only).
+    // npu_mla_prolog_v3: aligned with torch_npu; underlying aclnn op is MlaPrologV3 (950-only).
     ops.def(
-        "mla_prolog(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
+        "npu_mla_prolog_v3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
         "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
         "           Tensor rope_sin, Tensor rope_cos, Tensor(a!) kv_cache, Tensor(b!) kr_cache, *,"
         "           Tensor? cache_index=None, Tensor? dequant_scale_x=None,"
@@ -2544,7 +2544,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "           int ckvkr_repo_mode=0, int quant_scale_repo_mode=0, int tile_size=128,"
         "           float qc_qr_scale=1.0, float kc_scale=1.0)"
         " -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
-    ops.impl("mla_prolog", torch::kPrivateUse1, &vllm_ascend::mla_prolog);
+    ops.impl("npu_mla_prolog_v3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3);
 
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function
