@@ -113,6 +113,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
+        self.torch_distributed_backend = torch_distributed_backend
         self.backend = _normalize_backend(torch_distributed_backend)
         self._acquired_hccl_keys: list[HcclPgKey] = []
         self._unshared_hccl_groups: list[object] = []
