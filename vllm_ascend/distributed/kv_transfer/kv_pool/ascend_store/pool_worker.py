@@ -401,6 +401,11 @@ class KVPoolWorker:
                     len(phys_to_layer_idx),
                 )
 
+        # Registration provides the authoritative layer layout.  In
+        # particular, model_config.get_num_layers() only reports the local PP
+        # target layers and does not include registered MTP draft layers.
+        self.local_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
+
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
@@ -430,10 +435,9 @@ class KVPoolWorker:
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
-            "layerwise config: num_layers=%d num_groups=%d physical_layer_to_group_layers_sample=%s",
+            "layerwise config: num_layers=%d num_groups=%d",
             self.num_layers,
             self.num_kv_cache_groups,
-            {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
@@ -721,8 +725,6 @@ class KVPoolWorker:
         layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers and self.num_kv_cache_groups > 1:
-                continue
             layer_names_by_physical.setdefault(phys, []).append(layer_name)
 
         layer_cache_entry_offsets = [0]
@@ -741,6 +743,38 @@ class KVPoolWorker:
         self.group_block_stride[group_id] = group_block_strides
         self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
         self.group_num_layers[group_id] = len(layer_names_by_physical)
+
+    def _configure_registered_layerwise_layers(self, cache_groups: list[tuple[int, list[str]]]) -> None:
+        """Map registered physical layers to dense local and group indices."""
+        groups_by_physical: dict[int, list[tuple[int, int]]] = {}
+
+        for group_id, layer_names in cache_groups:
+            group_physical_layers: list[int] = []
+            seen_in_group: set[int] = set()
+            for layer_name in layer_names:
+                physical_layer = self._extract_physical_layer_index(layer_name)
+                if physical_layer not in seen_in_group:
+                    seen_in_group.add(physical_layer)
+                    group_physical_layers.append(physical_layer)
+
+            for layer_idx_in_group, physical_layer in enumerate(group_physical_layers):
+                groups_by_physical.setdefault(physical_layer, []).append((group_id, layer_idx_in_group))
+
+        physical_layers = sorted(groups_by_physical)
+        self.local_layer_to_group_layers = {
+            local_layer: groups_by_physical[physical_layer]
+            for local_layer, physical_layer in enumerate(physical_layers)
+        }
+
+        original_num_layers = self.num_layers
+        self.num_layers = len(physical_layers)
+        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        logger.info(
+            "KVPoolWorker: configured %d registered layers (was %d).",
+            self.num_layers,
+            original_num_layers,
+        )
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
@@ -819,29 +853,17 @@ class KVPoolWorker:
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
+        cache_groups: list[tuple[int, list[str]]]
         if self.kv_cache_config is not None and self.use_hybrid:
-            for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                self._infer_cache_group_metadata(group_id, group_spec.layer_names)
+            cache_groups = [
+                (group_id, [layer_name for layer_name in group_spec.layer_names if layer_name in kv_caches])
+                for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups)
+            ]
         else:
-            self._infer_cache_group_metadata(0, list(kv_caches.keys()))
-
-        # group_num_layers is computed from the actual kv_caches dict which
-        # includes ALL attention layers (main + MTP). For single-group models,
-        # sum(group_num_layers.values()) equals the physical layer count
-        # (including MTP). For multi-group models, it counts (group, layer)
-        # pairs which is NOT the physical layer count — keep the original
-        # num_layers (physical layers) in that case.
-        original_num_layers = self.num_layers
-        new_num_layers = sum(self.group_num_layers.values())
-        if self.num_kv_cache_groups == 1 and new_num_layers != original_num_layers:
-            self.num_layers = new_num_layers
-            logger.info(
-                "KVPoolWorker: updated num_layers %d -> %d (includes MTP/spec-decode draft layers).",
-                original_num_layers,
-                self.num_layers,
-            )
-            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+            cache_groups = [(0, list(kv_caches.keys()))]
+        for group_id, layer_names in cache_groups:
+            self._infer_cache_group_metadata(group_id, layer_names)
+        self._configure_registered_layerwise_layers(cache_groups)
 
         self.page_size_bytes = sum(self.block_len)
         self.token_database.set_group_buffers(
@@ -1660,18 +1682,18 @@ class KVPoolWorker:
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-        for physical_layer in range(self.num_layers):
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
+        for local_layer in range(self.num_layers):
+            group_layers = self.local_layer_to_group_layers.get(local_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+                self._process_save_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         # Protect the previous partial before allocating the next snapshot.
         self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
-        for physical_layer in range(self.num_layers):
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
+        for local_layer in range(self.num_layers):
+            group_layers = self.local_layer_to_group_layers.get(local_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_load_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+                self._process_load_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         self._build_shared_load_data()
 
     def _submit_ready_layer_loads(self) -> None:
