@@ -1404,9 +1404,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache_kv_c_for_load = cache_kv_c
             cache_k_pe_for_load = cache_k_pe
             if is_a3_c8_cache:
-                # A3 C8 cache uses the PA_NZ logical layout. The CANN gather
-                # wrapper derives its mode from the cache's NPU format; after
-                # gathering, restore the TND shape consumed by kv_b_proj.
+                # A3 C8 cache uses the PA_NZ logical layout. Gather from the
+                # corresponding 5D block views, then restore the TND shape
+                # consumed by kv_b_proj.
                 block_size = cache_kv_c.shape[1]
                 cache_kv_c_for_load = cache_kv_c.view(
                     -1,
@@ -1442,15 +1442,42 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
                 k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
-            DeviceOperator.kv_cache_load(
-                cache_kv_c_for_load,
-                cache_k_pe_for_load,
-                prefill_metadata.block_table,
-                context_seq_len_npu,
-                prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
+            if is_a3_c8_cache:
+                # npu_gather_pa_kv_cache requires its key/value cache pair to
+                # have one dtype. A3 C8 keeps the latent cache in INT8 and
+                # the RoPE cache in BF16, so gather each cache independently.
+                # The operator has mandatory key/value outputs; the duplicate
+                # output of each same-cache gather is intentionally discarded.
+                kv_c_unused = torch.empty_like(kv_c_normed)
+                k_pe_unused = torch.empty_like(k_pe)
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c_for_load,
+                    cache_kv_c_for_load,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=kv_c_unused,
+                )
+                DeviceOperator.kv_cache_load(
+                    cache_k_pe_for_load,
+                    cache_k_pe_for_load,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    key=k_pe,
+                    value=k_pe_unused,
+                )
+            else:
+                DeviceOperator.kv_cache_load(
+                    cache_kv_c_for_load,
+                    cache_k_pe_for_load,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
             if is_a3_c8_cache:
                 kv_c_normed = kv_c_normed.view(toks, num_heads, latent_kv_dim)
                 k_pe = k_pe.view(toks, num_heads, rope_dim)
