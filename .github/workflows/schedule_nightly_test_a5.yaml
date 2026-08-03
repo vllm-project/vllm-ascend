@@ -261,11 +261,19 @@ jobs:
       - name: Forward outputs
         id: forward
         run: |
+          # strip outer double quotes from json strings !important
+          single_raw="${{ needs.setup-vars.outputs.single_node }}"
+          multi_raw="${{ needs.setup-vars.outputs.multi_node }}"
+  
+          # 去除首尾多余双引号
+          single_clean=$(echo "$single_raw" | sed -e 's/^"//' -e 's/"$//')
+          multi_clean=$(echo "$multi_raw" | sed -e 's/^"//' -e 's/"$//')
+  
           {
             echo "run=${{ needs.parse-trigger.outputs.run }}"
             echo "filter=${{ needs.parse-trigger.outputs.filter }}"
-            echo "single_node=${{ needs.setup-vars.outputs.single_node }}"
-            echo "multi_node=${{ needs.setup-vars.outputs.multi_node }}"
+            echo "single_node=$single_clean"
+            echo "multi_node=$multi_clean"
           } >> "$GITHUB_OUTPUT"
     outputs:
       run: ${{ steps.forward.outputs.run }}
