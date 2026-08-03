@@ -31,11 +31,18 @@ vllm-ascend source pair. It currently discovers:
 - verified overrides whose effective parent implementation is resolved through the combined MRO;
 - generated dataclass constructors, typed lazy exports, patch save/restore lifecycle, and field-mutation findings;
 - exact, source-pinned Triton `kernel[grid](...)` launch signatures, including literal heuristic-generated parameters;
+- exact local helpers that select one literal-named class from a complete MRO, return its module, and patch that module
+  through `sys.modules[name]` or `sys.modules.get(name)`;
+- direct `contextlib.contextmanager` wrappers, keeping the source/reporting contract separate from the wrapper's broad
+  runtime entry;
 - optional exact external source indexes for methods inherited by a vLLM class, without treating external-only overrides as vLLM edges.
 
 The POC targets vLLM main. Branches guarded by an exact `vllm_version_is("<tag>")` check are treated as release-only;
 the opposite branch is indexed for main. Top-level imports under the selected branch and `try` blocks are included.
 An incomplete or ambiguous vLLM/vllm-ascend MRO is reported as unresolved instead of choosing a likely parent.
+The MRO-selected-module rule is fail-closed as well: the receiver class, complete MRO, literal selected class name, and
+single vLLM owner must all be proven. Ordinary callables assigned to a proven instance are checked as instance
+attributes; class descriptor rules are applied only when the target is a class namespace.
 
 The generator is consumer-first. A downstream patch or inheritance declaration whose upstream target cannot be resolved
 is kept in the main output as a finding instead of being silently dropped. Findings distinguish an upstream risk, an
@@ -75,3 +82,7 @@ The expected SHA options are recommended for reproducible local generation so th
 a different source pair.
 The comparison report separates exact edge matches from downstream endpoint coverage; this prevents a re-export path
 change from being counted as a missing downstream dependency.
+
+`audit_interface_boundary_coverage.py` independently enumerates source candidate sites and checks that each has exactly
+one disposition in the generated mapping. It can follow direct downstream helpers with call-site module arguments, but
+does not enter vLLM or external helper bodies and reinterpret their normal field assignments as downstream patches.

@@ -4,6 +4,89 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.36.0 - do not apply class descriptors to instance patches
+
+- Red-test checkpoint: `7f707669a`; implementation: `992b32ac0`.
+- Problem: the generator correctly resolved
+  `current_platform.verify_quantization` through the typed lazy export and
+  correctly recorded that the assignment writes to an instance, but it still
+  compared the replacement with the `classmethod` descriptor stored on
+  `Platform`. That produced one false `descriptor_kind_mismatch` risk.
+- Change: an ordinary function written into an instance attribute has no
+  installed class descriptor. Descriptor mismatch reporting is skipped for
+  that exact case. Signature compatibility is still checked against the
+  receiver-bound upstream contract.
+- Safety boundary: class namespace patches and real override descriptors are
+  unchanged. A non-ordinary replacement written to an instance is not covered
+  by this exception. The existing exact typed-instance proof is still required;
+  an unresolved target is not guessed to be an instance.
+- Reason: `vllm.platforms.current_platform` is created by calling the selected
+  platform class. Assigning `_platform_verify_hook` to that object does not
+  install a class descriptor. The separate `signature_incompatible` finding is
+  retained because upstream accepts keyword `quant`, while the replacement
+  names that parameter `quant_method`.
+- Fixed-source evidence: all 972 relation payloads are byte-for-byte equivalent
+  to v0.35 after ignoring the generator metadata. Exactly one finding is
+  removed: the instance descriptor mismatch above. Final output contains 173
+  findings: 136 risks, nine expected, 22 excluded, six verified, zero reviews,
+  zero unresolved items, and zero generator issues. Runtime was about 740
+  seconds.
+- Independent audit v0.7 classifies all 1,023 source candidates with zero
+  missing, conflicting, orphan, or generator-issue sites. All 209 isolated
+  tests pass; Ruff and `git diff --check` pass.
+- Manual finding audit: all five stale patch targets, both missing bases, and
+  the missing `super().postprocess` target are absent in the fixed upstream
+  source. All 14 remaining descriptor risks match explicit decorators on both
+  sides. The 114 signature findings represent 112 unique downstream
+  boundaries: 109 have an upstream-valid call that the downstream signature
+  rejects, and three accept the call but bind a positional value to a different
+  parameter. No exact-contract boundary was missing a corresponding signature
+  risk. All nine expected injections have either an explicit negative
+  existence guard or a downstream consumer of the newly installed member; all
+  excluded and verified findings match their save, restore, inactive, external,
+  or field-mutation source shape.
+
+## v0.35.0 - resolve MRO-selected runtime module patches
+
+- Red-test checkpoint: `64fe57bd7`; implementation: `727fc768e`; incomplete-MRO
+  safety tests: `257b30bea`.
+- Problem: `NPUModelRunner.capture_model` asks a local helper to find the class
+  literally named `GPUModelRunner` in `self.__class__.__mro__`, returns that
+  class's `__module__`, loads the module through `sys.modules`, and temporarily
+  replaces `graph_capture`. The previous scanner did not follow this exact
+  dataflow, so the dependency was absent from the mapping.
+- Change: the generator recognizes one narrow helper form: a direct local
+  helper call, one `next` generator over `receiver.__class__.__mro__`, one
+  literal `cls.__name__` comparison, and a direct return of that class's
+  `__module__`. The resolved module may then flow through
+  `sys.modules[name]` or `sys.modules.get(name)`. Direct
+  `contextlib.contextmanager` functions also retain their definition and
+  reported signatures while exposing the wrapper's runtime entry.
+- Safety boundary: the receiver class, helper, selected class name, MRO, and
+  resulting vLLM module must all be unique and exact. Any incomplete MRO,
+  starred or ambiguous call arguments, dynamic class name, nested return, or
+  multiple matching owners stops resolution. No runtime import or execution is
+  used.
+- Reason: fixed source contains two assignments to
+  `target_module.graph_capture`. The upstream callable accepts
+  `graph_capture_context`; the downstream replacement does not, so the missed
+  edge hides a real signature break. Both assignment sites remain relation
+  evidence, while their identical supplemental signature result is reported
+  once.
+- Fixed-source evidence: relations rise from 971 to 972 solely through
+  `vllm_ascend/worker/model_runner_v1.py:graph_capture` ->
+  `vllm/distributed/parallel_state.py:graph_capture`. Findings rise from 173 to
+  174 solely through its `signature_incompatible` risk; relation counts become
+  192 inheritance, 125 monkey patches, and 655 overrides. Runtime was about 733
+  seconds.
+- Independent-audit red checkpoint: `946a8ac0e`; implementation: `86b9b5516`.
+  Audit v0.7 pre-indexes helpers defined after their callers and follows direct
+  downstream context-manager calls. It never rescans a vLLM or external helper
+  body as downstream patch code. Before that restriction, ordinary upstream
+  field assignments produced ten false missing candidates. After the fix, the
+  two new `graph_capture` sites increase audited candidates from 1,021 to 1,023
+  with full classification.
+
 ## v0.34.0 - model exact Triton kernel launch contracts
 
 - Red-test checkpoint: `4b843ea62`. Five monkey patches decorated with
