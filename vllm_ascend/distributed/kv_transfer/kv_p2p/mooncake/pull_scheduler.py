@@ -28,6 +28,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakeTransferMetadata,
+    MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_recv,
@@ -56,19 +58,68 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         host: str,
         port: int,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+        pp_size: int,
         ready_event: threading.Event,
     ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
         encoder = msgspec.msgpack.Encoder()
         self.host = host
         self.port = port
-        self.encoded_metadata = {key: encoder.encode(value) for key, value in metadata.items()}
+        metadata_by_tp_rank = self._group_metadata_by_tp_rank(metadata)
+        expected_pp_ranks = set(range(pp_size))
+        for tp_rank, metadata_by_pp_rank in metadata_by_tp_rank.items():
+            actual_pp_ranks = set(metadata_by_pp_rank)
+            if actual_pp_ranks != expected_pp_ranks:
+                raise ValueError(
+                    f"Incomplete Mooncake metadata for TP rank {tp_rank}: "
+                    f"got PP ranks {sorted(actual_pp_ranks)}, "
+                    f"expected {sorted(expected_pp_ranks)}"
+                )
+        self.encoded_metadata = {
+            tp_rank: encoder.encode(
+                MooncakeTransferMetadataGroups(
+                    tp_rank=tp_rank,
+                    metadata_by_pp_rank=dict(sorted(metadata_by_pp_rank.items())),
+                )
+            )
+            for tp_rank, metadata_by_pp_rank in metadata_by_tp_rank.items()
+        }
         self.ready_event = ready_event
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.early_finished_requests: set[str] = set()
         self.finished_request_ids: set[str] = set()
         self.state_lock = threading.Lock()
+
+    @staticmethod
+    def _group_metadata_by_tp_rank(
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+    ) -> dict[int, dict[int, MooncakeTransferMetadata]]:
+        grouped: dict[int, dict[int, MooncakeTransferMetadata]] = {}
+        for metadata_key, rank_metadata in metadata.items():
+            if isinstance(metadata_key, int):
+                pp_rank, tp_rank = 0, metadata_key
+            elif len(metadata_key) == 2:
+                pp_rank, tp_rank = metadata_key
+            else:
+                raise ValueError(
+                    "Mooncake handshake metadata key must be tp_rank or "
+                    f"(pp_rank, tp_rank), got {metadata_key!r}"
+                )
+
+            if not isinstance(rank_metadata, MooncakeTransferMetadata):
+                raise ValueError(
+                    "Mooncake scheduler expects MooncakeTransferMetadata, "
+                    f"got {type(rank_metadata).__name__} for key {metadata_key!r}"
+                )
+
+            metadata_by_pp_rank = grouped.setdefault(tp_rank, {})
+            if pp_rank in metadata_by_pp_rank:
+                raise ValueError(
+                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, TP rank {tp_rank}"
+                )
+            metadata_by_pp_rank[pp_rank] = rank_metadata
+        return grouped
 
     def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
         with self.state_lock:
@@ -126,10 +177,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             except Exception:
                 logger.exception("Failed to handle Mooncake scheduler control message")
 
-    def _get_metadata(self, metadata_key: Any) -> bytes | None:
-        if isinstance(metadata_key, list):
-            metadata_key = tuple(metadata_key)
-        return self.encoded_metadata.get(metadata_key)
+    def _get_metadata(self, tp_rank: Any) -> bytes | None:
+        if not isinstance(tp_rank, int):
+            logger.warning("Invalid Mooncake metadata TP rank: %r", tp_rank)
+            return None
+        return self.encoded_metadata.get(tp_rank)
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -242,7 +294,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
-        super().set_xfer_handshake_metadata_from_workers(metadata)
         if self.kv_role != "kv_producer" or not metadata or self._sending_thread is not None:
             return
 
@@ -251,6 +302,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self.side_channel_host,
             self.side_channel_port,
             metadata,
+            self.pp_size,
             ready_event,
         )
         self._sending_thread.start()

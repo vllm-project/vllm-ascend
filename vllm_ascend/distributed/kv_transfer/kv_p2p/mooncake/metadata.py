@@ -32,6 +32,9 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+    pcp_size: int
+    dcp_size: int
+    tp_size: int
     local_ip: str = ""
     handshake_port: int = 0
 
@@ -69,6 +72,14 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
                     )
 
 
+@dataclass(frozen=True)
+class MooncakeTransferMetadataGroups:
+    """All pipeline-stage metadata for one tensor-parallel rank."""
+
+    tp_rank: int
+    metadata_by_pp_rank: dict[int, MooncakeTransferMetadata]
+
+
 @dataclass
 class ReqMeta:
     """Request metadata required by the initial Mooncake pull path."""
@@ -81,8 +92,7 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     remote_request_id: str
-    num_prompt_blocks: int
-    remote_block_size: int
+    remote_num_prompt_tokens: int
     local_full_block_ids: BlockIds = tuple()
 
 
@@ -111,8 +121,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_request_id=kv_transfer_params["remote_request_id"],
-            num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
-            remote_block_size=kv_transfer_params.get("remote_block_size", 0),
+            remote_num_prompt_tokens=kv_transfer_params["remote_num_prompt_tokens"],
             local_full_block_ids=local_full_block_ids or tuple(),
         )
 
@@ -120,5 +129,6 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 __all__ = [
     "MooncakeConnectorMetadata",
     "MooncakeTransferMetadata",
+    "MooncakeTransferMetadataGroups",
     "ReqMeta",
 ]

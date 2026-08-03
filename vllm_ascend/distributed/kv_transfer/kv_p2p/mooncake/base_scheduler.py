@@ -81,9 +81,6 @@ class MooncakeBaseConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_rank
         )
 
-        # Worker metadata for a DP group that may span multiple nodes.
-        self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
-
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
@@ -197,43 +194,12 @@ class MooncakeBaseConnectorScheduler:
     ) -> tuple[bool, dict[str, Any] | None]:
         raise NotImplementedError
 
-    def _port_offset_from_handshake_metadata(
-        self,
-        rank_metadata: KVConnectorHandshakeMetadata,
-        metadata_key: int | tuple[int, ...],
-    ) -> int:
-        handshake_port = getattr(rank_metadata, "handshake_port", 0)
-        if handshake_port > 0:
-            return handshake_port - self.kv_transfer_config.kv_port
-        if isinstance(metadata_key, int):
-            return metadata_key
-        raise ValueError(f"Mooncake handshake metadata is missing handshake_port for worker key {metadata_key}")
-
     def set_xfer_handshake_metadata_from_workers(
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
-        """Build the worker host mapping for a possibly multi-node DP group."""
-        if not metadata:
-            return
-
-        updated_mapping: dict[str, dict[str, Any]] = {}
-        kv_port = self.kv_transfer_config.kv_port
-        for metadata_key, rank_metadata in metadata.items():
-            port_offset = self._port_offset_from_handshake_metadata(rank_metadata, metadata_key)
-            updated_mapping[str(port_offset)] = {
-                "host": rank_metadata.local_ip,
-                "engine_id": rank_metadata.engine_id,
-                "handshake_port": kv_port + port_offset,
-            }
-
-        self.multi_nodes_meta_mapping.update(updated_mapping)
-        logger.info(
-            "MooncakeConnector set_xfer_handshake_metadata: worker_count=%d, updated=%s, multi_nodes_meta_mapping=%s",
-            len(metadata),
-            updated_mapping,
-            self.multi_nodes_meta_mapping,
-        )
+        """Set worker transfer metadata on a concrete scheduler."""
+        raise NotImplementedError
 
     def set_xfer_handshake_metadata(
         self,
