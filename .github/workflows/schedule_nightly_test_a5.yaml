@@ -220,8 +220,8 @@ jobs:
       config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
       name: deepSeek-V3.2-W8A8-DCP
       should_run: "true"
-      request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      request_id: ""
+      vllm_ascend_ref: ""
       aop_single_enabled: ${{ inputs.aop_enabled }}
       filter_expr: "all"
 
