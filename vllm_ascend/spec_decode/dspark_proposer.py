@@ -128,9 +128,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         would silently reintroduce the KV-cache corruption this resolves, so a
         missing runner is an error rather than a fallback.
         """
-        assert self.runner is not None, (
-            "DSpark proposer needs the model runner to resolve the kernel block size"
-        )
+        assert self.runner is not None, "DSpark proposer needs the model runner to resolve the kernel block size"
         gid = attn_group.kv_cache_group_id
         return int(self.runner.input_batch.block_table[gid].block_size)
 

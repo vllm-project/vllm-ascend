@@ -43,7 +43,7 @@ def postprocess_mamba_fused_kernel(
     COPY_BLOCK_SIZE: tl.constexpr,
     # CONV_STATE_DIM_FIRST: conv state stored as (dim, state_len) per block.
     # The copy loop below assumes the (state_len, dim) layout, so the DS layout
-    # is rejected instead of being silently mis-copied.
+    # is rejected instead of being copied with the wrong strides.
     CONV_STATE_DIM_FIRST: tl.constexpr = False,
     # HAS_IDX_MAPPING: when True, program_id(0) is a batch index resolved to a
     # req-state slot via idx_mapping_ptr (V2). When False, it is the req index.
