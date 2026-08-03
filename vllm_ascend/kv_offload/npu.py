@@ -1,63 +1,88 @@
-from collections.abc import Iterator
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+"""Ascend adaptation of vLLM's native CPU offloading spec."""
 
-import torch
-from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionBackend  # type: ignore
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+from __future__ import annotations
 
-from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
+from collections.abc import MutableMapping
+
+from typing_extensions import override
+from vllm.utils.math_utils import round_up
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    OffloadingWorker,
+)
+from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
+
+from vllm_ascend.kv_offload.cpu_npu import NPUOffloadingWorker
 
 
-class NPUOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None = None):
-        super().__init__(vllm_config, kv_cache_config)
+def _set_cpu_bytes_from_legacy_num_blocks(
+    config: OffloadingConfig,
+    alignment: int,
+) -> None:
+    """Translate the legacy Ascend block count to vLLM's byte capacity."""
+    extra_config = config.extra_config
+    if extra_config.get("cpu_bytes_to_use") is not None:
+        return
 
-        num_cpu_blocks = self.extra_config.get("num_cpu_blocks")
-        if not num_cpu_blocks:
-            raise Exception("num_cpu_blocks must be specified in kv_connector_extra_config")
-        self.num_cpu_blocks: int = num_cpu_blocks
+    num_cpu_blocks = extra_config.get("num_cpu_blocks")
+    if num_cpu_blocks is None:
+        return
+    num_cpu_blocks = int(num_cpu_blocks)
+    if num_cpu_blocks <= 0:
+        raise ValueError("num_cpu_blocks must be greater than 0")
+    if not isinstance(extra_config, MutableMapping):
+        raise TypeError("kv_connector_extra_config must be mutable when using the legacy num_cpu_blocks option")
 
-        # scheduler-side
-        self._manager: OffloadingManager | None = None
+    world_size = config.parallel.world_size
+    worker_kv_bytes_per_block = config.worker_kv_bytes_per_block
+    if worker_kv_bytes_per_block <= 0 or world_size <= 0:
+        # The scheduler can construct the spec before worker cache sizing is
+        # available. Match vLLM's zero-capacity initialization behavior.
+        extra_config["cpu_bytes_to_use"] = 1
+        return
 
-        # worker-side
-        self._handler: OffloadingHandler | None = None
+    kv_bytes_per_chunk = worker_kv_bytes_per_block * world_size * config.cache.blocks_per_chunk
+    aligned_kv_bytes_per_chunk = round_up(
+        kv_bytes_per_chunk,
+        alignment,
+    )
+    extra_config["cpu_bytes_to_use"] = num_cpu_blocks * aligned_kv_bytes_per_chunk
 
-    def get_manager(self) -> OffloadingManager:
-        if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            offloaded_block_size = gpu_block_size * self.block_size_factor
-            self._manager = CPUOffloadingManager(
-                block_size=offloaded_block_size,
-                num_blocks=self.num_cpu_blocks,
-                enable_events=enable_events,
-            )
-        return self._manager
 
-    def get_handlers(
+class NPUOffloadingSpec(_CPUOffloadingSpec):
+    """Use vLLM's CPU manager with an Ascend-specific transfer worker."""
+
+    def __init__(self, config: OffloadingConfig):
+        _set_cpu_bytes_from_legacy_num_blocks(
+            config,
+            self.BLOCK_SIZE_ALIGNMENT,
+        )
+        super().__init__(config)
+        self._npu_worker: NPUOffloadingWorker | None = None
+
+    @override
+    def create_worker(
         self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        if not self._handler:
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            self._handler = CpuNpuOffloadingHandler(
-                attn_backends=attn_backends,
-                gpu_block_size=gpu_block_size,
-                cpu_block_size=gpu_block_size * self.block_size_factor,
-                num_cpu_blocks=self.num_cpu_blocks,
-                gpu_caches=kv_caches,
-            )
+        kv_caches: CanonicalKVCaches,
+    ) -> NPUOffloadingWorker:
+        return NPUOffloadingWorker(
+            kv_caches=kv_caches,
+            blocks_per_chunk=self.blocks_per_chunk,
+            num_cpu_blocks=self.num_blocks,
+        )
 
-        assert self._handler is not None
-        yield GPULoadStoreSpec, CPULoadStoreSpec, self._handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, self._handler
+    @override
+    def get_worker(
+        self,
+        kv_caches: CanonicalKVCaches,
+    ) -> OffloadingWorker:
+        if self._npu_worker is None:
+            self._npu_worker = self.create_worker(kv_caches)
+        return self._npu_worker
+
+
+# Compatibility alias for configurations that load this module directly.
+CPUOffloadingSpec = NPUOffloadingSpec
