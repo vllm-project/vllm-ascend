@@ -25,7 +25,16 @@ generator problem.
 - Reason: a unique source wrapper is direct Python call-contract evidence;
   treating it as unknown was a generator limitation.
 - Test evidence: all 196 isolated generator and independent-auditor tests pass;
-  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+  Ruff and `git diff --check` pass.
+- Fixed-source evidence: 971 relations remain exact endpoint matches with
+  v0.29. Exactly eight runtime contracts change: two `tensor_cache`, two
+  `if_aiter_supported`, and four LoRA guard decorators. Findings fall from 182
+  to 174 and reviews from 29 to 21; risks remain 116 and generator issues remain
+  zero. The independent audit still classifies all 1,019 candidates with no
+  missing or conflicting site. Runtime was about 665 seconds versus 685 seconds
+  for v0.29. The six remaining unknown signature transforms are five Triton JIT
+  callables and one `torch.compiler.disable` callable whose implementation is
+  absent from the local reduced PyTorch source snapshot.
 
 ## v0.29.0 - propagate `wraps` targets through wrapper factories
 
