@@ -216,7 +216,6 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
@@ -230,16 +229,6 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
-      aop_single_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
-      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
-      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
-      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
-      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
-      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
-      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
-      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: tests/e2e/models/configs
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image]
@@ -257,7 +246,6 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
@@ -270,16 +258,6 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
-      aop_single_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
-      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
-      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
-      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
-      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
-      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
-      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
-      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: tests/e2e/models/configs
 
   clear-pre-logs:
     needs: [parse-trigger]
