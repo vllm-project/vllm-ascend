@@ -663,8 +663,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_index > 0:
-                    assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                    if self.block_table_tensor_clone is not None:
+                        common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                    else:
+                        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
                 if not self.use_compress or draft_index == 0:
                     attn_metadata_eagle = builder.build_for_graph_capture(
                         common_attn_metadata,
