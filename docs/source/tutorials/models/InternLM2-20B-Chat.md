@@ -244,11 +244,17 @@ inter-token latency together with the hardware and software versions. Results
 from different context lengths or concurrency settings are not directly
 comparable.
 
-The TP=2 eager baseline measured on two 64 GB Ascend 910 NPUs is:
+The following TP=2 results were measured on two 64 GB Ascend 910 NPUs:
 
-| Requests | Success | Duration | Request throughput | Output throughput | Mean TTFT | Mean TPOT | Mean ITL |
-|----------|---------|----------|--------------------|-------------------|-----------|-----------|----------|
-| 100 | 100% | 166.51 s | 0.6005 req/s | 76.87 tok/s | 1295.02 ms | 91.43 ms | 91.43 ms |
+| Mode | Max model length | Max sequences | Requests | Success | Duration | Request throughput | Output throughput | Mean TTFT | Mean TPOT | Mean ITL |
+|------|-----------------:|--------------:|---------:|--------:|---------:|-------------------:|------------------:|----------:|----------:|---------:|
+| ACL Graph | 2,048 | 4 | 100 | 100% | 101.45 s | 0.9857 req/s | 126.17 tok/s | 4145.54 ms | 29.97 ms | 29.97 ms |
+| Eager | 32,768 | 16 | 100 | 100% | 166.51 s | 0.6005 req/s | 76.87 tok/s | 1295.02 ms | 91.43 ms | 91.43 ms |
+
+Both runs use the request workload shown above. They are operational baselines,
+not a strict graph-versus-eager A/B comparison, because the server-side maximum
+model length and sequence capacity differ. With `max-num-seqs=4`, the ACL Graph
+run queues part of the concurrency-8 burst, which increases TTFT.
 
 ## Troubleshooting
 
