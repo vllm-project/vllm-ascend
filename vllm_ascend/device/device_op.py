@@ -311,9 +311,13 @@ class BaseDeviceAdaptor:
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+        if atten_obj.use_mla_rope:
+            cos_shape = attn_metadata.decode.cos.shape
+            cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
+            sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+        else:
+            cos = None
+            sin = None
 
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         dequant_scale_q_nope = None

@@ -1,6 +1,9 @@
 from typing import TYPE_CHECKING, Any
 
+from transformers import AutoConfig
+from transformers.configuration_utils import PretrainedConfig as _HFPretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils import config as _vllm_config_module
 from vllm.utils.import_utils import LazyLoader
 
 _orig_post_init = SpeculativeConfig.__post_init__
@@ -12,6 +15,20 @@ else:
     PretrainedConfig = Any
 
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
+
+
+# Kimi-K3 (MLA) DSpark draft config registration.
+# The K3 dspark checkpoint ships model_type="k3_dspark" with no auto_map, so
+# neither vLLM's config parser nor transformers AutoConfig can load it unless
+# the model_type is registered with both. PretrainedConfig accepts the K3 MLA
+# / dspark fields (q_lora_rank, kv_lora_rank, target_layer_ids, markov_rank,
+# rope_parameters, ...) as plain attributes.
+class K3DSparkConfig(_HFPretrainedConfig):
+    model_type = "k3_dspark"
+
+
+_vllm_config_module._CONFIG_REGISTRY["k3_dspark"] = K3DSparkConfig
+AutoConfig.register("k3_dspark", K3DSparkConfig, exist_ok=True)
 
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -174,6 +191,29 @@ def _dspark_post_init(self):
                     "Qwen3/GQA DSpark requires num_speculative_tokens to match "
                     f"the trained block_size ({block_size}); got "
                     f"{self.num_speculative_tokens}."
+                )
+
+        # Kimi-K3 (MLA) dspark: upstream __post_init__ rewrites any non-
+        # Qwen3/Gemma4 dspark draft to DSparkDraftModel (deepseek_v4), which
+        # would clobber K3DSparkModel. The rewrite only changes model_type and
+        # architectures, so K3-unique fields (markov_head_type /
+        # target_num_hidden_layers) survive and let us restore the K3 arch so
+        # the K3 dspark draft model is loaded. DSV4 dspark carries neither
+        # field, so it is left untouched.
+        if getattr(draft_hf_config, "model_type", None) == "deepseek_v4" and (
+            getattr(draft_hf_config, "markov_head_type", None) is not None
+            or getattr(draft_hf_config, "target_num_hidden_layers", None) is not None
+        ):
+            draft_hf_config.model_type = "k3_dspark"  # type: ignore
+            draft_hf_config.architectures = ["K3DSparkModel"]  # type: ignore
+            self.update_arch_()
+            # fast-fail (no fallback): the K3 draft is trained with
+            # block_size=7, so num_speculative_tokens must be exactly 7
+            # (any other value yields garbled output, not just lower
+            # acceptance).
+            if self.num_speculative_tokens != 7:
+                raise ValueError(
+                    f"K3 dspark requires num_speculative_tokens=7 (block_size=7); got {self.num_speculative_tokens}."
                 )
 
 

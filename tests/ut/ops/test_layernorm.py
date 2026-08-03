@@ -5,6 +5,8 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 
+from vllm_ascend.ops.layernorm import AscendRMSNormGated
+from vllm_ascend.ops.triton.fused_norm_gate import _get_layer_norm_gated_tiles
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -82,3 +84,22 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+@patch("vllm_ascend.ops.layernorm.layer_norm_fwd_npu")
+def test_rms_norm_gated_forwards_kimi_sigmoid_activation(mock_fused_norm_gate):
+    x = torch.randn(2, 8)
+    gate = torch.randn_like(x)
+    expected = torch.randn_like(x)
+    mock_fused_norm_gate.return_value = (expected, None, torch.ones(2))
+    layer = AscendRMSNormGated(hidden_size=8, activation="sigmoid")
+
+    actual = layer.forward_oot(x, gate)
+
+    torch.testing.assert_close(actual, expected)
+    assert mock_fused_norm_gate.call_args.kwargs["activation"] == "sigmoid"
+    assert mock_fused_norm_gate.call_args.kwargs["norm_before_gate"] is False
+
+
+def test_kimi_fused_norm_gate_uses_ub_safe_row_tile():
+    assert _get_layer_norm_gated_tiles(128) == (128, 32)

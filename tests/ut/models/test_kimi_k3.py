@@ -371,6 +371,57 @@ def test_kimi_k3_dense_mlp_uses_callable_situ(monkeypatch):
     assert output.shape == (1, 2)
 
 
+def test_attention_residual_routes_to_golden_ops(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(kimi_k3, "_EXTRA_CTX", SimpleNamespace(flash_comm_v1_enabled=False))
+    torch.manual_seed(42)
+    prefix_sum = torch.randn(3, 4, dtype=torch.bfloat16)
+    block_residual = torch.randn(3, 2, 4, dtype=torch.bfloat16)
+    norm = nn.Module()
+    norm.register_parameter("weight", nn.Parameter(torch.randn(4, dtype=torch.bfloat16)))
+    norm.variance_epsilon = 1e-5
+    projection = nn.Linear(4, 1, bias=False, dtype=torch.bfloat16)
+    op_calls: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+
+    def fake_apply_attn_res(
+        prefix: torch.Tensor,
+        residuals: torch.Tensor,
+        projection_module: nn.Module,
+        norm_module: nn.Module,
+    ) -> torch.Tensor:
+        op_calls.append((tuple(prefix.shape), tuple(residuals.shape)))
+        values = torch.cat((residuals, prefix.unsqueeze(1)), dim=1).float()
+        normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + norm_module.variance_epsilon)
+        score_weight = norm_module.weight.float() * projection_module.weight.squeeze(0).float()
+        probabilities = (normalized * score_weight).sum(-1).softmax(-1).unsqueeze(1)
+        return torch.matmul(probabilities, values).squeeze(1).to(prefix.dtype)
+
+    monkeypatch.setattr(kimi_k3, "apply_attn_res", fake_apply_attn_res)
+
+    actual = kimi_k3._apply_attention_residual(prefix_sum, block_residual, projection, norm)
+
+    assert op_calls == [((3, 4), (3, 2, 4))]
+    assert actual.shape == prefix_sum.shape
+
+
+def test_attention_residual_golden_path_matches_model_math():
+    torch.manual_seed(42)
+    prefix_sum = torch.randn(3, 4, dtype=torch.bfloat16)
+    block_residual = torch.randn(3, 2, 4, dtype=torch.bfloat16)
+    norm = nn.Module()
+    norm.register_parameter("weight", nn.Parameter(torch.randn(4, dtype=torch.bfloat16)))
+    norm.variance_epsilon = 1e-5
+    projection = nn.Linear(4, 1, bias=False, dtype=torch.bfloat16)
+
+    actual = kimi_k3.apply_attn_res(prefix_sum, block_residual, projection, norm)
+
+    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1).float()
+    normalized_without_gamma = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + norm.variance_epsilon)
+    score_weight = norm.weight.float() * projection.weight.squeeze(0).float()
+    probabilities = (normalized_without_gamma * score_weight).sum(-1).softmax(-1).unsqueeze(1)
+    expected = torch.matmul(probabilities, values).squeeze(1).to(prefix_sum.dtype)
+    torch.testing.assert_close(actual, expected)
+
+
 def test_text_model_captures_materialized_dspark_aux_stream(monkeypatch: pytest.MonkeyPatch):
     residual_calls: list[tuple[int, torch.Tensor]] = []
     consumed_inputs: list[torch.Tensor] = []
