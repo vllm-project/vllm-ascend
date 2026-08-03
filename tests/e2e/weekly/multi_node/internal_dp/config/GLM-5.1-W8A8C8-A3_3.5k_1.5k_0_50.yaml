@@ -1,9 +1,5 @@
 test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_3.5k_1.5k_0_50"
-<<<<<<< HEAD
 model: "Eco-Tech/GLM-5.1-w8a8c8"
-=======
-model: "gdydems/GLM-5.1-w8a8c8"
->>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
