@@ -25,11 +25,7 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-<<<<<<< HEAD
       vllm serve Eco-Tech/GLM-5.1-w8a8c8
-=======
-      vllm serve gdydems/GLM-5.1-w8a8c8
->>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -60,11 +56,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-<<<<<<< HEAD
       vllm serve Eco-Tech/GLM-5.1-w8a8c8
-=======
-      vllm serve gdydems/GLM-5.1-w8a8c8
->>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -84,11 +76,7 @@ deployment:
       --max-model-len 133120
       --max-num-batched-tokens 4096
       --trust-remote-code
-<<<<<<< HEAD
       --gpu-memory-utilization 0.95
-=======
-      --gpu-memory-utilization 0.8
->>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
       --quantization ascend
       --enable-chunked-prefill
       --no-enable-prefix-caching
@@ -106,10 +94,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 64
     request_rate: 0
-<<<<<<< HEAD
     baseline: 1267.2573
-=======
-    baseline: 1
     threshold: 0.97
   perf_TPOT20:
     case_type: performance
@@ -121,5 +106,4 @@ benchmarks:
     batch_size: 8
     request_rate: 0
     baseline: 1
->>>>>>> 9efb6ee39... update GLM5.1-w8a8c8 weekly cases
     threshold: 0.97
