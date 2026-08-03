@@ -14,14 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
+from vllm_ascend import envs
 from vllm_ascend.utils import is_310p
 
 if not is_310p():
@@ -35,7 +34,7 @@ import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
-if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
+if envs.DYNAMIC_EPLB or envs.EXPERT_MAP_RECORD:
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
