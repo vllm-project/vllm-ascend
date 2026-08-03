@@ -1,4 +1,4 @@
-# KV Cache Pool（Ascend Store）Deployment Guide
+# KV Cache Pool (Ascend Store) Deployment Guide
 
 ## Contents
 
@@ -60,6 +60,7 @@ export PYTHONHASHSEED=0
         ```bash
         cat /etc/hccn.conf
         ```
+
         For A5 series, additionally mount:
         * devices: `/dev/ummu`, `/dev/uburma`
         * commands: `/usr/bin/urma_admin`
@@ -112,12 +113,12 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 }
 ```
 
-**metadata_server**: Configured as **P2PHANDSHAKE**.  
+**metadata_server**: Configured as **P2PHANDSHAKE**.
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
-**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.
 **prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
 #### 2. Start mooncake_master
@@ -214,7 +215,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                     "lookup_rpc_port":"0",
                     "backend": "mooncake"
                 }
-            }  
+            }
         ]
     }
     }'
@@ -477,7 +478,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the MemFabric is installed.**
+**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the MemFabric is installed.**
 
 ```shell
 pip install memfabric-hybrid
@@ -752,35 +753,31 @@ Starting from the `mmc-local.conf` configured in [Configuring the memcache Confi
 
 ```shell
 ock.mmc.local_service.storage.enabled = true
-ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2:/dev/nvmexn3:/dev/nvmexn4:/dev/nvmexn5:/dev/nvmexn6:/dev/nvmexn7:/dev/nvmexn8
+ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
 ubsio.mem.size_in_gb = 10
 ubsio.standalone.device_count = 8
-```
-
-When starting vLLM, explicitly set `UBSIO_CONFIG_PATH` to the same file as `MMC_LOCAL_CONFIG_PATH`:
-
-```shell
-export UBSIO_CONFIG_PATH=${MMC_LOCAL_CONFIG_PATH}
+ubsio.standalone.force_new_disk = true
 ```
 
 | Field | Description |
 | :--- | :--- |
 | `ock.mmc.local_service.storage.enabled` | Set to `true` to enable SSD caching. |
-| `ubsio.disk.path` | **Required when SSD caching is enabled. The configured SSDs or partitions must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). |
-| `ubsio.mem.size_in_gb` | Per-process UBS IO memory pool size in GB. The recommended value is `10`. The supported range is an integer from `0` to `1024`; SSD caching requires at least `5` GB per process. The total allocation must not exceed the node memory available after reserving memory for the operating system, vLLM, and the Memcache DRAM pool. |
+| `ubsio.disk.path` | **Required when SSD caching is enabled. Specify the target SSD block devices, partitions, or loop devices directly. The configured devices must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). |
+| `ubsio.mem.size_in_gb` | Per-process UBS IO memory pool size in GB. The recommended value is `10`. The supported range is an integer from `0` to `3072`; SSD caching requires at least `5` GB per process. The total allocation must not exceed the node memory available after reserving memory for the operating system, vLLM, and the Memcache DRAM pool. |
 | `ubsio.standalone.device_count` | Number of local services whose `ock.mmc.local_service.dram.size` is not `0`. |
+| `ubsio.standalone.force_new_disk` | Controls whether UBS IO initializes the configured SSD devices as new disks instead of recovering their existing metadata. Set to `true` because the current version does not support fault recovery. |
 
-When adjusting the recommended value, calculate the maximum permitted per-process value by dividing the node memory available to UBS IO by the number of DRAM-enabled local services, rounding down, and capping the result at `1024`:
+When adjusting the recommended value, calculate the maximum permitted per-process value by dividing the node memory available to UBS IO by the number of DRAM-enabled local services, rounding down, and capping the result at `3072`:
 
 ```text
-maximum ubsio.mem.size_in_gb = min(1024, floor(available node memory for UBS IO (GB) / number of DRAM-enabled local services))
+maximum ubsio.mem.size_in_gb = min(3072, floor(available node memory for UBS IO (GB) / number of DRAM-enabled local services))
 ```
 
 For example, if `200` GB is available to UBS IO and four local services have DRAM enabled, the upper limit is `50` GB per process, so the recommended value `ubsio.mem.size_in_gb = 10` is valid. If the calculated upper limit is less than `5`, free more node memory or reduce the number of DRAM-enabled local services.
 
 For SSD caching, `10` GB per process is generally sufficient and does not need to be configured much larger. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [`ubsio.wcache.evict_water_level`](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
 
-For disk partitioning, capacity, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
+For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
 
 ### Separated Deployment of MemCache and vLLM
 

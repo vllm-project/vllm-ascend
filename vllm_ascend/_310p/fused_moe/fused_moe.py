@@ -25,6 +25,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
@@ -121,6 +122,13 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
+class AscendRoutedExperts310(AscendRoutedExperts):
+    def _get_quant_method(self, prefix, quant_config, moe_config):
+        if quant_config is None:
+            return AscendUnquantizedFusedMoEMethod310(moe_config)
+        return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+
+
 class AscendMoERunner310(AscendMoERunner):
     def __init__(
         self,
@@ -139,24 +147,18 @@ class AscendMoERunner310(AscendMoERunner):
         n_shared_experts: int = 0,
     ):
         super().__init__(
-            layer_name,
-            moe_config,
-            router,
-            routed_experts,
-            enable_dbo,
-            gate,
-            shared_experts,
-            shared_expert_gate,
-            routed_input_transform,
-            routed_output_transform,
-            routed_scaling_factor,
-            tid2eid,
-            n_shared_experts,
+            layer_name=layer_name,
+            moe_config=moe_config,
+            router=router,
+            routed_experts=routed_experts,
+            enable_dbo=enable_dbo,
+            gate=gate,
+            shared_experts=shared_experts,
+            shared_expert_gate=shared_expert_gate,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+            routed_scaling_factor=routed_scaling_factor,
         )
-
-        if routed_experts.quant_config is None:
-            routed_experts.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
-            self.quant_type = self._get_quant_type()
 
         self.multistream_overlap_shared_expert = False
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)

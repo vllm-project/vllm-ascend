@@ -19,7 +19,7 @@ Execute the following commands on each node in sequence. The results must all be
 
 ```bash
  # Check the remote switch ports
- for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+ for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
  # Get the link status of the Ethernet ports (UP or DOWN)
  for i in {0..7}; do hccn_tool -i $i -link -g ; done
  # Check the network health status
@@ -53,7 +53,7 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 
 To ensure a consistent execution environment across all nodes, including the model path and Python environment, it is advised to use Docker images.
 
-For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the primary and secondary nodes, with the `--net=host` option to enable proper network connectivity.
+For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the head and worker nodes, with the `--net=host` option to enable proper network connectivity.
 
 Below is the example container setup command, which should be executed on **all nodes**:
 
@@ -92,20 +92,20 @@ docker run --rm \
 
 ### Start Ray Cluster
 
-After setting up the containers and installing vllm-ascend on each node, follow the steps below to start the Ray cluster and execute inference tasks.
-
-Choose one machine as the primary node and the others as secondary nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
-
-Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues.
-
-Below are the commands for the primary and secondary nodes:
-
-**Primary node**:
-
 !!! note
 
     When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
     Updating the environment variables requires restarting the Ray cluster.
+
+After setting up the containers and installing vllm-ascend on each node, follow the steps below to start the Ray cluster and execute inference tasks.
+
+Choose one machine as the head node and the others as worker nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
+
+Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues.
+
+Below are the commands for the head and worker nodes:
+
+**Head node**:
 
 ```shell
 # Head node
@@ -117,11 +117,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --head
 ```
 
-**Secondary node**:
-
-!!! note
-
-    When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
+**Worker node**:
 
 ```shell
 # Worker node
