@@ -83,14 +83,11 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker: MooncakeBaseConnectorWorker | None = None
 
     @classmethod
-    def get_required_kvcache_layout(
-        cls, vllm_config: VllmConfig
-    ) -> str | None:
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """Use HND to avoid reformatting KV cache before D2D transfer."""
         if vllm_config.model_config is None:
             logger.warning_once(
-                "Unable to detect the current vLLM model config; falling "
-                "back to the default KV cache layout."
+                "Unable to detect the current vLLM model config; falling back to the default KV cache layout."
             )
             return None
 
@@ -99,23 +96,16 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
             # affect its transfer layout.
             return None
 
-        logger.info_once(
-            "MooncakeConnector is setting the KV cache layout to HND for "
-            "direct D2D transfer."
-        )
+        logger.info_once("MooncakeConnector is setting the KV cache layout to HND for direct D2D transfer.")
         return "HND"
 
     ############################################################
     # Scheduler-side methods
     ############################################################
 
-    def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int | None, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_num_new_matched_tokens(
-            request, num_computed_tokens
-        )
+        return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
     def update_state_after_alloc(
         self,
@@ -124,13 +114,9 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         num_external_tokens: int,
     ) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens
-        )
+        self.connector_scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
-    def build_connector_meta(
-        self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
@@ -138,9 +124,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
-    def update_connector_output(
-        self, connector_output: KVConnectorOutput
-    ) -> None:
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
@@ -162,9 +146,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def set_xfer_handshake_metadata(
         self,
-        metadata: Mapping[
-            int | tuple[int, ...], KVConnectorHandshakeMetadata
-        ],
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
         """Set worker handshake metadata on the scheduler."""
         assert self.connector_scheduler is not None
@@ -172,9 +154,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def set_xfer_handshake_metadata_pp_aware(
         self,
-        metadata: Mapping[
-            int | tuple[int, ...], KVConnectorHandshakeMetadata
-        ],
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
         """Set PP-aware worker handshake metadata on the scheduler."""
         assert self.connector_scheduler is not None
@@ -188,9 +168,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Return requests whose receive and send operations have finished."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
@@ -206,9 +184,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
-    def build_kv_connector_stats(
-        cls, data: dict[str, Any] | None = None
-    ) -> KVConnectorStats:
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:
         return MooncakeKVConnectorStats(data=data or {})
 
     @classmethod
@@ -219,13 +195,9 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
-        return MooncakePromMetrics(
-            vllm_config, metric_types, labelnames, per_engine_labelvalues
-        )
+        return MooncakePromMetrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
-    def start_load_kv(
-        self, forward_context: "ForwardContext", **kwargs: Any
-    ) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -263,13 +235,9 @@ class MooncakePullConnector(MooncakeBaseConnector):
         super().__init__(vllm_config, role, kv_cache_config)
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = MooncakePullConnectorScheduler(
-                vllm_config, str(self.engine_id), kv_cache_config
-            )
+            self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePullConnectorWorker(
-                vllm_config, str(self.engine_id), kv_cache_config
-            )
+            self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
 
@@ -283,9 +251,7 @@ class MooncakePushConnector(MooncakeBaseConnector):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ) -> None:
-        raise NotImplementedError(
-            "MooncakePushConnector is not implemented yet."
-        )
+        raise NotImplementedError("MooncakePushConnector is not implemented yet.")
 
 
 # Backward compatibility: MooncakeConnector is the pull-based connector.
