@@ -2858,6 +2858,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.enable_kv_nz = False
         self.impl.enable_mla_fia_split = False
         self.impl.fa_quant_layer = True
+        self.impl.use_mla_rope = False
         self.impl.speculative_config = None
         self.impl.fak_descale_float = torch.ones(1)
         self.impl._v_up_proj = MagicMock(return_value=torch.empty(1, num_heads, self.impl.v_head_dim))
@@ -2888,6 +2889,8 @@ class TestAscendMLAImpl(TestBase):
 
         call_args = mock_npu_fused_infer_attention_score_v2.call_args
         self.assertEqual(call_args.args[0].shape, (1, 1, padded_heads, self.impl.qk_nope_head_dim))
+        self.assertEqual(call_args.args[1].shape, (1, block_size, self.impl.kv_lora_rank))
+        self.assertEqual(call_args.kwargs["key_rope"].shape, (1, block_size, self.impl.qk_rope_head_dim))
         expected_descale = torch.nn.functional.pad(
             descale.view(1, 1, num_heads),
             (0, padded_heads - num_heads),

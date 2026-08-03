@@ -1769,7 +1769,23 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        if self._uses_a3_kimi_c8_cache():
+            # K3 A3 C8 caches are registered and populated in normal ND
+            # [block, block_size, kv_head, dim] order.  BnBsH is a supported
+            # Page-Attention cache layout and is a contiguous view of that
+            # storage.  Do not reinterpret this ND cache as a 5D PA-NZ cache:
+            # ``view`` alone cannot reorder its block-size and tile axes.
+            k_nope = k_nope.view(
+                -1,
+                block_size,
+                self.num_kv_heads * self.kv_lora_rank,
+            )
+            k_pe = k_pe.view(
+                -1,
+                block_size,
+                self.num_kv_heads * self.qk_rope_head_dim,
+            )
+        elif self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
