@@ -25,7 +25,7 @@ on:
       test_config_json:
         required: true
         type: string
-        default: "[]"
+        # default: "[]"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
