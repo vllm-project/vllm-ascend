@@ -41,6 +41,8 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.26.0rc
+          - releases/v0.25.1rc
           - releases/v0.24.0rc
           - releases/v0.23.0
           - releases/v0.22.1rc
@@ -58,6 +60,39 @@ on:
         required: false
         default: ''
         type: string
+      build_type:
+        description: 'Build type (release/daily)'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      memcache:
+        description: 'Memcache version and date (JSON array: ["version", "date"])'
+        required: false
+        default: '["1.2.0", "20260725.3"]'
+        type: string
+      memfabric:
+        description: 'Memfabric version and date (JSON array: ["version", "date"])'
+        required: false
+        default: '["1.2.0", "20260725.3"]'
+        type: string
+      torch_npu:
+        description: 'Torch NPU version and date (JSON array: ["version", "date"])'
+        required: false
+        default: '["26.1.0", "20260715.4"]'
+        type: string
+      cann:
+        description: 'CANN Quay URL and version (JSON array: ["url", "version"])'
+        required: false
+        default: '["quay.io/atlas_inference/cann", "2026.07.29"]'
+        type: string
+      triton_ascend:
+        description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
+        required: false
+        default: '["", "3.2.2"]'
+        type: string
 
 permissions:
   packages: write
@@ -65,7 +100,7 @@ permissions:
 
 jobs:
   image_build:
-    name: Image Build and Push
+    name: ${{ matrix.build_meta.name }}
     if: ${{ !((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')))
         && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
@@ -89,21 +124,51 @@ jobs:
           - name: 310P openEuler
             dockerfile: Dockerfile.310p.openEuler
             suffix: '310p-openeuler'
+          - name: A5 Ubuntu
+            dockerfile: Dockerfile.a5
+            suffix: 'a5'
+          - name: A5 openEuler
+            dockerfile: Dockerfile.a5.openEuler
+            suffix: 'a5-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
-      quay_username: ${{ vars.QUAY_USERNAME }}
-      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
+      
+      # ===== Dynamic repository and authentication based on build_type =====
+      quay_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-ascend' || 'quay.io/ascend/vllm-ascend' }}
+      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
+      quay_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_USERNAME || vars.QUAY_USERNAME }}
+      quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
+      # ====================================================================
+      
       should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
       workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
+      schedule_tag_pattern: 'main'
+      build_type: ${{ inputs.build_type || 'release' }}
+      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1] }}
+      
+      build_args: |
+        BUILD_TYPE=${{ inputs.build_type || 'release' }}
+        ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[0] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[1] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[0] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
+        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
+        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1]) || '' }}
+        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
+        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
+      
     secrets:
-      QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
-      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+      quay_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_PASSWORD || secrets.QUAY_PASSWORD }}
+      quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}
 
   image_build_by_commit:
-    name: Image Build (commit mode) and Push to QUAY_TEMP
+    name: ${{ matrix.build_meta.name }} (commit mode)
     if: ${{ github.event_name == 'workflow_dispatch'
         && inputs.vllm_commit != ''
         && inputs.vllm_ascend_commit != ''
@@ -130,18 +195,40 @@ jobs:
           - name: 310P openEuler
             dockerfile: Dockerfile.310p.openEuler
             suffix: '310p-openeuler'
+          - name: A5 Ubuntu
+            dockerfile: Dockerfile.a5
+            suffix: 'a5'
+          - name: A5 openEuler
+            dockerfile: Dockerfile.a5.openEuler
+            suffix: 'a5-openeuler'
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
-      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
-      # Commit mode always pushes (to QUAY_TEMP_REPO only) and never promotes
-      # the image to QUAY_REPO via merge-image, so quay_username is intentionally omitted.
+      quay_temp_repo: ${{ inputs.build_type == 'daily' && 'quay.io/atlas_inference/vllm-atlas-temp' || 'quay.io/atlas-ci/vllm-atlas-temp' }}
+      quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       should_push: true
       temp_only: true
       vllm_commit: ${{ inputs.vllm_commit }}
       vllm_ascend_commit: ${{ inputs.vllm_ascend_commit }}
       workflow_dispatch_tag: ''
       branch_ref: ''
+      build_type: ${{ inputs.build_type || 'release' }}
+      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1] }}
+
+      build_args: |
+        BUILD_TYPE=${{ inputs.build_type || 'release' }}
+        ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[0] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[1] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[0] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
+        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
+        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1]) || '' }}
+        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
+        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
+
     secrets:
-      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+      quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}

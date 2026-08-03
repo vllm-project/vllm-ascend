@@ -71,12 +71,13 @@ def get_ip() -> str:
 
 
 @lru_cache(maxsize=1)
-def npu_generate_uuid() -> str:
+def npu_generate_uuid(logical_device: int | None = None) -> str:
     """Generate a unique identifier for the current process's physical NPU chip.
 
     Returns ``{host_ip}-{physical_chip_id}`` where ``host_ip`` is the local
     machine's IP address and ``physical_chip_id`` is derived from the current
-    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``.
+    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``. The
+    logical index is read from the current device when it is not provided.
 
     On Ascend NPU, ``torch.accelerator.current_device_index()`` returns the
     *logical* device index. When ``ASCEND_RT_VISIBLE_DEVICES`` is set, it
@@ -90,7 +91,8 @@ def npu_generate_uuid() -> str:
     on the same physical NPU chip will produce the same UUID, which is
     required for NPU IPC handle matching.
     """
-    logical_device = torch.accelerator.current_device_index()
+    if logical_device is None:
+        logical_device = torch.accelerator.current_device_index()
     visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", None)
     if visible_devices:
         physical_device = int(visible_devices.split(",")[logical_device].strip())
@@ -155,27 +157,33 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         pass
 
     def start_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        """Finalize layerwise reloading after all weights have been received."""
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(
         self,
         update_info: NPUIPCWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
         Args:
             update_info: NPU IPC update info containing parameter names,
                 dtypes, shapes, and IPC handles.
-            load_weights: Callable that loads weights into the model.
         """
-        device_index = torch.accelerator.current_device_index()
-        physical_npu_id = npu_generate_uuid()
+        device_index = self.device.index
+        physical_npu_id = npu_generate_uuid(device_index)
 
         if update_info.packed:
             assert update_info.tensor_sizes is not None
@@ -189,7 +197,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
             )
-            load_weights(weights)
+            self.model.load_weights(weights)
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
             # must not be imported at module load time on non-NPU hosts.
@@ -219,7 +227,7 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-            load_weights(weights)
+            self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass
