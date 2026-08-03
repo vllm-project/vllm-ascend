@@ -119,9 +119,15 @@ def test_qwen_eagle3_acceptance(
     effective_num_speculative_tokens = (
         num_speculative_tokens if dynamic_num_speculative_tokens is None else dynamic_num_speculative_tokens
     )
+    assert len(acceptance_per_pos) == num_speculative_tokens
+    active_acceptance_per_pos = acceptance_per_pos[:effective_num_speculative_tokens]
     golden = BASELINES[method][:effective_num_speculative_tokens]
 
-    match = all(abs(a - b) < 0.08 for a, b in zip(acceptance_per_pos, golden))
+    # Eagle3 drafts autoregressively, so reducing K does not alter the active
+    # prefix within a drafting step. Keep the acceptance-quality regression
+    # against the corresponding baseline prefix; unlike DFlash, K does not
+    # change a parallel block-prediction input shape.
+    match = all(abs(a - b) < 0.08 for a, b in zip(active_acceptance_per_pos, golden, strict=True))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
     if dynamic_num_speculative_tokens is not None:
         assert all(rate == 0 for rate in acceptance_per_pos[dynamic_num_speculative_tokens:])
