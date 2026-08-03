@@ -201,20 +201,22 @@ jobs:
           echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
 
   single-node-tests:
-    name: single-node
-    needs: [parse-trigger, setup-vars]
-    # ========= 删除外层所有if条件 =========
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-    with:
-      runner: linux-aarch64-a5-8
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
-      config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
-      name: deepSeek-V3.2-W8A8-DCP
-      should_run: ${{ needs['parse-trigger'].outputs.run }}
-      request_id: ${{ inputs.request_id }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
-      aop_single_enabled: ${{ inputs.aop_enabled }}
-      filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
+      name: single-node
+      needs: [parse-trigger, setup-vars]
+      strategy:
+        fail-fast: false
+        max-parallel: 3
+        matrix:
+          test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
+      uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+      with:
+        runner: ${{ matrix.test_config.os }}
+        config_file_path: ${{ matrix.test_config.config_file_path }}
+        name: ${{ matrix.test_config.name }}
+        should_run: ${{ needs['parse-trigger'].outputs.run }}
+        request_id: ${{ inputs.request_id }}
+        vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
+        filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
 
   multi-node-tests:
     name: multi-node
