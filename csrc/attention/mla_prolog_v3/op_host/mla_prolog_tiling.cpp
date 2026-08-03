@@ -67,6 +67,9 @@ inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t in
                                        bool useStrideAttr, const gert::Shape &shape, const char *tensorName,
                                        uint64_t &stride0)
 {
+    OP_CHECK_IF(shape.GetDimNum() == 0U,
+                OP_LOGE(context.GetNodeName(), "%s must not be a scalar tensor.", tensorName),
+                return ge::GRAPH_FAILED);
     const uint64_t defaultStride0 = GetDefaultStride0(shape);
     const auto *attrs = context.GetAttrs();
     const int64_t *stride0Attr =

@@ -171,6 +171,10 @@ bool CheckQueryQuantModeValidity(int64_t queryQuantMode)
 
 bool GetCacheStride0(const aclTensor *tensor, const char *tensorName, int64_t &stride0)
 {
+    if (tensor == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT("MlaPrologV3", tensorName);
+        return false;
+    }
     const auto &shape = tensor->GetViewShape();
     const auto &strides = tensor->GetViewStrides();
     const size_t dimNum = shape.GetDimNum();
