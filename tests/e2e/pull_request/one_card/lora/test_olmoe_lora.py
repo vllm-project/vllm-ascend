@@ -1,4 +1,4 @@
-# Static capacity prediction: 7B total MoE weights require a 32 GiB vNPU.
+# CI correction: model plus ACL graph capture exceeds the 32 GiB vNPU budget.
 from collections.abc import Sequence
 
 import vllm

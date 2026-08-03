@@ -15,7 +15,8 @@
 # limitations under the License.
 """E2E tests for the extract_hidden_states speculative decoding method.
 
-Static capacity prediction: the atomic 8B cases require a 32 GiB vNPU.
+CI correction: the 8B model's default 40960-token context requires a 6.56 GiB
+KV cache, but only 3.37 GiB remains on a 32 GiB vNPU. Use a physical full card.
 
 Follows the pattern from vllm's test_extraction.py, validating that hidden
 states are correctly extracted and saved on the Ascend NPU. Parametrized over:

@@ -4,8 +4,9 @@ End-to-end tests for BatchJobAwareScheduler.
 This test module verifies the correctness of the BatchJobAwareScheduler
 by comparing outputs with the default scheduler.
 
-The Qwen3-0.6B engines are initialized sequentially, so the file fits the
-quarter-card prediction budget.
+The Qwen3-0.6B engines are initialized sequentially, but CI showed that ACL
+graph capture exceeds the quarter-card budget. Keep the file atomic on a
+half-card runner.
 """
 
 import pytest

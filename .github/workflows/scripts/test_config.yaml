@@ -192,7 +192,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
-    - tests/e2e/pull_request/quarter_card/test_batch_job_aware_scheduler_e2e.py
+    - tests/e2e/pull_request/half_card/test_batch_job_aware_scheduler_e2e.py
 
 # Device
 - name: device
@@ -318,7 +318,7 @@
   tests:
     - tests/ut/ops
     - tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py
-    - tests/e2e/pull_request/quarter_card/test_minicpm.py
+    - tests/e2e/pull_request/half_card/test_minicpm.py
 
 - name: ops_moe
   optional: false
@@ -328,7 +328,7 @@
     - vllm_ascend/ops/mla.py
   tests:
     - tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py
-    - tests/e2e/pull_request/half_card/test_multistream_overlap_shared_expert.py
+    - tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/test_moe_routing_replay.py
@@ -540,7 +540,7 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/extract_hidden_states_proposer.py
   tests:
-    - tests/e2e/pull_request/half_card/spec_decode/test_extract_hidden_states.py
+    - tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py
 
 - name: spec_decode_medusa
   optional: false
@@ -735,10 +735,10 @@ estimated_times:
   tests/e2e/pull_request/quarter_card/lora/test_ilama_lora.py: 220
   tests/e2e/pull_request/quarter_card/lora/test_llama32_lora.py: 370
   tests/e2e/pull_request/quarter_card/lora/test_lora_with_spec_decode.py: 620
-  tests/e2e/pull_request/half_card/lora/test_olmoe_lora.py: 300
+  tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py: 300
   tests/e2e/pull_request/quarter_card/lora/test_qwen3_multi_loras.py: 240
-  tests/e2e/pull_request/quarter_card/lora/test_qwen3_reranker_lora.py: 320
-  tests/e2e/pull_request/half_card/model_runner_v2/test_basic.py: 1370
+  tests/e2e/pull_request/half_card/lora/test_qwen3_reranker_lora.py: 320
+  tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 1370
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 30
   tests/e2e/pull_request/quarter_card/pooling/test_classification.py: 250
   tests/e2e/pull_request/quarter_card/pooling/test_embedding.py: 550
@@ -747,7 +747,7 @@ estimated_times:
   tests/e2e/pull_request/half_card/spec_decode/test_dspark.py: 360
   tests/e2e/pull_request/half_card/spec_decode/test_draft_parallel.py: 260
   tests/e2e/pull_request/half_card/spec_decode/test_eagle.py: 440
-  tests/e2e/pull_request/half_card/spec_decode/test_extract_hidden_states.py: 490
+  tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 490
   tests/e2e/pull_request/half_card/spec_decode/test_mtp_eagle_correctness.py: 210
   tests/e2e/pull_request/half_card/spec_decode/test_ngram.py: 230
   tests/e2e/pull_request/half_card/spec_decode/test_ngram_npu.py: 170
@@ -759,10 +759,10 @@ estimated_times:
   tests/e2e/pull_request/quarter_card/test_cpu_offloading.py: 30
   tests/e2e/pull_request/quarter_card/test_cpu_weight_offload.py: 1400
   tests/e2e/pull_request/quarter_card/test_guided_decoding.py: 610
-  tests/e2e/pull_request/quarter_card/test_minicpm.py: 330
+  tests/e2e/pull_request/half_card/test_minicpm.py: 330
   tests/e2e/pull_request/quarter_card/test_minimax_m3_sparse_attn.py: 600
   tests/e2e/pull_request/quarter_card/test_multi_instance.py: 140
-  tests/e2e/pull_request/half_card/test_multistream_overlap_shared_expert.py: 340
+  tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 340
   tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 190
   tests/e2e/pull_request/quarter_card/test_qwen3_0_6b.py: 220
   tests/e2e/pull_request/quarter_card/test_qwen3_5_0_8b.py: 330
@@ -772,7 +772,7 @@ estimated_times:
   tests/e2e/pull_request/quarter_card/test_simple_cpu_offload.py: 220
   tests/e2e/pull_request/half_card/test_vlm.py: 860
   tests/e2e/pull_request/quarter_card/test_xlite.py: 170
-  tests/e2e/pull_request/quarter_card/test_batch_job_aware_scheduler_e2e.py: 263
+  tests/e2e/pull_request/half_card/test_batch_job_aware_scheduler_e2e.py: 263
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 150
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
@@ -862,6 +862,8 @@ estimated_times:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  tests/ut/attention/a2/test_attention_v1_precision.py:
+    default: a2_half_x1
   tests/ut/attention/a2/test_mla_precision.py:
     default: a2_half_x1
   tests/e2e/pull_request/quarter_card:
