@@ -8763,9 +8763,7 @@ def install(flag):
     assert contract.status == "unknown"
     assert contract.reported_signature is None
     assert contract.forwarded_targets == ()
-    assert "unknown_signature_transform" in {
-        finding.reason_code for finding in findings if finding.supplemental
-    }
+    assert "unknown_signature_transform" in {finding.reason_code for finding in findings if finding.supplemental}
 
 
 def test_v029_wrapper_factory_forwards_exact_call_argument_to_wraps(
@@ -8866,9 +8864,7 @@ Target.run = make_wrapper(original)
     assert contract.status == "unknown"
     assert contract.reported_signature is None
     assert contract.forwarded_targets == ()
-    assert [finding.reason_code for finding in findings if finding.supplemental] == [
-        "unknown_signature_transform"
-    ]
+    assert [finding.reason_code for finding in findings if finding.supplemental] == ["unknown_signature_transform"]
 
 
 def test_v030_source_decorator_with_wraps_preserves_reported_signature(
@@ -8890,8 +8886,9 @@ def cached(function):
 
 
 class Base:
+    @staticmethod
     @cached
-    def run(self, value, *, mode=None):
+    def run(value, *, mode=None):
         return value
 """,
     )
@@ -8903,8 +8900,9 @@ from vllm.base import Base, cached
 
 
 class Child(Base):
+    @staticmethod
     @cached
-    def run(self, value, *, mode=None):
+    def run(value, *, mode=None):
         return value
 """,
     )
@@ -9025,9 +9023,7 @@ class Child(Base):
     override = next(relation for relation in relations if relation.relation == "override")
     assert override.upstream_signature_contract.status == "unknown"
     assert override.downstream_signature_contract.status == "unknown"
-    assert "unknown_signature_transform" in {
-        finding.reason_code for finding in findings if finding.supplemental
-    }
+    assert "unknown_signature_transform" in {finding.reason_code for finding in findings if finding.supplemental}
 
 
 def test_v025_outer_classmethod_keeps_descriptor_when_inner_signature_is_unknown(
@@ -9240,9 +9236,7 @@ def test_v026_descriptor_sha_allowlist_does_not_imply_signature_transparency(
         "vllm/base.py",
         """
 def signature_transform(function):
-    def wrapper(*args, **kwargs):
-        return function(*args, **kwargs)
-    return wrapper
+    return runtime_factory(function)
 
 
 class Base:

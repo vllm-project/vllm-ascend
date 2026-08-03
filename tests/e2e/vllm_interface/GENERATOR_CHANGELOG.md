@@ -4,6 +4,29 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.30.0 - derive simple decorator wrapper signatures from source
+
+- Red-test checkpoint: `15cb137ba`. Direct decorators such as `tensor_cache`
+  and the LoRA `can_replace_layer` guards had fully visible source, but every
+  non-allowlisted decorator was treated as an unknown signature transform.
+- Change: resolve a direct decorator only when it takes one callable argument,
+  does not rebind that argument, and all returns prove the same single nested
+  wrapper. The wrapper's AST signature becomes the runtime entry signature.
+  One exact `@functools.wraps(parameter)` preserves the decorated function's
+  reported signature; no wrapper decorator exposes the wrapper signature.
+- Safety boundary: decorator calls with options, multiple or conditional
+  wrapper returns, dynamic return values, argument reassignment, generators,
+  extra parameters, and decorated wrappers remain unknown. This rule does not
+  execute decorator code or infer wrapper semantics.
+- Regression adjustment: the descriptor/signature allowlist separation test
+  now uses a dynamic factory return. A simple returned wrapper is independently
+  proven by this rule, whereas a descriptor allowlist alone still cannot prove
+  an opaque signature transform.
+- Reason: a unique source wrapper is direct Python call-contract evidence;
+  treating it as unknown was a generator limitation.
+- Test evidence: all 196 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. Fixed-source regeneration is pending.
+
 ## v0.29.0 - propagate `wraps` targets through wrapper factories
 
 - Red-test checkpoint: `1ccf4b93b`. The generator already resolved a factory

@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.29.0"
+GENERATOR_VERSION = "0.30.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -1816,6 +1816,13 @@ class SignatureContract:
     protocol: str = "python_call"
     status: str = "exact"
     provenance: tuple[str, ...] = ("ast_definition",)
+
+
+@dataclass(frozen=True)
+class StaticDecoratorTransform:
+    wrapper_signature: list[object]
+    preserves_reported_signature: bool
+    wrapper_name: str
 
 
 def _signature_contract_payload(
@@ -4369,6 +4376,20 @@ class InterfaceBoundaryGenerator:
                 provenance.append(label)
                 continue
 
+            static_transform = (
+                self._static_decorator_transform(reference)
+                if reference is not None and not isinstance(decorator, ast.Call)
+                else None
+            )
+            if static_transform is not None:
+                runtime_entry_signature = static_transform.wrapper_signature
+                if static_transform.preserves_reported_signature:
+                    forwarded_targets.append(callable_info.qualified_name)
+                else:
+                    reported_signature = static_transform.wrapper_signature
+                provenance.append(f"{label}:static_wrapper:{static_transform.wrapper_name}")
+                continue
+
             runtime_entry_signature = None
             reported_signature = None
             status = "unknown"
@@ -4395,6 +4416,74 @@ class InterfaceBoundaryGenerator:
             protocol=("property_access" if effective_kind == "property" else "python_call"),
             status=status,
             provenance=tuple(provenance),
+        )
+
+    def _static_decorator_transform(
+        self,
+        reference: str,
+    ) -> StaticDecoratorTransform | None:
+        """Resolve a direct decorator that returns one local wrapper."""
+
+        decorator = self._callable_info(reference)
+        node = decorator.node if decorator is not None else None
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            return None
+        if node.decorator_list or node.args.vararg is not None or node.args.kwarg is not None:
+            return None
+        positional = [*node.args.posonlyargs, *node.args.args]
+        if len(positional) != 1 or node.args.kwonlyargs:
+            return None
+        parameter = positional[0].arg
+        if self._parameter_is_reassigned(node, parameter):
+            return None
+
+        scope_nodes = list(_function_scope_nodes(node))
+        if any(isinstance(child, (ast.Yield, ast.YieldFrom)) for child in scope_nodes):
+            return None
+        nested = {
+            child.name: child for child in scope_nodes if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
+        }
+        returns = [child for child in scope_nodes if isinstance(child, ast.Return)]
+        if not returns or not isinstance(node.body[-1], ast.Return):
+            return None
+        returned_names = {
+            child.value.id for child in returns if isinstance(child.value, ast.Name) and child.value.id in nested
+        }
+        if len(returned_names) != 1 or len(returned_names) != len(returns):
+            return None
+        wrapper_name = next(iter(returned_names))
+        final_return = node.body[-1]
+        if not isinstance(final_return.value, ast.Name) or final_return.value.id != wrapper_name:
+            return None
+        wrapper = nested[wrapper_name]
+        wrapper_signature = _jsonable_signature(wrapper)
+        if wrapper_signature is None:
+            return None
+
+        preserves_reported_signature = False
+        if wrapper.decorator_list:
+            repository = self._repository_for_callable(decorator)
+            wrapper_references = (
+                repository._decorator_references_by_node.get(id(wrapper), ()) if repository is not None else ()
+            )
+            if len(wrapper_references) != 1 or len(wrapper.decorator_list) != 1:
+                return None
+            wrapper_decorator = wrapper.decorator_list[0]
+            if not (
+                wrapper_references[0] == "functools.wraps"
+                and isinstance(wrapper_decorator, ast.Call)
+                and len(wrapper_decorator.args) == 1
+                and not wrapper_decorator.keywords
+                and isinstance(wrapper_decorator.args[0], ast.Name)
+                and wrapper_decorator.args[0].id == parameter
+            ):
+                return None
+            preserves_reported_signature = True
+
+        return StaticDecoratorTransform(
+            wrapper_signature=wrapper_signature,
+            preserves_reported_signature=preserves_reported_signature,
+            wrapper_name=wrapper_name,
         )
 
     def _append_signature_finding(
