@@ -27,10 +27,16 @@ from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
 class NPUInputBatch(InputBatch):
+    # main2main compat: `use_replayssm` and `slot_mapping_modes` were
+    # added to upstream InputBatch.__init__() in vllm main after 0.26.0.
+    # NPU does not implement Mamba replay-SSM, so the kwargs are only
+    # accepted for interface alignment.
+    # Remove the version gate once 0.26.0 support is dropped.
     def __init__(
         self,
         max_num_reqs: int,
@@ -49,7 +55,15 @@ class NPUInputBatch(InputBatch):
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        use_replayssm: bool = False,
+        slot_mapping_modes: list | None = None,
     ):
+        # main2main compat: only store the new upstream kwargs when
+        # running against vllm main (post-0.26.0).
+        if not vllm_version_is("0.26.0"):
+            self.use_replayssm = use_replayssm
+            self.slot_mapping_modes = slot_mapping_modes
+
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         # Added for compatibility with InputBatch methods that reference these
