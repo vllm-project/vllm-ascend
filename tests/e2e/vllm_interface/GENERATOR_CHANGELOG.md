@@ -4,6 +4,22 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.27.0 - deduplicate descriptor-derived receiver findings
+
+- Red-test checkpoint: `9799e7037`. A classmethod replaced by a zero-argument
+  ordinary function produced both `descriptor_kind_mismatch` and
+  `invalid_receiver_binding`, even though both findings described the same
+  descriptor-protocol change.
+- Change: when an exact descriptor-kind mismatch is already reported, suppress
+  only its derived receiver-binding finding. Keep a separate finding if an
+  independent unknown decorator also changes the runtime callable contract.
+- Safety boundary: this does not make the relation compatible and does not
+  suppress any descriptor finding. It removes duplicate evidence only when
+  the upstream and installed descriptor kinds are both known.
+- Reason: one source incompatibility should have one owning finding. Duplicate
+  derived findings inflate risk counts and make the generated report harder to
+  review without adding evidence.
+
 ## v0.26.0 - persist and compare runtime signature contracts (in progress)
 
 - Starting red-test checkpoint: `a1d5b6fa5`. Ten tests failed because the
@@ -40,8 +56,20 @@ generator problem.
   - Findings supplement the verified relation; they do not delete the
     downstream dependency edge.
 - Test evidence: all 188 isolated generator and independent-auditor tests pass;
-  Ruff and `git diff --check` pass. Fixed-source regeneration and manual review
-  are still required before this checkpoint is accepted.
+  Ruff and `git diff --check` pass.
+- Fixed-source evidence using vLLM
+  `88402a41c4ab272ebbbd33f4a77fbbac0431cbb9`, vllm-ascend
+  `81d3450128528be2c343232fcc28220814a15fd6`, and PyTorch
+  `449b1768410104d3ed79d3bcfe4ba1d65c7f22c0`: 971 relations retain 100%
+  endpoint equality with the schema-v5 mapping; all 1,019 independently
+  enumerated candidates are classified with no missing or conflicting
+  candidate. The 108 signature incompatibilities were manually and
+  mechanically audited: 106 reject at least one valid upstream call shape and
+  two change positional-argument meaning. They are source risks, not generator
+  errors. Twenty unknown signature transforms remain conservative reviews.
+- Performance note: this fixed-source run took about 687 seconds, compared with
+  about 414 seconds for the historical v0.24 run. Correctness is accepted for
+  this checkpoint, but profiling remains necessary before CI use.
 
 ## v0.25.0 - runtime signature contracts (in progress)
 

@@ -4404,7 +4404,25 @@ class InterfaceBoundaryGenerator:
         unknown_binding = any(
             contract is not None and "unknown_descriptor_binding" in contract.provenance for contract in contracts
         )
-        if unknown_binding and not invalid_binding:
+        unknown_transform = any(
+            contract is not None
+            and contract.status == "unknown"
+            and "unknown_descriptor_binding" not in contract.provenance
+            for contract in contracts
+        )
+        known_descriptor_mismatch = (
+            relation.upstream_descriptor_kind is not None
+            and relation.installed_descriptor_kind is not None
+            and relation.upstream_descriptor_kind != relation.installed_descriptor_kind
+        )
+        if invalid_binding and known_descriptor_mismatch:
+            # The invalid binding is derived from the already reported change
+            # in descriptor protocol. Keep an independent decorator unknown,
+            # but do not report the same binding break twice.
+            if not unknown_transform:
+                return
+            invalid_binding = False
+        if unknown_binding and not invalid_binding and not unknown_transform:
             # The descriptor finding already owns this uncertainty. Emitting a
             # second signature finding for the same unknown binding would add
             # noise without providing independent evidence.
@@ -4421,11 +4439,14 @@ class InterfaceBoundaryGenerator:
                     "descriptor binding requires a receiver but the callable has no positional slot"
                     if invalid_binding
                     else (
-                        "the descriptor kind is conditional or unknown, so the bound runtime signature cannot be proven"
-                        if unknown_binding
-                        else (
+                        (
                             "a decorator changes the runtime callable contract and "
                             "its exact signature effect is not proven for this source version"
+                        )
+                        if unknown_transform
+                        else (
+                            "the descriptor kind is conditional or unknown, so the "
+                            "bound runtime signature cannot be proven"
                         )
                     )
                 ),
@@ -4433,7 +4454,7 @@ class InterfaceBoundaryGenerator:
                 reason_code=(
                     "invalid_receiver_binding"
                     if invalid_binding
-                    else ("unknown_signature_binding" if unknown_binding else "unknown_signature_transform")
+                    else ("unknown_signature_transform" if unknown_transform else "unknown_signature_binding")
                 ),
                 generator_issue=False,
                 evidence_scope=evidence_scope,
