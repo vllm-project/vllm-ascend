@@ -120,7 +120,7 @@ jobs:
               return;
             }
 
-            // pull_request trigger
+            // pull_request trigger: ONLY require nightly-test label, remove /nightly-pr comment check
             if (eventName === 'pull_request') {
               const pr = context.payload.pull_request;
               const labels = pr.labels.map(l => l.name);
@@ -134,38 +134,9 @@ jobs:
                 return;
               }
 
-              // Scan PR comments for latest /nightly-pr command
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                per_page: 100,
-              });
-              let testFilter = null;
-              for (let i = comments.length - 1; i >= 0; i--) {
-                const body = comments[i].body || '';
-                const match = body.trim().match(/^\/nightly-pr(?:\s+(.+))?$/m);
-                if (match) {
-                  const args = (match[1] || '').trim();
-                  if (!args) {
-                    core.info('/nightly-pr without arguments; skip all tests.');
-                    testFilter = 'none';
-                  } else {
-                    testFilter = ',' + args.split(/\s+/).join(',') + ',';
-                  }
-                  break;
-                }
-              }
-
-              if (testFilter === null) {
-                core.info('nightly-test label present but no /nightly-pr comment found; skipping.');
-                return;
-              }
-              if (testFilter === 'none') {
-                return;
-              }
+              core.info('nightly-test label detected, run all nightly test cases');
               core.setOutput('run', 'true');
-              core.setOutput('filter', testFilter);
+              core.setOutput('filter', 'all');
               return;
             }
 
@@ -187,7 +158,7 @@ jobs:
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
             input_branch="${{ needs['parse-trigger'].outputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
-            echo "vllm_ascend_branches=[\"${normalized}\"]"
+            echo "vllm_ascend_branches=[${normalized@Q}]"
           } >> $GITHUB_OUTPUT
 
       - name: Checkout repository
@@ -253,61 +224,39 @@ jobs:
           echo "double_node json: >>${{ needs.setup-vars.outputs.double_node }}<<"
           echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
 
-  wait-deps:
-    name: Wait upstream dependencies and forward outputs
-    needs: [parse-trigger, setup-vars]
-    runs-on: linux-amd64-cpu-8-hk
-    steps:
-      - name: Forward outputs
-        id: forward
-        run: |
-          # strip outer double quotes from json strings !important
-          single_raw="${{ needs.setup-vars.outputs.single_node }}"
-          multi_raw="${{ needs.setup-vars.outputs.multi_node }}"
-  
-          # 去除首尾多余双引号
-          single_clean=$(echo "$single_raw" | sed -e 's/^"//' -e 's/"$//')
-          multi_clean=$(echo "$multi_raw" | sed -e 's/^"//' -e 's/"$//')
-  
-          {
-            echo "run=${{ needs.parse-trigger.outputs.run }}"
-            echo "filter=${{ needs.parse-trigger.outputs.filter }}"
-            echo "single_node=$single_clean"
-            echo "multi_node=$multi_clean"
-          } >> "$GITHUB_OUTPUT"
-    outputs:
-      run: ${{ steps.forward.outputs.run }}
-      filter: ${{ steps.forward.outputs.filter }}
-      single_node: ${{ steps.forward.outputs.single_node }}
-      multi_node: ${{ steps.forward.outputs.multi_node }}
-
   single-node-tests:
     name: single-node
-    needs: wait-deps
+    needs: [parse-trigger, setup-vars]
+    if: >-
+      always() &&
+      needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        test_config: ${{ fromJSON(needs.wait-deps.outputs.single_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      should_run: ${{ needs.wait-deps.outputs.run }}
-      filter_expr: ${{ needs.wait-deps.outputs.filter }}
+      should_run: ${{ needs.parse-trigger.outputs.run }}
+      filter_expr: ${{ needs.parse-trigger.outputs.filter }}
       request_id: ${{ inputs.request_id }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
 
   multi-node-tests:
     name: multi-node
-    needs: wait-deps
+    needs: [parse-trigger, setup-vars]
+    if: >-
+      always() &&
+      needs['parse-trigger'].outputs.run == 'true'
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        test_config: ${{ fromJSON(needs.wait-deps.outputs.multi_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -317,8 +266,8 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       size: ${{ matrix.test_config.size }}
       name: ${{ matrix.test_config.name }}
-      should_run: ${{ needs.wait-deps.outputs.run }}
-      filter_expr: ${{ needs.wait-deps.outputs.filter }}
+      should_run: ${{ needs.parse-trigger.outputs.run }}
+      filter_expr: ${{ needs.parse-trigger.outputs.filter }}
       request_id: ${{ inputs.request_id }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
 
