@@ -36,6 +36,32 @@ def test_parse_args_maps_no_assume_built_head_flag():
     assert args.native_check == "since-build"
 
 
+def test_parse_args_accepts_internal_pytest_replay_path():
+    args = _parse_args(
+        [
+            "--scene",
+            "single_node",
+            "--test-path",
+            "tests/e2e/weekly/single_node/models/test_case.py",
+        ]
+    )
+
+    assert args.config_yaml is None
+    assert args.test_path == "tests/e2e/weekly/single_node/models/test_case.py"
+
+
+@pytest.mark.parametrize(
+    "replay_args",
+    [
+        [],
+        ["--config-yaml", "case.yaml", "--test-path", "tests/e2e/test_case.py"],
+    ],
+)
+def test_parse_args_requires_exactly_one_replay_source(replay_args: list[str]):
+    with pytest.raises(SystemExit):
+        _parse_args(["--scene", "single_node", *replay_args])
+
+
 def _bisector_with_good_table(
     table_path: str,
     *,
