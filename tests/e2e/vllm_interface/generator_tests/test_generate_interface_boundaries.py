@@ -9956,3 +9956,68 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         if finding.relation == "monkey_patch" and finding.downstream_name == "graph_capture"
     ]
     assert [finding.reason_code for finding in patch_findings] == ["signature_incompatible"]
+
+
+def test_v035_mro_selected_runtime_module_patch_requires_complete_mro(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(vllm_root, "vllm/parallel.py", "def graph_capture(device):\n    pass\n")
+    _write(
+        vllm_root,
+        "vllm/runner.py",
+        "from vllm.parallel import graph_capture\n\nclass GPUModelRunner:\n    pass\n",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+from contextlib import contextmanager
+
+from unavailable_vendor import ExternalMixin
+from vllm.runner import GPUModelRunner
+
+
+def graph_capture(device):
+    return None
+
+
+class NPUModelRunner(GPUModelRunner, ExternalMixin):
+    def capture_model(self):
+        parent_module_name = _get_gpu_model_runner_module_name(self)
+        with _replace_gpu_model_runner_function_wrapper(parent_module_name):
+            return None
+
+
+def _get_gpu_model_runner_module_name(model_runner):
+    gpu_model_runner_cls = next(
+        (cls for cls in model_runner.__class__.__mro__ if cls.__name__ == "GPUModelRunner"),
+        None,
+    )
+    return gpu_model_runner_cls.__module__
+
+
+@contextmanager
+def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    target_module = sys.modules[target_module_name]
+    setattr(target_module, "graph_capture", graph_capture)
+    yield
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    assert not any(
+        relation.relation == "monkey_patch"
+        and relation.downstream_name == "graph_capture"
+        for relation in relations
+    )
+    assert not any(
+        finding.relation == "monkey_patch"
+        and finding.downstream_name == "graph_capture"
+        for finding in findings
+    )
