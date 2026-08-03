@@ -110,7 +110,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     block_tables,
                     attn_groups,
                     kv_cache_config,
-                    skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                    full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
                 )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 if vllm_version_is("0.26.0"):

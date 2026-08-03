@@ -52,6 +52,9 @@ class NPUInputBatch(InputBatch):
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
+        # ReplaySSM is not supported on NPU. InputBatch methods check this
+        # attribute before accessing ReplaySSM-only buffers.
+        self.use_replayssm = False
         # Added for compatibility with InputBatch methods that reference these
         # attributes after PR vllm-project/vllm#34668. NPU does not use
         # thinking budget, so the holder is always None.
