@@ -44,6 +44,8 @@ _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not No
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+_MAX_A2_FUSED_MC2_EP_SIZE = 8
+_MIN_A2_FUSED_MC2_LOCAL_EXPERTS = 3
 
 
 @contextmanager
@@ -296,6 +298,19 @@ def _select_a2_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+    quant_type = getattr(
+        vllm_config.model_config.hf_text_config,
+        "moe_quantize",
+        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
+    )
+    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+    if (
+        get_ascend_config().enable_fused_mc2 == 1
+        and quant_name == "w8a8_dynamic"
+        and ep_world_size <= _MAX_A2_FUSED_MC2_EP_SIZE
+        and num_experts_per_device >= _MIN_A2_FUSED_MC2_LOCAL_EXPERTS
+    ):
+        return MoECommType.FUSED_MC2
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
@@ -347,8 +362,10 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
 
     1. Non-MoE models return `None`.
     2. Without expert parallel, fall back to all-gather.
-    3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
-       and the DP size is large enough; otherwise use all-gather.
+    3. On A2 with expert parallel, prefer the explicitly enabled dynamic-W8A8
+       fused path for a small EP group with enough local experts. Otherwise,
+       pick MC2 when tokens fit the MC2 capacity and the DP size is large
+       enough, or use all-gather.
     4. On A3 with expert parallel, prefer fused MC2 when enabled and the EP
        group size is small enough; otherwise use MC2 within capacity or
        all-to-all.
