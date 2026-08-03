@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.33.0"
+GENERATOR_VERSION = "0.34.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -110,6 +110,15 @@ _PINNED_WRAPS_SIGNATURE_DECORATORS: dict[
         "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
     ): frozenset({"torch.compiler.disable"}),
 }
+_PINNED_TRITON_KERNEL_SOURCES = frozenset(
+    {
+        ("vllm", "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9"),
+        ("vllm_ascend", "81d3450128528be2c343232fcc28220814a15fd6"),
+    }
+)
+_TRITON_JIT_DECORATOR = "vllm.triton_utils.triton.jit"
+_TRITON_HEURISTICS_DECORATOR = "vllm.triton_utils.triton.heuristics"
+_TRITON_KERNEL_PROTOCOL = "triton_kernel_launch"
 STDLIB_STRUCTURAL_BASES: dict[str, tuple[str, ...]] = {
     "abc.ABC": (),
     "typing.Generic": (),
@@ -4313,6 +4322,11 @@ class InterfaceBoundaryGenerator:
         status = "exact"
         provenance = ["ast_definition"]
         forwarded_targets: list[str] = []
+        protocol = (
+            "property_access"
+            if (descriptor_kind or callable_info.descriptor_kind) == "property"
+            else "python_call"
+        )
         node = callable_info.node
         decorators = tuple(node.decorator_list) if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) else ()
         references = callable_info.decorator_references
@@ -4325,9 +4339,42 @@ class InterfaceBoundaryGenerator:
             forwarded_target_variants = captured_targets
 
         repository = self._repository_for_callable(callable_info)
+        repository_source = (
+            (repository.package_name, self.source_versions.get(repository.package_name))
+            if repository is not None
+            else None
+        )
+        pinned_triton_source = repository_source in _PINNED_TRITON_KERNEL_SOURCES
         for decorator, reference, captured in reversed(tuple(zip(decorators, references, forwarded_target_variants))):
             expression = _expression_name(decorator.func if isinstance(decorator, ast.Call) else decorator)
             label = reference or expression or "<dynamic-decorator>"
+            if reference == _TRITON_JIT_DECORATOR and pinned_triton_source:
+                runtime_entry_signature = definition_signature
+                reported_signature = None
+                protocol = _TRITON_KERNEL_PROTOCOL
+                provenance.append(f"{label}:kernel_launch@{repository_source[1]}")
+                continue
+            if reference == _TRITON_HEURISTICS_DECORATOR and pinned_triton_source:
+                generated_names = self._triton_heuristic_names(decorator)
+                transformed_signature = (
+                    self._triton_heuristics_signature(
+                        runtime_entry_signature,
+                        generated_names,
+                    )
+                    if protocol == _TRITON_KERNEL_PROTOCOL and generated_names is not None
+                    else None
+                )
+                if transformed_signature is None:
+                    runtime_entry_signature = None
+                    reported_signature = None
+                    status = "unknown"
+                    provenance.append(f"{label}:unresolved_kernel_heuristics@{repository_source[1]}")
+                else:
+                    runtime_entry_signature = transformed_signature
+                    provenance.append(
+                        f"{label}:generated={','.join(generated_names)}@{repository_source[1]}"
+                    )
+                continue
             if reference == "functools.wraps" and isinstance(decorator, ast.Call) and decorator.args:
                 target_expression = _expression_name(decorator.args[0])
                 target_names = captured
@@ -4440,10 +4487,83 @@ class InterfaceBoundaryGenerator:
             reported_signature=reported_signature,
             bound_call_signature=bound_call_signature,
             forwarded_targets=tuple(dict.fromkeys(forwarded_targets)),
-            protocol=("property_access" if effective_kind == "property" else "python_call"),
+            protocol=protocol,
             status=status,
             provenance=tuple(provenance),
         )
+
+    @staticmethod
+    def _triton_heuristic_names(
+        decorator: ast.AST,
+    ) -> tuple[str, ...] | None:
+        """Return the literal names injected by a pinned Triton heuristic."""
+
+        if not isinstance(decorator, ast.Call):
+            return None
+        values: ast.AST | None = decorator.args[0] if len(decorator.args) == 1 else None
+        for keyword in decorator.keywords:
+            if keyword.arg == "values":
+                if values is not None:
+                    return None
+                values = keyword.value
+            else:
+                return None
+        if not isinstance(values, ast.Dict) or len(values.keys) != len(values.values):
+            return None
+        names: list[str] = []
+        for key in values.keys:
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                return None
+            names.append(key.value)
+        return tuple(dict.fromkeys(names))
+
+    @staticmethod
+    def _triton_heuristics_signature(
+        signature: list[object] | None,
+        generated_names: tuple[str, ...],
+    ) -> list[object] | None:
+        """Model the public ``kernel[grid](...)`` shape after heuristics."""
+
+        if signature is None:
+            return None
+        result = json.loads(json.dumps(signature))
+        positional_only = result[1]
+        positional_or_keyword = result[2]
+        keyword_only = result[4]
+        if not all(isinstance(items, list) for items in (positional_only, positional_or_keyword, keyword_only)):
+            return None
+        generated = set(generated_names)
+        known_names = {
+            item[0]
+            for items in (positional_only, positional_or_keyword, keyword_only)
+            for item in items
+            if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str)
+        }
+        if not generated.issubset(known_names):
+            return None
+        if any(item[0] in generated for item in positional_only):
+            return None
+
+        first_generated = next(
+            (
+                index
+                for index, item in enumerate(positional_or_keyword)
+                if item[0] in generated
+            ),
+            None,
+        )
+        if first_generated is not None:
+            trailing = positional_or_keyword[first_generated:]
+            result[2] = positional_or_keyword[:first_generated]
+            result[4] = [
+                [name, False if name in generated else required]
+                for name, required in trailing
+            ] + keyword_only
+        result[4] = [
+            [name, False if name in generated else required]
+            for name, required in result[4]
+        ]
+        return result
 
     def _static_decorator_transform(
         self,
@@ -4651,10 +4771,13 @@ class InterfaceBoundaryGenerator:
             installed.bound_call_signature,
         )
         binds_receiver = relation.upstream_owner is not None
-        for label, attribute in (
-            ("reported", "reported_signature"),
-            ("definition", "definition_signature"),
-        ):
+        extra_views = ()
+        if _TRITON_KERNEL_PROTOCOL not in {upstream.protocol, installed.protocol}:
+            extra_views = (
+                ("reported", "reported_signature"),
+                ("definition", "definition_signature"),
+            )
+        for label, attribute in extra_views:
             upstream_signature, upstream_status = self._bound_call_signature(
                 getattr(upstream, attribute),
                 descriptor_kind=relation.upstream_descriptor_kind,
@@ -9799,7 +9922,11 @@ def main() -> None:
         args.vllm_root,
         args.ascend_root,
         external_roots,
-        source_versions={"vllm": vllm_sha, **external_sources},
+        source_versions={
+            "vllm": vllm_sha,
+            "vllm_ascend": ascend_sha,
+            **external_sources,
+        },
     )
     relations, findings = generator.generate()
     _write_jsonl(
