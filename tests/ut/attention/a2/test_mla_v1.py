@@ -2106,6 +2106,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast", side_effect=lambda cache, *_: cache)
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator.kv_cache_load")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
@@ -2114,6 +2115,7 @@ class TestAscendMLAImpl(TestBase):
         mock_fia,
         mock_update,
         mock_cache_load,
+        _mock_format_cast,
         mock_get_device_type,
     ):
         self.impl.fa_quant_layer = True
@@ -2425,12 +2427,12 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(cache_call["slot_mapping"], slots)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_scatter_pa_kv_cache")
     @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_quantize")
-    def test_kimi_k3_exec_kv_prefill_quantizes_and_writes_a3_nd_cache(
+    def test_kimi_k3_exec_kv_prefill_quantizes_and_writes_a3_nz_cache(
         self,
         mock_npu_quantize,
-        mock_reshape_and_cache,
+        mock_scatter_pa_kv_cache,
         mock_get_device_type,
     ):
         self.impl.use_mla_rope = False
@@ -2470,24 +2472,28 @@ class TestAscendMLAImpl(TestBase):
             -1,
             False,
         )
-        self.assertEqual(mock_reshape_and_cache.call_count, 2)
-        latent_call, position_call = mock_reshape_and_cache.call_args_list
+        self.assertEqual(mock_scatter_pa_kv_cache.call_count, 2)
+        latent_call, position_call = mock_scatter_pa_kv_cache.call_args_list
         latent_call = latent_call.kwargs
         position_call = position_call.kwargs
 
         torch.testing.assert_close(latent_call["key"], quantized_kv_c)
         torch.testing.assert_close(latent_call["value"], quantized_kv_c)
-        self.assertIs(latent_call["key_cache"], kv_cache[0])
-        self.assertIs(latent_call["value_cache"], kv_cache[0])
+        self.assertEqual(latent_call["key_cache"].shape, (2, 1, 1, 4, 32))
+        self.assertIs(latent_call["key_cache"]._base, kv_cache[0])
+        self.assertIs(latent_call["value_cache"]._base, kv_cache[0])
         torch.testing.assert_close(latent_call["slot_mapping"], slots)
         self.assertEqual(latent_call["key"].dtype, latent_call["value"].dtype)
+        self.assertEqual(latent_call["cache_mode"], "PA_NZ")
 
         torch.testing.assert_close(position_call["key"], raw_k_pe)
         torch.testing.assert_close(position_call["value"], raw_k_pe)
-        self.assertIs(position_call["key_cache"], kv_cache[1])
-        self.assertIs(position_call["value_cache"], kv_cache[1])
+        self.assertEqual(position_call["key_cache"].shape, (2, 1, 1, 4, 16))
+        self.assertIs(position_call["key_cache"]._base, kv_cache[1])
+        self.assertIs(position_call["value_cache"]._base, kv_cache[1])
         torch.testing.assert_close(position_call["slot_mapping"], slots)
         self.assertEqual(position_call["key"].dtype, position_call["value"].dtype)
+        self.assertEqual(position_call["cache_mode"], "PA_NZ")
 
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
@@ -2889,8 +2895,8 @@ class TestAscendMLAImpl(TestBase):
 
         call_args = mock_npu_fused_infer_attention_score_v2.call_args
         self.assertEqual(call_args.args[0].shape, (1, 1, padded_heads, self.impl.qk_nope_head_dim))
-        self.assertEqual(call_args.args[1].shape, (1, block_size, self.impl.kv_lora_rank))
-        self.assertEqual(call_args.kwargs["key_rope"].shape, (1, block_size, self.impl.qk_rope_head_dim))
+        self.assertEqual(call_args.args[1].shape, (1, 1, 16, block_size, 32))
+        self.assertEqual(call_args.kwargs["key_rope"].shape, (1, 1, 4, block_size, 16))
         expected_descale = torch.nn.functional.pad(
             descale.view(1, 1, num_heads),
             (0, padded_heads - num_heads),
