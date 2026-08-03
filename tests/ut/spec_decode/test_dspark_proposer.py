@@ -732,14 +732,17 @@ class TestKernelBlockSizeResolution(_DSparkProposerTestBase):
         proposer, attn_group = self._make_proposer_with_block_table(128, 128)
         assert proposer._resolve_kernel_block_size(attn_group) == 128
 
-    def test_falls_back_to_spec_without_runner_block_tables(self):
+    def test_missing_runner_raises_instead_of_falling_back(self):
+        # Falling back to kv_cache_spec.block_size would silently reintroduce
+        # the corruption this resolves, so a missing runner must be loud.
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
         proposer.runner = None
         attn_group = SimpleNamespace(
             kv_cache_group_id=0,
             kv_cache_spec=SimpleNamespace(block_size=128),
         )
-        assert proposer._resolve_kernel_block_size(attn_group) == 128
+        with pytest.raises(AssertionError, match="model runner"):
+            proposer._resolve_kernel_block_size(attn_group)
 
     def test_inputs_kernel_receives_kernel_block_size(self, monkeypatch):
         """``set_inputs_first_pass`` must pass the kernel block size downstream."""

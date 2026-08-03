@@ -120,13 +120,19 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         The eagle/mtp path solves the same problem in
         ``AscendSpecDecodeBaseProposer.attn_update_stack_num_spec_norm``.
+
+        Deliberately not defensive: ``initialize_attn_backend`` is only ever
+        driven by the model runner, which rebuilds the input batch with the right
+        kernel block sizes (``may_reinitialize_input_batch``) before calling this.
+        Falling back to ``kv_cache_spec.block_size`` when the runner is missing
+        would silently reintroduce the KV-cache corruption this resolves, so a
+        missing runner is an error rather than a fallback.
         """
+        assert self.runner is not None, (
+            "DSpark proposer needs the model runner to resolve the kernel block size"
+        )
         gid = attn_group.kv_cache_group_id
-        input_batch = getattr(self.runner, "input_batch", None)
-        block_tables = getattr(input_batch, "block_table", None)
-        if block_tables is None:
-            return int(attn_group.kv_cache_spec.block_size)
-        return int(block_tables[gid].block_size)
+        return int(self.runner.input_batch.block_table[gid].block_size)
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
