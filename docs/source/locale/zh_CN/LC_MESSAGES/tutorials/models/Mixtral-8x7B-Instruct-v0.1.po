@@ -96,13 +96,6 @@ msgstr "## 部署"
 msgid "### Single-node Deployment"
 msgstr "### 单节点部署"
 
-msgid ""
-"- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64G × 16) "
-"or 1 Atlas 800 A2 (64G × 8)."
-msgstr ""
-"- `Mixtral-8x7B-Instruct-v0.1` 可以部署在 1 台 Atlas 800 A3（64G × 16）或 1 台 Atlas "
-"800 A2（64G × 8）上。"
-
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
@@ -161,9 +154,6 @@ msgstr ""
 "2. 执行后即可获得结果。作为参考，Mixtral-8x7B-Instruct-v0.1 "
 "通常在包括推理、理解和指令遵循任务在内的各种基准测试中表现良好。"
 
-msgid "## Performance"
-msgstr "## 性能"
-
 msgid "### Using AISBench"
 msgstr "### 使用 AISBench"
 
@@ -219,3 +209,16 @@ msgid ""
 "For more details about model capabilities and best practices, refer to the "
 "official Mixtral documentation and vllm-ascend user guide."
 msgstr "有关模型能力和最佳实践的更多详情，请参考官方 Mixtral 文档和 vllm-ascend 用户指南。"
+
+msgid ""
+"- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64GB × 16)"
+" or 1 Atlas 800 A2 (64GB × 8)."
+msgstr ""
+"- `Mixtral-8x7B-Instruct-v0.1` 可部署在 1 台 Atlas 800 A3（64GB × 16）或 1 台 Atlas "
+"800 A2（64GB × 8）上。"
+
+msgid "## Accuracy Evaluation"
+msgstr "## 精度评估"
+
+msgid "## Performance Evaluation"
+msgstr "## 性能评估"
