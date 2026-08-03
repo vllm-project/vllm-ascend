@@ -6,6 +6,7 @@ from typing import Any
 
 import regex as re
 
+from tests.e2e.env_logging import log_full_environment
 from tests.e2e.nightly.multi_node.scripts.utils import (
     get_available_port,
     get_net_interface,
@@ -152,7 +153,9 @@ class ProxyLauncher:
         ]
 
         logger.info("Launching proxy: %s", " ".join(cmd))
-        self.process = subprocess.Popen(cmd, env={**os.environ, **self.envs})
+        proxy_env = {**os.environ, **self.envs}
+        log_full_environment(proxy_env, logger, prefix="[proxy] ")
+        self.process = subprocess.Popen(cmd, env=proxy_env)
         return self
 
     def __exit__(self, exc_type, exc, tb):

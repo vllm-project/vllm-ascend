@@ -44,6 +44,8 @@ import pytest
 import requests
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
+
+from tests.e2e.env_logging import log_full_environment
 from PIL import Image
 from requests.exceptions import RequestException
 from torch import nn
@@ -277,6 +279,7 @@ class RemoteOpenAIServer:
         if env_dict is not None:
             env.update(env_dict)
         logger.info("Starting server with command: %s", " ".join(server_cmd))
+        log_full_environment(env, logger, prefix="[server] ")
         self.proc: subprocess.Popen = subprocess.Popen(
             server_cmd,
             env=env,
@@ -593,6 +596,7 @@ class RemotePDServer(RemoteOpenAIServer):
         env = os.environ.copy()
         if env_dict is not None:
             env.update(env_dict)
+        log_full_environment(env, logger, prefix=log_prefix)
         proc = subprocess.Popen(
             server_cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1
         )
@@ -749,6 +753,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
         env = os.environ.copy()
         if env_dict is not None:
             env.update(env_dict)
+        log_full_environment(env, logger, prefix=log_prefix)
         proc = subprocess.Popen(
             server_cmd,
             env=env,
