@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -144,8 +144,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
-    @patch("vllm_ascend.worker.model_runner_v1.torch_npu.npu_format_cast", side_effect=lambda cache, _: cache)
-    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=True)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
@@ -154,8 +152,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         mock_get_layers,
         _mock_has_ec_transfer,
         _mock_enable_fa_quant,
-        _mock_get_device_type,
-        mock_format_cast,
     ):
         runner = self._build_runner()
         runner.block_size = 16
@@ -179,7 +175,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(
             fa_quant_layer=True,
             dtype=torch.int8,
-            use_mla_rope=False,
         )
         attn_module.get_kv_cache_spec = MagicMock(
             return_value=AscendMLAAttentionSpec(
@@ -234,9 +229,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )[layer_name]
         runner.vllm_config.quant_config.get_kv_quant_dtype.assert_not_called()
         self.assertEqual(k_cache.dtype, torch.int8)
-        self.assertEqual(k_cache.shape, (num_blocks, 16, runner.block_size, 32))
+        self.assertEqual(k_cache.shape, (num_blocks, runner.block_size, 1, 512))
         self.assertEqual(v_cache.dtype, torch.bfloat16)
-        self.assertEqual(v_cache.shape, (num_blocks, 4, runner.block_size, 16))
+        self.assertEqual(v_cache.shape, (num_blocks, runner.block_size, 1, 64))
 
         runner.use_hybrid_blocks = True
         runner.hybrid_with_attn_and_mamba = True
@@ -250,12 +245,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {layer_name: hybrid_raw_cache},
         )[layer_name]
         self.assertEqual(hybrid_k_cache.dtype, torch.int8)
-        self.assertEqual(hybrid_k_cache.shape, (num_blocks, 16, runner.block_size, 32))
+        self.assertEqual(hybrid_k_cache.shape, (num_blocks, runner.block_size, 1, 512))
         self.assertEqual(hybrid_v_cache.dtype, torch.bfloat16)
-        self.assertEqual(hybrid_v_cache.shape, (num_blocks, 4, runner.block_size, 16))
-        self.assertEqual(mock_format_cast.call_count, 4)
-        for format_call in mock_format_cast.call_args_list:
-            self.assertEqual(format_call.args[1], ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(hybrid_v_cache.shape, (num_blocks, runner.block_size, 1, 64))
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
