@@ -19,6 +19,9 @@ with `ast`; it does not import `torch_npu`, initialize an NPU, download a model,
 
 ## Source-based mapping generator (POC)
 
+For a Chinese explanation of why the generator grew from its early version to more than 10,000 lines, including the
+problem solved by every version from v0.3 to v0.36, see `接口映射生成器代码演进说明.md`.
+
 `generate_interface_boundaries.py` rebuilds the low-noise subset of the mapping directly from a checked-out vLLM and
 vllm-ascend source pair. It currently discovers:
 
