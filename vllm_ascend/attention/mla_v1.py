@@ -1410,15 +1410,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 block_size = cache_kv_c.shape[1]
                 cache_kv_c_for_load = cache_kv_c.view(
                     -1,
-                    num_heads,
-                    latent_kv_dim // 32,
+                    num_heads * latent_kv_dim // 32,
                     block_size,
                     32,
                 )
                 cache_k_pe_for_load = cache_k_pe.view(
                     -1,
-                    num_heads,
-                    rope_dim // 16,
+                    num_heads * rope_dim // 16,
                     block_size,
                     16,
                 )
