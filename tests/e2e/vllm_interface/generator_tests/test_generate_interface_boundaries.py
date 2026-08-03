@@ -8768,6 +8768,109 @@ def install(flag):
     ]
 
 
+def test_v029_wrapper_factory_forwards_exact_call_argument_to_wraps(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def run(self, value, *, mode=None):
+        return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from functools import wraps
+
+from vllm.base import Target
+
+
+def make_wrapper(original):
+    @wraps(original)
+    def wrapped(*args, **kwargs):
+        return original(*args, **kwargs)
+
+    return wrapped
+
+
+Target.run = make_wrapper(Target.run)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
+    contract = patch.installed_signature_contract
+    assert contract.status == "exact"
+    assert contract.reported_signature == patch.upstream_signature
+    assert contract.forwarded_targets == ("vllm.base.Target.run",)
+    assert not [finding for finding in findings if finding.reason_code == "unknown_signature_transform"]
+
+
+def test_v029_wrapper_factory_keeps_ambiguous_call_argument_unknown(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+class Target:
+    def run(self, value):
+        return value
+
+    def other(self, different):
+        return different
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+from functools import wraps
+
+from vllm.base import Target
+
+
+def make_wrapper(original):
+    @wraps(original)
+    def wrapped(*args, **kwargs):
+        return original(*args, **kwargs)
+
+    return wrapped
+
+
+if flag:
+    original = Target.run
+else:
+    original = Target.other
+Target.run = make_wrapper(original)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
+    contract = patch.installed_signature_contract
+    assert contract.status == "unknown"
+    assert contract.reported_signature is None
+    assert contract.forwarded_targets == ()
+    assert [finding.reason_code for finding in findings if finding.supplemental] == [
+        "unknown_signature_transform"
+    ]
+
+
 def test_v025_outer_classmethod_keeps_descriptor_when_inner_signature_is_unknown(
     tmp_path: Path,
 ) -> None:
