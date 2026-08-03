@@ -20,7 +20,6 @@ from vllm_ascend.models.kimi_k3 import (
     _routed_latent_quant_config,
     get_spec_layer_idx_from_weight_name,
 )
-from vllm_ascend.ops import attn_res as attn_res_ops
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
 from vllm_ascend.transformers_utils.configs.kimi_k3 import (
     KimiK3Config,
@@ -372,7 +371,7 @@ def test_kimi_k3_dense_mlp_uses_callable_situ(monkeypatch):
     assert output.shape == (1, 2)
 
 
-def test_attention_residual_routes_to_fused_op(monkeypatch: pytest.MonkeyPatch):
+def test_attention_residual_routes_to_golden_ops(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(kimi_k3, "_EXTRA_CTX", SimpleNamespace(flash_comm_v1_enabled=False))
     torch.manual_seed(42)
     prefix_sum = torch.randn(3, 4, dtype=torch.bfloat16)
@@ -381,17 +380,15 @@ def test_attention_residual_routes_to_fused_op(monkeypatch: pytest.MonkeyPatch):
     norm.register_parameter("weight", nn.Parameter(torch.randn(4, dtype=torch.bfloat16)))
     norm.variance_epsilon = 1e-5
     projection = nn.Linear(4, 1, bias=False, dtype=torch.bfloat16)
-    kernel_calls: list[tuple[tuple[int, ...], tuple[int, ...], bool]] = []
+    op_calls: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
 
     def fake_apply_attn_res(
         prefix: torch.Tensor,
         residuals: torch.Tensor,
         projection_module: nn.Module,
         norm_module: nn.Module,
-        *,
-        use_fused_kernel: bool,
     ) -> torch.Tensor:
-        kernel_calls.append((tuple(prefix.shape), tuple(residuals.shape), use_fused_kernel))
+        op_calls.append((tuple(prefix.shape), tuple(residuals.shape)))
         values = torch.cat((residuals, prefix.unsqueeze(1)), dim=1).float()
         normalized = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + norm_module.variance_epsilon)
         score_weight = norm_module.weight.float() * projection_module.weight.squeeze(0).float()
@@ -402,11 +399,11 @@ def test_attention_residual_routes_to_fused_op(monkeypatch: pytest.MonkeyPatch):
 
     actual = kimi_k3._apply_attention_residual(prefix_sum, block_residual, projection, norm)
 
-    assert kernel_calls == [((3, 4), (3, 2, 4), True)]
+    assert op_calls == [((3, 4), (3, 2, 4))]
     assert actual.shape == prefix_sum.shape
 
 
-def test_attention_residual_reference_path_matches_model_math(monkeypatch: pytest.MonkeyPatch):
+def test_attention_residual_golden_path_matches_model_math():
     torch.manual_seed(42)
     prefix_sum = torch.randn(3, 4, dtype=torch.bfloat16)
     block_residual = torch.randn(3, 2, 4, dtype=torch.bfloat16)
@@ -415,59 +412,14 @@ def test_attention_residual_reference_path_matches_model_math(monkeypatch: pytes
     norm.variance_epsilon = 1e-5
     projection = nn.Linear(4, 1, bias=False, dtype=torch.bfloat16)
 
-    def fake_npu_rms_norm(
-        values: torch.Tensor,
-        weight: torch.Tensor,
-        epsilon: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        inverse_rms = torch.rsqrt(values.square().mean(-1, keepdim=True) + epsilon)
-        return values * inverse_rms * weight, inverse_rms
+    actual = kimi_k3.apply_attn_res(prefix_sum, block_residual, projection, norm)
 
-    monkeypatch.setattr(attn_res_ops.torch_npu, "npu_rms_norm", fake_npu_rms_norm)
-
-    actual = attn_res_ops.apply_attn_res(
-        prefix_sum,
-        block_residual,
-        projection,
-        norm,
-        use_fused_kernel=False,
-    )
-
-    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
-    values_fp32 = values.float()
-    normalized = fake_npu_rms_norm(values_fp32, norm.weight.float(), norm.variance_epsilon)[0]
-    probabilities = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1).softmax(-1).unsqueeze(1)
-    expected = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+    values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1).float()
+    normalized_without_gamma = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + norm.variance_epsilon)
+    score_weight = norm.weight.float() * projection.weight.squeeze(0).float()
+    probabilities = (normalized_without_gamma * score_weight).sum(-1).softmax(-1).unsqueeze(1)
+    expected = torch.matmul(probabilities, values).squeeze(1).to(prefix_sum.dtype)
     torch.testing.assert_close(actual, expected)
-
-
-@pytest.mark.parametrize(
-    ("is_dspark", "draft_uses_mla", "model_type", "architectures", "expected"),
-    [
-        pytest.param(False, False, None, (), True, id="non-speculative"),
-        pytest.param(True, False, "qwen3", ("DSparkDraftModel",), True, id="gqa-dspark"),
-        pytest.param(True, True, None, (), False, id="mla-flag"),
-        pytest.param(True, False, "k3_dspark", (), False, id="mla-model-type"),
-        pytest.param(True, False, None, ("K3DSparkModel",), False, id="mla-architecture"),
-    ],
-)
-def test_attention_residual_fusion_is_disabled_only_for_mla_dspark(
-    is_dspark: bool,
-    draft_uses_mla: bool,
-    model_type: str | None,
-    architectures: tuple[str, ...],
-    expected: bool,
-):
-    speculative_config = SimpleNamespace(
-        use_dspark=lambda: is_dspark,
-        draft_model_config=SimpleNamespace(
-            use_mla=draft_uses_mla,
-            hf_config=SimpleNamespace(model_type=model_type, architectures=architectures),
-        ),
-    )
-    vllm_config = SimpleNamespace(speculative_config=speculative_config)
-
-    assert kimi_k3._should_use_fused_attention_residual(vllm_config) is expected
 
 
 def test_text_model_captures_materialized_dspark_aux_stream(monkeypatch: pytest.MonkeyPatch):
@@ -510,10 +462,8 @@ def test_text_model_captures_materialized_dspark_aux_stream(monkeypatch: pytest.
         block_residual: torch.Tensor,
         projection: Marker,
         norm: nn.Module,
-        *,
-        use_fused_kernel: bool = True,
     ) -> torch.Tensor:
-        del block_residual, norm, use_fused_kernel
+        del block_residual, norm
         residual_calls.append((projection.value, hidden_states.clone()))
         return hidden_states + projection.value * 100
 
@@ -535,7 +485,6 @@ def test_text_model_captures_materialized_dspark_aux_stream(monkeypatch: pytest.
     model.output_attn_res_norm = nn.Identity()
     model.norm = nn.Identity()
     model.dspark_aux_capture_materialized = True
-    model.use_fused_attention_residual = True
     model._set_aux_hidden_state_layers((0, 1))
 
     hidden_states, aux_hidden_states = model(

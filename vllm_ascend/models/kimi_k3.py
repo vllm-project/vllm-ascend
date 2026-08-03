@@ -882,17 +882,9 @@ def _apply_attention_residual(
     block_residual: torch.Tensor,
     projection: nn.Module,
     norm: RMSNorm,
-    *,
-    use_fused_kernel: bool = True,
 ) -> torch.Tensor:
     """Apply K3's learned normalized mixture over residual block starts."""
-    mixed = apply_attn_res(
-        prefix_sum,
-        block_residual,
-        projection,
-        norm,
-        use_fused_kernel=use_fused_kernel,
-    )
+    mixed = apply_attn_res(prefix_sum, block_residual, projection, norm)
     if _EXTRA_CTX.flash_comm_v1_enabled:
         # FlashComm changes the first decoder layer from the global token
         # layout to a TP-local layout.  The learned-residual arithmetic above
@@ -903,26 +895,12 @@ def _apply_attention_residual(
     return mixed
 
 
-def _should_use_fused_attention_residual(vllm_config: VllmConfig) -> bool:
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is None or not speculative_config.use_dspark():
-        return True
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    draft_hf_config = getattr(draft_model_config, "hf_config", None)
-    model_type = getattr(draft_hf_config, "model_type", None)
-    architectures = getattr(draft_hf_config, "architectures", ()) or ()
-    draft_uses_mla = bool(getattr(draft_model_config, "use_mla", False)) or model_type == "k3_dspark"
-    draft_uses_mla = draft_uses_mla or "K3DSparkModel" in architectures
-    return not draft_uses_mla
-
-
 class KimiK3DecoderLayer(nn.Module):
     def __init__(self, config: KimiK3TextConfig, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.layer_idx = int(prefix.rsplit(".", 1)[1])
-        self.use_fused_attention_residual = _should_use_fused_attention_residual(vllm_config)
         self.is_vl_first_layer = bool(uses_kimi_k3_global_inputs_embeds(vllm_config) and self.layer_idx == 0)
         quant_config = vllm_config.quant_config
 
@@ -1008,7 +986,6 @@ class KimiK3DecoderLayer(nn.Module):
                 block_residual,
                 self.self_attention_res_proj,
                 self.self_attention_res_norm,
-                use_fused_kernel=self.use_fused_attention_residual,
             )
 
         if self.layer_idx % self.attn_res_block_size == 0:
@@ -1045,7 +1022,6 @@ class KimiK3DecoderLayer(nn.Module):
             block_residual,
             self.mlp_res_proj,
             self.mlp_res_norm,
-            use_fused_kernel=self.use_fused_attention_residual,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         if hasattr(self, "block_sparse_moe"):
@@ -1062,11 +1038,6 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
         config: KimiK3TextConfig = vllm_config.model_config.hf_text_config
         self.config = config
         self.vocab_size = config.vocab_size
-        self.use_fused_attention_residual = _should_use_fused_attention_residual(vllm_config)
-        if not self.use_fused_attention_residual:
-            logger.warning_once(
-                "Kimi K3 MLA DSpark is using the reference attention-residual path to preserve target/draft acceptance."
-            )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1149,7 +1120,6 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
                             block_residual,
                             layer.self_attention_res_proj,
                             layer.self_attention_res_norm,
-                            use_fused_kernel=self.use_fused_attention_residual,
                         )
                     )
             hidden_states, block_residual = layer(positions, hidden_states, block_residual)
@@ -1164,7 +1134,6 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
             block_residual,
             self.output_attn_res_proj,
             self.output_attn_res_norm,
-            use_fused_kernel=self.use_fused_attention_residual,
         )
         hidden_states = self.norm(hidden_states)
         if aux_hidden_states:
