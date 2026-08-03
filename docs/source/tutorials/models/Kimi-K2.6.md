@@ -285,6 +285,9 @@ Parameter descriptions:
 |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
 |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
+
 1. `run_dp_template.sh` script
 
     === "Node 0(Prefill)"
@@ -855,9 +858,6 @@ After about several minutes, you can get the performance evaluation result.
 |Multimodal (1080P)|Server-D Node|16|1|16|17k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
-
-**Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
 ### 9.2 Tuning Guidelines
 
