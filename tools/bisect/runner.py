@@ -53,7 +53,6 @@ logger = logging.getLogger(__name__)
 # Internal vs external DP pytest entries (mirrors run.sh selection logic).
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
 _EXTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
-_PYTEST_DRIVEN_IGNORE = "tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py"
 
 # Ascend toolkit env files sourced before launching multi-node pytest.
 _ENV_SOURCE_FILES = (
@@ -97,13 +96,7 @@ class BaseRunner:
 
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
-        if self.inp.test_path:
-            env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-            env["VLLM_USE_MODELSCOPE"] = "True"
-            ld_library_path = env.get("LD_LIBRARY_PATH", "")
-            env["LD_LIBRARY_PATH"] = f"/usr/local/lib:{ld_library_path}"
-        if self.inp.config_yaml:
-            env["CONFIG_YAML_PATH"] = self.inp.config_yaml
+        env["CONFIG_YAML_PATH"] = self.inp.config_yaml
         if self.inp.config_base_path:
             env["CONFIG_BASE_PATH"] = self.inp.config_base_path
         return env
@@ -143,13 +136,6 @@ class BaseRunner:
 
 
 class SingleNodeRunner(BaseRunner):
-    def _test_command(self) -> list[str]:
-        """Return the pytest command matching the original failing workflow."""
-        if self.inp.test_path:
-            return ["python", "-m", "pytest", "-sv", self.inp.test_path, f"--ignore={_PYTEST_DRIVEN_IGNORE}"]
-
-        return ["python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH]
-
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
@@ -166,7 +152,7 @@ class SingleNodeRunner(BaseRunner):
         # this trial's files.
         results_dir = self._reset_dir(self.repo / "benchmark_results")
         env = self._base_env()
-        cmd = self._test_command()
+        cmd = ["python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH]
 
         rc = self._run_pytest(cmd, env, log_path)
         outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)

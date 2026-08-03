@@ -69,7 +69,7 @@ echo "   YAML         : ${YAML_SUMMARY:-N/A}"
 echo "================================================"
 
 echo "::group::Failed test details"
-for f in /tmp/test-logs/pytest-driven.log /tmp/test-logs/yaml-test.log /tmp/test-logs/multi-node.log /tmp/test-logs/model-accuracy-*.log; do
+for f in /tmp/test-logs/pytest-driven.log /tmp/test-logs/yaml-test.log /tmp/test-logs/multi-node.log; do
   if [ -f "$f" ]; then
     grep -A 10 'FAILED' "$f" || true
   fi
@@ -107,22 +107,6 @@ BISECT_CMD=(
 )
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")
-if [ -n "$TESTS" ]; then
-  # Match the environment of the original pytest-driven workflow step. These
-  # are internal replay details, not user-facing bisect parameters.
-  export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  export VLLM_USE_MODELSCOPE=True
-  export VLLM_CI_RUNNER="$RUNNER"
-  BISECT_CMD+=(--test-path "$TESTS")
-fi
-[ -n "$CONFIG" ] && [ -n "$TESTS" ] && {
-  echo "ERROR: both config_file_path and tests were provided; cannot select bisect replay mode"
-  exit 1
-}
-[ -z "$CONFIG" ] && [ -z "$TESTS" ] && {
-  echo "ERROR: neither config_file_path nor tests was provided for bisect replay"
-  exit 1
-}
 [ -n "$NAME" ] && BISECT_CMD+=(--name "$NAME")
 [ -n "$SOC" ] && BISECT_CMD+=(--soc "$SOC")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")

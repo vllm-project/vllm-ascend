@@ -138,17 +138,16 @@ class TrialResult:
 class BisectInput:
     """Everything needed to start a bisect run, assembled by the CLI.
 
-    YAML-driven nightly trials replay the whole config file. Pytest-driven
-    single-node trials instead replay the original repository-relative test
-    path. The workflow selects exactly one mode from the case configuration;
-    neither value is a user-facing slash-command parameter.
+    A nightly trial runs at *whole-YAML* granularity (all ``test_cases`` in the
+    file) -- nightly cannot select a single case -- so there is no per-case
+    field. ``config_yaml`` both selects the failing file (CONFIG_YAML_PATH) and
+    is the unit a trial runs and judges.
     """
 
     scene: str  # SCENE_SINGLE | SCENE_MULTI
-    config_yaml: str | None  # CONFIG_YAML_PATH for a YAML-driven trial
+    config_yaml: str  # CONFIG_YAML_PATH value: the whole failing case file
     bad_commit: str  # current failing commit (resolved to full sha later)
     soc: str  # hardware generation, part of the good-table composite key
-    test_path: str | None = None  # repository-relative pytest-driven entry
     name: str | None = None  # nightly case name, to match the good-table 'name'
     config_base_path: str | None = None  # CONFIG_BASE_PATH override (multi/ext dp)
     good_commit: str | None = None  # explicit good; else looked up in the table
@@ -156,8 +155,8 @@ class BisectInput:
 
     @property
     def case_key(self) -> str:
-        """Stable key for state/work-dir/report across both replay modes."""
-        return f"{self.scene}::{self.config_yaml or self.test_path}"
+        """Stable key (scene + whole yaml) for state/work-dir/report."""
+        return f"{self.scene}::{self.config_yaml}"
 
 
 @dataclass
