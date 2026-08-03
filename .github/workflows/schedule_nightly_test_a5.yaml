@@ -94,27 +94,80 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            let testFilter = 'all';
-            let runFlag = 'false';
-            let prRef = '';
-            let branch = 'main';
-            if (eventName === 'pull_request') {
-              const labels = context.payload.pull_request.labels.map(l => l.name);
-              if (labels.includes('nightly-test')) {
-                runFlag = 'true';
-                prRef = context.payload.pull_request.head.sha;
+            core.setOutput('run', 'false');
+            core.setOutput('filter', '');
+            core.setOutput('ref', '');
+            core.setOutput('request_id', '');
+            core.setOutput('vllm_ascend_branch', 'main');
+            core.setOutput('is_pr_event', 'false');
+
+            // workflow_dispatch manual trigger
+            if (eventName === 'workflow_dispatch') {
+              const inputs = context.payload.inputs || {};
+              const testCases = (inputs.test_cases || '').trim();
+              core.setOutput('ref', inputs.vllm_ascend_ref || context.sha || '');
+              core.setOutput('request_id', inputs.request_id || '');
+              core.setOutput('vllm_ascend_branch', inputs.vllm_ascend_branch || 'main');
+              core.setOutput('is_pr_event', 'false');
+              if (testCases) {
+                core.setOutput('run', 'true');
+                if (testCases === 'all') {
+                  core.setOutput('filter', 'all');
+                } else {
+                  core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+                }
               }
-            } else if (eventName === 'workflow_dispatch') {
-              testFilter = core.getInput('test_cases') || 'all';
-              branch = core.getInput('vllm_ascend_branch') || 'main';
-              runFlag = 'true';
+              return;
             }
-            core.setOutput('run', runFlag);
-            core.setOutput('filter', testFilter);
-            core.setOutput('ref', prRef);
-            core.setOutput('request_id', core.getInput('request_id'));
-            core.setOutput('vllm_ascend_branch', branch);
-            core.setOutput('is_pr_event', eventName === 'pull_request' ? 'true' : 'false');
+
+            // pull_request trigger
+            if (eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              const labels = pr.labels.map(l => l.name);
+              const prNumber = pr.number;
+              core.setOutput('ref', pr.head.sha);
+              core.setOutput('request_id', 'pr-' + prNumber);
+              core.setOutput('is_pr_event', 'true');
+
+              if (!labels.includes('nightly-test')) {
+                core.info('nightly-test label not found; skipping.');
+                return;
+              }
+
+              // Scan PR comments for latest /nightly-pr command
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+              let testFilter = null;
+              for (let i = comments.length - 1; i >= 0; i--) {
+                const body = comments[i].body || '';
+                const match = body.trim().match(/^\/nightly-pr(?:\s+(.+))?$/m);
+                if (match) {
+                  const args = (match[1] || '').trim();
+                  if (!args) {
+                    core.info('/nightly-pr without arguments; skip all tests.');
+                    testFilter = 'none';
+                  } else {
+                    testFilter = ',' + args.split(/\s+/).join(',') + ',';
+                  }
+                  break;
+                }
+              }
+
+              if (testFilter === null) {
+                core.info('nightly-test label present but no /nightly-pr comment found; skipping.');
+                return;
+              }
+              if (testFilter === 'none') {
+                return;
+              }
+              core.setOutput('run', 'true');
+              core.setOutput('filter', testFilter);
+              return;
+            }
 
   setup-vars:
     name: Export global env vars as job outputs
@@ -199,6 +252,7 @@ jobs:
           echo "single_node json: >>${{ needs.setup-vars.outputs.single_node }}<<"
           echo "double_node json: >>${{ needs.setup-vars.outputs.double_node }}<<"
           echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
+
   wait-deps:
     name: Wait upstream dependencies and forward outputs
     needs: [parse-trigger, setup-vars]
@@ -218,8 +272,7 @@ jobs:
       filter: ${{ steps.forward.outputs.filter }}
       single_node: ${{ steps.forward.outputs.single_node }}
       multi_node: ${{ steps.forward.outputs.multi_node }}
-  
-  
+
   single-node-tests:
     name: single-node
     needs: wait-deps
@@ -237,8 +290,8 @@ jobs:
       filter_expr: ${{ needs.wait-deps.outputs.filter }}
       request_id: ${{ inputs.request_id }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
-  
-  
+      aop_single_enabled: ${{ inputs.aop_enabled }}
+
   multi-node-tests:
     name: multi-node
     needs: wait-deps
