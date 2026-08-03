@@ -299,8 +299,8 @@
       "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot",
       "Eco-Tech/Qwen3-32B-w8a8c8",
       "Eco-Tech/Qwen3.6-35B-A3B-w8a8",
-      "z-lab/Kimi-K2.5-DFlash",
-      "Eco-Tech/Kimi-K2.7-Code-w4a8"
+      "Eco-Tech/Kimi-K2.7-Code-w4a8",
+      "z-lab/Kimi-K2.5-DFlash"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
@@ -357,6 +357,7 @@
       "vllm-ascend/GSM8K-in254k-bs16-prefix99-kimi",
       "vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi",
       "vllm-ascend/GSM8K-in3500-bs8000-qwen3",
-      "vllm-ascend/GSM8K-in2048-bs4000-ds3.2"
+      "vllm-ascend/GSM8K-in2048-bs4000-ds3.2",
+      "vllm-ascend/GSM8K-in16384-bs1024-prefix0-qwen"
     ]
   }
