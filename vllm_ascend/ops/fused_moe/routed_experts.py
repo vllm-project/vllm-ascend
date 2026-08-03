@@ -277,6 +277,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.log2phy = None
         self.global_redundant_expert_num = 0
         self.init_eplb(n_shared_experts)
+        self.return_with_event = False
 
         vllm_config = get_current_vllm_config()
 
@@ -406,12 +407,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             quant_type = getattr(method, "quant_type", QuantType.NONE)
         return quant_type
 
-    def no_shared_forward_impl(
+    def forward_impl(
         self,
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        return_with_event: bool = False,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -496,7 +496,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, None)
 
-        if return_with_event:
+        if self.return_with_event:
             return FusedMoEResult(
                 routed_out=routed_out,
                 before_dispatch_evt=fused_experts_results.before_dispatch_evt,
