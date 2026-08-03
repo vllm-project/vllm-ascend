@@ -99,8 +99,34 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per-gid context slot_mapping buffer
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
 
+        # per-gid block size used to derive slot ids (see _resolve_kernel_block_size)
+        self._per_group_kernel_block_size: dict[int, int] = {}
+
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+
+    def _resolve_kernel_block_size(self, attn_group) -> int:
+        """Block size the KV cache of ``attn_group`` is physically addressed with.
+
+        ``kv_cache_spec.block_size`` is the *KV manager* block size. On hybrid
+        targets (e.g. Gated-DeltaNet models such as Qwen3.5/Qwen3.6) vLLM enlarges
+        it so the attention page size matches the mamba page size, which makes it
+        a multiple of the block size the Ascend attention kernel supports. In that
+        case ``BlockTable`` splits every manager block into kernel blocks, so the
+        block table entries, the slot mappings and the physical KV cache are all
+        addressed in kernel blocks and the manager block size must not be used to
+        derive slot ids. ``BlockTable.block_size`` already holds the right value
+        in both the split and the non-split case.
+
+        The eagle/mtp path solves the same problem in
+        ``AscendSpecDecodeBaseProposer.attn_update_stack_num_spec_norm``.
+        """
+        gid = attn_group.kv_cache_group_id
+        input_batch = getattr(self.runner, "input_batch", None)
+        block_tables = getattr(input_batch, "block_table", None)
+        if block_tables is None:
+            return int(attn_group.kv_cache_spec.block_size)
+        return int(block_tables[gid].block_size)
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
@@ -161,7 +187,11 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-        self.kernel_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
+        self._per_group_kernel_block_size = {
+            attn_group.kv_cache_group_id: self._resolve_kernel_block_size(attn_group)
+            for attn_group in self.draft_attn_groups
+        }
+        self.kernel_block_size = self._per_group_kernel_block_size[self.kv_cache_gid]
 
         name_to_gid = {
             ln: gid
@@ -236,7 +266,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             gid_block_table = self._per_group_block_table_buffers.get(gid)
             if gid_block_table is None:
                 continue
-            kv_block_size = int(attn_group.kv_cache_spec.block_size)
+            # Slot ids are expressed in kernel blocks, not KV manager blocks.
+            kv_block_size = self._per_group_kernel_block_size[gid]
             copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,

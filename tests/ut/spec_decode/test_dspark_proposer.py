@@ -115,6 +115,9 @@ class _DSparkProposerTestBase:
         proposer._per_group_slot_mappings = {gid: slot}
         proposer._per_group_query_slot_mapping_buffers = {gid: slot.clone()}
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
+        # Normally filled by initialize_attn_backend; without block splitting it
+        # equals the kv-manager block size.
+        proposer._per_group_kernel_block_size = {gid: block_size}
         return proposer
 
     # fmt: off
@@ -691,4 +694,76 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
         with pytest.raises(RuntimeError, match="registered draft attention groups"):
             proposer.initialize_attn_backend(kv_cache_config)
+
+
+class TestKernelBlockSizeResolution(_DSparkProposerTestBase):
+    """Slot ids must be derived from the *kernel* block size.
+
+    Regression test: on hybrid (Gated-DeltaNet) targets such as Qwen3.5/Qwen3.6,
+    vLLM enlarges the attention ``kv_cache_spec.block_size`` so the attention page
+    size matches the mamba page size. ``BlockTable`` then splits each manager
+    block into kernel blocks, so block table entries and slot mappings are
+    addressed in kernel blocks. Using the manager block size to derive slot ids
+    writes the draft query block's K/V to out-of-range slots, the draft then
+    attends over uninitialized KV cache and its hidden states become NaN.
+    """
+
+    @staticmethod
+    def _make_proposer_with_block_table(manager_block_size, kernel_block_size):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.runner = SimpleNamespace(
+            input_batch=SimpleNamespace(
+                block_table={0: SimpleNamespace(block_size=kernel_block_size)}
+            )
+        )
+        attn_group = SimpleNamespace(
+            kv_cache_group_id=0,
+            kv_cache_spec=SimpleNamespace(block_size=manager_block_size),
+        )
+        return proposer, attn_group
+
+    def test_split_blocks_use_kernel_block_size(self):
+        # Hybrid target: manager block size is a multiple of the kernel one.
+        proposer, attn_group = self._make_proposer_with_block_table(512, 128)
+        assert proposer._resolve_kernel_block_size(attn_group) == 128
+
+    def test_unsplit_blocks_keep_manager_block_size(self):
+        # Pure-attention target: the two coincide, behaviour is unchanged.
+        proposer, attn_group = self._make_proposer_with_block_table(128, 128)
+        assert proposer._resolve_kernel_block_size(attn_group) == 128
+
+    def test_falls_back_to_spec_without_runner_block_tables(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.runner = None
+        attn_group = SimpleNamespace(
+            kv_cache_group_id=0,
+            kv_cache_spec=SimpleNamespace(block_size=128),
+        )
+        assert proposer._resolve_kernel_block_size(attn_group) == 128
+
+    def test_inputs_kernel_receives_kernel_block_size(self, monkeypatch):
+        """``set_inputs_first_pass`` must pass the kernel block size downstream."""
+        num_reqs, block_size = 1, _NUM_SPECULATIVE_TOKENS
+        proposer = self._make_proposer(
+            max_num_tokens=_MAX_NUM_TOKENS, num_reqs=num_reqs, block_size=block_size
+        )
+        # Simulate a split-block (hybrid) group: manager 512, kernel 128.
+        proposer.draft_attn_groups[0].kv_cache_spec = SimpleNamespace(block_size=512)
+        proposer._per_group_kernel_block_size = {0: 128}
+
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer."
+            "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
+            kernel,
+        )
+        self._invoke_set_inputs_first_pass(
+            proposer, num_reqs=num_reqs, block_size=block_size
+        )
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["block_size"] == 128, (
+            "slot mapping must be derived from the kernel block size, not the "
+            "kv-manager block size"
+        )
 # fmt: on
