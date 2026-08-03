@@ -34,6 +34,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_npu
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
@@ -150,6 +151,7 @@ from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
@@ -3742,6 +3744,53 @@ class NPUModelRunner(GPUModelRunner):
             return attn_layer.impl.dtype, self.model_config.dtype
         return None
 
+    def _uses_a3_kimi_c8_cache(
+        self,
+        layer_name: str,
+        kv_cache_spec: AttentionSpec,
+    ) -> bool:
+        """Whether an MLA cache is K3's A3 C8 PA-NZ cache."""
+        if (
+            get_ascend_device_type() != AscendDeviceType.A3
+            or not isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+        ):
+            return False
+
+        attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,
+            [layer_name],
+        )
+        attn_layer = attn_layers[layer_name]
+        return (
+            isinstance(attn_layer, MLAAttention)
+            and bool(getattr(attn_layer.impl, "fa_quant_layer", False))
+            and not bool(getattr(attn_layer.impl, "use_mla_rope", True))
+        )
+
+    @staticmethod
+    def _format_a3_kimi_c8_cache(
+        cache: torch.Tensor,
+        nz_width: int,
+    ) -> torch.Tensor:
+        """Create a PA-NZ cache whose internal format is FRACTAL_NZ.
+
+        ``npu_gather_pa_kv_cache`` selects PA_NZ based on the tensor's NPU
+        format, not from its logical shape.  The cache is therefore first
+        expressed in the PA-NZ logical layout and then format-cast once during
+        initialization.
+        """
+        num_blocks, block_size, num_kv_heads, head_dim = cache.shape
+        if head_dim % nz_width != 0:
+            raise ValueError(f"C8 cache head dim {head_dim} must be divisible by {nz_width}.")
+        pa_nz_cache = cache.view(
+            num_blocks,
+            num_kv_heads * head_dim // nz_width,
+            block_size,
+            nz_width,
+        )
+        return torch_npu.npu_format_cast(pa_nz_cache, ACL_FORMAT_FRACTAL_NZ)
+
     @staticmethod
     def _align_up(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
@@ -4335,6 +4384,11 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         assert raw_v_tensor is not None
                         v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+
+                    if self._uses_a3_kimi_c8_cache(layer_name, current_kv_cache_spec):
+                        k_cache = self._format_a3_kimi_c8_cache(k_cache, 32)
+                        assert v_cache is not None
+                        v_cache = self._format_a3_kimi_c8_cache(v_cache, 16)
 
                     if current_sparse_sfa_c8:
                         kv_caches[layer_name] = (k_cache,)

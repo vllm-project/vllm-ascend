@@ -1342,6 +1342,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
+    def _uses_a3_kimi_c8_cache(self) -> bool:
+        return (
+            bool(self.fa_quant_layer)
+            and not self.use_mla_rope
+            and get_ascend_device_type() == AscendDeviceType.A3
+        )
+
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -1360,8 +1367,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
-        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        is_a3_c8_cache = self._uses_a3_kimi_c8_cache()
+        if is_a3_c8_cache:
+            num_heads = self.num_kv_heads
+            latent_kv_dim = self.kv_lora_rank
+        else:
+            num_heads = cache_k_pe.size(2)
+            latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1398,28 +1410,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            is_a3_c8_cache = bool(self.fa_quant_layer) and (
-                get_ascend_device_type() == AscendDeviceType.A3
-            )
             cache_kv_c_for_load = cache_kv_c
             cache_k_pe_for_load = cache_k_pe
             if is_a3_c8_cache:
-                # A3 C8 cache uses the PA_NZ logical layout. The CANN gather
-                # wrapper derives its mode from the cache's NPU format; after
-                # gathering, restore the TND shape consumed by kv_b_proj.
-                block_size = cache_kv_c.shape[1]
-                cache_kv_c_for_load = cache_kv_c.view(
-                    -1,
-                    num_heads * latent_kv_dim // 32,
-                    block_size,
-                    32,
-                )
-                cache_k_pe_for_load = cache_k_pe.view(
-                    -1,
-                    num_heads * rope_dim // 16,
-                    block_size,
-                    16,
-                )
+                # A3 C8 cache is initialized in PA_NZ format. CANN derives
+                # gather mode from that actual NPU format rather than a Python
+                # cache_mode argument.
                 kv_c_normed = torch.empty(
                     toks,
                     num_heads * latent_kv_dim,
@@ -1620,7 +1616,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 # merely viewing that storage as NZ in _forward_decode changes
                 # its interpretation and corrupts every decode attention read.
                 # Scatter directly into the matching 5D NZ views instead.
-                block_size = kv_cache[0].shape[1]
+                block_size = kv_cache[0].shape[-2]
                 latent_cache_nz = kv_cache[0].view(
                     -1,
                     self.num_kv_heads,
@@ -2253,7 +2249,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_preprocess_res.q_pe,
                 decode_preprocess_res.k_nope,
                 decode_preprocess_res.k_pe,
-                kv_cache[0].shape[1],
+                kv_cache[0].shape[-2] if self._uses_a3_kimi_c8_cache() else kv_cache[0].shape[1],
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
             )
