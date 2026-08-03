@@ -35,6 +35,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -57,7 +58,8 @@ class FusedMoEResult:
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        vllm_config = get_current_vllm_config()
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
         self.lora_context = None
 
@@ -72,6 +74,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Ascend uses its own MoE communication and forward_impl path.
         # Do not let upstream modular-kernel initialization replace it.
         return None
+
+    @staticmethod
+    def get_eplb_weight_views(layer) -> list[torch.Tensor]:
+        weights = [layer.w13_weight, layer.w2_weight]
+        if layer.w13_bias is not None:
+            weights.append(layer.w13_bias)
+        if layer.w2_bias is not None:
+            weights.append(layer.w2_bias)
+        return weights
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
@@ -230,8 +241,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
         self.router = router
         ascend_config = get_ascend_config()
+        vllm_config = get_current_vllm_config()
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.dynamic_eplb = False
         self.multi_stage = False
         self.load_counter = None
@@ -240,11 +253,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.ascend_expert_map = None
         self.log2phy = None
         self.global_redundant_expert_num = 0
-        self.init_eplb(n_shared_experts)
+        if not self._use_v2_model_runner:
+            self.init_eplb(n_shared_experts)
         self.return_with_event = False
         self.n_shared_experts = n_shared_experts
-
-        vllm_config = get_current_vllm_config()
 
         if (
             self.custom_routing_function is None
@@ -547,7 +559,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if zero_expert_result is not None:
             fused_experts_results.routed_out += zero_expert_result
 
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
+        if self._use_v2_model_runner and self.router.eplb_state is not None:
+            expert_tokens = fused_experts_results.expert_tokens
+            group_list_type = fused_experts_results.group_list_type
+            assert expert_tokens is not None and group_list_type is not None, (
+                "expert_tokens and group_list_type must be returned when Model Runner V2 EPLB is enabled."
+            )
+            eplb_state = self.router.eplb_state
+            assert eplb_state.expert_load_view is not None
+            record_local_expert_load(
+                expert_tokens=expert_tokens,
+                group_list_type=group_list_type,
+                expert_load_view=eplb_state.expert_load_view,
+                ep_rank=self.moe_config.ep_rank,
+                ep_size=self.moe_config.ep_size,
+            )
+        elif self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (
