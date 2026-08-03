@@ -729,6 +729,8 @@ private:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::DataCopy(tokenPerExpert[rowOffset], tmpBuffer, numPerCore);
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
             } else {
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
