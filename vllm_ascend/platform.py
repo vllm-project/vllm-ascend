@@ -25,7 +25,6 @@ from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
-from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -470,6 +469,8 @@ class NPUPlatform(Platform):
 
         score_encoder_cache_config = get_score_encoder_cache_config(vllm_config)
         if score_encoder_cache_config.enabled:
+            from vllm.config.ec_manager_config import EncoderCacheManagerConfig
+
             logger.info("score_encoder_cache_config is enabled")
             vllm_config.ec_manager_config = EncoderCacheManagerConfig()
             vllm_config.ec_manager_config.encoder_cache_manager_cls = register_ec_manager()
