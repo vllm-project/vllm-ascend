@@ -32,20 +32,30 @@ def _build_weight_layer():
 
 
 def test_routed_experts_310_uses_parent_unquantized_method_during_init(monkeypatch):
-    routed_experts = AscendRoutedExperts310.__new__(AscendRoutedExperts310)
     moe_config = MagicMock()
-    parent_method = object()
-    parent_get_quant_method = MagicMock(return_value=parent_method)
+    parent_method = MagicMock()
+    specialized_method = object()
+
+    def parent_init(layer, *args, **kwargs):
+        nn.Module.__init__(layer)
+        layer.quant_config = None
+        layer.moe_config = moe_config
+        layer.quant_method = parent_method
+        layer.custom_routing_function = None
+        layer.e_score_correction_bias = None
+
+    monkeypatch.setattr(fused_moe_310_module.AscendRoutedExperts, "__init__", parent_init)
+    specialized_method_factory = MagicMock(return_value=specialized_method)
     monkeypatch.setattr(
-        fused_moe_310_module.AscendRoutedExperts,
-        "_get_quant_method",
-        parent_get_quant_method,
+        fused_moe_310_module,
+        "AscendUnquantizedFusedMoEMethod310",
+        specialized_method_factory,
     )
 
-    method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
+    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
 
-    assert method is parent_method
-    parent_get_quant_method.assert_called_once_with("model.layers.0.mlp", None, moe_config)
+    assert routed_experts.quant_method is specialized_method
+    specialized_method_factory.assert_called_once_with(moe_config)
 
 
 @pytest.mark.parametrize("quant_config", [None, object()])
