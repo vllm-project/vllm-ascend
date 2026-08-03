@@ -103,10 +103,10 @@ Layer 4 reuses layer 1's physical buffer, layer 7 reuses layer 4's buffer, and
 so on. Before loading layer 4, the transfer thread waits until layer 1 has
 finished saving.
 
-When physical layers have different KV cache layouts, the planner first groups
-them by their complete cache signature. Each signature gets its own reusable
-slots, so incompatible layouts never share storage. The physical slot count is
-then:
+When cache-bearing layers have different KV cache layouts, the planner first
+groups them by their complete cache signature. Each signature gets its own
+reusable buffer pool, so incompatible layouts never share storage. The number
+of physical KV buffers is then:
 
 ```text
 I + sum(min(B, reusable layers with signature S) for each signature S)
@@ -114,16 +114,17 @@ I + sum(min(B, reusable layers with signature S) for each signature S)
 
 For a uniform layout, the approximate logical-to-physical memory factor remains
 `N / (I + min(B, R))`. For heterogeneous layouts, the implementation calculates
-the factor from the actual cache page bytes assigned to every physical slot.
+the factor from the actual cache page bytes assigned to every physical buffer.
 
 ## Request Flow
 
 ### Initialization
 
-1. The KV cache planner maps logical layer names to physical layer indices.
+1. The KV cache planner maps logical layer names to cache-bearing layer indices.
 2. Base transformer layers keep their normal indices. MTP layers are appended
    after the base layers.
-3. The planner builds the complete KV cache signature of each physical layer.
+3. The planner builds the complete KV cache signature of each cache-bearing
+   layer.
 4. Compatible layers are assigned to dedicated or shared physical KV buffers.
 5. Corresponding KV cache tensor descriptors assigned to the same buffer are
    merged.
@@ -183,8 +184,8 @@ transferred through an incorrectly sized buffer.
 The following log messages indicate that shared-buffer offload is active:
 
 ```text
-Layerwise KV cache reuse merged ... descriptors into ... descriptors across ... physical buffers.
-Layerwise KV cache reuse uses ... buffers for ... layers; scale logical KV budget by ...
+Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
+Layerwise KV cache reuse maps ... layers onto ... buffer assignments; scale logical KV budget by ...
 ```
 
 If the first message is absent, check that:
