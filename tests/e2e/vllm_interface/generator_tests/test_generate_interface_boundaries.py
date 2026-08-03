@@ -7523,7 +7523,7 @@ Target.run = replacement
     assert not findings
 
 
-def test_v024_typed_lazy_instance_patch_keeps_upstream_descriptor_for_review(
+def test_v035_typed_lazy_instance_patch_does_not_install_class_descriptor(
     tmp_path: Path,
 ) -> None:
     vllm_root, ascend_root = _v018_source_roots(tmp_path)
@@ -7581,20 +7581,7 @@ current_platform.verify = replacement
         patches[0].downstream_descriptor_kind,
         patches[0].installed_descriptor_kind,
     ) == ("classmethod", "ordinary", None)
-    assert len(findings) == 1
-    assert (
-        findings[0].reason_code,
-        findings[0].supplemental,
-        findings[0].upstream_descriptor_kind,
-        findings[0].downstream_descriptor_kind,
-        findings[0].installed_descriptor_kind,
-    ) == (
-        "descriptor_kind_mismatch",
-        True,
-        "classmethod",
-        "ordinary",
-        None,
-    )
+    assert not findings
 
 
 def test_v024_module_callable_patch_ignores_descriptor_decorator_uncertainty(
