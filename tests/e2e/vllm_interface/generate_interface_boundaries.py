@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 6
-GENERATOR_VERSION = "0.28.0"
+GENERATOR_VERSION = "0.29.0"
 SUPPORTED_RELATIONS = frozenset({"inheritance", "monkey_patch", "override"})
 FINDING_STATUSES = frozenset({"expected", "excluded", "review", "risk", "verified"})
 DESCRIPTOR_KINDS = frozenset(
@@ -2068,7 +2068,7 @@ class CallableInfo:
     descriptor_kind: str | None = "ordinary"
     descriptor_variants: tuple[str | None, ...] = ()
     decorator_references: tuple[str | None, ...] = ()
-    decorator_forwarded_targets: tuple[tuple[str, ...], ...] | None = None
+    decorator_forwarded_targets: tuple[tuple[str, ...] | None, ...] | None = None
     property_accessor_nodes: tuple[ast.AST | None, ast.AST | None, ast.AST | None] | None = field(
         default=None,
         compare=False,
@@ -7140,16 +7140,16 @@ class InterfaceBoundaryGenerator:
         node: ast.AsyncFunctionDef | ast.FunctionDef,
         references: tuple[str | None, ...],
         context: PatchScanContext,
-    ) -> tuple[tuple[str, ...], ...] | None:
+    ) -> tuple[tuple[str, ...] | None, ...] | None:
         """Freeze statically known ``wraps`` arguments at definition time."""
 
         decorators = tuple(node.decorator_list)
         if len(references) != len(decorators):
             return None
-        captured: list[tuple[str, ...]] = []
+        captured: list[tuple[str, ...] | None] = []
         for decorator, reference in zip(decorators, references):
             if reference != "functools.wraps" or not isinstance(decorator, ast.Call) or not decorator.args:
-                captured.append(())
+                captured.append(None)
                 continue
             target_expression = _expression_name(decorator.args[0])
             targets = (
@@ -8582,6 +8582,91 @@ class InterfaceBoundaryGenerator:
             return "property"
         return "unknown"
 
+    def _call_argument_targets(
+        self,
+        module_info: ModuleInfo,
+        node: ast.AST,
+        context: PatchScanContext,
+    ) -> tuple[str, ...]:
+        expression = _expression_name(node)
+        targets = (
+            self._resolve_patch_references(
+                module_info,
+                expression,
+                context,
+            )
+            if expression is not None
+            else set()
+        )
+        return tuple(sorted(self._canonical_reference(target) for target in targets))
+
+    def _wrapper_factory_parameter_targets(
+        self,
+        module_info: ModuleInfo,
+        factory: ast.AsyncFunctionDef | ast.FunctionDef,
+        call: ast.Call,
+        context: PatchScanContext,
+    ) -> dict[str, tuple[str, ...]]:
+        positional_parameters = [
+            argument.arg
+            for argument in (
+                *factory.args.posonlyargs,
+                *factory.args.args,
+            )
+        ]
+        known_parameters = {
+            *positional_parameters,
+            *(argument.arg for argument in factory.args.kwonlyargs),
+        }
+        bindings: dict[str, tuple[str, ...]] = {}
+        for parameter, argument in zip(positional_parameters, call.args):
+            bindings[parameter] = self._call_argument_targets(
+                module_info,
+                argument,
+                context,
+            )
+        for keyword in call.keywords:
+            if keyword.arg is None or keyword.arg not in known_parameters:
+                continue
+            targets = self._call_argument_targets(
+                module_info,
+                keyword.value,
+                context,
+            )
+            if keyword.arg in bindings:
+                targets = tuple(sorted({*bindings[keyword.arg], *targets}))
+            bindings[keyword.arg] = targets
+        return bindings
+
+    def _capture_factory_forwarded_targets(
+        self,
+        node: ast.AsyncFunctionDef | ast.FunctionDef,
+        references: tuple[str | None, ...],
+        parameters: set[str],
+        parameter_targets: dict[str, tuple[str, ...]],
+    ) -> tuple[tuple[str, ...] | None, ...] | None:
+        decorators = tuple(node.decorator_list)
+        if len(references) != len(decorators):
+            return None
+        captured: list[tuple[str, ...] | None] = []
+        for decorator, reference in zip(decorators, references):
+            if reference != "functools.wraps" or not isinstance(decorator, ast.Call) or not decorator.args:
+                captured.append(None)
+                continue
+            expression = _expression_name(decorator.args[0])
+            if expression is None:
+                captured.append(())
+                continue
+            root, *attributes = expression.split(".")
+            if root not in parameters:
+                captured.append(None)
+                continue
+            suffix = ".".join(attributes)
+            captured.append(
+                tuple(sorted(f"{target}.{suffix}" if suffix else target for target in parameter_targets.get(root, ())))
+            )
+        return tuple(captured)
+
     def _resolve_wrapper_factory_call(
         self,
         module_info: ModuleInfo,
@@ -8647,6 +8732,12 @@ class InterfaceBoundaryGenerator:
             parameters.add(factory.node.args.vararg.arg)
         if factory.node.args.kwarg:
             parameters.add(factory.node.args.kwarg.arg)
+        parameter_targets = self._wrapper_factory_parameter_targets(
+            module_info,
+            factory.node,
+            node,
+            context,
+        )
 
         returned_nodes: dict[str, ast.AST] = {}
         identity_return = False
@@ -8690,6 +8781,10 @@ class InterfaceBoundaryGenerator:
             ),
             ordinary_decorators=self.downstream.ordinary_descriptor_decorators,
         )
+        decorator_references = self.downstream._decorator_references_by_node.get(
+            id(returned_node),
+            (),
+        )
         return PatchReplacement(
             info=CallableInfo(
                 qualified_name=f"{factory.qualified_name}.<return>.{returned_name}",
@@ -8701,9 +8796,12 @@ class InterfaceBoundaryGenerator:
                 binding_line=line,
                 origin_kind=kind,
                 descriptor_kind=descriptor_kind,
-                decorator_references=self.downstream._decorator_references_by_node.get(
-                    id(returned_node),
-                    (),
+                decorator_references=decorator_references,
+                decorator_forwarded_targets=self._capture_factory_forwarded_targets(
+                    returned_node,
+                    decorator_references,
+                    parameters,
+                    parameter_targets,
                 ),
             ),
             kind=kind,

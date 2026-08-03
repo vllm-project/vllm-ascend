@@ -4,6 +4,25 @@ This log records why each generator iteration changed, the boundary case it
 handles, and the evidence used to decide whether a result is a source risk or a
 generator problem.
 
+## v0.29.0 - propagate `wraps` targets through wrapper factories
+
+- Red-test checkpoint: `1ccf4b93b`. The generator already resolved a factory
+  that returns one nested wrapper, but `make_wrapper(Target.run)` did not carry
+  the exact argument into the nested `@wraps(original)` signature contract.
+- Change: bind explicit positional and named call arguments to factory
+  parameters, then substitute a parameter-rooted `wraps` target on the single
+  returned wrapper.
+- Safety boundary: ambiguous argument bindings remain multiple alternatives
+  and therefore unknown. Dynamic `*args`/`**kwargs` expansion, missing
+  arguments, unsupported returns, and non-parameter decorator expressions are
+  not inferred by this rule.
+- Reason: the factory return and explicit argument binding are both already
+  proven by the AST path, so their composition is exact evidence rather than a
+  generator review.
+- Test evidence: all 193 isolated generator and independent-auditor tests pass;
+  Ruff and `git diff --check` pass. The fixed-source result is evaluated in the
+  next full audit together with v0.27 and v0.28.
+
 ## v0.28.0 - resolve local `functools.wraps` targets
 
 - Red-test checkpoint: `60ac6e3f8`. A local wrapper such as
