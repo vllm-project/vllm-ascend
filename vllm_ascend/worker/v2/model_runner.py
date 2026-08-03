@@ -438,15 +438,11 @@ class NPUModelRunner(GPUModelRunner):
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = (
-                    self.num_computed_tokens_cpu[req_index]
-                )
+                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
         else:
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = (
-                    self.req_states.num_computed_tokens_np[req_index]
-                )
+                self.req_states.num_computed_tokens_cpu[req_index] = self.req_states.num_computed_tokens_np[req_index]
 
         # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):  # type: ignore
