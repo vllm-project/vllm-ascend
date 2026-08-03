@@ -44,9 +44,10 @@ extern aclnnStatus aclnnInnerMlaPrologV3GetWorkspaceSize(
     const aclTensor *actualSeqLenOptional, const aclTensor *kNopeClipAlphaOptional, double rmsnormEpsilonCq,
     double rmsnormEpsilonCkv, char *cacheModeOptional, bool queryNormFlag, int64_t weightQuantMode,
     int64_t kvCacheQuantMode, int64_t queryQuantMode, int64_t ckvkrRepoMode, int64_t quantScaleRepoMode,
-    int64_t tileSize, double qcQrScale, double kcScale, const aclTensor *queryOut,
-    const aclTensor *queryRopeOut, const aclTensor *dequantScaleQNopeOut, const aclTensor *queryNormOut,
-    const aclTensor *dequantScaleQNormOut, uint64_t *workspaceSize, aclOpExecutor **executor);
+    int64_t tileSize, double qcQrScale, double kcScale, int64_t kvCacheStride0,
+    int64_t krCacheStride0, const aclTensor *queryOut, const aclTensor *queryRopeOut,
+    const aclTensor *dequantScaleQNopeOut, const aclTensor *queryNormOut, const aclTensor *dequantScaleQNormOut,
+    uint64_t *workspaceSize, aclOpExecutor **executor);
 
 extern aclnnStatus aclnnInnerMlaPrologV3(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
                                          const aclrtStream stream);
@@ -167,6 +168,37 @@ bool CheckQueryQuantModeValidity(int64_t queryQuantMode)
     return true;
 }
 
+
+bool GetCacheStride0(const aclTensor *tensor, const char *tensorName, int64_t &stride0)
+{
+    const auto &shape = tensor->GetViewShape();
+    const auto &strides = tensor->GetViewStrides();
+    const size_t dimNum = shape.GetDimNum();
+    if (dimNum == 0 || strides.size() != dimNum) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "%s has invalid rank or stride descriptor.", tensorName);
+        return false;
+    }
+
+    int64_t expectedStride = 1;
+    for (int64_t dim = static_cast<int64_t>(dimNum) - 1; dim >= 1; --dim) {
+        if (strides[static_cast<size_t>(dim)] != expectedStride) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "%s dim%ld must be contiguous, actual stride is %ld, expected stride is %ld. "
+                    "Only dim0 may be non-contiguous.",
+                    tensorName, dim, strides[static_cast<size_t>(dim)], expectedStride);
+            return false;
+        }
+        expectedStride *= shape.GetDim(static_cast<size_t>(dim));
+    }
+    if (strides[0] < expectedStride) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "%s dim0 stride must be at least %ld, but got %ld.", tensorName,
+                expectedStride, strides[0]);
+        return false;
+    }
+    stride0 = strides[0];
+    return true;
+}
+
 aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
     const aclTensor *tokenX, const aclTensor *weightDq, const aclTensor *weightUqQr, const aclTensor *weightUk,
     const aclTensor *weightDkvKr, const aclTensor *rmsnormGammaCq, const aclTensor *rmsnormGammaCkv,
@@ -250,13 +282,19 @@ aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
             "ropeSin and ropeCos must both be non-null (RoPE enabled) or both be null (RoPE disabled)");
         return ge::GRAPH_FAILED;
     }
+    int64_t kvCacheStride0 = 0;
+    int64_t krCacheStride0 = 0;
+    if (!GetCacheStride0(kvCacheRef, "kvCacheRef", kvCacheStride0) ||
+        !GetCacheStride0(krCacheRef, "krCacheRef", krCacheStride0)) {
+        return ge::GRAPH_FAILED;
+    }
     return aclnnInnerMlaPrologV3GetWorkspaceSize(
         tokenX, weightDq, weightUqQr, weightUk, weightDkvKr, rmsnormGammaCq, rmsnormGammaCkv, ropeSin, ropeCos,
         kvCacheRef, krCacheRef, cacheIndexOptional, dequantScaleXOptional, dequantScaleWDqOptional,
         dequantScaleWUqQrOptional, dequantScaleWDkvKrOptional, quantScaleCkvOptional, quantScaleCkrOptional,
         smoothScalesCqOptional, actualSeqLenOptional, kNopeClipAlphaOptional, rmsnormEpsilonCq, rmsnormEpsilonCkv,
         cacheModeOptional, queryNormFlag, weightQuantMode, kvCacheQuantMode, queryQuantMode, ckvkrRepoMode,
-        quantScaleRepoMode, tileSize, qcQrScale, kcScale, queryOut, queryRopeOut,
+        quantScaleRepoMode, tileSize, qcQrScale, kcScale, kvCacheStride0, krCacheStride0, queryOut, queryRopeOut,
         dequantScaleQNopeOutOptional, queryNormOutOptional, dequantScaleQNormOutOptional, workspaceSize,
         executor);
 }

@@ -93,6 +93,8 @@ constexpr uint32_t QUANT_SCALE_REPO_MODE_ATTR_INDEX = 8;
 constexpr uint32_t TILE_SIZE_ATTR_INDEX = 9;
 constexpr uint32_t QC_QR_SCALE_ATTR_INDEX = 10;
 constexpr uint32_t KC_SCALE_ATTR_INDEX = 11;
+constexpr uint32_t KV_CACHE_STRIDE0_ATTR_INDEX = 12;
+constexpr uint32_t KR_CACHE_STRIDE0_ATTR_INDEX = 13;
 
 constexpr uint32_t MLA_PROLOG_DIM_INDEX_0 = 0;
 constexpr uint32_t MLA_PROLOG_DIM_INDEX_1 = 1;
@@ -376,6 +378,9 @@ struct MlaPrologContext {
     // Inferred in ConvertContext from ropeSin/ropeCos nullity (no OpDef Attr).
     bool doRopeValue = true;
     const bool *doRope = nullptr;
+
+    uint64_t kvCacheStride0 = 0U;
+    uint64_t krCacheStride0 = 0U;
 
     size_t *workSpaces;
     uint64_t tilingKey;

@@ -47,9 +47,21 @@ struct ScatterCacheParams {
     int64_t row;
     int64_t col;
     int64_t stride;
+    int64_t cacheStride0;
     int64_t seqLength;
     int64_t tokenIndex;
 };
+
+__aicore__ inline int64_t GetCacheOffset(int64_t paTokenIndex, int64_t blockSize, int64_t tokenStride,
+                                         int64_t cacheStride0)
+{
+    if (blockSize <= 0) {
+        return paTokenIndex * cacheStride0;
+    }
+    int64_t blockIndex = paTokenIndex / blockSize;
+    int64_t tokenIndexInBlock = paTokenIndex % blockSize;
+    return blockIndex * cacheStride0 + tokenIndexInBlock * tokenStride;
+}
 
 template <typename T, bool IS_NZ>
 __aicore__ inline void ScatterCache(const GlobalTensor<T> &cacheGm, const LocalTensor<T> &inputLocal,
@@ -59,13 +71,15 @@ __aicore__ inline void ScatterCache(const GlobalTensor<T> &cacheGm, const LocalT
         return;
     }
     if constexpr (!IS_NZ) {
-        DataCopy(cacheGm[scatterCacheParams.paTokenIndex * scatterCacheParams.stride], inputLocal,
-                 scatterCacheParams.col);
+        int64_t cacheOffset =
+            GetCacheOffset(scatterCacheParams.paTokenIndex, scatterCacheParams.blockSize,
+                           scatterCacheParams.stride, scatterCacheParams.cacheStride0);
+        DataCopy(cacheGm[cacheOffset], inputLocal, scatterCacheParams.col);
     } else {
         constexpr uint8_t col0 = ALIGN_BLOCK_SIZE / sizeof(T);
-        int64_t cacheOffset = scatterCacheParams.paTokenIndex / scatterCacheParams.blockSize *
-                                  scatterCacheParams.blockSize * scatterCacheParams.stride +
-                              scatterCacheParams.paTokenIndex % scatterCacheParams.blockSize * col0;
+        int64_t cacheOffset =
+            GetCacheOffset(scatterCacheParams.paTokenIndex, scatterCacheParams.blockSize, col0,
+                           scatterCacheParams.cacheStride0);
         DataCopyParams copyParams{static_cast<uint16_t>(scatterCacheParams.col / col0), 1, 0,
                                   static_cast<uint16_t>(scatterCacheParams.blockSize - 1)};
         DataCopy(cacheGm[cacheOffset], inputLocal, copyParams);
@@ -80,9 +94,12 @@ __aicore__ inline void ScatterCacheUnAligned(const GlobalTensor<T> &cacheGm, con
         return;
     }
     if constexpr (!IS_NZ) {
+        int64_t cacheOffset =
+            GetCacheOffset(scatterCacheParams.paTokenIndex, scatterCacheParams.blockSize,
+                           scatterCacheParams.stride, scatterCacheParams.cacheStride0);
         // blockCount, blockLen, srcStride, dstStride
         DataCopyParams dataCopyParams{1, static_cast<uint16_t>(scatterCacheParams.col * sizeof(T)), 0, 0};
-        DataCopyPad(cacheGm[scatterCacheParams.paTokenIndex * scatterCacheParams.stride], inputLocal, dataCopyParams);
+        DataCopyPad(cacheGm[cacheOffset], inputLocal, dataCopyParams);
     }
 }
 
@@ -116,18 +133,19 @@ __aicore__ inline void ScatterCacheMultiRows(GlobalTensor<T> &cacheGm, const Loc
 }
 
 template <typename T, bool IS_NZ>
-__aicore__ inline void MaterializeOffsetsWithHeadSize(int64_t pageTokenOffset, int64_t tokenOffsetInPage,
+__aicore__ inline void MaterializeOffsetsWithHeadSize(int64_t pageId, int64_t tokenOffsetInPage,
                                                       int64_t rowsThisStep, bool spill, int64_t nextPageId,
-                                                      int64_t headSize, CkvkrParams &ckvkrParams)
+                                                      int64_t headSize, int64_t cacheStride0,
+                                                      CkvkrParams &ckvkrParams)
 {
     ckvkrParams.rowsInCurBatch = rowsThisStep;
     if constexpr (IS_NZ) {
         constexpr uint8_t col0 = ALIGN_BLOCK_SIZE / sizeof(T);
-        ckvkrParams.cacheOffset = pageTokenOffset * headSize + tokenOffsetInPage * col0;
+        ckvkrParams.cacheOffset = pageId * cacheStride0 + tokenOffsetInPage * col0;
     } else {
-        ckvkrParams.cacheOffset = (pageTokenOffset + tokenOffsetInPage) * headSize;
+        ckvkrParams.cacheOffset = pageId * cacheStride0 + tokenOffsetInPage * headSize;
     }
-    ckvkrParams.nextBatchOffset = (spill && nextPageId >= 0) ? nextPageId * headSize : 0;
+    ckvkrParams.nextBatchOffset = (spill && nextPageId >= 0) ? nextPageId * cacheStride0 : 0;
 }
 
 } // namespace MlaProlog

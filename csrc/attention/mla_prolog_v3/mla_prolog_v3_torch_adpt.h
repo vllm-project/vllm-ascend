@@ -40,7 +40,8 @@ bool NeedDequantScaleQNope(int64_t weight_quant_mode, int64_t kv_cache_quant_mod
 at::ScalarType GetQueryDtype(const at::Tensor &rope_sin, int64_t weight_quant_mode,
                              int64_t kv_cache_quant_mode)
 {
-    if (weight_quant_mode == WEIGHT_QUANT_MODE_MXFP8_FULL_QUANT &&
+    if ((weight_quant_mode == WEIGHT_QUANT_MODE_MXFP8_FULL_QUANT ||
+         weight_quant_mode == WEIGHT_QUANT_MODE_FULL_QUANT_FP8) &&
         kv_cache_quant_mode == KV_CACHE_QUANT_MODE_PER_TENSOR) {
         return at::kFloat8_e4m3fn;
     }

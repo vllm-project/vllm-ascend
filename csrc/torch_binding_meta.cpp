@@ -1503,7 +1503,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_p
     // symbolic-meta-ok: empty rope_sin (numel==0) is the concrete RoPE-off runtime sentinel.
     const bool rope_enabled = rope_sin.defined() && rope_sin.numel() > 0;
     at::ScalarType query_dtype = rope_enabled ? rope_sin.scalar_type() : at::kBFloat16;
-    if (weight_quant_mode == 3 && kv_cache_quant_mode == 1) {
+    if ((weight_quant_mode == 3 || weight_quant_mode == 4) && kv_cache_quant_mode == 1) {
         query_dtype = at::kFloat8_e4m3fn;
     } else if (weight_quant_mode == 2 && kv_cache_quant_mode == 1) {
         query_dtype = at::kChar;
