@@ -47,13 +47,12 @@ class MooncakeBaseConnectorScheduler:
 
         self.vllm_config = vllm_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
+        self.kv_role = self.kv_transfer_config.kv_role
         self.kv_cache_config = kv_cache_config
         self.engine_id = engine_id
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config is not None
-            else 0
+            vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config is not None else 0
         )
 
         init_ascend_config(vllm_config)
@@ -72,10 +71,14 @@ class MooncakeBaseConnectorScheduler:
             * vllm_config.parallel_config.pipeline_parallel_size
         )
 
-        # Handshake base port for this DP group.
+        # Worker handshake ports occupy
+        # [kv_port, kv_port + dp_size * pp_size * pcp_size * tp_size).
+        # Keep one scheduler control port per DP rank immediately after that
+        # range so it cannot collide with a worker handshake socket.
         self.side_channel_port = (
             self.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * self.tp_size * self.pp_size * self.pcp_size
+            + self.max_device_id
+            + vllm_config.parallel_config.data_parallel_rank
         )
 
         # Worker metadata for a DP group that may span multiple nodes.
@@ -168,11 +171,9 @@ class MooncakeBaseConnectorScheduler:
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
-        """Mooncake currently requires no request-arrival bookkeeping."""
         raise NotImplementedError
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        """Mooncake currently requires no worker-output bookkeeping."""
         raise NotImplementedError
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
@@ -240,6 +241,5 @@ class MooncakeBaseConnectorScheduler:
     ) -> None:
         """Handle the legacy port-offset-keyed handshake entry point."""
         self.set_xfer_handshake_metadata_from_workers(metadata)
-
 
 __all__ = ["MooncakeBaseConnectorScheduler"]

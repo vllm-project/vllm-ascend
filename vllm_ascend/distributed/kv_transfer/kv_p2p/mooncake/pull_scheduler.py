@@ -3,14 +3,23 @@
 """Scheduler-side logic for Mooncake pull transfers."""
 
 import math
+import queue
+import threading
 import time
+from collections import OrderedDict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+import msgspec
+import zmq
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
 from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -21,6 +30,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+    ensure_zmq_recv,
+    ensure_zmq_send,
+    zmq_ctx,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -29,6 +43,168 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+GET_META_MSG = b"get_meta_msg"
+DONE_RECVING_MSG = b"done_recving_msg"
+ACK_MSG = b"ACK"
+
+
+class MooncakeSchedulerSendingThread(threading.Thread):
+    """Serve worker metadata and collect D-side completion messages."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+        ready_event: threading.Event,
+    ) -> None:
+        super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
+        encoder = msgspec.msgpack.Encoder()
+        self.host = host
+        self.port = port
+        self.encoded_metadata = {key: encoder.encode(value) for key, value in metadata.items()}
+        self.ready_event = ready_event
+        self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self.early_finished_requests: set[str] = set()
+        self.finished_request_ids: set[str] = set()
+        self.state_lock = threading.Lock()
+
+    def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
+        with self.state_lock:
+            self.delayed_free_requests[request_id] = delay_start_time
+            if request_id in self.early_finished_requests:
+                self.early_finished_requests.remove(request_id)
+                self._mark_finished_locked(request_id)
+
+    def get_and_clear_finished_requests(self) -> set[str]:
+        finished: set[str] = set()
+        with self.state_lock:
+            self._retrieve_expired_requests_locked()
+        while True:
+            try:
+                finished.add(self.finished_requests.get_nowait())
+            except queue.Empty:
+                return finished
+
+    def run(self) -> None:
+        path = make_zmq_path("tcp", self.host, self.port)
+        try:
+            logger.info("Mooncake scheduler sending thread listening on %s", path)
+            with zmq_ctx(zmq.ROUTER, path) as sock:
+                sock.setsockopt(zmq.RCVTIMEO, 1000)
+                self.ready_event.set()
+                self._run_busy_loop(sock)
+        except Exception:
+            self.ready_event.set()
+            logger.exception("Mooncake scheduler sending thread failed on %s", path)
+
+    def _run_busy_loop(self, sock: zmq.Socket) -> None:
+        decoder = msgspec.msgpack.Decoder(type=tuple)
+        while True:
+            try:
+                frames = sock.recv_multipart()
+            except zmq.Again:
+                continue
+
+            identity = frames[0]
+            payload = [frame for frame in frames[1:] if frame]
+            if len(payload) != 1:
+                logger.warning("Invalid Mooncake scheduler control frames: %s", frames)
+                continue
+
+            try:
+                msg = decoder.decode(payload[0])
+                if msg[0] == GET_META_MSG and len(msg) == 2:
+                    metadata = self._get_metadata(msg[1])
+                    sock.send_multipart((identity, b"", metadata or b""))
+                elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
+                    self._handle_finished_request(str(msg[1]))
+                    sock.send_multipart((identity, b"", ACK_MSG))
+                else:
+                    logger.warning("Unexpected Mooncake scheduler control message: %s", msg)
+            except Exception:
+                logger.exception("Failed to handle Mooncake scheduler control message")
+
+    def _get_metadata(self, metadata_key: Any) -> bytes | None:
+        if isinstance(metadata_key, list):
+            metadata_key = tuple(metadata_key)
+        return self.encoded_metadata.get(metadata_key)
+
+    def _handle_finished_request(self, request_id: str) -> None:
+        with self.state_lock:
+            if request_id in self.finished_request_ids:
+                return
+            if request_id in self.delayed_free_requests:
+                self._mark_finished_locked(request_id)
+            else:
+                self.early_finished_requests.add(request_id)
+
+    def _mark_finished_locked(self, request_id: str) -> None:
+        if request_id in self.finished_request_ids:
+            return
+        self.finished_request_ids.add(request_id)
+        self.delayed_free_requests.pop(request_id, None)
+        self.finished_requests.put(request_id)
+
+    def _retrieve_expired_requests_locked(self) -> None:
+        current_time = time.time()
+        while self.delayed_free_requests:
+            request_id = next(iter(self.delayed_free_requests))
+            delay_start_time = self.delayed_free_requests[request_id]
+            if current_time - delay_start_time <= envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
+                break
+
+            self._mark_finished_locked(request_id)
+            logger.error(
+                "Force freed expired Mooncake request %s after %s seconds",
+                request_id,
+                envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+            )
+
+
+class MooncakeSchedulerRecvingThread(threading.Thread):
+    """Send scheduler-level completion messages from D to P."""
+
+    def __init__(self, ready_event: threading.Event) -> None:
+        super().__init__(daemon=True, name="MooncakeSchedulerRecvingThread")
+        self.ready_event = ready_event
+        self.request_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
+        self.encoder = msgspec.msgpack.Encoder()
+
+    def add_request(self, remote_host: str, remote_port: int, request_id: str) -> None:
+        self.request_queue.put((remote_host, remote_port, request_id))
+
+    def run(self) -> None:
+        self.ready_event.set()
+        while True:
+            request = self.request_queue.get()
+
+            try:
+                self._send_done_recving(*request)
+            except Exception:
+                logger.exception(
+                    "Failed to send Mooncake scheduler completion for request %s",
+                    request[2],
+                )
+                self.request_queue.put(request)
+            finally:
+                self.request_queue.task_done()
+
+    def _send_done_recving(self, remote_host: str, remote_port: int, request_id: str) -> None:
+        path = make_zmq_path("tcp", remote_host, remote_port)
+        with zmq_ctx(zmq.REQ, path) as sock:
+            sock.setsockopt(zmq.SNDTIMEO, 1000)
+            sock.setsockopt(zmq.RCVTIMEO, 1000)
+            ensure_zmq_send(
+                sock,
+                self.encoder.encode((DONE_RECVING_MSG, request_id)),
+                path,
+            )
+            response = ensure_zmq_recv(sock, path)
+            if response != ACK_MSG:
+                raise RuntimeError(f"Unexpected Mooncake scheduler completion response: {response!r}")
 
 
 class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
@@ -47,6 +223,42 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # Producer requests whose blocks must remain allocated until read.
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
+        # D request -> (P scheduler host, port, P request id).
+        self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
+        self._sending_thread: MooncakeSchedulerSendingThread | None = None
+        self._recving_thread: MooncakeSchedulerRecvingThread | None = None
+
+        if self.kv_role == "kv_consumer":
+            recving_ready_event = threading.Event()
+            self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
+            self._recving_thread.start()
+            recving_ready_event.wait()
+        elif self.kv_role != "kv_producer":
+            raise ValueError(
+                "Mooncake pull scheduler only supports kv_producer or "
+                f"kv_consumer, got {self.kv_role!r}"
+            )
+
+    def set_xfer_handshake_metadata_from_workers(
+        self,
+        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+    ) -> None:
+        super().set_xfer_handshake_metadata_from_workers(metadata)
+        if self.kv_role != "kv_producer" or not metadata or self._sending_thread is not None:
+            return
+
+        ready_event = threading.Event()
+        self._sending_thread = MooncakeSchedulerSendingThread(
+            self.side_channel_host,
+            self.side_channel_port,
+            metadata,
+            ready_event,
+        )
+        self._sending_thread.start()
+        if not ready_event.wait(timeout=10):
+            raise RuntimeError("Timed out starting Mooncake scheduler sending thread")
+        if not self._sending_thread.is_alive():
+            raise RuntimeError("Mooncake scheduler sending thread failed to start")
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """Return prompt tokens that will be loaded from a remote producer."""
@@ -103,6 +315,11 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                     local_block_ids,
                     num_external_tokens,
                 )
+                self._reqs_recv_info[request.request_id] = (
+                    params["remote_host"],
+                    params["remote_port"],
+                    params["remote_request_id"],
+                )
             else:
                 logger.warning("Got invalid KVTransferParams. params=%s.", params)
         else:
@@ -127,8 +344,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             )
 
         self._reqs_need_recv.clear()
-        meta.requests_to_send = self._reqs_need_send
-        self._reqs_need_send = {}
         meta.reqs_in_batch = self._reqs_in_batch
         self._reqs_in_batch = set()
         return meta
@@ -165,7 +380,14 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 num_computed_blocks,
                 request.request_id,
             )
-            self._reqs_need_send[request.request_id] = time.time()
+            delay_start_time = time.time()
+            self._reqs_need_send[request.request_id] = delay_start_time
+            if self._sending_thread is None:
+                raise RuntimeError("Mooncake scheduler metadata has not been initialized")
+            self._sending_thread.add_delayed_request(
+                request.request_id,
+                delay_start_time,
+            )
 
         return delay_free_blocks, {
             "do_remote_prefill": True,
@@ -187,7 +409,34 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self,
         connector_output: KVConnectorOutput,
     ) -> None:
-        pass
+        # D side: this output has already aggregated completion from all
+        # workers. Send one scheduler-to-scheduler ACK for the request.
+        for req_id in connector_output.finished_recving or ():
+            remote = self._reqs_recv_info.pop(req_id, None)
+            if remote is not None:
+                if self._recving_thread is None:
+                    raise RuntimeError(
+                        "Producer Mooncake scheduler received a receive-completion event"
+                    )
+                self._recving_thread.add_request(*remote)
+
+        # P side: feed scheduler-received ACKs into vLLM's standard delayed
+        # free path. Scheduler._update_from_kv_xfer_finished reads this same
+        # KVConnectorOutput immediately after this hook returns.
+        finished_sending = (
+            self._sending_thread.get_and_clear_finished_requests() if self._sending_thread is not None else set()
+        )
+        if finished_sending:
+            for req_id in finished_sending:
+                self._reqs_need_send.pop(req_id, None)
+            if connector_output.finished_sending is None:
+                connector_output.finished_sending = finished_sending
+            else:
+                connector_output.finished_sending.update(finished_sending)
 
 
-__all__ = ["MooncakePullConnectorScheduler"]
+__all__ = [
+    "MooncakePullConnectorScheduler",
+    "MooncakeSchedulerRecvingThread",
+    "MooncakeSchedulerSendingThread",
+]

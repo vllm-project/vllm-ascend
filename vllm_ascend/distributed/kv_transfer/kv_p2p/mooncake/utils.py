@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Shared utilities for Mooncake KV transfer connectors."""
 
+import contextlib
 import hashlib
 import struct
 import time
 from collections import OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +16,7 @@ import numpy.typing as npt
 import torch
 import zmq
 from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_socket
 
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -24,6 +27,26 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+
+@contextlib.contextmanager
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+    """Create a Mooncake ROUTER or REQ socket and clean up its context."""
+    if socket_type not in (zmq.ROUTER, zmq.REQ):
+        raise ValueError(f"Unexpected socket type: {socket_type}")
+
+    context: zmq.Context | None = None
+    try:
+        context = zmq.Context()  # type: ignore[attr-defined]
+        yield make_zmq_socket(
+            ctx=context,
+            path=addr,
+            socket_type=socket_type,
+            bind=socket_type == zmq.ROUTER,
+        )
+    finally:
+        if context is not None:
+            context.destroy(linger=0)
 
 
 def as_kv_cache_tensors(cache_or_caches: Any) -> tuple[torch.Tensor, ...]:
@@ -248,4 +271,5 @@ __all__ = [
     "group_concurrent_contiguous",
     "split_if_not_byte_contiguous",
     "string_to_int64_hash",
+    "zmq_ctx",
 ]
