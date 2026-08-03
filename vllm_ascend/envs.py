@@ -66,6 +66,26 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
+    # Whether to enable lossless overlapping parallel tokenization (LoPT)
+    # for long text prompts handled by the upstream vLLM HF renderer.
+    # This optimization is disabled by default and falls back to the standard
+    # tokenizer whenever lossless merging cannot be established.
+    "VLLM_ASCEND_LOPT_ENABLE": lambda: bool(int(os.getenv("VLLM_ASCEND_LOPT_ENABLE", "0"))),
+    # Number of long-lived worker threads used to tokenize overlapping chunks.
+    "VLLM_ASCEND_LOPT_THREAD_WORKERS": lambda: int(os.getenv("VLLM_ASCEND_LOPT_THREAD_WORKERS", "4")),
+    # Minimum prompt length, in Python Unicode characters, required for LoPT.
+    "VLLM_ASCEND_LOPT_MIN_CHARS": lambda: int(os.getenv("VLLM_ASCEND_LOPT_MIN_CHARS", "32768")),
+    # Non-overlapping body length of each LoPT text chunk, in characters.
+    "VLLM_ASCEND_LOPT_CHUNK_CHARS": lambda: int(os.getenv("VLLM_ASCEND_LOPT_CHUNK_CHARS", "32768")),
+    # Character overlap appended to adjacent LoPT chunks.
+    "VLLM_ASCEND_LOPT_OVERLAP_CHARS": lambda: int(os.getenv("VLLM_ASCEND_LOPT_OVERLAP_CHARS", "512")),
+    # Minimum number of position-identical tokens required to splice chunks.
+    "VLLM_ASCEND_LOPT_MIN_MATCH_TOKENS": lambda: int(os.getenv("VLLM_ASCEND_LOPT_MIN_MATCH_TOKENS", "2")),
+    # Maximum number of retries that double the LoPT chunk body length.
+    "VLLM_ASCEND_LOPT_MAX_RETRIES": lambda: int(os.getenv("VLLM_ASCEND_LOPT_MAX_RETRIES", "3")),
+    # Compare LoPT output with standard tokenization before returning it.
+    # This is intended for validation and has the cost of tokenizing twice.
+    "VLLM_ASCEND_LOPT_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_LOPT_VERIFY", "0"))),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),

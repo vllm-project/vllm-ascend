@@ -15,6 +15,16 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
+
+from . import envs
+
+# LoPT owns the outer chunk-level parallelism. Keep the tokenizer's internal
+# Rayon pool conservative unless the user explicitly tunes it.
+if envs.VLLM_ASCEND_LOPT_ENABLE:
+    os.environ.setdefault("RAYON_NUM_THREADS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 _GLOBAL_PATCH_APPLIED = False
 
 
