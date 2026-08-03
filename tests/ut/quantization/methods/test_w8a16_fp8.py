@@ -13,9 +13,9 @@ class TestAscendW8A16FP8MoEMethod(TestBase):
     hidden_size = 128
     intermediate_size = 256
 
-    @patch("vllm_ascend.quantization.methods.w8a16_mxfp8.get_ep_group")
-    @patch("vllm_ascend.quantization.methods.w8a16_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a16_mxfp8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a16_fp8.get_ep_group")
+    @patch("vllm_ascend.quantization.methods.w8a16_fp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a16_fp8.get_ascend_config")
     def setUp(self, mock_ascend, mock_vllm, mock_ep_group):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
