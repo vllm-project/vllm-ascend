@@ -1342,6 +1342,14 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
+    def _uses_a3_kimi_c8_cache(self) -> bool:
+        """Whether this is K3's A3 C8 cache path with real PA-NZ storage."""
+        return (
+            bool(self.fa_quant_layer)
+            and not self.use_mla_rope
+            and get_ascend_device_type() == AscendDeviceType.A3
+        )
+
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -1360,8 +1368,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
-        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        is_a3_c8_cache = self._uses_a3_kimi_c8_cache()
+        if is_a3_c8_cache:
+            # K-noRoPE and K-RoPE are directly registered as 4D PA-NZ
+            # tensors: [block, N * D/tile, block_size, tile].
+            num_heads = self.num_kv_heads
+            latent_kv_dim = self.kv_lora_rank
+        else:
+            num_heads = cache_k_pe.size(2)
+            latent_kv_dim = cache_kv_c.size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1398,28 +1413,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            is_a3_c8_cache = bool(self.fa_quant_layer) and (
-                get_ascend_device_type() == AscendDeviceType.A3
-            )
             cache_kv_c_for_load = cache_kv_c
             cache_k_pe_for_load = cache_k_pe
             if is_a3_c8_cache:
-                # A3 C8 cache uses the PA_NZ logical layout. Gather from the
-                # corresponding 5D block views, then restore the TND shape
-                # consumed by kv_b_proj.
-                block_size = cache_kv_c.shape[1]
-                cache_kv_c_for_load = cache_kv_c.view(
-                    -1,
-                    num_heads * latent_kv_dim // 32,
-                    block_size,
-                    32,
-                )
-                cache_k_pe_for_load = cache_k_pe.view(
-                    -1,
-                    num_heads * rope_dim // 16,
-                    block_size,
-                    16,
-                )
+                # Gather consumes the 4D PA-NZ source cache directly and
+                # emits ND.  The following view restores its TND form before
+                # dequantization and kv_b_proj.
+                assert cache_kv_c.ndim == 4 and cache_k_pe.ndim == 4
+                assert cache_kv_c.shape[1] == num_heads * latent_kv_dim // 32
+                assert cache_k_pe.shape[1] == num_heads * rope_dim // 16
                 kv_c_normed = torch.empty(
                     toks,
                     num_heads * latent_kv_dim,
@@ -1640,12 +1642,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 False,
             )
             if device_type == AscendDeviceType.A3:
-                # A3 C8 FIA consumes PA_NZ KV.  The regular
-                # ``reshape_and_cache`` path writes the logical BSND layout;
-                # merely viewing that storage as NZ in _forward_decode changes
-                # its interpretation and corrupts every decode attention read.
-                # Scatter directly into the matching 5D NZ views instead.
-                block_size = kv_cache[0].shape[1]
+                # A3 C8 FIA consumes PA-NZ KV.  K3 registers the cache as
+                # true NZ storage; Scatter receives its matching 5D API view
+                # rather than a BSND cache with a relabeled layout.
+                # Registered C8 caches are 4D PA-NZ tensors. Scatter/FIA
+                # APIs use the equivalent 5D cache view.
+                block_size = kv_cache[0].shape[-2]
                 latent_cache_nz = kv_cache[0].view(
                     -1,
                     self.num_kv_heads,
@@ -1813,7 +1815,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        if self._uses_a3_kimi_c8_cache():
+            # FIA documents NZ page-attention cache as 5D even though the
+            # registered storage is a 4D FRACTAL_NZ tensor. This view does
+            # not convert or copy the cache; it only exposes that API shape.
+            nz_fmt_last_dim = 16
+            k_nope = k_nope.view(
+                -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
+            )
+            k_pe = k_pe.view(
+                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
+            )
+        elif self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
@@ -2278,7 +2291,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_preprocess_res.q_pe,
                 decode_preprocess_res.k_nope,
                 decode_preprocess_res.k_pe,
-                kv_cache[0].shape[1],
+                kv_cache[0].shape[-2] if self._uses_a3_kimi_c8_cache() else kv_cache[0].shape[1],
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
             )

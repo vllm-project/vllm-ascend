@@ -2117,6 +2117,7 @@ class TestAscendMLAImpl(TestBase):
         mock_get_device_type,
     ):
         self.impl.fa_quant_layer = True
+        self.impl.use_mla_rope = False
         self.impl.num_heads = 2
         self.impl.num_kv_heads = 1
         self.impl.kv_lora_rank = 32
@@ -2130,8 +2131,12 @@ class TestAscendMLAImpl(TestBase):
         loaded_k_pe = torch.ones(1, self.impl.qk_rope_head_dim, dtype=torch.bfloat16)
 
         def load_cache(*args, key, value, **_):
-            key.copy_(quantized_kv)
-            value.copy_(loaded_k_pe)
+            if key.dtype == torch.int8:
+                key.copy_(quantized_kv)
+                value.copy_(quantized_kv)
+            else:
+                key.copy_(loaded_k_pe)
+                value.copy_(loaded_k_pe)
 
         mock_cache_load.side_effect = load_cache
         captured_kv_b_inputs = []
@@ -2177,9 +2182,10 @@ class TestAscendMLAImpl(TestBase):
             prefix_lse,
         )
 
-        cache_load_args = mock_cache_load.call_args
-        self.assertEqual(cache_load_args.args[0].shape, (1, 1, 1, 32))
-        self.assertEqual(cache_load_args.args[1].shape, (1, 1, 1, 16))
+        self.assertEqual(mock_cache_load.call_count, 2)
+        latent_call, rope_call = mock_cache_load.call_args_list
+        self.assertEqual(latent_call.args[0].shape, (1, 1, 1, 32))
+        self.assertEqual(rope_call.args[0].shape, (1, 1, 1, 16))
         expected = (quantized_kv.squeeze().to(torch.float32) * self.impl.fak_descale_float).to(torch.bfloat16)
         torch.testing.assert_close(captured_kv_b_inputs[0], expected)
 
@@ -2441,8 +2447,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_a_layernorm = MagicMock(return_value=kv_c_normed)
         mock_npu_quantize.return_value = quantized_kv_c
         kv_cache = (
-            torch.empty(2, 4, 1, 32, dtype=torch.int8),
-            torch.empty(2, 4, 1, 16, dtype=torch.bfloat16),
+            torch.empty(2, 1, 4, 32, dtype=torch.int8),
+            torch.empty(2, 1, 4, 16, dtype=torch.bfloat16),
         )
         slots = torch.tensor([3, 7])
 
