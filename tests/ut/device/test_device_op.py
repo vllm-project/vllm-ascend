@@ -71,6 +71,43 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["value"] is value
 
 
+def test_kv_cache_load_pa_nz_uses_explicit_custom_gather():
+    cache_kv_c = object()
+    cache_k_pe = object()
+    block_table = object()
+    context_seq_len_npu = torch.arange(8, dtype=torch.int32)[::2]
+    seq_starts = object()
+    key = object()
+    value = object()
+
+    with (
+        mock.patch("vllm_ascend.device.device_op.enable_custom_op", return_value=True),
+        mock.patch.object(torch.ops._C_ascend, "npu_gather_pa_kv_cache", create=True) as mock_gather,
+    ):
+        BaseDeviceAdaptor.kv_cache_load(
+            cache_kv_c,
+            cache_k_pe,
+            block_table,
+            context_seq_len_npu,
+            seq_starts,
+            key,
+            value,
+            cache_mode="PA_NZ",
+        )
+
+    mock_gather.assert_called_once()
+    call_args = mock_gather.call_args.args
+    assert call_args[0] is cache_kv_c
+    assert call_args[1] is cache_k_pe
+    assert call_args[2] is block_table
+    assert call_args[3].is_contiguous()
+    torch.testing.assert_close(call_args[3], context_seq_len_npu)
+    assert call_args[4] is key
+    assert call_args[5] is value
+    assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
+    assert mock_gather.call_args.kwargs["cache_is_pa_nz"] is True
+
+
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():
     query = torch.randn(5, 4, 64, dtype=torch.float32)
     key = torch.randn_like(query)

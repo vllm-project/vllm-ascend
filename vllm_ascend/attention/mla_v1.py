@@ -52,7 +52,6 @@ from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
-    ACL_FORMAT_FRACTAL_NZ,
     AscendDeviceType,
     get_ascend_device_type,
     maybe_trans_nz,
@@ -1351,54 +1350,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             and get_ascend_device_type() == AscendDeviceType.A3
         )
 
-    @staticmethod
-    def _compact_block_table_for_nz_gather(
-        cache: torch.Tensor,
-        block_table: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return referenced cache blocks and a block table indexed into them.
-
-        K3 A3 C8 writes PA-NZ bytes into the regular vLLM cache pool.  The
-        Gather wrapper determines PA-NZ from the source tensor's format, so
-        chunked prefill works on a temporary compact cache segment rather than
-        format-casting the complete layer cache.
-        """
-        table_long = block_table.to(torch.long)
-        block_ids = torch.unique(table_long[table_long >= 0], sorted=True)
-        if block_ids.numel() == 0:
-            raise ValueError("Chunked-context block table does not reference any KV cache block.")
-        if int(block_ids[-1]) >= cache.shape[0]:
-            raise ValueError(
-                f"Block table references block {int(block_ids[-1])}, but cache has only {cache.shape[0]} blocks."
-            )
-
-        remap = torch.full((cache.shape[0],), -1, dtype=torch.long, device=cache.device)
-        remap[block_ids] = torch.arange(block_ids.numel(), dtype=torch.long, device=cache.device)
-        safe_table = table_long.clamp_min(0)
-        compact_table = remap[safe_table]
-        compact_table = torch.where(table_long >= 0, compact_table, table_long)
-        return block_ids, compact_table.to(dtype=block_table.dtype)
-
-    @staticmethod
-    def _format_compact_a3_kimi_c8_cache_for_gather(
-        cache: torch.Tensor,
-        block_ids: torch.Tensor,
-        *,
-        num_kv_heads: int,
-        head_dim: int,
-        nz_width: int,
-    ) -> torch.Tensor:
-        """Temporarily expose one referenced PA-NZ cache segment to Gather."""
-        compact_cache = cache.index_select(0, block_ids)
-        block_size = compact_cache.shape[1]
-        pa_nz_view = compact_cache.view(
-            -1,
-            num_kv_heads * head_dim // nz_width,
-            block_size,
-            nz_width,
-        )
-        return torch_npu.npu_format_cast(pa_nz_view, ACL_FORMAT_FRACTAL_NZ)
-
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -1421,28 +1372,26 @@ class AscendMLAImpl(MLAAttentionImpl):
         if is_a3_c8_cache:
             num_heads = self.num_kv_heads
             latent_kv_dim = self.kv_lora_rank
-            block_ids, gather_block_table = self._compact_block_table_for_nz_gather(
-                cache_kv_c,
-                prefill_metadata.block_table,
+            block_size = cache_kv_c.shape[1]
+            # The cache pool has an ND descriptor, while A3 C8 Scatter writes
+            # its storage in PA-NZ order. Keep that descriptor and expose the
+            # PA-NZ physical layout as a 4D view. The custom Gather wrapper
+            # explicitly requests PA_NZ from CANN and produces ND outputs.
+            cache_kv_c_for_load = cache_kv_c.view(
+                -1,
+                num_heads * latent_kv_dim // 32,
+                block_size,
+                32,
             )
-            cache_kv_c_for_load = self._format_compact_a3_kimi_c8_cache_for_gather(
-                cache_kv_c,
-                block_ids,
-                num_kv_heads=num_heads,
-                head_dim=latent_kv_dim,
-                nz_width=32,
-            )
-            cache_k_pe_for_load = self._format_compact_a3_kimi_c8_cache_for_gather(
-                cache_k_pe,
-                block_ids,
-                num_kv_heads=num_heads,
-                head_dim=rope_dim,
-                nz_width=16,
+            cache_k_pe_for_load = cache_k_pe.view(
+                -1,
+                num_heads * rope_dim // 16,
+                block_size,
+                16,
             )
         else:
             num_heads = cache_k_pe.size(2)
             latent_kv_dim = cache_kv_c.size(-1)
-            gather_block_table = prefill_metadata.block_table
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1510,26 +1459,28 @@ class AscendMLAImpl(MLAAttentionImpl):
             if is_a3_c8_cache:
                 # npu_gather_pa_kv_cache requires matching dtypes for the
                 # key/value cache pair. A3 C8 stores latent cache in INT8 and
-                # RoPE cache in BF16, so gather the two ND caches separately.
+                # RoPE cache in BF16, so gather the two PA-NZ caches separately.
                 kv_c_unused = torch.empty_like(kv_c_normed)
                 k_pe_unused = torch.empty_like(k_pe)
                 DeviceOperator.kv_cache_load(
                     cache_kv_c_for_load,
                     cache_kv_c_for_load,
-                    gather_block_table,
+                    prefill_metadata.block_table,
                     context_seq_len_npu,
                     prefill_metadata.chunked_context.starts[i],
                     key=kv_c_normed,
                     value=kv_c_unused,
+                    cache_mode="PA_NZ",
                 )
                 DeviceOperator.kv_cache_load(
                     cache_k_pe_for_load,
                     cache_k_pe_for_load,
-                    gather_block_table,
+                    prefill_metadata.block_table,
                     context_seq_len_npu,
                     prefill_metadata.chunked_context.starts[i],
                     key=k_pe,
                     value=k_pe_unused,
+                    cache_mode="PA_NZ",
                 )
             else:
                 DeviceOperator.kv_cache_load(
