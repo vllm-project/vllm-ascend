@@ -100,7 +100,7 @@ jobs:
             core.setOutput('request_id', '');
             core.setOutput('vllm_ascend_branch', 'main');
             core.setOutput('is_pr_event', 'false');
-
+            
             // workflow_dispatch manual trigger
             if (eventName === 'workflow_dispatch') {
               const inputs = context.payload.inputs || {};
@@ -117,6 +117,27 @@ jobs:
                   core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
                 }
               }
+              return;
+            }
+            
+            // pull_request trigger：仅依赖nightly-test标签触发，无需PR评论
+            if (eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              const labels = pr.labels.map(l => l.name);
+              const prNumber = pr.number;
+              core.setOutput('ref', pr.head.sha);
+              core.setOutput('request_id', 'pr-' + prNumber);
+              core.setOutput('vllm_ascend_branch', 'main');
+              core.setOutput('is_pr_event', 'true');
+            
+              if (!labels.includes('nightly-test')) {
+                core.info('nightly-test label not found; skipping.');
+                return;
+              }
+            
+              core.info('nightly-test label detected, run all nightly test cases');
+              core.setOutput('run', 'true');
+              core.setOutput('filter', 'all');
               return;
             }
 
