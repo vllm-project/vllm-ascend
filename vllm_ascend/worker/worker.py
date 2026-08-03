@@ -600,16 +600,17 @@ class NPUWorker(WorkerBase):
             if memory_info is None:
                 num_layers = self.model_config.get_num_layers(self.parallel_config)
                 layout = build_layerwise_cache_layout(num_layers, extra_config)
-                num_slots = len(layout.storage_indices)
-                factor = num_layers / num_slots if layout.has_layer_reuse else 1.0
+                num_buffer_assignments = len(layout.storage_indices)
+                factor = num_layers / num_buffer_assignments if layout.has_layer_reuse else 1.0
             else:
-                num_layers, num_slots, factor = memory_info
+                num_layers, num_buffer_assignments, factor = memory_info
             if factor != 1.0:
                 self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
                 logger.info(
-                    "Layerwise KV cache reuse uses %d buffers for %d layers; scale logical KV budget by %.3f.",
-                    num_slots,
+                    "Layerwise KV cache reuse maps %d layers onto %d buffer assignments; "
+                    "scale logical KV budget by %.3f.",
                     num_layers,
+                    num_buffer_assignments,
                     factor,
                 )
 
@@ -971,14 +972,14 @@ class NPUWorker(WorkerBase):
         )
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 1.0
-        num_slots = len(reuse_layout.storage_slots)
+        num_buffer_assignments = len(reuse_layout.shared_buffer_layers)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
         physical_page_bytes = sum(
-            sum(entry.spec.page_size_bytes for entry in reuse_layout.layer_entries[slot_layers[0]])
-            for slot_layers in reuse_layout.storage_slots
+            sum(entry.spec.page_size_bytes for entry in reuse_layout.layer_entries[layers_sharing_buffer[0]])
+            for layers_sharing_buffer in reuse_layout.shared_buffer_layers
         )
-        return num_layers, num_slots, logical_page_bytes / physical_page_bytes
+        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
