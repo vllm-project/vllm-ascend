@@ -9698,3 +9698,156 @@ Target.enabled = mock_true
         patch.installed_descriptor_kind,
     ) == ("classmethod", "ordinary", "ordinary")
     assert [finding.reason_code for finding in findings] == ["descriptor_kind_mismatch"]
+
+
+def test_v034_pinned_triton_jit_uses_kernel_launch_contract(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+from vllm.triton_utils import triton
+
+
+@triton.jit
+def kernel(src, dst, size, BLOCK_SIZE):
+    return None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+from vllm.triton_utils import triton
+
+
+@triton.jit
+def replacement(src, dst, size, BLOCK_SIZE):
+    return None
+
+
+base.kernel = replacement
+""",
+    )
+
+    source_versions = {
+        "vllm": "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
+        "vllm_ascend": "81d3450128528be2c343232fcc28220814a15fd6",
+    }
+    pinned_relations, pinned_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions=source_versions,
+    ).generate()
+    unknown_relations, unknown_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={
+            "vllm": "unregistered-vllm",
+            "vllm_ascend": "unregistered-vllm-ascend",
+        },
+    ).generate()
+
+    pinned = next(relation for relation in pinned_relations if relation.relation == "monkey_patch")
+    unknown = next(relation for relation in unknown_relations if relation.relation == "monkey_patch")
+    assert pinned.upstream_signature_contract.status == "exact"
+    assert pinned.installed_signature_contract.status == "exact"
+    assert pinned.upstream_signature_contract.protocol == "triton_kernel_launch"
+    assert pinned.installed_signature_contract.protocol == "triton_kernel_launch"
+    assert not [finding for finding in pinned_findings if finding.reason_code == "unknown_signature_transform"]
+    assert unknown.upstream_signature_contract.status == "unknown"
+    assert unknown.installed_signature_contract.status == "unknown"
+    assert any(finding.reason_code == "unknown_signature_transform" for finding in unknown_findings)
+
+
+def test_v034_pinned_triton_heuristics_models_generated_launch_parameters(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    kernel_source = """
+from vllm.triton_utils import triton
+
+
+@triton.heuristics({"EVEN": lambda args: args["size"] % 2 == 0})
+@triton.jit
+def kernel(src, size, BLOCK_SIZE, EVEN, EPILOGUE):
+    return None
+"""
+    _write(vllm_root, "vllm/base.py", kernel_source)
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        kernel_source.replace("def kernel", "def replacement")
+        + "\n\nimport vllm.base as base\nbase.kernel = replacement\n",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={
+            "vllm": "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
+            "vllm_ascend": "81d3450128528be2c343232fcc28220814a15fd6",
+        },
+    ).generate()
+
+    patch = next(relation for relation in relations if relation.relation == "monkey_patch")
+    expected_launch_signature = [
+        "sync",
+        [],
+        [["src", True], ["size", True], ["BLOCK_SIZE", True]],
+        None,
+        [["EVEN", False], ["EPILOGUE", True]],
+        None,
+    ]
+    assert patch.upstream_signature_contract.bound_call_signature == expected_launch_signature
+    assert patch.installed_signature_contract.bound_call_signature == expected_launch_signature
+    assert patch.upstream_signature_contract.protocol == "triton_kernel_launch"
+    assert not [finding for finding in findings if finding.reason_code == "unknown_signature_transform"]
+
+
+def test_v034_pinned_triton_jit_reports_narrower_replacement(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+from vllm.triton_utils import triton
+
+
+@triton.jit
+def kernel(src, dst, size, BLOCK_SIZE):
+    return None
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+from vllm.triton_utils import triton
+
+
+@triton.jit
+def replacement(src, dst, BLOCK_SIZE):
+    return None
+
+
+base.kernel = replacement
+""",
+    )
+
+    _, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={
+            "vllm": "88402a41c4ab272ebbbd33f4a77fbbac0431cbb9",
+            "vllm_ascend": "81d3450128528be2c343232fcc28220814a15fd6",
+        },
+    ).generate()
+
+    assert [finding.reason_code for finding in findings] == ["signature_incompatible"]
