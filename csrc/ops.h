@@ -145,4 +145,19 @@ namespace vllm_ascend {
         void* gm_tiling_data,
         const uint32_t block_dim
     );
+
+    extern void sfa_remap_sparse_indices_impl(
+        void* stream,
+        void* input,
+        void* output,
+        uint32_t rows,
+        uint32_t top_k,
+        uint32_t dcp_size,
+        uint32_t dcp_rank,
+        uint32_t interleave_size,
+        uint32_t interleave_shift,
+        uint32_t dcp_interleave_shift,
+        uint32_t use_power_of_two,
+        uint32_t vector_core_count
+    );
 }
