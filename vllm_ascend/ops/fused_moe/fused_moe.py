@@ -228,7 +228,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         states: torch.Tensor,
         trunc_size: int,
     ) -> torch.Tensor:
-        states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        # Sequence-parallel MoE returns a token-sharded result after EP
+        # reduce-scatter.  Qwen3Moe gathers those token shards across TP in
+        # the model, so a TP all-reduce here would sum different token
+        # segments and corrupt the sequence.
+        if not self.moe_config.is_sequence_parallel:
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
     def set_lora_context(self, lora_context):
