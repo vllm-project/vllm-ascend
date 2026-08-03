@@ -17,7 +17,7 @@ This document describes how to install vllm-ascend manually.
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
     | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
-    | TorchNPU      | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | TorchNPU      | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
     | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
@@ -32,7 +32,7 @@ Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P 
  |---------------|----------------------------------|-------------------------------------------|
  | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
  | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
- | TorchNPU      | == 2.10.0               | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | TorchNPU      | == 2.10.0.post4         | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
  | torch         | == 2.10.0               | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
