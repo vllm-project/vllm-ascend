@@ -8,7 +8,6 @@ serve:
   max_model_len: 2048
   gpu_memory_utilization: 0.8
   trust_remote_code: true
-  enforce_eager: true
 
 tasks:
 - name: "ceval-valid"

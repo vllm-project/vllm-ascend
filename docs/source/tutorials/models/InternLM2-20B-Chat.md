@@ -18,9 +18,9 @@ development version.
 |---------|--------|-------|
 | BF16 inference | ✅ | Native model weight format |
 | Tensor parallelism | ✅ | TP=2 is recommended for the 20B BF16 model |
-| ACL Graph | ⚠️ | Requires an image with the complete Ascend custom-op package |
+| ACL Graph | ✅ | Verified with TP=2 and real weights at a 2,048-token model length |
 | Eager mode | ✅ | Available with `--enforce-eager` for troubleshooting |
-| 32K context | ✅ | Verified with TP=2, `max-num-seqs=16`, and a 32,002-token prompt |
+| 32K context | ✅ | Verified in eager mode with TP=2, `max-num-seqs=16`, and a 32,002-token prompt |
 | Pipeline parallelism | ✅ | Supported by the upstream vLLM model implementation |
 | LoRA | ✅ | Supported by the upstream vLLM model implementation |
 | Expert parallelism | N/A | InternLM2-20B-Chat is a dense model |
@@ -123,11 +123,10 @@ vllm serve /data/models/internlm2-chat-20b \
   --served-model-name internlm2-20b-chat \
   --tensor-parallel-size 2 \
   --dtype bfloat16 \
-  --max-model-len 32768 \
-  --max-num-seqs 16 \
-  --gpu-memory-utilization 0.90 \
+  --max-model-len 2048 \
+  --max-num-seqs 4 \
+  --gpu-memory-utilization 0.8 \
   --trust-remote-code \
-  --enforce-eager \
   --port 8000
 ```
 
@@ -135,16 +134,23 @@ Key parameters:
 
 - `--tensor-parallel-size 2` distributes the 20B BF16 checkpoint across two
   NPUs.
-- `--max-model-len 32768` enables the context length declared by the model.
-  Lower this value when the deployment must reserve more memory for
-  concurrent requests.
+- `--max-model-len 2048` and `--max-num-seqs 4` match the real-weight ACL
+  Graph validation. Increase them only after validating the target workload
+  and available KV-cache memory.
 - `--trust-remote-code` is required for the model repository's tokenizer and
   configuration code. vLLM still uses its native `InternLM2ForCausalLM`
   implementation for inference.
-- `--enforce-eager` is the verified fallback for source environments that do
-  not contain the complete Ascend custom-op package. With a complete official
-  image, remove it to enable ACL Graph and verify one request before production
-  rollout.
+
+With a complete Ascend custom-op package, the default command captures both
+PIECEWISE mixed prefill/decode graphs and FULL decode graphs. The real-weight
+TP=2 validation captured batch sizes 1, 2, and 4, then returned HTTP 200 from
+the models, completions, and chat-completions endpoints. This validation used
+a 2,048-token model length; it does not establish ACL Graph support at 32K.
+
+If graph compilation or a custom-op installation fails, add
+`--enforce-eager` as a troubleshooting fallback. The 32K capacity result and
+the C-Eval and performance numbers below were measured in eager mode and
+should not be presented as ACL Graph results.
 
 The service is ready when `GET /v1/models` returns HTTP 200 and lists
 `internlm2-20b-chat`:
@@ -204,7 +210,7 @@ pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
   --report-dir benchmarks/accuracy
 ```
 
-The real-weight TP=2 eager baseline is:
+The real-weight TP=2 eager accuracy baseline is:
 
 | Dataset | Shots | Metric | Value |
 |---------|------:|--------|------:|
