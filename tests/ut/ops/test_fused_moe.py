@@ -313,23 +313,23 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     routed_out = torch.randn(2, 4)
     finalized = torch.randn(2, 4)
     quant_method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
-    quant_method.apply = MagicMock(
-        return_value=SimpleNamespace(
-            routed_out=routed_out,
-            expert_tokens=None,
-            group_list_type=1,
-            before_dispatch_evt=None,
-            before_gmm2_evt=None,
-            before_combine_evt=None,
-            swiglu_limit=0.0,
-        )
-    )
+    quant_method.apply = MagicMock(return_value=SimpleNamespace(
+        routed_out=routed_out,
+        expert_tokens=None,
+        group_list_type=1,
+        before_dispatch_evt=None,
+        before_gmm2_evt=None,
+        before_combine_evt=None,
+        swiglu_limit=0.0,
+    ))
     routed_experts.enable_npugraph_ex_static_kernel = False
     routed_experts.enable_shared_expert_dp = False
     object.__setattr__(routed_experts, "quant_method", quant_method)
     topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]], dtype=torch.float32)
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
-    routed_experts.router = SimpleNamespace(_select_experts=MagicMock(return_value=(topk_weights, topk_ids)))
+    routed_experts.router = SimpleNamespace(
+        _select_experts=MagicMock(return_value=(topk_weights, topk_ids))
+    )
     routed_experts.top_k = 2
     routed_experts.renormalize = True
     routed_experts.use_grouped_topk = False

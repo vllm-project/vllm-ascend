@@ -198,7 +198,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         n_shared_experts: int = 0,
         **kwargs,
     ):
+        object.__setattr__(self, "router", router)
         object.__setattr__(self, "tid2eid", tid2eid)
+        object.__setattr__(self, "n_shared_experts", n_shared_experts)
         super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
@@ -209,7 +211,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     tid2eid=self.tid2eid,
                 )
             )
-        self.router = router
         ascend_config = get_ascend_config()
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -359,11 +360,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        if self.router is None:
+        router = getattr(self, "router", None)
+        if router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
 
         forward_context = get_forward_context()
-        topk_weights, topk_ids = self.router._select_experts(
+        topk_weights, topk_ids = router._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             input_ids=getattr(forward_context, "input_ids", None),
@@ -379,7 +381,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             if capturer is not None:
                 capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
 
-        num_shared_experts = self.n_shared_experts
+        num_shared_experts = getattr(self, "n_shared_experts", 0)
         if num_shared_experts is None:
             num_shared_experts = 0
         num_logical_experts = get_moe_num_logical_experts(

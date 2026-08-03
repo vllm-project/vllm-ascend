@@ -31,48 +31,48 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
     """Router adapter that uses Ascend's existing expert-selection path."""
 
     def __init__(
-        self,
-        top_k: int,
-        global_num_experts: int,
-        renormalize: bool = True,
-        use_grouped_topk: bool = False,
-        num_expert_group: int | None = None,
-        topk_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        eplb_state: EplbLayerState | None = None,
-        num_logical_experts: int | None = None,
-        tid2eid: torch.Tensor | None = None,
-        select_experts_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None,
+            self,
+            top_k: int,
+            global_num_experts: int,
+            renormalize: bool = True,
+            use_grouped_topk: bool = False,
+            num_expert_group: int | None = None,
+            topk_group: int | None = None,
+            custom_routing_function: Callable | None = None,
+            scoring_func: str = "softmax",
+            routed_scaling_factor: float = 1.0,
+            e_score_correction_bias: torch.Tensor | None = None,
+            eplb_state: EplbLayerState | None = None,
+            num_logical_experts: int | None = None,
+            tid2eid: torch.Tensor | None = None,
+            select_experts_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
             eplb_state=eplb_state,
         )
+        self.renormalize = renormalize
+        self.use_grouped_topk = use_grouped_topk
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
+        self.scoring_func = scoring_func
+        self.routed_scaling_factor = routed_scaling_factor
+        self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts if num_logical_experts is not None else global_num_experts
         self.tid2eid = tid2eid
 
     def is_fused_supported(
-        self,
-        hidden_states: torch.Tensor,
+            self,
+            hidden_states: torch.Tensor,
     ) -> bool:
         topk_group = self.topk_group if self.topk_group is not None else 1
         num_expert_group = self.num_expert_group if self.num_expert_group is not None else 1
         if not (
-            num_expert_group > 0
-            and hidden_states.shape[-1] % num_expert_group == 0
-            and hidden_states.shape[-1] // num_expert_group > 2
+                num_expert_group > 0
+                and hidden_states.shape[-1] % num_expert_group == 0
+                and hidden_states.shape[-1] // num_expert_group > 2
         ):
             return False
         if self.top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
@@ -82,12 +82,12 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         return True
 
     def _compute_routing(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        indices_type: torch.dtype | None,
-        *,
-        input_ids: torch.Tensor | None = None,
+            self,
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            indices_type: torch.dtype | None,
+            *,
+            input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.is_fused_supported(hidden_states):
             return super()._compute_routing(
