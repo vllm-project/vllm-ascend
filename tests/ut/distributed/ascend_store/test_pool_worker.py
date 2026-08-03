@@ -26,6 +26,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 )
 
 
+def start_patch(test: unittest.TestCase, *args, **kwargs):
+    patcher = patch(*args, **kwargs)
+    mocked = patcher.start()
+    test.addCleanup(patcher.stop)
+    return mocked
+
+
 def make_worker(
     test: unittest.TestCase,
     *,
@@ -41,13 +48,13 @@ def make_worker(
     num_hidden_layers=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
-    test.enterContext(patch(f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank))
-    test.enterContext(patch(f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size))
-    pcp_group = test.enterContext(patch(f"{module}.get_pcp_group"))
+    start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
+    start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
+    pcp_group = start_patch(test, f"{module}.get_pcp_group")
     pcp_group.return_value.world_size = 1
-    test.enterContext(patch(f"{module}.get_decode_context_model_parallel_world_size", return_value=1))
-    test.enterContext(patch(f"{module}.get_decode_context_model_parallel_rank", return_value=0))
-    importlib = test.enterContext(patch(f"{module}.importlib"))
+    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
+    importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
