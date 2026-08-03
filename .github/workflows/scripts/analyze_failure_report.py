@@ -18,6 +18,7 @@ Usage:
 import argparse
 import contextlib
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import regex as re
@@ -218,15 +219,42 @@ def match_failed_vs_recommended(failed, recommended):
 # ============================================================
 
 
-def generate_report(failed, recommended, matched, log_dir, recommendations_source="none"):
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def get_report_timestamp():
+    """Return the current Beijing time, or None when it cannot be obtained."""
+    try:
+        return datetime.now(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S UTC+08:00")
+    except Exception as exc:
+        print(f"::warning:: Failed to get report timestamp: {exc}")
+        return None
+
+
+def generate_report(
+    failed,
+    recommended,
+    matched,
+    log_dir,
+    recommendations_source="none",
+    pr_number="unknown",
+    pr_title="untitled",
+):
     """Produce a Markdown summary table."""
     hit = matched["hit"]
     miss = matched["miss"]
     untested = matched["untested"]
+    pr_number = " ".join(str(pr_number).split()) or "unknown"
+    pr_title = " ".join(str(pr_title).split()) or "untitled"
+    report_timestamp = get_report_timestamp()
 
     out = []
     out.append("# Test Failure vs Recommendation Report")
     out.append("")
+    out.append(f"**Pull request**: #{pr_number}  ")
+    out.append(f"**PR title**: {pr_title}  ")
+    if report_timestamp:
+        out.append(f"**Report time**: {report_timestamp}  ")
     out.append(f"**Log source**: `{log_dir}`")
     out.append("")
 
@@ -353,6 +381,8 @@ def main():
     parser.add_argument(
         "--output", default="failure_report.md", help="Output Markdown report path (default: failure_report.md)"
     )
+    parser.add_argument("--pr-number", default="unknown", help="Pull request number")
+    parser.add_argument("--pr-title", default="untitled", help="Pull request title")
     parser.add_argument(
         "--recommendations-source",
         default="none",
@@ -397,7 +427,15 @@ def main():
     print(f"Miss (failed, not recommended): {len(matched['miss'])}")
     print(f"Untested (recommended, no failure): {len(matched['untested'])}")
 
-    report = generate_report(failed, recommended, matched, args.log_dir, args.recommendations_source)
+    report = generate_report(
+        failed,
+        recommended,
+        matched,
+        args.log_dir,
+        args.recommendations_source,
+        args.pr_number,
+        args.pr_title,
+    )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report, encoding="utf-8")

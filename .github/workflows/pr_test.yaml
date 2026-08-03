@@ -517,3 +517,5 @@ jobs:
       log_artifact_pattern: selected-test-logs-*
       recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
       recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}
+      pr_number: ${{ github.event.pull_request.number }}
+      pr_title: ${{ github.event.pull_request.title }}
