@@ -199,47 +199,67 @@ jobs:
           echo "single_node json: >>${{ needs.setup-vars.outputs.single_node }}<<"
           echo "double_node json: >>${{ needs.setup-vars.outputs.double_node }}<<"
           echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
-
+  wait-deps:
+    name: Wait upstream dependencies and forward outputs
+    needs: [parse-trigger, setup-vars]
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Forward outputs
+        id: forward
+        run: |
+          {
+            echo "run=${{ needs.parse-trigger.outputs.run }}"
+            echo "filter=${{ needs.parse-trigger.outputs.filter }}"
+            echo "single_node=${{ needs.setup-vars.outputs.single_node }}"
+            echo "multi_node=${{ needs.setup-vars.outputs.multi_node }}"
+          } >> "$GITHUB_OUTPUT"
+    outputs:
+      run: ${{ steps.forward.outputs.run }}
+      filter: ${{ steps.forward.outputs.filter }}
+      single_node: ${{ steps.forward.outputs.single_node }}
+      multi_node: ${{ steps.forward.outputs.multi_node }}
+  
+  
   single-node-tests:
-      name: single-node
-      needs: [parse-trigger, setup-vars]
-      strategy:
-        fail-fast: false
-        max-parallel: 3
-        matrix:
-          test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
-      uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-      with:
-        runner: ${{ matrix.test_config.os }}
-        config_file_path: ${{ matrix.test_config.config_file_path }}
-        name: ${{ matrix.test_config.name }}
-        should_run: ${{ needs['parse-trigger'].outputs.run }}
-        request_id: ${{ inputs.request_id }}
-        vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
-        filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
-
+    name: single-node
+    needs: wait-deps
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        test_config: ${{ fromJSON(needs.wait-deps.outputs.single_node) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
+      should_run: ${{ needs.wait-deps.outputs.run }}
+      filter_expr: ${{ needs.wait-deps.outputs.filter }}
+      request_id: ${{ inputs.request_id }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
+  
+  
   multi-node-tests:
-      name: multi-node
-      needs: [parse-trigger, setup-vars]
-      strategy:
-        fail-fast: false
-        max-parallel: 3
-        matrix:
-          test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
-      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-      # 新增这一段！
-      secrets:
-        KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      with:
-        soc_version: a5
-        runner: ${{ matrix.test_config.os }}
-        config_file_path: ${{ matrix.test_config.config_file_path }}
-        size: ${{ matrix.test_config.size }}
-        name: ${{ matrix.test_config.name }}
-        should_run: ${{ needs['parse-trigger'].outputs.run }}
-        request_id: ${{ inputs.request_id }}
-        vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
-        filter_expr: ${{ needs['parse-trigger'].outputs.filter }}
+    name: multi-node
+    needs: wait-deps
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        test_config: ${{ fromJSON(needs.wait-deps.outputs.multi_node) }}
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+    with:
+      soc_version: a5
+      runner: ${{ matrix.test_config.os }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      size: ${{ matrix.test_config.size }}
+      name: ${{ matrix.test_config.name }}
+      should_run: ${{ needs.wait-deps.outputs.run }}
+      filter_expr: ${{ needs.wait-deps.outputs.filter }}
+      request_id: ${{ inputs.request_id }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
