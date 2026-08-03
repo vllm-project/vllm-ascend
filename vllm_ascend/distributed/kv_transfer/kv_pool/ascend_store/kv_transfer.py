@@ -5,6 +5,8 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -25,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
+    TransferChunkWithBlockId,
     get_block_hashes,
 )
 # isort: on
@@ -578,6 +581,79 @@ class KVTransferThread(threading.Thread):
         except TypeError:
             return self.token_database.prepare_value(start, end, block_ids)
 
+    def _process_transfer_chunks_with_block_ids(
+        self,
+        token_len: int,
+        block_hashes,
+        block_ids: list[int],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+        cache_role: str = "kv",
+    ):
+        process_transfer_chunks = getattr(
+            self.token_database,
+            "process_transfer_chunks_with_block_ids",
+            None,
+        )
+        if process_transfer_chunks is not None:
+            return process_transfer_chunks(
+                token_len,
+                block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=kv_cache_group_id,
+                skip_null_blocks=skip_null_blocks,
+                cache_role=cache_role,
+            )
+
+        def iter_legacy_chunks():
+            group_block_size = self._get_block_size(kv_cache_group_id)
+            for start, end, key, block_id in self._process_tokens_with_block_ids(
+                token_len,
+                block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=kv_cache_group_id,
+                skip_null_blocks=skip_null_blocks,
+                cache_role=cache_role,
+            ):
+                yield TransferChunkWithBlockId(
+                    raw_start=start,
+                    raw_end=end,
+                    value_start=start,
+                    value_end=end,
+                    target_block_index=start // group_block_size,
+                    key=key,
+                    block_id=block_id,
+                )
+
+        return iter_legacy_chunks()
+
+    def _prepare_transfer_value(
+        self,
+        chunk: TransferChunkWithBlockId,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+    ):
+        prepare_transfer_value = getattr(self.token_database, "prepare_transfer_value", None)
+        if prepare_transfer_value is not None:
+            return prepare_transfer_value(
+                chunk,
+                block_ids,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+            )
+        return self._prepare_value(
+            chunk.value_start,
+            chunk.value_end,
+            block_ids,
+            kv_cache_group_id=kv_cache_group_id,
+            cache_role=cache_role,
+            block_id=chunk.block_id,
+        )
+
     def _decode_adaptor_prefill_pp(
         self,
         keys: list[str],
@@ -680,59 +756,51 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             store_masks = self._store_mask(req_meta)
             for group_id in req_meta.kv_cache_group_ids or [0]:
-                starts = []
-                ends = []
-                keys = []
-                block_hashes = []
-                key_block_ids = []
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
+                transfer_config = getattr(self.token_database, "hybrid_cache_c128_config", None)
+                event_granularity = (
+                    transfer_config.chunk_tokens
+                    if transfer_config is not None and transfer_config.enabled
+                    else group_block_size
+                )
+                assert event_granularity is not None
                 group_block_hashes = get_block_hashes(
                     req_meta.block_hashes,
-                    group_block_size,
+                    event_granularity,
                     getattr(self.token_database, "hash_block_size", group_block_size),
                 )
-
-                for start, end, key, block_id in self._process_tokens_with_block_ids(
-                    token_len,
-                    req_meta.block_hashes,
-                    block_ids,
-                    kv_cache_group_id=group_id,
-                    skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
-                ):
-                    if not self._mask_allows_chunk(store_masks, group_id, start):
-                        continue
-                    starts.append(start)
-                    ends.append(end)
-                    keys.append(key.to_string())
-                    block_hashes.append(group_block_hashes[start // group_block_size])
-                    key_block_ids.append(block_id)
+                chunks = [
+                    chunk
+                    for chunk in self._process_transfer_chunks_with_block_ids(
+                        token_len,
+                        req_meta.block_hashes,
+                        block_ids,
+                        kv_cache_group_id=group_id,
+                        skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+                    )
+                    if self._mask_allows_chunk(store_masks, group_id, chunk.raw_start)
+                ]
 
                 if (
                     not self.dcp_size > 1
                     and not req_meta.disable_tp_key_sharding
                     and not self.group_uses_align_state[group_id]
                 ):
-                    starts = starts[self.tp_rank % self.put_step :: self.put_step]
-                    ends = ends[self.tp_rank % self.put_step :: self.put_step]
-                    keys = keys[self.tp_rank % self.put_step :: self.put_step]
-                    block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
-                    key_block_ids = key_block_ids[self.tp_rank % self.put_step :: self.put_step]
+                    chunks = chunks[self.tp_rank % self.put_step :: self.put_step]
 
-                if not keys:
+                if not chunks:
                     continue
 
+                keys = [chunk.key.to_string() for chunk in chunks]
                 exists_states = self.lookup(keys)
                 missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
                 if not missing_indices:
                     continue
 
-                starts = [starts[index] for index in missing_indices]
-                ends = [ends[index] for index in missing_indices]
+                chunks = [chunks[index] for index in missing_indices]
                 keys = [keys[index] for index in missing_indices]
-                block_hashes = [block_hashes[index] for index in missing_indices]
-                key_block_ids = [key_block_ids[index] for index in missing_indices]
 
                 logger.debug(
                     "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
@@ -742,47 +810,45 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     req_id,
                     group_id,
                 )
-                logger.debug(
-                    "KV pool put request=%s group=%d token_len=%d keys=%d sample_keys=%s",
-                    req_id,
-                    group_id,
-                    token_len,
-                    len(keys),
-                    keys[:3],
-                )
-
                 addrs = []
                 sizes = []
                 stored_events: list[BlockStored] = []
-                all_hashes = [maybe_convert_block_hash(bh) for bh in group_block_hashes]
-                for index, start in enumerate(starts):
-                    addr, size, _ = self._prepare_value(
-                        start,
-                        ends[index],
+                prev_key = None
+                new_block_hashes = [
+                    maybe_convert_block_hash(
+                        group_block_hashes[chunk.raw_start // event_granularity]
+                    )
+                    for chunk in chunks
+                ]
+                for index, chunk in enumerate(chunks):
+                    addr, size, _ = self._prepare_transfer_value(
+                        chunk,
                         block_ids,
                         kv_cache_group_id=group_id,
-                        block_id=key_block_ids[index],
                     )
                     addrs.append(addr)
                     sizes.append(size)
 
                     # Create KV event
                     if self.enable_kv_event:
-                        token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                        token_ids = (
+                            req_meta.token_ids[chunk.raw_start : chunk.raw_end]
+                            if req_meta.token_ids is not None
+                            else None
+                        )
                         block_size = (
-                            req_meta.original_block_size[group_id]
-                            if isinstance(req_meta.original_block_size, list)
-                            else req_meta.original_block_size
+                            transfer_config.chunk_tokens
+                            if transfer_config is not None and transfer_config.enabled
+                            else (
+                                req_meta.original_block_size[group_id]
+                                if isinstance(req_meta.original_block_size, list)
+                                else req_meta.original_block_size
+                            )
                         )
                         if block_size is not None:
-                            block_idx = start // group_block_size
-                            if block_idx >= len(all_hashes):
-                                continue
-                            current_hash = all_hashes[block_idx]
-                            parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
                             stored_event = BlockStored(
-                                block_hashes=[current_hash],
-                                parent_block_hash=parent_hash,
+                                block_hashes=[new_block_hashes[index]],
+                                parent_block_hash=prev_key,
                                 token_ids=token_ids,
                                 block_size=block_size,
                                 lora_id=None,
@@ -790,6 +856,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                                 lora_name=None,
                             )
                             stored_events.append(stored_event)
+                            prev_key = new_block_hashes[index]
                             logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
                 if self.kv_role == "kv_consumer":
@@ -829,6 +896,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event | None = None,
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
+        get_c128_staging_value: Callable[[int], tuple[list[int], list[int]]] | None = None,
+        merge_c128_staging_chunk: Callable[[int, TransferChunkWithBlockId], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -842,8 +911,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         )
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
+        self._get_c128_staging_value = get_c128_staging_value
+        self._merge_c128_staging_chunk = merge_c128_staging_chunk
 
     def _handle_request(self, req_meta: ReqMeta):
+        transfer_config = getattr(self.token_database, "hybrid_cache_c128_config", None)
+        if transfer_config is not None and transfer_config.enabled:
+            self._handle_hybrid_c128_request(req_meta)
+            return
+
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         addr_list = []
@@ -939,6 +1015,108 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             req_meta.kv_cache_group_ids or [0],
             len(key_list_c),
         )
+        self.set_finished_request(req_id)
+        self.request_queue.task_done()
+
+    def _record_load_failures(
+        self,
+        req_meta: ReqMeta,
+        block_ids: list[int],
+        results: list[int] | None,
+    ) -> None:
+        if results is None:
+            results = [1] * len(block_ids)
+        if not any(result != 0 for result in results):
+            return
+        missing_block_ids = record_failed_blocks(block_ids, results)
+        if len(req_meta.block_ids_by_group) == 1:
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(missing_block_ids)
+        elif missing_block_ids:
+            logger.error(
+                "KV load failed for hybrid request %s. "
+                "Skip invalid-block fallback to avoid scheduler crash. "
+                "failed_blocks=%s",
+                req_meta.req_id,
+                missing_block_ids,
+            )
+
+    def _handle_hybrid_c128_request(self, req_meta: ReqMeta) -> None:
+        transfer_config = self.token_database.hybrid_cache_c128_config
+        assert transfer_config.chunk_tokens is not None
+        if self._get_c128_staging_value is None or self._merge_c128_staging_chunk is None:
+            raise RuntimeError("Hybrid C128 asynchronous load requires registered staging callbacks.")
+
+        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
+        req_id = req_meta.req_id
+        group_ids = req_meta.kv_cache_group_ids or [0]
+        load_masks = self._load_mask(req_meta, token_len)
+        addr_list: list[list[int]] = []
+        size_list: list[list[int]] = []
+        key_list: list[str] = []
+        block_id_list: list[int] = []
+        c128_chunks: list[tuple[int, TransferChunkWithBlockId]] = []
+        mask_num = (
+            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+            // transfer_config.chunk_tokens
+            * transfer_config.chunk_tokens
+        )
+
+        for group_id in group_ids:
+            if group_id >= len(req_meta.block_ids_by_group):
+                continue
+            block_ids = req_meta.block_ids_by_group[group_id]
+            for chunk in self._process_transfer_chunks_with_block_ids(
+                token_len,
+                req_meta.block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=group_id,
+                skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+            ):
+                if not self._mask_allows_chunk(load_masks, group_id, chunk.raw_start):
+                    continue
+                if self.token_database.is_c128_group(group_id):
+                    c128_chunks.append((group_id, chunk))
+                    continue
+                addr, size, block_id = self._prepare_transfer_value(
+                    chunk,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.append(chunk.key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                block_id_list.append(block_id)
+
+        if not key_list and not c128_chunks:
+            self.set_finished_request(req_id)
+            self.request_queue.task_done()
+            return
+
+        if key_list:
+            rotation = self.tp_rank % len(key_list)
+            key_list = key_list[rotation:] + key_list[:rotation]
+            addr_list = addr_list[rotation:] + addr_list[:rotation]
+            size_list = size_list[rotation:] + size_list[:rotation]
+            block_id_list = block_id_list[rotation:] + block_id_list[:rotation]
+            results = self.m_store.get(key_list, addr_list, size_list)
+            self._record_load_failures(req_meta, block_id_list, results)
+
+        for group_id, chunk in c128_chunks:
+            staging_addrs, staging_sizes = self._get_c128_staging_value(group_id)
+            results = self.m_store.get(
+                [chunk.key.to_string()],
+                [staging_addrs],
+                [staging_sizes],
+            )
+            if results is not None and len(results) == 1 and results[0] == 0:
+                # The callback copies only the authoritative range and waits for
+                # that NPU copy before the single staging page is reused.
+                self._merge_c128_staging_chunk(group_id, chunk)
+            else:
+                self._record_load_failures(req_meta, [chunk.block_id], results)
+
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 

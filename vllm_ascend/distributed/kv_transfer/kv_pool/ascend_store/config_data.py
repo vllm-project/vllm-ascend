@@ -18,6 +18,40 @@ from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
+HYBRID_CACHE_C128_CHUNK_CONFIG_KEY = "hybrid_cache_c128_chunk"
+HYBRID_CACHE_C128_CHUNK_MULTIPLIER = 4
+HYBRID_CACHE_C128_TRANSFER_NAMESPACE = "hybrid_c128_chunk_v1"
+HYBRID_CACHE_C128_FAMILY = "c128"
+
+
+@dataclass(frozen=True)
+class HybridCacheC128Config:
+    """Connector-only hybrid C128 external transfer configuration."""
+
+    enabled: bool = False
+    chunk_tokens: int | None = None
+    namespace: str | None = None
+    c128_group_id: int | None = None
+    c128_slots_per_page: int | None = None
+
+
+@dataclass(frozen=True)
+class TransferChunk:
+    """One external key and its raw-token/cache-slot placement."""
+
+    raw_start: int
+    raw_end: int
+    value_start: int
+    value_end: int
+    target_block_index: int
+    key: PoolKey
+
+
+@dataclass(frozen=True)
+class TransferChunkWithBlockId(TransferChunk):
+    block_id: int
+    block_ids: tuple[int, ...] = ()
+
 
 # Parameters related to the key
 @dataclass
@@ -39,6 +73,12 @@ class KeyMetadata:
     cache_role: str = "kv"
     """ Family name for compress-aware hybrid cache layouts """
     cache_family: str = "default"
+    """ Versioned namespace for an opt-in external transfer layout """
+    transfer_namespace: str | None = None
+    """ First authoritative cache slot in a full-page value """
+    slot_start: int | None = None
+    """ Exclusive end of the authoritative cache-slot range """
+    slot_end: int | None = None
 
 
 @dataclass(order=True)
@@ -57,11 +97,19 @@ class PoolKey:
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
+                self.key_metadata.transfer_namespace,
+                self.key_metadata.slot_start,
+                self.key_metadata.slot_end,
                 self.chunk_hash,
             )
         )
 
     def to_string(self):
+        transfer_suffix = ""
+        if self.key_metadata.transfer_namespace is not None:
+            transfer_suffix += f"@transfer:{self.key_metadata.transfer_namespace}"
+        if self.key_metadata.slot_start is not None and self.key_metadata.slot_end is not None:
+            transfer_suffix += f"@range:{self.key_metadata.slot_start}_{self.key_metadata.slot_end}"
         return (
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
@@ -70,6 +118,7 @@ class PoolKey:
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
+            f"{transfer_suffix}"
             f"@{self.chunk_hash}"
         )
 
@@ -103,12 +152,20 @@ class LayerPoolKey(PoolKey):
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
+                self.key_metadata.transfer_namespace,
+                self.key_metadata.slot_start,
+                self.key_metadata.slot_end,
                 self.chunk_hash,
                 self.layer_id,
             )
         )
 
     def to_string(self):
+        transfer_suffix = ""
+        if self.key_metadata.transfer_namespace is not None:
+            transfer_suffix += f"@transfer:{self.key_metadata.transfer_namespace}"
+        if self.key_metadata.slot_start is not None and self.key_metadata.slot_end is not None:
+            transfer_suffix += f"@range:{self.key_metadata.slot_start}_{self.key_metadata.slot_end}"
         return (
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
@@ -116,6 +173,7 @@ class LayerPoolKey(PoolKey):
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
+            f"{transfer_suffix}"
             f"@layer_id:{self.layer_id}"
             f"@{self.chunk_hash}"
         )
@@ -138,6 +196,86 @@ def infer_cache_family_ratio(cache_family: str | None) -> int:
 
 def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
     return block_size * infer_cache_family_ratio(cache_family)
+
+
+def resolve_hybrid_cache_c128_config(
+    vllm_config: Any,
+    *,
+    use_layerwise: bool,
+    group_block_sizes: Sequence[int],
+    group_cache_families: Sequence[str],
+    hash_block_size: int,
+    discard_partial_chunks: bool,
+) -> HybridCacheC128Config:
+    """Parse and validate the opt-in connector-only hybrid C128 path."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    enabled = extra_config.get(HYBRID_CACHE_C128_CHUNK_CONFIG_KEY, False)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{HYBRID_CACHE_C128_CHUNK_CONFIG_KEY} must be a boolean.")
+    if not enabled:
+        return HybridCacheC128Config()
+
+    config_key = HYBRID_CACHE_C128_CHUNK_CONFIG_KEY
+    if str(extra_config.get("backend", "mooncake")).lower() != "mooncake":
+        raise ValueError(f"{config_key} requires the Mooncake backend.")
+    if use_layerwise:
+        raise ValueError(f"{config_key} does not support layerwise transfer.")
+    if not discard_partial_chunks:
+        raise ValueError(f"{config_key} requires discard_partial_chunks=true.")
+    if len(group_block_sizes) != len(group_cache_families):
+        raise ValueError("KV cache group sizes and cache families must have the same length.")
+
+    c128_group_id: int | None = None
+    c128_block_size: int | None = None
+    for group_id, (block_size, family) in enumerate(
+        zip(group_block_sizes, group_cache_families, strict=True)
+    ):
+        if family == HYBRID_CACHE_C128_FAMILY:
+            if c128_group_id is not None:
+                raise ValueError(f"{config_key} requires exactly one C128 cache group.")
+            c128_group_id = group_id
+            c128_block_size = block_size
+
+    if c128_group_id is None or c128_block_size is None:
+        raise ValueError(f"{config_key} requires exactly one C128 cache group.")
+
+    # Four C128 compressed-slot groups form one external transfer chunk.  The
+    # physical block size is deliberately taken from the actual group spec so
+    # block_size=128 yields 512 raw tokens and block_size=64 yields 256.
+    chunk_tokens = c128_block_size * HYBRID_CACHE_C128_CHUNK_MULTIPLIER
+    if chunk_tokens % hash_block_size != 0:
+        raise ValueError(
+            f"{config_key} chunk size ({chunk_tokens}) must be divisible by "
+            f"hash_block_size ({hash_block_size})."
+        )
+    c128_ratio = infer_cache_family_ratio(HYBRID_CACHE_C128_FAMILY)
+    if chunk_tokens % c128_ratio != 0:
+        raise ValueError(
+            f"{config_key} chunk size ({chunk_tokens}) must be divisible by "
+            f"the C128 compression ratio ({c128_ratio})."
+        )
+
+    for group_id, (block_size, family) in enumerate(
+        zip(group_block_sizes, group_cache_families, strict=True)
+    ):
+        if family == HYBRID_CACHE_C128_FAMILY:
+            continue
+        raw_tokens_per_block = get_cache_family_granularity(block_size, family)
+        if chunk_tokens % raw_tokens_per_block != 0:
+            raise ValueError(
+                f"{config_key} chunk size ({chunk_tokens}) must be divisible by "
+                "every non-C128 group's raw tokens per physical block; "
+                f"group {group_id} ({family}) maps {raw_tokens_per_block}."
+            )
+
+    return HybridCacheC128Config(
+        enabled=True,
+        chunk_tokens=chunk_tokens,
+        namespace=HYBRID_CACHE_C128_TRANSFER_NAMESPACE,
+        c128_group_id=c128_group_id,
+        c128_slots_per_page=c128_block_size,
+    )
 
 
 def _get_layer_compress_ratio(
@@ -210,6 +348,7 @@ class ChunkedTokenDatabase:
         partitions: list[int] | None,
         use_hybrid: bool = False,
         hash_block_size: int | None = None,
+        hybrid_cache_c128_config: HybridCacheC128Config | None = None,
     ):
         self.metadata = metadata
         self.block_size = block_size
@@ -227,6 +366,7 @@ class ChunkedTokenDatabase:
         self.partitions = partitions
         self.use_hybrid = use_hybrid
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
+        self.hybrid_cache_c128_config = hybrid_cache_c128_config or HybridCacheC128Config()
         self.cache_coordinator: Any | None = None
 
     def set_cache_coordinator(self, cache_coordinator: Any | None) -> None:
@@ -259,7 +399,11 @@ class ChunkedTokenDatabase:
         if masks is None or kv_cache_group_id >= len(masks):
             return True
         group_mask = masks[kv_cache_group_id]
-        block_idx = start // self.get_block_size(kv_cache_group_id)
+        if self.hybrid_cache_c128_config.enabled:
+            assert self.hybrid_cache_c128_config.chunk_tokens is not None
+            block_idx = start // self.hybrid_cache_c128_config.chunk_tokens
+        else:
+            block_idx = start // self.get_block_size(kv_cache_group_id)
         return block_idx < len(group_mask) and group_mask[block_idx]
 
     def _make_key_by_hash(
@@ -269,6 +413,9 @@ class ChunkedTokenDatabase:
         cache_role: str = "kv",
         cache_family: str | None = None,
         layer_id: int | None = None,
+        transfer_namespace: str | None = None,
+        slot_start: int | None = None,
+        slot_end: int | None = None,
     ):
         assert self.metadata is not None
         if cache_family is None:
@@ -284,9 +431,19 @@ class ChunkedTokenDatabase:
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
+                transfer_namespace=transfer_namespace,
+                slot_start=slot_start,
+                slot_end=slot_end,
             ),
             chunk_hash,
         )
+
+    def is_hybrid_cache_c128_enabled(self) -> bool:
+        return self.hybrid_cache_c128_config.enabled
+
+    def is_c128_group(self, kv_cache_group_id: int) -> bool:
+        config = self.hybrid_cache_c128_config
+        return config.enabled and config.c128_group_id == kv_cache_group_id
 
     def get_block_size(self, kv_cache_group_id: int) -> int:
         if kv_cache_group_id >= len(self.block_size):
@@ -388,6 +545,233 @@ class ChunkedTokenDatabase:
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
+
+    def process_transfer_chunks(
+        self,
+        token_len: int,
+        block_hashes: BlockHashList | list[str],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
+    ) -> Iterable[TransferChunk]:
+        """Return explicit raw-token and physical-value coordinates."""
+        config = self.hybrid_cache_c128_config
+        if not config.enabled:
+            group_block_size = self.get_block_size(kv_cache_group_id)
+            for start, end, key in self.process_tokens(
+                token_len,
+                block_hashes,
+                mask_num,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                cache_family=cache_family,
+            ):
+                yield TransferChunk(
+                    raw_start=start,
+                    raw_end=end,
+                    value_start=start,
+                    value_end=end,
+                    target_block_index=start // group_block_size,
+                    key=key,
+                )
+            return
+
+        if not block_hashes:
+            return
+        assert config.chunk_tokens is not None
+        assert config.namespace is not None
+        chunk_tokens = config.chunk_tokens
+        if cache_family is None:
+            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        family_ratio = max(infer_cache_family_ratio(cache_family), 1)
+        physical_block_size = self.get_block_size(kv_cache_group_id)
+        raw_tokens_per_page = physical_block_size * family_ratio
+        chunk_hashes = get_block_hashes(block_hashes, chunk_tokens, self.hash_block_size)
+        if not chunk_hashes:
+            return
+
+        for chunk_id, hash_value in enumerate(chunk_hashes):
+            raw_start = chunk_id * chunk_tokens
+            raw_end = raw_start + chunk_tokens
+            if raw_end > token_len:
+                break
+            if raw_start < mask_num:
+                continue
+            if not isinstance(hash_value, str):
+                hash_value = hash_value.hex()
+            target_block_index = raw_start // raw_tokens_per_page
+            value_start = (raw_start % raw_tokens_per_page) // family_ratio
+            value_end = value_start + min(chunk_tokens, raw_tokens_per_page) // family_ratio
+            slot_start = value_start if self.is_c128_group(kv_cache_group_id) else None
+            slot_end = value_end if self.is_c128_group(kv_cache_group_id) else None
+            yield TransferChunk(
+                raw_start=raw_start,
+                raw_end=raw_end,
+                value_start=value_start,
+                value_end=value_end,
+                target_block_index=target_block_index,
+                key=self._make_key_by_hash(
+                    hash_value,
+                    kv_cache_group_id=kv_cache_group_id,
+                    cache_role=cache_role,
+                    cache_family=cache_family,
+                    transfer_namespace=config.namespace,
+                    slot_start=slot_start,
+                    slot_end=slot_end,
+                ),
+            )
+
+    def process_transfer_chunks_with_block_ids(
+        self,
+        token_len: int,
+        block_hashes: BlockHashList | list[str],
+        block_ids: list[int],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
+    ) -> Iterable[TransferChunkWithBlockId]:
+        if not self.hybrid_cache_c128_config.enabled:
+            group_block_size = self.get_block_size(kv_cache_group_id)
+            for start, end, key, block_id in self.process_tokens_with_block_ids(
+                token_len,
+                block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=kv_cache_group_id,
+                skip_null_blocks=skip_null_blocks,
+                cache_role=cache_role,
+                cache_family=cache_family,
+            ):
+                yield TransferChunkWithBlockId(
+                    raw_start=start,
+                    raw_end=end,
+                    value_start=start,
+                    value_end=end,
+                    target_block_index=start // group_block_size,
+                    key=key,
+                    block_id=block_id,
+                    block_ids=(block_id,),
+                )
+            return
+
+        all_chunks = list(
+            self.process_transfer_chunks(
+                token_len,
+                block_hashes,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                cache_family=cache_family,
+            )
+        )
+        if not all_chunks:
+            return
+        if cache_family is None:
+            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        family_ratio = max(infer_cache_family_ratio(cache_family), 1)
+        raw_tokens_per_page = self.get_block_size(kv_cache_group_id) * family_ratio
+        # A C128 chunk addresses a range inside a full physical page, so a
+        # partial final page still needs to participate in the tail offset.
+        # Other groups only publish complete transfer chunks and their block
+        # IDs therefore correspond to complete native pages at this frontier.
+        if self.is_c128_group(kv_cache_group_id):
+            num_logical_blocks = cdiv(token_len, raw_tokens_per_page)
+        else:
+            num_logical_blocks = token_len // raw_tokens_per_page
+        block_id_offset = max(num_logical_blocks - len(block_ids), 0)
+        for chunk in all_chunks:
+            if chunk.raw_start < mask_num:
+                continue
+            if self.is_c128_group(kv_cache_group_id):
+                block_start = chunk.target_block_index
+                block_end = block_start + 1
+            elif self.cache_coordinator is not None:
+                block_start, block_end = self.cache_coordinator.transfer_value_block_range(
+                    kv_cache_group_id,
+                    chunk.raw_start,
+                    chunk.raw_end,
+                )
+            else:
+                block_start = chunk.target_block_index
+                block_end = block_start + 1
+            block_start -= block_id_offset
+            block_end -= block_id_offset
+            if block_start < 0 or block_end > len(block_ids):
+                continue
+            chunk_block_ids = tuple(block_ids[block_start:block_end])
+            if skip_null_blocks and any(block_id <= 0 for block_id in chunk_block_ids):
+                continue
+            yield TransferChunkWithBlockId(
+                raw_start=chunk.raw_start,
+                raw_end=chunk.raw_end,
+                value_start=chunk.value_start,
+                value_end=chunk.value_end,
+                target_block_index=chunk.target_block_index,
+                key=chunk.key,
+                block_id=chunk_block_ids[0],
+                block_ids=chunk_block_ids,
+            )
+
+    def prepare_transfer_value(
+        self,
+        chunk: TransferChunkWithBlockId,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+    ):
+        if not self.hybrid_cache_c128_config.enabled:
+            return self.prepare_value(
+                chunk.value_start,
+                chunk.value_end,
+                block_ids,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                block_id=chunk.block_id,
+            )
+
+        if self.is_c128_group(kv_cache_group_id):
+            # Mooncake stores a complete physical C128 page.  The key's
+            # authoritative slot range is applied after load by the staging
+            # merge path; ordinary groups use their complete transfer block.
+            value_start = 0
+            value_end = self.get_block_size(kv_cache_group_id)
+            return self.prepare_value(
+                value_start,
+                value_end,
+                block_ids,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                block_id=chunk.block_id,
+            )
+
+        chunk_block_ids = chunk.block_ids or (chunk.block_id,)
+        values = [
+            self.prepare_value(
+                0,
+                self.get_block_size(kv_cache_group_id),
+                block_ids,
+                kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                block_id=block_id,
+            )
+            for block_id in chunk_block_ids
+        ]
+        if not values or not values[0][0]:
+            return [], [], chunk.block_id
+        num_buffers = len(values[0][0])
+        addr_list = [
+            values[block][0][buffer]
+            for buffer in range(num_buffers)
+            for block in range(len(values))
+        ]
+        size_list = [
+            values[block][1][buffer]
+            for buffer in range(num_buffers)
+            for block in range(len(values))
+        ]
+        return addr_list, size_list, chunk.block_id
 
     def process_tokens(
         self,

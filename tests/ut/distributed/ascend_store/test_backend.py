@@ -404,6 +404,26 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
 
+    def test_register_additional_buffer(self):
+        b = self._make_backend()
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+            ) as mock_te,
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip"),
+        ):
+            b.register_additional_buffer([300], [400])
+            mock_te.register_additional_buffer.assert_called_once_with([300], [400])
+
+    def test_register_additional_buffer_is_noop_with_fabric_memory(self):
+        b = self._make_backend()
+        b._use_fabric_mem = True
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+        ) as mock_te:
+            b.register_additional_buffer([300], [400])
+            mock_te.register_additional_buffer.assert_not_called()
+
 
 # =========================================================================
 # YuanrongBackend (mocked store)

@@ -5,6 +5,7 @@ class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
         self.is_register_buffer: bool = False
+        self.additional_registered_buffers: set[tuple[int, int]] = set()
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -38,6 +39,22 @@ class GlobalTE:
                 if ret_value != 0:
                     raise RuntimeError("Mooncake memory registration failed.")
             self.is_register_buffer = True
+
+    def register_additional_buffer(self, ptrs: list[int], sizes: list[int]):
+        """Register buffers allocated after the initial KV cache registration."""
+        with self.register_buffer_lock:
+            assert self.transfer_engine is not None, "Transfer engine must be initialized"
+            for ptr, size in zip(ptrs, sizes, strict=True):
+                region = (ptr, size)
+                if region in self.additional_registered_buffers:
+                    continue
+                ret_value = self.transfer_engine.register_memory(ptr, size)
+                if ret_value != 0:
+                    raise RuntimeError(
+                        "Mooncake additional memory registration failed: "
+                        f"ptr={ptr}, size={size}, ret={ret_value}"
+                    )
+                self.additional_registered_buffers.add(region)
 
 
 global_te = GlobalTE()

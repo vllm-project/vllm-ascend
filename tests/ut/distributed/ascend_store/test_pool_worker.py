@@ -19,10 +19,15 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import torch
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    HybridCacheC128Config,
+    KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
+    TransferChunkWithBlockId,
 )
 
 
@@ -106,9 +111,54 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
+    @staticmethod
+    def _c128_chunk(value_start: int, value_end: int, block_id: int = 1):
+        return TransferChunkWithBlockId(
+            raw_start=value_start * 128,
+            raw_end=value_end * 128,
+            value_start=value_start,
+            value_end=value_end,
+            target_block_index=0,
+            key=PoolKey(KeyMetadata("hybrid-model", 0, 0, 0, 0), "hash"),
+            block_id=block_id,
+        )
+
+    def test_merge_c128_chunks_aggregates_authoritative_ranges(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.hybrid_cache_c128_config = HybridCacheC128Config(enabled=True, c128_slots_per_page=128)
+        target = torch.full((2, 128, 2), -1, dtype=torch.int64)
+        staging = torch.arange(256, dtype=torch.int64).view(1, 128, 2)
+        worker.group_kv_cache_tensors = {1: [target]}
+        worker.group_block_size_scales = {1: [1]}
+        worker.c128_staging_tensors = {1: [staging]}
+
+        worker._merge_c128_staging_chunk(1, self._c128_chunk(0, 4))
+        first_range = target[1, 0:4].clone()
+        staging.add_(1000)
+        worker._merge_c128_staging_chunk(1, self._c128_chunk(4, 8))
+
+        self.assertTrue(torch.equal(first_range, torch.arange(8).view(4, 2)))
+        self.assertTrue(torch.equal(target[1, 0:4], first_range))
+        self.assertTrue(torch.equal(target[1, 4:8], staging[0, 4:8]))
+        self.assertTrue(torch.all(target[1, 8:] == -1))
+        self.assertTrue(torch.all(target[0] == -1))
+
+    def test_merge_c128_chunk_rejects_invalid_range(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.hybrid_cache_c128_config = HybridCacheC128Config(enabled=True, c128_slots_per_page=128)
+        worker.group_kv_cache_tensors = {1: [torch.zeros((1, 128))]}
+        worker.group_block_size_scales = {1: [1]}
+        worker.c128_staging_tensors = {1: [torch.zeros((1, 128))]}
+
+        with self.assertRaises(ValueError):
+            worker._merge_c128_staging_chunk(1, self._c128_chunk(124, 132, block_id=0))
+
     def test_external_coordinator_lookup_disables_eagle_drop(self):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
+        worker.hybrid_cache_c128_config = HybridCacheC128Config(enabled=True, c128_slots_per_page=128)
         worker.num_kv_cache_groups = 1
         worker.cache_coordinator = MagicMock()
         worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
@@ -119,15 +169,17 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         key.chunk_hash = "ab" * 32
         key.to_string.return_value = "key"
         worker.token_database = MagicMock()
-        worker.token_database.process_tokens.return_value = [(0, 128, key)]
+        worker.token_database.process_transfer_chunks.return_value = [MagicMock(key=key)]
 
-        hit = worker._lookup_with_coordinator(
-            128,
-            [b"h0"],
-            [0],
-            use_layerwise=False,
-            include_all_ranks=False,
-        )
+        with self.assertLogs(level="INFO") as logs:
+            hit = worker._lookup_with_coordinator(
+                128,
+                [b"h0"],
+                [0],
+                use_layerwise=False,
+                include_all_ranks=False,
+            )
+        self.assertTrue(any("kv Test lookup" in line for line in logs.output))
 
         self.assertEqual(hit, 128)
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
@@ -521,6 +573,27 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.register_kv_caches(kv_caches)
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
+        worker.m_store.register_additional_buffer.assert_not_called()
+
+    def test_register_kv_caches_registers_c128_staging_separately(self):
+        worker = self._make_worker()
+        worker.hybrid_cache_c128_config = HybridCacheC128Config(
+            enabled=True,
+            chunk_tokens=512,
+            namespace="hybrid_c128_chunk_v1",
+            c128_group_id=0,
+            c128_slots_per_page=128,
+        )
+        fake_cache = torch.zeros((2, 128), dtype=torch.uint8)
+
+        worker.register_kv_caches({"layer.0": fake_cache})
+
+        worker.m_store.register_buffer.assert_called_once()
+        staging = worker.c128_staging_tensors[0][0]
+        worker.m_store.register_additional_buffer.assert_called_once_with(
+            [staging.data_ptr()],
+            [staging.numel() * staging.element_size()],
+        )
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
@@ -563,6 +636,123 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(addrs, [[1000 + 99 * 160]])
         self.assertEqual(sizes, [[160]])
 
+    def _make_c128_load_worker(self, get_result):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = object.__new__(KVPoolWorker)
+        target = torch.full((2, 128, 2), -1, dtype=torch.int64)
+        staging = torch.zeros((1, 128, 2), dtype=torch.int64)
+        chunk = TransferChunkWithBlockId(
+            raw_start=0,
+            raw_end=512,
+            value_start=0,
+            value_end=4,
+            target_block_index=0,
+            key=PoolKey(KeyMetadata("hybrid-model", 0, 0, 0, 0), "hash"),
+            block_id=1,
+        )
+        worker.hybrid_cache_c128_config = HybridCacheC128Config(
+            enabled=True,
+            chunk_tokens=512,
+            namespace="hybrid_c128_chunk_v1",
+            c128_group_id=1,
+            c128_slots_per_page=128,
+        )
+        worker.cache_transfer_granularity = 512
+        worker.use_layerwise = False
+        worker.load_async = False
+        worker.group_uses_align_state = [False, False]
+        worker.tp_rank = 0
+        worker._invalid_block_ids = set()
+        worker.grouped_block_size = [512, 128]
+        worker.group_kv_cache_tensors = {1: [target]}
+        worker.group_block_size_scales = {1: [1]}
+        worker.c128_staging_tensors = {1: [staging]}
+        worker.token_database = MagicMock()
+        worker.token_database.load_mask.return_value = None
+        worker.token_database.mask_allows_chunk.return_value = True
+        worker.token_database.is_c128_group.return_value = True
+        worker.token_database.process_transfer_chunks_with_block_ids.return_value = [chunk]
+        worker.m_store = MagicMock()
+
+        def get(*_args):
+            if get_result == [0]:
+                staging.copy_(torch.arange(256, dtype=torch.int64).view(1, 128, 2))
+            return get_result
+
+        worker.m_store.get.side_effect = get
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=512,
+            block_ids_by_group=[[], [1]],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            load_spec=LoadSpec(0, 512, True),
+            kv_cache_group_ids=[1],
+        )
+        metadata = AscendConnectorMetadata(set(), set())
+        metadata.add_request(request)
+        return worker, target, metadata
+
+    def test_start_load_kv_c128_merges_only_after_successful_get(self):
+        worker, target, metadata = self._make_c128_load_worker([0])
+
+        with self.assertLogs(level="INFO") as logs:
+            worker.start_load_kv(metadata)
+        self.assertTrue(any("kv Test load" in line for line in logs.output))
+
+        self.assertTrue(torch.equal(target[1, 0:4], torch.arange(8).view(4, 2)))
+        self.assertTrue(torch.all(target[1, 4:] == -1))
+        self.assertTrue(torch.all(target[0] == -1))
+
+    def test_start_load_kv_c128_aggregates_two_chunks_into_one_page(self):
+        worker, target, metadata = self._make_c128_load_worker([0])
+        chunks = [
+            TransferChunkWithBlockId(
+                raw_start=0,
+                raw_end=512,
+                value_start=0,
+                value_end=4,
+                target_block_index=0,
+                key=PoolKey(KeyMetadata("hybrid-model", 0, 0, 0, 0), "hash0"),
+                block_id=1,
+            ),
+            TransferChunkWithBlockId(
+                raw_start=512,
+                raw_end=1024,
+                value_start=4,
+                value_end=8,
+                target_block_index=1,
+                key=PoolKey(KeyMetadata("hybrid-model", 0, 0, 0, 0), "hash1"),
+                block_id=1,
+            ),
+        ]
+        worker.token_database.process_transfer_chunks_with_block_ids.return_value = chunks
+        staging = worker.c128_staging_tensors[1][0]
+        staging_values = iter((11, 22))
+
+        def get(*_args):
+            staging.fill_(next(staging_values))
+            return [0]
+
+        worker.m_store.get.side_effect = get
+
+        worker.start_load_kv(metadata)
+
+        self.assertEqual(worker.m_store.get.call_count, 2)
+        self.assertTrue(torch.all(target[1, 0:4] == 11))
+        self.assertTrue(torch.all(target[1, 4:8] == 22))
+        self.assertTrue(torch.all(target[1, 8:] == -1))
+        self.assertTrue(torch.all(target[0] == -1))
+
+    def test_start_load_kv_c128_does_not_merge_failed_get(self):
+        for get_result in ([1], None):
+            with self.subTest(get_result=get_result):
+                worker, target, metadata = self._make_c128_load_worker(get_result)
+
+                worker.start_load_kv(metadata)
+
+                self.assertTrue(torch.all(target == -1))
+
     def test_start_load_kv_no_load(self):
         worker = self._make_worker()
         req = ReqMeta(
@@ -577,7 +767,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         # No get called since no load_spec
 
-    def test_wait_for_save(self):
+    @patch.object(torch, "npu", create=True)
+    def test_wait_for_save(self, mock_npu):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock()
 
