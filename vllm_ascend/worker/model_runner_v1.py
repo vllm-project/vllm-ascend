@@ -34,7 +34,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch_npu
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
@@ -151,7 +150,6 @@ from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
 from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
@@ -3744,68 +3742,6 @@ class NPUModelRunner(GPUModelRunner):
             return attn_layer.impl.dtype, self.model_config.dtype
         return None
 
-    def _uses_a3_kimi_c8_cache(
-        self,
-        layer_name: str,
-        kv_cache_spec: AttentionSpec,
-    ) -> bool:
-        """Whether ``layer_name`` owns K3's A3 C8 PA-NZ MLA cache.
-
-        K3 is identified by its no-RoPE MLA path.  Keeping the check here
-        avoids changing the allocation contract of normal MLA FA-quant
-        models, including the A5 implementation.
-        """
-        if (
-            get_ascend_device_type() != AscendDeviceType.A3
-            or not isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-        ):
-            return False
-
-        attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,
-            [layer_name],
-        )
-        attn_layer = attn_layers[layer_name]
-        return (
-            isinstance(attn_layer, MLAAttention)
-            and bool(getattr(attn_layer.impl, "fa_quant_layer", False))
-            and not bool(getattr(attn_layer.impl, "use_mla_rope", True))
-        )
-
-    def _allocate_a3_kimi_c8_nz_cache(
-        self,
-        *,
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: torch.dtype,
-        nz_width: int,
-    ) -> torch.Tensor:
-        """Allocate one K3 C8 cache segment directly in FRACTAL_NZ format.
-
-        The logical 4D shape is the PA-NZ shape used by Gather.  FIA receives
-        the same storage as its required 5D view at decode time.  Allocating
-        it directly is important: ``npu_format_cast`` after allocating all
-        ND buffers temporarily doubles the complete KV cache footprint.
-        """
-        if head_dim % nz_width:
-            raise ValueError(
-                f"K3 A3 C8 cache head dim {head_dim} must be divisible by {nz_width}."
-            )
-        return torch_npu.empty_with_format(
-            size=(
-                num_blocks,
-                num_kv_heads * head_dim // nz_width,
-                block_size,
-                nz_width,
-            ),
-            dtype=dtype,
-            device=self.device,
-            acl_format=ACL_FORMAT_FRACTAL_NZ,
-        )
-
     @staticmethod
     def _align_up(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
@@ -4032,56 +3968,19 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
-                    if self._uses_a3_kimi_c8_cache(layer_name, current_kv_cache_spec):
-                        # C8 cache storage is consumed as PA-NZ by A3 FIA and
-                        # must also be recognized as NZ by the chunk Gather
-                        # path. Allocate the two mixed-dtype segments directly
-                        # in their PA-NZ logical layout instead of allocating
-                        # ND buffers and format-casting the entire cache later.
-                        assert v_tensor_size is not None
-                        assert kv_cache_tensor.size % current_kv_cache_spec.page_size_bytes == 0
-                        num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
-                        expected_cache_bytes = (
-                            num_blocks
-                            * current_kv_cache_spec.block_size
-                            * current_kv_cache_spec.num_kv_heads
-                            * (
-                                k_dim * get_dtype_size(k_cache_dtype)
-                                + v_dim * get_dtype_size(v_cache_dtype)
-                            )
-                        )
-                        assert expected_cache_bytes == kv_cache_tensor.size
-                        k_tensor = self._allocate_a3_kimi_c8_nz_cache(
-                            num_blocks=num_blocks,
-                            block_size=current_kv_cache_spec.block_size,
-                            num_kv_heads=current_kv_cache_spec.num_kv_heads,
-                            head_dim=k_dim,
-                            dtype=k_cache_dtype,
-                            nz_width=32,
-                        )
-                        v_tensor = self._allocate_a3_kimi_c8_nz_cache(
-                            num_blocks=num_blocks,
-                            block_size=current_kv_cache_spec.block_size,
-                            num_kv_heads=current_kv_cache_spec.num_kv_heads,
-                            head_dim=v_dim,
-                            dtype=v_cache_dtype,
-                            nz_width=16,
-                        )
-                    else:
-                        # Allocate raw int8 tensors. Even bf16/fp16 KV cache
-                        # entries are allocated as int8 raw bytes first and
-                        # then viewed as their target dtype in
-                        # _reshape_kv_cache_tensors.
-                        v_tensor = None
-                        k_tensor = self._allocate_int8_cache_tensor(
-                            k_tensor_size,
+                    # Allocate raw int8 tensors. Even bf16/fp16 KV cache
+                    # entries are allocated as int8 raw bytes first and then
+                    # viewed as their target dtype in _reshape_kv_cache_tensors.
+                    v_tensor = None
+                    k_tensor = self._allocate_int8_cache_tensor(
+                        k_tensor_size,
+                        alignment,
+                    )
+                    if v_tensor_size is not None:
+                        v_tensor = self._allocate_int8_cache_tensor(
+                            v_tensor_size,
                             alignment,
                         )
-                        if v_tensor_size is not None:
-                            v_tensor = self._allocate_int8_cache_tensor(
-                                v_tensor_size,
-                                alignment,
-                            )
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
@@ -4263,22 +4162,6 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    if self._uses_a3_kimi_c8_cache(layer_name, current_kv_cache_spec):
-                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name]  # type: ignore[misc]
-                        assert raw_k_tensor.ndim == 4
-                        assert raw_v_tensor.ndim == 4
-                        assert raw_k_tensor.shape[0] == raw_v_tensor.shape[0]
-                        assert raw_k_tensor.shape[-2] == raw_v_tensor.shape[-2]
-                        assert raw_k_tensor.shape[-1] == 32
-                        assert raw_v_tensor.shape[-1] == 16
-                        assert raw_k_tensor.dtype == torch.int8
-                        assert raw_v_tensor.dtype == self.model_config.dtype
-                        assert raw_k_tensor.shape[0] >= kv_cache_config.num_blocks
-                        # These tensors were already allocated in the logical
-                        # PA-NZ layout with a FRACTAL_NZ descriptor. Do not
-                        # reinterpret them as the legacy BSND raw byte pool.
-                        kv_caches[layer_name] = (raw_k_tensor, raw_v_tensor)
-                        continue
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)

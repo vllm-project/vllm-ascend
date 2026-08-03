@@ -1343,7 +1343,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         return kv_c_normed, k_pe
 
     def _uses_a3_kimi_c8_cache(self) -> bool:
-        """Whether this is K3's A3 C8 cache path with real PA-NZ storage."""
+        """Whether K3's A3 C8 cache needs its mixed dtypes loaded separately."""
         return (
             bool(self.fa_quant_layer)
             and not self.use_mla_rope
@@ -1369,14 +1369,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         is_a3_c8_cache = self._uses_a3_kimi_c8_cache()
-        if is_a3_c8_cache:
-            # K-noRoPE and K-RoPE are directly registered as 4D PA-NZ
-            # tensors: [block, N * D/tile, block_size, tile].
-            num_heads = self.num_kv_heads
-            latent_kv_dim = self.kv_lora_rank
-        else:
-            num_heads = cache_k_pe.size(2)
-            latent_kv_dim = cache_kv_c.size(-1)
+        num_heads = cache_k_pe.size(2)
+        latent_kv_dim = cache_kv_c.size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
@@ -1416,21 +1410,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache_kv_c_for_load = cache_kv_c
             cache_k_pe_for_load = cache_k_pe
             if is_a3_c8_cache:
-                # Gather consumes the 4D PA-NZ source cache directly and
-                # emits ND.  The following view restores its TND form before
-                # dequantization and kv_b_proj.
-                assert cache_kv_c.ndim == 4 and cache_k_pe.ndim == 4
-                assert cache_kv_c.shape[1] == num_heads * latent_kv_dim // 32
-                assert cache_k_pe.shape[1] == num_heads * rope_dim // 16
+                # A3 K3 C8 caches are regular ND tensors. Gather each cache
+                # separately because the latent cache is INT8 while K-RoPE is
+                # BF16; both calls therefore use the Normal-cache contract.
                 kv_c_normed = torch.empty(
                     toks,
-                    num_heads * latent_kv_dim,
+                    num_heads,
+                    latent_kv_dim,
                     dtype=cache_kv_c.dtype,
                     device=cache_kv_c.device,
                 )
                 k_pe = torch.empty(
                     toks,
-                    num_heads * rope_dim,
+                    num_heads,
+                    rope_dim,
                     dtype=q_pe.dtype,
                     device=q_pe.device,
                 )
@@ -1447,7 +1440,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if is_a3_c8_cache:
                 # npu_gather_pa_kv_cache requires matching dtypes for the
                 # key/value cache pair. A3 C8 stores latent cache in INT8 and
-                # RoPE cache in BF16, so gather the two PA_NZ caches separately.
+                # RoPE cache in BF16, so gather the two ND caches separately.
                 kv_c_unused = torch.empty_like(kv_c_normed)
                 k_pe_unused = torch.empty_like(k_pe)
                 DeviceOperator.kv_cache_load(
@@ -1478,9 +1471,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     key=kv_c_normed,
                     value=k_pe,
                 )
-            if is_a3_c8_cache:
-                kv_c_normed = kv_c_normed.view(toks, num_heads, latent_kv_dim)
-                k_pe = k_pe.view(toks, num_heads, rope_dim)
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1641,59 +1631,23 @@ class AscendMLAImpl(MLAAttentionImpl):
                 -1,
                 False,
             )
-            if device_type == AscendDeviceType.A3:
-                # A3 C8 FIA consumes PA-NZ KV.  K3 registers the cache as
-                # true NZ storage; Scatter receives its matching 5D API view
-                # rather than a BSND cache with a relabeled layout.
-                # Registered C8 caches are 4D PA-NZ tensors. Scatter/FIA
-                # APIs use the equivalent 5D cache view.
-                block_size = kv_cache[0].shape[-2]
-                latent_cache_nz = kv_cache[0].view(
-                    -1,
-                    self.num_kv_heads,
-                    self.kv_lora_rank // 32,
-                    block_size,
-                    32,
-                )
-                rope_cache_nz = kv_cache[1].view(
-                    -1,
-                    self.num_kv_heads,
-                    self.qk_rope_head_dim // 16,
-                    block_size,
-                    16,
-                )
-                torch_npu.npu_scatter_pa_kv_cache(
-                    key=cache_kv_c.contiguous(),
-                    value=cache_kv_c.contiguous(),
-                    key_cache=latent_cache_nz,
-                    value_cache=latent_cache_nz,
-                    slot_mapping=slots.contiguous(),
-                    cache_mode="PA_NZ",
-                )
-                torch_npu.npu_scatter_pa_kv_cache(
-                    key=k_pe.contiguous(),
-                    value=k_pe.contiguous(),
-                    key_cache=rope_cache_nz,
-                    value_cache=rope_cache_nz,
-                    slot_mapping=slots.contiguous(),
-                    cache_mode="PA_NZ",
-                )
-            else:
-                # reshape_and_cache requires key and value to have the same dtype.
-                DeviceOperator.reshape_and_cache(
-                    key=cache_kv_c,
-                    value=cache_kv_c,
-                    key_cache=kv_cache[0],
-                    value_cache=kv_cache[0],
-                    slot_mapping=slots,
-                )
-                DeviceOperator.reshape_and_cache(
-                    key=k_pe,
-                    value=k_pe,
-                    key_cache=kv_cache[1],
-                    value_cache=kv_cache[1],
-                    slot_mapping=slots,
-                )
+            # reshape_and_cache requires key and value to have the same dtype.
+            # Keep the registered A3 C8 cache in Normal (ND) layout. Decode
+            # still supplies its existing 5D view to FIA without a format cast.
+            DeviceOperator.reshape_and_cache(
+                key=cache_kv_c,
+                value=cache_kv_c,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[0],
+                slot_mapping=slots,
+            )
+            DeviceOperator.reshape_and_cache(
+                key=k_pe,
+                value=k_pe,
+                key_cache=kv_cache[1],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
         else:
             DeviceOperator.reshape_and_cache(
                 key=cache_kv_c,
@@ -1815,18 +1769,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self._uses_a3_kimi_c8_cache():
-            # FIA documents NZ page-attention cache as 5D even though the
-            # registered storage is a 4D FRACTAL_NZ tensor. This view does
-            # not convert or copy the cache; it only exposes that API shape.
-            nz_fmt_last_dim = 16
-            k_nope = k_nope.view(
-                -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
-            )
-            k_pe = k_pe.view(
-                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
-        elif self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
@@ -2291,7 +2234,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_preprocess_res.q_pe,
                 decode_preprocess_res.k_nope,
                 decode_preprocess_res.k_pe,
-                kv_cache[0].shape[-2] if self._uses_a3_kimi_c8_cache() else kv_cache[0].shape[1],
+                kv_cache[0].shape[1],
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
             )

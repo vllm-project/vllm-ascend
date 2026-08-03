@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -144,8 +144,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
-    @patch("vllm_ascend.worker.model_runner_v1.torch_npu.empty_with_format", create=True)
-    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=True)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
@@ -154,8 +152,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         mock_get_layers,
         _mock_has_ec_transfer,
         _mock_enable_fa_quant,
-        _mock_get_device_type,
-        mock_empty_with_format,
     ):
         runner = self._build_runner()
         runner.block_size = 16
@@ -179,7 +175,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(
             fa_quant_layer=True,
             dtype=torch.int8,
-            use_mla_rope=False,
         )
         attn_module.get_kv_cache_spec = MagicMock(
             return_value=AscendMLAAttentionSpec(
@@ -191,10 +186,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             )
         )
         mock_get_layers.return_value = {layer_name: attn_module}
-        mock_empty_with_format.side_effect = (
-            lambda *, size, dtype, device, acl_format: torch.empty(size, dtype=dtype, device=device)
-        )
-
         layer_spec = runner.get_kv_cache_spec()[layer_name]
         spec = AscendMLAAttentionSpec.merge([layer_spec])
         expected_bytes_per_token = 512 + 64 * 2
@@ -221,13 +212,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
         raw_k_cache, raw_v_cache = raw_caches[layer_name]
         runner.vllm_config.quant_config.get_kv_quant_split_factor.assert_not_called()
-        self.assertEqual(raw_k_cache.shape, (num_blocks, 16, runner.block_size, 32))
-        self.assertEqual(raw_v_cache.shape, (num_blocks, 4, runner.block_size, 16))
         self.assertEqual(raw_k_cache.numel(), num_blocks * runner.block_size * 512)
-        self.assertEqual(raw_v_cache.numel(), num_blocks * runner.block_size * 64)
-        self.assertEqual(mock_empty_with_format.call_count, 2)
-        for format_call in mock_empty_with_format.call_args_list:
-            self.assertEqual(format_call.kwargs["acl_format"], ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(raw_v_cache.numel(), num_blocks * runner.block_size * 64 * 2)
 
         runner._kv_cache_spec_attn_group_iterator = lambda: [
             SimpleNamespace(
@@ -242,13 +228,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )[layer_name]
         runner.vllm_config.quant_config.get_kv_quant_dtype.assert_not_called()
         self.assertEqual(k_cache.dtype, torch.int8)
-        self.assertEqual(k_cache.shape, (num_blocks, 16, runner.block_size, 32))
+        self.assertEqual(k_cache.shape, (num_blocks, runner.block_size, 1, 512))
         self.assertEqual(v_cache.dtype, torch.bfloat16)
-        self.assertEqual(v_cache.shape, (num_blocks, 4, runner.block_size, 16))
-
-        # Hybrid cache tests use the legacy shared raw-buffer contract, which
-        # is intentionally outside K3's direct-NZ allocation path.
-        attn_module.impl.use_mla_rope = True
+        self.assertEqual(v_cache.shape, (num_blocks, runner.block_size, 1, 64))
         runner.use_hybrid_blocks = True
         runner.hybrid_with_attn_and_mamba = True
         runner.attn_backend.get_supported_kernel_block_sizes.return_value = [runner.block_size]
