@@ -213,7 +213,7 @@ jobs:
   single-node-tests:
     name: single-node
     if: true
-    uses: ${{ github.event.pull_request.head.repo.full_name }}/.github/workflows/_e2e_nightly_single_node.yaml@${{ github.event.pull_request.head.sha }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: linux-aarch64-a5-8
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
