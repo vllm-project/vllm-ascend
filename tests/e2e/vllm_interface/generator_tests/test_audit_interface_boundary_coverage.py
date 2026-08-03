@@ -992,3 +992,72 @@ if cached_module is not None:
     assert patches[0].line == 11
     assert patches[0].scope is None
     assert "vllm.cache.hook" in patches[0].targets
+
+
+def test_v035_scanner_follows_mro_selected_runtime_module_patch(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/parallel.py", "def graph_capture(device, graph_capture_context=None):\n    pass\n")
+    _write(
+        vllm_root,
+        "vllm/runner.py",
+        "from vllm.parallel import graph_capture\n\nclass GPUModelRunner:\n    pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+from contextlib import contextmanager
+
+from vllm.runner import GPUModelRunner
+
+
+def graph_capture(device):
+    return None
+
+
+class NPUModelRunner(GPUModelRunner):
+    def capture_model(self):
+        parent_module_name = _get_gpu_model_runner_module_name(self)
+        with _replace_gpu_model_runner_function_wrapper(parent_module_name):
+            return None
+
+
+def _get_gpu_model_runner_module_name(model_runner):
+    gpu_model_runner_cls = next(
+        (cls for cls in model_runner.__class__.__mro__ if cls.__name__ == "GPUModelRunner"),
+        None,
+    )
+    if gpu_model_runner_cls is None:
+        raise TypeError("GPUModelRunner not found")
+    return gpu_model_runner_cls.__module__
+
+
+@contextmanager
+def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    target_module = None
+    try:
+        target_module = sys.modules[target_module_name]
+        setattr(target_module, "graph_capture", graph_capture)
+        yield
+    finally:
+        if target_module is not None:
+            setattr(target_module, "graph_capture", graph_capture)
+""",
+    )
+
+    candidates = auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+    patches = [
+        candidate
+        for candidate in candidates
+        if candidate.relation == "monkey_patch" and any(target.endswith(".graph_capture") for target in candidate.targets)
+    ]
+
+    assert len(patches) == 2
+    assert all(candidate.scope == "_replace_gpu_model_runner_function_wrapper" for candidate in patches)
+    assert all("vllm.parallel.graph_capture" in candidate.targets for candidate in patches)

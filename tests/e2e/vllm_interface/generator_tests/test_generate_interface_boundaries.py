@@ -9851,3 +9851,108 @@ base.kernel = replacement
     ).generate()
 
     assert [finding.reason_code for finding in findings] == ["signature_incompatible"]
+
+
+def test_v035_mro_selected_runtime_module_patch_is_resolved(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/parallel.py",
+        """
+from contextlib import contextmanager
+
+
+@contextmanager
+def graph_capture(device, graph_capture_context=None):
+    yield
+""",
+    )
+    _write(
+        vllm_root,
+        "vllm/runner.py",
+        """
+from vllm.parallel import graph_capture
+
+
+class GPUModelRunner:
+    pass
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+from contextlib import contextmanager
+
+from vllm.runner import GPUModelRunner
+
+
+@contextmanager
+def graph_capture(device):
+    yield
+
+
+class NPUModelRunner(GPUModelRunner):
+    def capture_model(self):
+        parent_module_name = _get_gpu_model_runner_module_name(self)
+        with _replace_gpu_model_runner_function_wrapper(parent_module_name):
+            return None
+
+
+def _get_gpu_model_runner_module_name(model_runner):
+    gpu_model_runner_cls = next(
+        (cls for cls in model_runner.__class__.__mro__ if cls.__name__ == "GPUModelRunner"),
+        None,
+    )
+    if gpu_model_runner_cls is None:
+        raise TypeError("GPUModelRunner not found")
+    return gpu_model_runner_cls.__module__
+
+
+@contextmanager
+def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    target_module = None
+    try:
+        target_module = sys.modules[target_module_name]
+        setattr(target_module, "graph_capture", graph_capture)
+        yield
+    finally:
+        if target_module is not None:
+            setattr(target_module, "graph_capture", graph_capture)
+""",
+    )
+
+    relations, findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+    ).generate()
+
+    patch = next(
+        relation
+        for relation in relations
+        if relation.relation == "monkey_patch" and relation.downstream_name == "graph_capture"
+    )
+    assert (
+        patch.upstream_file,
+        patch.upstream_name,
+        patch.downstream_file,
+        patch.downstream_name,
+    ) == (
+        "vllm/parallel.py",
+        "graph_capture",
+        "vllm_ascend/plugin.py",
+        "graph_capture",
+    )
+    assert len(patch.evidence) == 2
+    assert all(evidence.scope == "_replace_gpu_model_runner_function_wrapper" for evidence in patch.evidence)
+    assert patch.upstream_signature_contract.status == "exact"
+    assert patch.installed_signature_contract.status == "exact"
+    patch_findings = [
+        finding
+        for finding in findings
+        if finding.relation == "monkey_patch" and finding.downstream_name == "graph_capture"
+    ]
+    assert [finding.reason_code for finding in patch_findings] == ["signature_incompatible"]
