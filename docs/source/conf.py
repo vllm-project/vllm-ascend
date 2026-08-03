@@ -56,6 +56,7 @@ extensions = [
     "myst_parser",
     "sphinxarg.ext",
     "sphinx_design",
+    "tools.docs_i18n.sphinx_extension",
     "sphinx_togglebutton",
     "sphinx_substitution_extensions",
     "tools.docs_codegen.sphinx_extension",

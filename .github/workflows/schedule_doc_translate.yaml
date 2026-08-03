@@ -89,7 +89,11 @@ jobs:
           fi
           make clean && make html
           sphinx-build -b gettext source _build/gettext
-          sphinx-intl update -p _build/gettext -l zh_CN
+
+          sphinx-intl update \
+            -p _build/gettext \
+            -d source/locale \
+            -l zh_CN
 
       - name: Detect PO files to translate
         id: detect
@@ -135,7 +139,10 @@ jobs:
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
             --validate-only
-          make -C docs intl SPHINXOPTS="-W --keep-going"
+          # The Sphinx extension checks every table nested in tabs across the
+          # entire documentation tree after gettext catalogs are applied.
+          make -C docs intl \
+            SPHINXOPTS="-W --keep-going -D validate_tab_table_translations=1"
 
       - name: Process translated files
         if: steps.detect.outputs.has_changes == 'true'
