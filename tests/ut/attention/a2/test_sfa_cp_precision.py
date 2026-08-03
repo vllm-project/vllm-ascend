@@ -11,8 +11,6 @@ def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:
     impl.dcp_rank = rank
     impl._dcp_interleave_size = interleave_size
     impl._dcp_index_topk = 8
-    impl._remap_order = torch.arange(8, dtype=torch.float32)
-    impl._remap_invalid_index = torch.tensor(-1.0)
     return impl
 
 
@@ -29,6 +27,19 @@ def test_sfa_dcp_sparse_indices_are_compacted_per_owner_rank() -> None:
     torch.testing.assert_close(
         rank1,
         torch.tensor([[0, 1, 2, -1, -1, -1, -1, -1]], dtype=torch.int32),
+    )
+
+
+def test_sfa_dcp_sparse_indices_preserve_large_integer_precision() -> None:
+    impl = _make_impl(rank=0, interleave_size=128)
+    impl._dcp_index_topk = 4
+    replicated_indices = torch.tensor([[16_777_216, 16_777_217, 16_777_344, -1]], dtype=torch.int32)
+
+    remapped = impl._remap_sparse_indices(replicated_indices)
+
+    torch.testing.assert_close(
+        remapped,
+        torch.tensor([[8_388_608, 8_388_609, -1, -1]], dtype=torch.int32),
     )
 
 
