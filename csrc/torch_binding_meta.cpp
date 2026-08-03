@@ -66,8 +66,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const at::Tensor &wuq,
     const c10::optional<at::Tensor> &descale1,
     const at::Tensor &gamma2,
-    const at::Tensor &cos,
-    const at::Tensor &sin,
+    const c10::optional<at::Tensor> &cos,
+    const c10::optional<at::Tensor> &sin,
     const at::Tensor &wuk,
     const at::Tensor &kv_cache,
     const at::Tensor &kv_cache_rope,
@@ -90,6 +90,9 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     at::Tensor &inner_out
     )
 {
+    TORCH_CHECK(
+        cos.has_value() == sin.has_value(),
+        "mla_preprocess requires cos and sin to both be tensors or both be None.");
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
