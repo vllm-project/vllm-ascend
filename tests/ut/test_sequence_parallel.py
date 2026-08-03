@@ -135,6 +135,22 @@ def test_user_threshold_takes_precedence():
     assert policy.should_shard(64)
 
 
+def test_backend_decisions_remain_source_specific():
+    legacy_policy = resolve_sequence_parallel_policy(
+        _make_config(enable_sp=False, min_tokens=64),
+        legacy_flashcomm_enabled=True,
+    )
+    pass_policy = resolve_sequence_parallel_policy(
+        _make_config(enable_sp=True, min_tokens=64),
+        legacy_flashcomm_enabled=False,
+    )
+
+    assert legacy_policy.should_use_legacy_backend(64)
+    assert not legacy_policy.should_use_compile_pass(64)
+    assert pass_policy.should_use_compile_pass(64)
+    assert not pass_policy.should_use_legacy_backend(64)
+
+
 def test_zero_token_forward_is_not_sharded():
     policy = resolve_sequence_parallel_policy(
         _make_config(enable_sp=True, min_tokens=0),

@@ -125,10 +125,21 @@ class SequenceParallelPolicy:
     def configured(self) -> bool:
         return self.legacy_flashcomm_enabled or self.compile_pass_enabled
 
-    def should_shard(self, num_tokens: int) -> bool:
+    def _meets_threshold(self, num_tokens: int) -> bool:
         if num_tokens < 0:
             raise ValueError("num_tokens must be non-negative")
-        return self.enabled and num_tokens > 0 and num_tokens >= self.min_tokens
+        return num_tokens > 0 and num_tokens >= self.min_tokens
+
+    def should_shard(self, num_tokens: int) -> bool:
+        return self._meets_threshold(num_tokens) and self.enabled
+
+    def should_use_legacy_backend(self, num_tokens: int) -> bool:
+        """Whether the compatibility FlashComm1 path owns this forward."""
+        return self._meets_threshold(num_tokens) and self.enabled and self.legacy_flashcomm_enabled
+
+    def should_use_compile_pass(self, num_tokens: int) -> bool:
+        """Whether the transitional compile pass owns this forward."""
+        return self._meets_threshold(num_tokens) and self.enabled and self.compile_pass_enabled
 
 
 def resolve_sequence_parallel_policy(
