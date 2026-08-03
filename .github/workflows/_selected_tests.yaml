@@ -323,7 +323,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: selected-test-coverage-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
-          path: tests/outputs/**/covdata/**
+          path: |
+            tests/outputs/**/EXPECTED
+            tests/outputs/**/covdata/**
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
@@ -359,6 +361,41 @@ jobs:
             path: all-coverage
             pattern: selected-test-coverage-*
             merge-multiple: true
+
+        - name: Check full coverage data completeness
+          id: coverage-completeness
+          env:
+            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
+          run: |
+            python3 .github/workflows/scripts/assemble_coverage.py check \
+              --test-groups-json "${SELECTED_TEST_GROUPS}" \
+              --current-root all-coverage
+
+        - name: Download previous coverage data from OBS
+          if: steps.coverage-completeness.outputs.has_missing == 'true'
+          run: |
+            mkdir -p previous-coverage
+            # The historical coverage package is exposed as a public-read
+            # object in OBS, so download it directly via its public URL with
+            # curl (no SDK or credentials needed). On the very first run there
+            # is no history yet (HTTP 404); tolerate that so the downstream
+            # backfill/assemble steps still proceed with the current data.
+            if curl -fSL --retry 3 -o previous-coverage.tar \
+              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar"; then
+              tar xf previous-coverage.tar -C previous-coverage
+            else
+              echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
+            fi
+
+        - name: Backfill missing coverage data
+          if: steps.coverage-completeness.outputs.has_missing == 'true'
+          env:
+            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
+          run: |
+            python3 .github/workflows/scripts/assemble_coverage.py backfill \
+              --test-groups-json "${SELECTED_TEST_GROUPS}" \
+              --current-root all-coverage \
+              --previous-root previous-coverage
 
         - name: Debug - List downloaded coverage files
           run: |

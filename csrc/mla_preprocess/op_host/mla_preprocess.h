@@ -129,6 +129,7 @@ struct OpParam {
     QuantMode quantMode;
     caffe2::TypeMeta inDtype;
     bool enableInnerOut;
+    bool enableRope;
     // MLA dimensions derived from tensor shapes
     uint32_t qLoraRank;
     uint32_t qkNopeHeadDim;
@@ -565,6 +566,7 @@ void MlaPreprocessTiling::Init()
     tilingData->n = opParam.N;
     tilingData->hiddenStateDim = opParam.hiddenStateDim;
     tilingData->isWeightQuantized = opParam.isWeightQuantized;
+    tilingData->enableRope = static_cast<uint32_t>(opParam.enableRope);
     bool enDequant = (opParam.isWeightQuantized == 1);
     bool deqOnTheFly = false;
     if (enDequant && (opParam.inDtype == at::kBFloat16 || opParam.quantMode == QuantMode::PER_TOKEN_SYMM_QUANT)) {
@@ -660,7 +662,8 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     const at::Tensor &kv_cache_rope,
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
-    bool enable_inner_out
+    bool enable_inner_out,
+    bool enable_rope
 )
 {
     auto cacheMode = get_op_mode(cache_mode_map, cache_mode, "krope_ctkv", "cache_mode");
@@ -697,6 +700,7 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     opParam.quantMode = static_cast<QuantMode>(quantMode);
     opParam.inDtype = hiddenState.options().dtype();
     opParam.enableInnerOut = enable_inner_out;
+    opParam.enableRope = enable_rope;
     opParam.qLoraRank = qLoraRank;
     opParam.qkNopeHeadDim = qkNopeHeadDim;
     opParam.qkRopeHeadDim = qkRopeHeadDim;
