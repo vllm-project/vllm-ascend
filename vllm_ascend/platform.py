@@ -50,6 +50,7 @@ from vllm_ascend.utils import (
     update_cudagraph_capture_sizes,
     is_310p,
     enable_sp,
+    use_legacy_sp_backend,
 )
 
 if TYPE_CHECKING:
@@ -735,10 +736,10 @@ class NPUPlatform(Platform):
         # communication methods.
         mmrs_fusion = True
         if is_moe_model(vllm_config):
-            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
+            flash_comm_v1_enabled = num_tokens is not None and use_legacy_sp_backend(num_tokens)
             mmrs_fusion = False
         else:
-            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
+            flash_comm_v1_enabled = num_tokens is not None and use_legacy_sp_backend(num_tokens)
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None

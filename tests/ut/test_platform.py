@@ -236,7 +236,7 @@ class TestNPUPlatform(TestBase):
         with (
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
-            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm_ascend.platform.use_legacy_sp_backend", return_value=False),
             patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
@@ -263,7 +263,7 @@ class TestNPUPlatform(TestBase):
         with (
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
-            patch("vllm_ascend.platform.enable_sp", return_value=True),
+            patch("vllm_ascend.platform.use_legacy_sp_backend", return_value=True),
             patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=2)),
@@ -291,7 +291,7 @@ class TestNPUPlatform(TestBase):
         with (
             patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
-            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm_ascend.platform.use_legacy_sp_backend", return_value=False),
             patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=2),
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),

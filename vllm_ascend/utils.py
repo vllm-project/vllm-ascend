@@ -843,6 +843,11 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     return get_ascend_config().sequence_parallel_policy.legacy_flashcomm_enabled
 
 
+def use_legacy_sp_backend(num_tokens: int) -> bool:
+    """Return whether the transitional FlashComm1 backend owns this forward."""
+    return get_ascend_config().sequence_parallel_policy.should_use_legacy_backend(num_tokens)
+
+
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
