@@ -997,7 +997,12 @@ class IndependentCandidateScanner:
 
         function_name = _expression_name(call.func)
         targets = self._resolve_expression(caller_module, function_name, caller_state)
-        records = [self._functions[target] for target in sorted(targets) if target in self._functions]
+        records = [
+            self._functions[target]
+            for target in sorted(targets)
+            if target in self._functions
+            and self._package_role(target) == "downstream"
+        ]
         for record in records:
             qualified_name = f"{record.module}.{'.'.join(record.scope)}"
             if qualified_name in self._active_helper_calls:
