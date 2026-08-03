@@ -15,6 +15,8 @@
 # limitations under the License.
 """E2E tests for the extract_hidden_states speculative decoding method.
 
+Static capacity prediction: the atomic 8B cases require a 32 GiB vNPU.
+
 Follows the pattern from vllm's test_extraction.py, validating that hidden
 states are correctly extracted and saved on the Ascend NPU. Parametrized over:
 

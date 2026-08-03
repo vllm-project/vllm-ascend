@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+# Static capacity prediction: atomic 8B plus draft cases require a 32 GiB vNPU.
 import os
 from unittest.mock import patch
 

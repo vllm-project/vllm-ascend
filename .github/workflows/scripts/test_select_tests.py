@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import pytest
 import regex as re
@@ -138,13 +140,15 @@ def test_collect_paths_and_basic_path_helpers():
 
 def test_route_helpers():
     # Use a controlled runner_mapping that covers all convention directories
-    # documented in test_config.yaml. A2 UTs use the quarter-card vNPU; the
-    # synthetic a3_8 entry covers main's eight-card routing, while the
+    # documented in test_config.yaml. A2 UTs default to the quarter-card vNPU,
+    # with an explicit half-card exception for the statically largest file.
+    # The synthetic a3_8 entry covers main's eight-card routing, while the
     # other synthetic entries exercise routing keys whose corresponding
     # directories don't exist in the repo today.
     select_tests._load_runner_mapping(
         {
             "runner_mapping": {
+                "tests/ut/attention/a2/test_mla_precision.py": {"default": "a2_half_x1"},
                 "tests/e2e/pull_request/quarter_card": {"default": "a2_quarter_x1"},
                 "tests/e2e/pull_request/half_card": {"default": "a2_half_x1"},
                 "tests/ut/.+/a2_2": {"default": "a2_x2"},
@@ -173,6 +177,14 @@ def test_route_helpers():
         select_tests.NpuType.A2_QUARTER,
     )
     assert select_tests._route_ut_dir("tests/ut/mod/a3_8/test_x.py") == (8, select_tests.NpuType.A3)
+    assert select_tests._route_ut_dir("tests/ut/attention/a2/test_attention_v1_precision.py") == (
+        1,
+        select_tests.NpuType.A2_QUARTER,
+    )
+    assert select_tests._route_ut_dir("tests/ut/attention/a2/test_mla_precision.py::test_case") == (
+        1,
+        select_tests.NpuType.A2_HALF,
+    )
     assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == (4, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == (2, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/310p/test_x.py") == (1, select_tests.NpuType._310P)
@@ -214,6 +226,69 @@ def test_route_helpers():
         1,
         select_tests.NpuType.A2_QUARTER,
     )
+
+
+def test_filter_runner_types_keeps_only_requested_groups():
+    groups = defaultdict(
+        list,
+        {
+            (0, select_tests.NpuType.CPU): ["tests/ut/test_cpu.py"],
+            (1, select_tests.NpuType.A2_QUARTER): ["tests/e2e/quarter.py"],
+            (1, select_tests.NpuType.A2_HALF): ["tests/e2e/half.py"],
+            (1, select_tests.NpuType.A2): ["tests/e2e/full.py"],
+        },
+    )
+
+    select_tests._filter_runner_types(groups, ["a2_quarter", "a2_half"])
+
+    assert set(groups) == {
+        (1, select_tests.NpuType.A2_QUARTER),
+        (1, select_tests.NpuType.A2_HALF),
+    }
+
+
+def test_run_selected_tests_continues_after_target_failure(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    call_log = tmp_path / "pytest-calls.log"
+    fake_pytest = fake_bin / "pytest"
+    fake_pytest.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$CALL_LOG"\n'
+        'if [[ "$*" == *test_first.py* ]]; then exit 1; fi\n'
+        "exit 0\n"
+    )
+    fake_pytest.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CALL_LOG"] = str(call_log)
+    env["RUNNER_TEMP"] = str(tmp_path)
+    script = Path(__file__).with_name("run_selected_tests.sh")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "a2_quarter",
+            "1",
+            "with-device",
+            "tests/fake/test_first.py",
+            "tests/fake/test_second.py",
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    calls = call_log.read_text().splitlines()
+    assert completed.returncode == 1
+    assert len(calls) == 2
+    assert "test_first.py" in calls[0]
+    assert "test_second.py" in calls[1]
+    assert "FAILED: tests/fake/test_first.py" in completed.stdout
+    assert "PASSED: tests/fake/test_second.py" in completed.stdout
 
 
 def test_scan_ut_test_dir(tmp_path):

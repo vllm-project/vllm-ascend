@@ -1,3 +1,4 @@
+# Static capacity prediction: 7B total MoE weights require a 32 GiB vNPU.
 from collections.abc import Sequence
 
 import vllm

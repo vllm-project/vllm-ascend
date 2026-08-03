@@ -3,6 +3,9 @@ End-to-end tests for BatchJobAwareScheduler.
 
 This test module verifies the correctness of the BatchJobAwareScheduler
 by comparing outputs with the default scheduler.
+
+The Qwen3-0.6B engines are initialized sequentially, so the file fits the
+quarter-card prediction budget.
 """
 
 import pytest

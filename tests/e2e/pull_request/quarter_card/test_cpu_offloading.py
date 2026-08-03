@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Static capacity prediction: the skipped 0.6B case belongs to the 16 GiB group.
 import socket
 import time
 
