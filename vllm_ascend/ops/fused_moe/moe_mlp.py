@@ -135,6 +135,10 @@ def quant_apply_mlp(
     # GELU can't use the fused SwiGLU+quant ops below; fall back to the
     # non-fused GMM -> GELU -> (re)quant -> GMM2 path for GELU activations.
     is_gelu_activation = activation in (MoEActivation.GELU, MoEActivation.GELU_TANH)
+    # W4A16 (int4, with zero-point) and W8A16FP (fp8, without zero-point) are both
+    # weight-only antiquant schemes: activations stay in bf16/fp16 and weights are
+    # dequantized inside npu_grouped_matmul via antiquant_scale(/antiquant_offset).
+    is_weight_only_antiquant = w1_offset is not None or mxfp_quant_dtype == QuantType.W8A16FP
     is_swigluoai_uninterleave = act_name == "swigluoai_uninterleave"
 
     if use_mxfp_quant:
@@ -145,10 +149,11 @@ def quant_apply_mlp(
         if w1_offset is not None or w2_offset is not None:
             raise NotImplementedError("MXFP path does not support antiquant offset yet.")
 
-    if w1_offset is not None:
+    if is_weight_only_antiquant:
+        # Weight-only path: no activation quantization.
         unquantized_hidden_states = hidden_states
         quantized_hidden_states = None
-    elif mxfp_quant_dtype in [QuantType.W4A16MXFP, QuantType.W8A16FP]:
+    elif mxfp_quant_dtype == QuantType.W4A16MXFP:
         quantized_hidden_states = None
         pertoken_scale = None
     elif dynamic_scale is None:
@@ -172,7 +177,7 @@ def quant_apply_mlp(
     _output_dtype = w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype
 
     is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
-    if w1_scale_bias is None and w1_offset is None and is_mc2 and not is_gelu_activation:
+    if w1_scale_bias is None and not is_weight_only_antiquant and is_mc2 and not is_gelu_activation:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -231,7 +236,7 @@ def quant_apply_mlp(
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
-                weight=w1,
+                weight=w1 if isinstance(w1, list) else [w1],
                 split_item=3,
                 group_list_type=group_list_type,
                 group_type=0,
@@ -266,7 +271,7 @@ def quant_apply_mlp(
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
-            weight=w2,
+            weight=w2 if isinstance(w2, list) else [w2],
             weight_scale=w2_scale,
             per_token_scale=swiglu_out_scale,
             group_list=group_list,
@@ -282,13 +287,15 @@ def quant_apply_mlp(
             fallback_output_dtype=w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype,
             mxfp_quant_dtype=mxfp_quant_dtype,
         )
-    elif w1_offset is not None:
+    elif is_weight_only_antiquant:
+        # Weight-only antiquant: int4 passes a zero-point via antiquant_offset,
+        # fp8 (W8A16FP) passes None since float formats are symmetric around 0.
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[unquantized_hidden_states],
-            weight=[w1],
-            antiquant_scale=[w1_scale],
-            antiquant_offset=[w1_offset],
+            weight=w1 if isinstance(w1, list) else [w1],
+            antiquant_scale=w1_scale if isinstance(w1_scale, list) else [w1_scale],
+            antiquant_offset=[w1_offset] if w1_offset is not None else None,
             split_item=2,
             group_list_type=group_list_type,
             group_type=0,
@@ -317,9 +324,9 @@ def quant_apply_mlp(
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[w2],
-            antiquant_scale=[w2_scale],
-            antiquant_offset=[w2_offset],
+            weight=w2 if isinstance(w2, list) else [w2],
+            antiquant_scale=w2_scale if isinstance(w2_scale, list) else [w2_scale],
+            antiquant_offset=[w2_offset] if w2_offset is not None else None,
             split_item=2,
             group_list_type=group_list_type,
             group_type=0,
@@ -445,7 +452,7 @@ def quant_apply_mlp(
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
-            weight=w2,
+            weight=w2 if isinstance(w2, list) else [w2],
             weight_scale=w2_scale,
             per_token_scale=swiglu_out_scale,
             group_list=group_list,
@@ -647,10 +654,10 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         mxfp = mlp_compute_input.quant.mxfp
         assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is W8A8MXFP."
         act_quant_type = mxfp.act_quant_type or act_quant_type
-        if mxfp_quant_dtype in [QuantType.W4A16MXFP, QuantType.W8A16FP]:
+        if mxfp_quant_dtype == QuantType.W4A16MXFP:
             act_quant_type = mxfp.act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
-        if mxfp_quant_dtype in [QuantType.W4A8MXFP, QuantType.W4A16MXFP, QuantType.W8A16FP]:
+        if mxfp_quant_dtype in [QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
             weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype
