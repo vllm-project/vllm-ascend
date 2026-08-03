@@ -115,9 +115,7 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
-        copy_and_expand_dflash_and_dspark_inputs_kernel[
-            (_compute_num_programs(num_context, num_query_total),)
-        ](
+        copy_and_expand_dflash_and_dspark_inputs_kernel[(_compute_num_programs(num_context, num_query_total),)](
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,
