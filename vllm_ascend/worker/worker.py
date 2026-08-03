@@ -302,30 +302,45 @@ class NPUWorker(WorkerBase):
             )
 
     def _get_draft_model(self):
-        """Return the MTP/eagle draft model for weight update, or None."""
+        """Return the MTP/eagle draft model for weight update, or None.
+
+        Prefer ``drafter.get_model()`` (e.g. EagleProposer). Fall back to
+        ``drafter.model`` only when ``get_model`` is absent.
+        """
         drafter = getattr(self.model_runner, "drafter", None)
         if drafter is None:
             return None
-        # AscendEagleProposer stores the draft model in .model (may be wrapped)
+        # Prefer proposer.get_model() to unwrap ACLGraphWrapper when present.
+        if hasattr(drafter, "get_model") and callable(drafter.get_model):
+            with suppress(Exception):
+                draft_model = drafter.get_model()
+                if draft_model is not None and hasattr(draft_model, "load_weights"):
+                    return draft_model
+            # get_model is authoritative when present; do not fall back.
+            return None
         draft_model = getattr(drafter, "model", None)
         if draft_model is None:
             return None
-        # Unwrap ACLGraphWrapper if present
-        if hasattr(drafter, "get_model"):
+        # Fallback: unwrap wrapper stored on the model itself.
+        if hasattr(draft_model, "get_model") and callable(draft_model.get_model):
             with suppress(Exception):
-                draft_model = drafter.get_model()
-        # Draft model must have load_weights for checkpoint-format update
+                draft_model = draft_model.get_model()
         if not hasattr(draft_model, "load_weights"):
             return None
         return draft_model
 
     def _bind_draft_model_to_engine(self) -> None:
-        """Attach MTP draft model to the transfer engine for this update cycle."""
+        """Pass MTP draft model into the transfer engine via explicit API."""
         assert self.weight_transfer_engine is not None
         draft_model = self._get_draft_model()
-        self.weight_transfer_engine.draft_model = draft_model
         drafter = getattr(self.model_runner, "drafter", None)
-        self.weight_transfer_engine.draft_model_config = getattr(drafter, "draft_model_config", None)
+        draft_cfg = getattr(drafter, "draft_model_config", None)
+        if draft_cfg is None:
+            spec_cfg = getattr(self.vllm_config, "speculative_config", None)
+            draft_cfg = getattr(spec_cfg, "draft_model_config", None)
+        set_draft = getattr(self.weight_transfer_engine, "set_draft_model", None)
+        if callable(set_draft):
+            set_draft(draft_model, draft_cfg)
 
     def start_weight_update(self, is_checkpoint_format: bool | None = None) -> None:
         """Begin a new weight update; prepares the model for layerwise reload.

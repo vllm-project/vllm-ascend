@@ -126,6 +126,17 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
+        self._draft_model: torch.nn.Module | None = None
+        self._draft_model_config = None
+
+    def set_draft_model(
+        self,
+        draft_model: torch.nn.Module | None,
+        draft_model_config=None,
+    ) -> None:
+        """Bind optional MTP/eagle draft model for weight-update cycles."""
+        self._draft_model = draft_model
+        self._draft_model_config = draft_model_config
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
         """Parse update dict, deserializing pickled IPC handles if present.
@@ -163,10 +174,9 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         )
 
         initialize_layerwise_reload(self.model)
-        draft_model = getattr(self, "draft_model", None)
-        if draft_model is not None:
+        if self._draft_model is not None:
             # Also prepare MTP/eagle draft model for layerwise reload.
-            initialize_layerwise_reload(draft_model)
+            initialize_layerwise_reload(self._draft_model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
@@ -175,19 +185,17 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
-        draft_model = getattr(self, "draft_model", None)
-        if draft_model is not None:
-            draft_cfg = getattr(self, "draft_model_config", None) or self.model_config
-            finalize_layerwise_reload(draft_model, draft_cfg)
+        if self._draft_model is not None:
+            draft_cfg = self._draft_model_config or self.model_config
+            finalize_layerwise_reload(self._draft_model, draft_cfg)
 
     def _load_weights_with_draft(self, weights):
         """Load weights into target model and MTP draft model when present."""
         weights_list = list(weights)
         self.model.load_weights(weights_list)
-        draft_model = getattr(self, "draft_model", None)
-        if draft_model is not None:
+        if self._draft_model is not None:
             # Draft load_weights filters by name; MTP-only params go to draft.
-            draft_model.load_weights(weights_list)
+            self._draft_model.load_weights(weights_list)
 
     def receive_weights(
         self,

@@ -123,6 +123,17 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
+        self._draft_model: torch.nn.Module | None = None
+        self._draft_model_config = None
+
+    def set_draft_model(
+        self,
+        draft_model: torch.nn.Module | None,
+        draft_model_config=None,
+    ) -> None:
+        """Bind optional MTP/eagle draft model for weight-update cycles."""
+        self._draft_model = draft_model
+        self._draft_model_config = draft_model_config
 
     def start_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import (
@@ -130,10 +141,9 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         )
 
         initialize_layerwise_reload(self.model)
-        draft_model = getattr(self, "draft_model", None)
-        if draft_model is not None:
+        if self._draft_model is not None:
             # Also prepare MTP/eagle draft model for layerwise reload.
-            initialize_layerwise_reload(draft_model)
+            initialize_layerwise_reload(self._draft_model)
 
     def finish_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import (
@@ -141,19 +151,17 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
-        draft_model = getattr(self, "draft_model", None)
-        if draft_model is not None:
-            draft_cfg = getattr(self, "draft_model_config", None) or self.model_config
-            finalize_layerwise_reload(draft_model, draft_cfg)
+        if self._draft_model is not None:
+            draft_cfg = self._draft_model_config or self.model_config
+            finalize_layerwise_reload(self._draft_model, draft_cfg)
 
     def _load_weights_with_draft(self, weights):
         """Load weights into target model and MTP draft model when present."""
         weights_list = list(weights)
         self.model.load_weights(weights_list)
-        draft_model = getattr(self, "draft_model", None)
-        if draft_model is not None:
+        if self._draft_model is not None:
             # Draft load_weights filters by name; MTP-only params go to draft.
-            draft_model.load_weights(weights_list)
+            self._draft_model.load_weights(weights_list)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """

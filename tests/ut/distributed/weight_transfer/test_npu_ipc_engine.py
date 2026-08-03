@@ -143,6 +143,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     received: dict[str, list[tuple[str, torch.Tensor]]] = {}
     engine.model = MagicMock()
+    engine._draft_model = None
     engine.device = MagicMock(index=device_index)
     engine.model.load_weights.side_effect = lambda weights: received.update(weights=weights)
 
@@ -162,6 +163,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 def test_start_weight_update_initializes_layerwise_reload():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
+    engine._draft_model = None
 
     with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as mock_initialize:
         engine.start_weight_update()
@@ -173,8 +175,72 @@ def test_finish_weight_update_finalizes_layerwise_reload():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
+    engine._draft_model = None
+    engine._draft_model_config = None
 
     with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as mock_finalize:
         engine.finish_weight_update()
 
     mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+
+
+def test_set_draft_model_and_start_also_initializes_draft():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine._draft_model = None
+    engine._draft_model_config = None
+    draft = MagicMock()
+    draft_cfg = MagicMock()
+
+    engine.set_draft_model(draft, draft_cfg)
+    assert engine._draft_model is draft
+    assert engine._draft_model_config is draft_cfg
+
+    with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as mock_initialize:
+        engine.start_weight_update()
+
+    assert mock_initialize.call_count == 2
+    mock_initialize.assert_any_call(engine.model)
+    mock_initialize.assert_any_call(draft)
+
+
+def test_finish_weight_update_finalizes_draft_with_draft_config():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.model_config = MagicMock(name="target_cfg")
+    draft = MagicMock()
+    draft_cfg = MagicMock(name="draft_cfg")
+    engine.set_draft_model(draft, draft_cfg)
+
+    with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as mock_finalize:
+        engine.finish_weight_update()
+
+    assert mock_finalize.call_count == 2
+    mock_finalize.assert_any_call(engine.model, engine.model_config)
+    mock_finalize.assert_any_call(draft, draft_cfg)
+
+
+def test_load_weights_with_draft_loads_both_models():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    draft = MagicMock()
+    engine.set_draft_model(draft, None)
+    weights = [("a.weight", torch.ones(2))]
+
+    engine._load_weights_with_draft(weights)
+
+    engine.model.load_weights.assert_called_once()
+    draft.load_weights.assert_called_once()
+    assert engine.model.load_weights.call_args.args[0] == weights
+    assert draft.load_weights.call_args.args[0] == weights
+
+
+def test_load_weights_with_draft_skips_when_no_draft():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.set_draft_model(None, None)
+    weights = [("a.weight", torch.ones(2))]
+
+    engine._load_weights_with_draft(weights)
+
+    engine.model.load_weights.assert_called_once_with(weights)
