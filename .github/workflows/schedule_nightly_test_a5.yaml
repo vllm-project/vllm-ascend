@@ -204,11 +204,14 @@ jobs:
           echo "single_node=[${{ steps.set-matrix.outputs.single_node }}]"
           echo "multi_card=[${{ steps.set-matrix.outputs.multi_card }}]"
       # ==========新增调试打印 结束==========
-      
+
   build-image:
     name: Build nightly-a5 image
     if: >-
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_build_image || 'false') != 'true')
+      always() && (
+        github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_build_image || 'false') != 'true'
+        || github.event_name == 'pull_request'
+      )
     strategy:
       matrix:
         vllm_ascend_branch: >-
@@ -238,7 +241,7 @@ jobs:
       max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
@@ -281,7 +284,7 @@ jobs:
       max-parallel: 4
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
@@ -324,7 +327,7 @@ jobs:
       max-parallel: 9
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -357,7 +360,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_card) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -382,7 +385,9 @@ jobs:
   clear-pre-logs:
     runs-on: linux-aarch64-a5-8
     needs: [multi-node-tests, double-node-tests]
-    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+    if: >-
+      always() &&
+      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
         run: |
