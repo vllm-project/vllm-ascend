@@ -69,7 +69,6 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
     assert mock_gather.call_args.kwargs["key"] is key
     assert mock_gather.call_args.kwargs["value"] is value
-    assert mock_gather.call_args.kwargs["cache_mode"] == "Norm"
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():

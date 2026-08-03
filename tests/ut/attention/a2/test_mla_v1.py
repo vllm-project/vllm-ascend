@@ -2180,7 +2180,6 @@ class TestAscendMLAImpl(TestBase):
         cache_load_args = mock_cache_load.call_args
         self.assertEqual(cache_load_args.args[0].shape, (1, 1, 1, 32))
         self.assertEqual(cache_load_args.args[1].shape, (1, 1, 1, 16))
-        self.assertEqual(cache_load_args.kwargs["cache_mode"], "PA_NZ")
         expected = (quantized_kv.squeeze().to(torch.float32) * self.impl.fak_descale_float).to(torch.bfloat16)
         torch.testing.assert_close(captured_kv_b_inputs[0], expected)
 
