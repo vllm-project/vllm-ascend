@@ -97,7 +97,8 @@ class BaseRunner:
 
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
-        env["CONFIG_YAML_PATH"] = self.inp.config_yaml
+        if self.inp.config_yaml:
+            env["CONFIG_YAML_PATH"] = self.inp.config_yaml
         if self.inp.config_base_path:
             env["CONFIG_BASE_PATH"] = self.inp.config_base_path
         return env
@@ -139,9 +140,12 @@ class BaseRunner:
 class SingleNodeRunner(BaseRunner):
     def _test_command(self) -> list[str]:
         """Return the pytest command matching the original failing workflow."""
+        if self.inp.test_path:
+            return ["python", "-m", "pytest", "-sv", self.inp.test_path]
+
         config_base = self.inp.config_base_path
         if config_base and Path(config_base).as_posix().rstrip("/").endswith("tests/e2e/models/configs"):
-            config_path = self.repo / config_base / self.inp.config_yaml
+            config_path = self.repo / config_base / str(self.inp.config_yaml)
             with config_path.open(encoding="utf-8") as config_file:
                 model_type = (yaml.safe_load(config_file) or {}).get("model_type", "vllm")
             test_name = {
