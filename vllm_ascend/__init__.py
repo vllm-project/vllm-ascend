@@ -74,8 +74,9 @@ def register_model():
         install_hunyuan_vl_processor_compat,
     )
 
-    install_hunyuan_vl_processor_compat()
     from .models import register_model
+
+    install_hunyuan_vl_processor_compat()
 
     register_model()
 

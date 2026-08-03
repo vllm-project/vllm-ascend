@@ -5,7 +5,7 @@ comment command, without running the full E2E test suite.
 
 ## Background
 
-The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test suite
+The `E2E-Full` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) normally runs the complete E2E test suite
 when a PR has `ready` label. This is expensive in CI resources
 and time.
 

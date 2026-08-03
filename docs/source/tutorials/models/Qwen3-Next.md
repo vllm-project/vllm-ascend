@@ -4,7 +4,7 @@
 
 The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high sparsity. Compared to the MoE architecture of Qwen3, it has introduced key improvements in aspects such as the hybrid attention mechanism and multi-token prediction mechanism, enhancing the training and inference efficiency of the model under long contexts and large total parameter scales.
 
-This document will present the core verification steps of the model, including supported features, environment preparation, as well as accuracy and performance evaluation. Qwen3 Next is currently using Triton Ascend, which is in the experimental phase. In subsequent versions, its performance related to stability and accuracy may change, and performance will be continuously optimized.
+This document will present the core verification steps of the model, including supported features, environment preparation, as well as accuracy and performance evaluation. Qwen3-Next is currently using Triton Ascend, which is in the experimental phase. In subsequent versions, its performance related to stability and accuracy may change, and performance will be continuously optimized.
 
 The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1` and can stably run in v0.16.0 and later version.
 
@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64G × 16) node** or **8 cards in 1 Atlas 800 A2 (64G × 8) node**. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 
@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 **A3 series:**
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```bash
 #!/bin/sh
@@ -69,7 +69,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
+The Qwen3-Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
 **Installation Verification:**
 
@@ -123,9 +123,9 @@ For more details, please refer to the [Installation Guide](../../installation.md
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800 A3 (64G × 16).
+Single-node deployment completes both Prefill and Decode within the same node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 
-While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
+While a single-node setup supports all input/output scenarios, consider deploying multi-node clusters for optimal performance.
 
 Startup Command:
 
@@ -158,7 +158,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 }'
 ```
 
-Expected Result:
+Expected result:
 
 The service returns HTTP 200 OK with a JSON response containing the `choices` field. Example output (content truncated for brevity):
 
@@ -228,7 +228,7 @@ vllm bench serve --model Qwen/Qwen3-Next-80B-A3B-Instruct  --dataset-name random
 
 After about several minutes, you can get the performance evaluation result.
 
-The performance result is:  
+The performance result is:
 
 ```bash
 Hardware: A3-752T, 2 node
@@ -252,21 +252,21 @@ Performance: 580tps, TPOT 54ms
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|
-|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
-|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
-|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution visual inputs|
+|High Throughput<br>(16k context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128k, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
+|Long Context<br>(128k, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080p)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution visual inputs|
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|2|1|1|~16K|3|
-|Long Context (128K, no cache)|Server / Single Machine|2|1|1|128K|3|
-|Long Context (128K, with cache)|Server / Single Machine|2|1|1|128K|3|
-|Multimodal (1080P)|Server / Single Machine|2|1|1|~16K|3|
+|High Throughput / Low Latency (16k)|Server / Single Machine|2|1|1|~16k|3|
+|Long Context (128k, no cache)|Server / Single Machine|2|1|1|128k|3|
+|Long Context (128k, with cache)|Server / Single Machine|2|1|1|128k|3|
+|Multimodal (1080p)|Server / Single Machine|2|1|1|~16k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
@@ -276,7 +276,7 @@ Performance: 580tps, TPOT 54ms
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

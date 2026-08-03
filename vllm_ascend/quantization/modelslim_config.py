@@ -60,7 +60,15 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
+_MINIMAX_M3_PACKED_MODULES = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+}
+
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
+    "minimax_m3": _MINIMAX_M3_PACKED_MODULES,
+    "minimax_m3_vl": _MINIMAX_M3_PACKED_MODULES,
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",
@@ -708,7 +716,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         elif _is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
-                from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+                from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
