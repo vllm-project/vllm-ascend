@@ -7,6 +7,7 @@ _envs: &envs
   VLLM_USE_V1: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_ASCEND_ENABLE_FLASHCOMM: "1"
+  SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
   - "--tensor-parallel-size"
