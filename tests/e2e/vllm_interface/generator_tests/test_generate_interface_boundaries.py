@@ -9026,6 +9026,68 @@ class Child(Base):
     assert "unknown_signature_transform" in {finding.reason_code for finding in findings if finding.supplemental}
 
 
+def test_v031_torch_compiler_disable_wrapper_adapter_is_sha_pinned(
+    tmp_path: Path,
+) -> None:
+    vllm_root, ascend_root = _v018_source_roots(tmp_path)
+    _write(
+        vllm_root,
+        "vllm/base.py",
+        """
+import torch
+
+
+@torch.compiler.disable
+def run(value, *, mode=None):
+    return value
+""",
+    )
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import vllm.base as base
+
+
+def replacement(*args, **kwargs):
+    return base.run(*args, **kwargs)
+
+
+base.run = replacement
+""",
+    )
+
+    torch_sha = "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0"
+    pinned_relations, pinned_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"torch": torch_sha},
+    ).generate()
+    unknown_relations, unknown_findings = generator.InterfaceBoundaryGenerator(
+        vllm_root,
+        ascend_root,
+        source_versions={"torch": "unregistered-version"},
+    ).generate()
+
+    pinned = next(relation for relation in pinned_relations if relation.relation == "monkey_patch")
+    unknown = next(relation for relation in unknown_relations if relation.relation == "monkey_patch")
+    wrapper_signature = ["sync", [], [], "args", [], "kwargs"]
+    assert pinned.upstream_signature_contract.status == "exact"
+    assert pinned.upstream_signature_contract.runtime_entry_signature == wrapper_signature
+    assert pinned.upstream_signature_contract.reported_signature == pinned.upstream_signature
+    assert pinned.upstream_signature_contract.forwarded_targets == ("vllm.base.run",)
+    assert any(
+        "torch.compiler.disable" in item and torch_sha in item
+        for item in pinned.upstream_signature_contract.provenance
+    )
+    assert not [finding for finding in pinned_findings if finding.reason_code == "unknown_signature_transform"]
+    assert unknown.upstream_signature_contract.status == "unknown"
+    assert any(
+        finding.reason_code == "unknown_signature_transform" and finding.supplemental
+        for finding in unknown_findings
+    )
+
+
 def test_v025_outer_classmethod_keeps_descriptor_when_inner_signature_is_unknown(
     tmp_path: Path,
 ) -> None:
