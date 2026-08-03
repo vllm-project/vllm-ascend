@@ -919,3 +919,76 @@ def test_external_root_cli_values_are_validated(tmp_path: Path) -> None:
             expect_ascend_sha=None,
             expect_external_shas={},
         )
+
+
+def test_v034_scanner_follows_local_helper_module_arguments(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(
+        vllm_root,
+        "vllm/model.py",
+        "class Info:\n    def hook(self):\n        pass\n",
+    )
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+def patch_module(model_module):
+    def replacement(self):
+        return None
+
+    model_module.Info.hook = replacement
+
+
+def install():
+    from vllm import model
+
+    patch_module(model)
+""",
+    )
+
+    candidates = auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+    patches = [candidate for candidate in candidates if candidate.relation == "monkey_patch"]
+
+    assert len(patches) == 1
+    assert patches[0].line == 6
+    assert patches[0].scope == "patch_module"
+    assert "vllm.model.Info.hook" in patches[0].targets
+
+
+def test_v034_scanner_resolves_sys_modules_get_assignments(
+    tmp_path: Path,
+) -> None:
+    vllm_root = tmp_path / "vllm-repo"
+    ascend_root = tmp_path / "ascend-repo"
+    _write(vllm_root, "vllm/__init__.py", "")
+    _write(vllm_root, "vllm/cache.py", "def hook():\n    pass\n")
+    _write(ascend_root, "vllm_ascend/__init__.py", "")
+    _write(
+        ascend_root,
+        "vllm_ascend/plugin.py",
+        """
+import sys
+
+
+def replacement():
+    return None
+
+
+cached_module = sys.modules.get("vllm.cache")
+if cached_module is not None:
+    cached_module.hook = replacement
+""",
+    )
+
+    candidates = auditor.IndependentCandidateScanner(vllm_root, ascend_root).scan()
+    patches = [candidate for candidate in candidates if candidate.relation == "monkey_patch"]
+
+    assert len(patches) == 1
+    assert patches[0].line == 10
+    assert patches[0].scope is None
+    assert "vllm.cache.hook" in patches[0].targets
