@@ -352,9 +352,12 @@ def _parallel_encode_chunks(
     chunks: list[TextChunk],
     executor: Executor,
 ) -> list[ChunkEncoding]:
+    from concurrent.futures import as_completed
     futures: list[Future[ChunkEncoding]] = [executor.submit(_encode_chunk, tokenizer, chunk) for chunk in chunks]
+    encodings: list[ChunkEncoding] = []
     try:
-        encodings = [future.result() for future in futures]
+        for future in as_completed(futures):
+            encodings.append(future.result())
     except Exception as exc:
         for future in futures:
             future.cancel()
