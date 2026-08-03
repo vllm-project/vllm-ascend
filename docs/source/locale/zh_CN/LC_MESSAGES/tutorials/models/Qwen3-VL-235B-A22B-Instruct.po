@@ -975,7 +975,7 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能说明请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能说明请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/Qwen3-VL-235B-A22B-Instruct.md:587
 msgid "9.2.2 Recommended tuning order"

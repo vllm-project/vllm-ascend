@@ -618,7 +618,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/Kimi-K2.6.md:733
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/Kimi-K2.6.md:735
 msgid ""
@@ -1010,7 +1010,7 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/Kimi-K2.6.md:872
 msgid "10 FAQ"

@@ -376,7 +376,7 @@ msgstr "没有与HCCL或NPU初始化相关的错误日志。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:224
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:226
 msgid ""
@@ -398,7 +398,7 @@ msgstr "`choices[0].message.content`包含生成的助手响应。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:243
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:245
 msgid "Using AISBench"
@@ -520,7 +520,7 @@ msgstr "0.0100"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:274
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:276
 msgid ""
@@ -907,7 +907,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:336
 msgid "9 Performance Tuning"
-msgstr "9性能调优"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:338
 msgid "9.1 Recommended Configurations"
@@ -1066,7 +1066,7 @@ msgid ""
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+"请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
 #: ../../source/tutorials/models/Kimi-K2-Thinking.md:370
 msgid "10 FAQ"

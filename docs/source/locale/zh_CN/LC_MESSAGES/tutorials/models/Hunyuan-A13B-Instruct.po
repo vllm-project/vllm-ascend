@@ -22,7 +22,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:1
 msgid "Hunyuan-A13B-Instruct"
-msgstr "混元-A13B-Instruct"
+msgstr "Hunyuan-A13B-Instruct"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:3
 msgid "Introduction"
@@ -35,7 +35,7 @@ msgid ""
 "activation parameters, supports 256k ultra-long contexts, and possesses "
 "native thought chain (CoT) reasoning capabilities."
 msgstr ""
-"混元-A13B-Instruct "
+"Hunyuan-A13B-Instruct "
 "是由腾讯开发的细粒度混合专家模型（MoE）。该模型总参数量为800亿，激活参数量为130亿，支持256k超长上下文，并具备原生思维链（CoT）推理能力。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:7

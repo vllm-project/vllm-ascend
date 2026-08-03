@@ -194,9 +194,9 @@ vllm serve Qwen/Qwen3-VL-Reranker-2B \
   --max-model-len 1024
 ```
 
-    Required  Parameter Descriptions:
+Required  Parameter Descriptions:
 
-    `--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 ::::
 :::::

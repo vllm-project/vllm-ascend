@@ -21,8 +21,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:1
-msgid "Feature × Feature"
-msgstr "功能 × 功能"
+msgid "feature_matrix"
+msgstr "功能矩阵"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:3
 msgid ""

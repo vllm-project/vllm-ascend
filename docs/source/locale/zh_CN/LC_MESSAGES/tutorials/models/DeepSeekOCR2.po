@@ -421,7 +421,7 @@ msgid ""
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+"请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:248
 msgid "10 FAQ"

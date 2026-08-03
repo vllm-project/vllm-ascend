@@ -396,7 +396,7 @@ msgstr "如果服务启动成功，将显示以下启动日志："
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:313
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:315
 msgid ""
@@ -424,7 +424,7 @@ msgstr "预期结果：服务返回HTTP 200 OK。JSON响应中包含带有生成
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:348
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:350
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:398
@@ -516,7 +516,7 @@ msgstr "82.33"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:396
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:400
 msgid ""
@@ -529,7 +529,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:402
 msgid "9 Performance Tuning"
-msgstr "9性能调优"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:404
 msgid "9.1 Recommended Configurations"
@@ -572,11 +572,11 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:416
 msgid "10 FAQ"
-msgstr "10常见问题"
+msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:418
 msgid ""

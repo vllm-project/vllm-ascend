@@ -53,7 +53,7 @@ msgid ""
 "features](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
 msgstr ""
-"请参考[支持的功能](../../user_guide/support_matrix/supported_models.md)获取该模型支持的功能矩阵。"
+"请参考[支持的模型](../../user_guide/support_matrix/supported_models.md)获取该模型支持的功能矩阵。"
 
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md:11
 msgid "3 Prerequisites"

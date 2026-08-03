@@ -97,11 +97,11 @@ f you prefer to build from source instead of using the Docker image, install vLL
 
 :::{note}
 
-    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
-    ```bash
-    pip uninstall -y triton-ascend triton
-    ```
+```bash
+pip uninstall -y triton-ascend triton
+```
 
 To verify the source installation:
 

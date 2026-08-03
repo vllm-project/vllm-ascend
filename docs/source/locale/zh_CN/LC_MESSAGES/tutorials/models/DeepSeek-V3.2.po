@@ -452,7 +452,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:788
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:790
 msgid ""
@@ -483,7 +483,7 @@ msgstr "**预期结果**："
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:814
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:816
 msgid "Here are two accuracy evaluation methods."
@@ -529,7 +529,7 @@ msgstr "运行`lm_eval`执行精度评估。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:842
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:846
 msgid ""
@@ -616,7 +616,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:883
 msgid "10 FAQ"
-msgstr "10常见问题解答"
+msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:885
 msgid ""

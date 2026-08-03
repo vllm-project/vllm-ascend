@@ -1089,7 +1089,7 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能说明请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能说明请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:1060
 msgid "10 FAQ"

@@ -21,8 +21,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:1
-msgid "Qwen3.5-397B-A17B Deployment Tutorial"
-msgstr "Qwen3.5-397B-A17B 部署教程"
+msgid "Qwen3.5-397B-A17B"
+msgstr "Qwen3.5-397B-A17B"
 
 #: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:3
 msgid "1 Introduction"

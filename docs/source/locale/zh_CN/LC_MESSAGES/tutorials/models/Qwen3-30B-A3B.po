@@ -402,7 +402,7 @@ msgstr "服务启动后，通过发送提示词验证其运行状态。使用示
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:316
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:318
 msgid ""
@@ -421,7 +421,7 @@ msgstr "预期结果：HTTP 200，返回包含`choices`字段及生成文本的J
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:345
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:347
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:418
@@ -558,7 +558,7 @@ msgstr "76.67%"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:416
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:420
 msgid ""
@@ -626,7 +626,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:501
 msgid "9 Performance Tuning"
-msgstr "9性能调优"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:503
 msgid "9.1 Recommended Configurations"
@@ -825,7 +825,7 @@ msgid ""
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。详细功能说明请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。详细功能说明请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/Qwen3-30B-A3B.md:644
 msgid "10 FAQ"

@@ -60,7 +60,7 @@ msgstr "启动容器后，您应安装所需的软件包："
 
 #: ../../source/developer_guide/contribution/testing.md
 msgid "Multi-cards"
-msgstr "多卡片"
+msgstr "多卡"
 
 #: ../../source/developer_guide/contribution/testing.md:153
 msgid "Running tests"

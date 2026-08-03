@@ -164,7 +164,7 @@ This section describes operating system–level optimizations applied on the hos
 These settings must be applied on the host OS and with root privileges. Not inside containers.
 :::
 
-#### 4.1
+#### 4.1 Set CPU Frequency Governor to `performance`
 
 Set CPU Frequency Governor to `performance`
 

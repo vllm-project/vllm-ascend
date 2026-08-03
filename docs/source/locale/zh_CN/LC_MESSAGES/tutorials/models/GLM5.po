@@ -434,7 +434,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/GLM5.md:1362
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/GLM5.md:1364
 msgid ""
@@ -447,7 +447,7 @@ msgstr "预期结果："
 
 #: ../../source/tutorials/models/GLM5.md:1383
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/GLM5.md:1385
 msgid "7.1 Using AISBench"
@@ -466,7 +466,7 @@ msgstr "执行后即可获取结果。"
 
 #: ../../source/tutorials/models/GLM5.md:1391
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/GLM5.md:1393
 msgid "8.1 Using AISBench"
@@ -493,7 +493,7 @@ msgstr "更多详细信息，请参阅 [vllm 基准测试](https://docs.vllm.ai/
 
 #: ../../source/tutorials/models/GLM5.md:1401
 msgid "9 Performance Tuning"
-msgstr "9性能调优"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/GLM5.md:1403
 msgid "9.1 Recommended Configurations"
@@ -649,7 +649,7 @@ msgstr "8"
 
 #: ../../source/tutorials/models/GLM5.md:1423
 msgid "10 FAQ"
-msgstr "10常见问题"
+msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/GLM5.md:1427
 msgid ""

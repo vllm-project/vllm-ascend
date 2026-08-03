@@ -68,13 +68,13 @@ msgid ""
 "List](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
 msgstr ""
-"请参阅[支持功能列表](../../user_guide/support_matrix/supported_models.md)以获取该模型支持的功能矩阵。"
+"请参阅[支持的模型](../../user_guide/support_matrix/supported_models.md)以获取该模型支持的功能矩阵。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:15
 msgid ""
 "Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
-msgstr "请参阅[功能指南](../../user_guide/feature_guide/index.md)以获取该功能的配置。"
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取该功能的配置。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:17
 msgid "3 Prerequisites"
@@ -370,7 +370,7 @@ msgstr "5.3.2使用vLLM作为后端，结合PP-DocLayoutV2进行离线推理"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:284
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:286
 msgid "If your service starts successfully, you can see the info shown below:"
@@ -394,7 +394,7 @@ msgstr "如果查询服务器成功，您将看到如下信息（客户端）：
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:357
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:359
 msgid ""
@@ -408,7 +408,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:361
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:363
 msgid ""
@@ -422,7 +422,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:365
 msgid "9 Performance Tuning"
-msgstr "9性能调优"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:367
 msgid "9.1 Recommended Configurations"
@@ -585,11 +585,11 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:399
 msgid "10 FAQ"
-msgstr "10常见问题"
+msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:401
 msgid ""
