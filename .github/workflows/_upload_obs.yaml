@@ -37,13 +37,14 @@ jobs:
     concurrency:
       group: failure-analysis-obs-daily-archive
       cancel-in-progress: false
+      queue: max
     env:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
       PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || 'unknown' }}
       PR_TITLE: ${{ github.event.workflow_run.pull_requests[0].title || 'untitled' }}
-      RUN_ID: ${{ github.run_id }}
-      RUN_ATTEMPT: ${{ github.run_attempt }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
     steps:
       - name: Download failure analysis report
         continue-on-error: true
@@ -178,7 +179,15 @@ jobs:
                       print(f"Downloaded existing archive: {obs_key}")
                       if not extract_archive(archive_path, CONTENT_DIR):
                           return
-                  elif response.status == 404:
+                  elif response.status == 404 or (
+                      response.status == 403 and response.errorCode == "AccessDenied"
+                  ):
+                      if response.status == 403:
+                          warn(
+                              f"OBS returned AccessDenied while reading {obs_key}; "
+                              "treating it as a missing object because OBS may hide "
+                              "object existence without bucket listing permission."
+                          )
                       print(f"No archive exists for {archive_date}; creating a new one")
                   else:
                       warn(
