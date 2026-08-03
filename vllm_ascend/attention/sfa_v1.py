@@ -246,6 +246,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        # PCP represents each prefill request as at most two rank-local
+        # DualChunkSwap segments. Size the graph-stable sequence-length
+        # buffers for that local virtual batch rather than the global batch.
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            max_num_reqs *= 2
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         # Reuse this graph-stable key-length buffer for global seq_lens in the
         # non-DSA-CP path and for local key lengths in the DSA-CP path.

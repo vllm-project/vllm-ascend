@@ -207,7 +207,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         with communicator_switch():
-            pcp_manager = getattr(self, "pcp_manager", None)
+            # PCPManager belongs to the model runner, not the graph manager.
+            # Capture must partition the dummy decode batch through the same
+            # manager as replay so the graph binds to PCP-local input buffers.
+            pcp_manager = getattr(self.model_runner, "pcp_manager", None)
             if pcp_manager is None:
                 return super().capture(
                     model, model_state, input_buffers, intermediate_tensors,
