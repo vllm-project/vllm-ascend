@@ -188,6 +188,18 @@ jobs:
           echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
           echo "vllm_ascend_branches: >>${{ needs.setup-vars.outputs.vllm_ascend_branches }}<<"
 
+  debug-matrix-output:
+    name: Debug Matrix Content
+    needs: [setup-vars]
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Print raw json outputs
+        run: |
+          echo "multi_node json: >>${{ needs.setup-vars.outputs.multi_node }}<<"
+          echo "single_node json: >>${{ needs.setup-vars.outputs.single_node }}<<"
+          echo "double_node json: >>${{ needs.setup-vars.outputs.double_node }}<<"
+          echo "multi_card json: >>${{ needs.setup-vars.outputs.multi_card }}<<"
+
   single-node-tests:
     name: single-node
     needs: [parse-trigger, setup-vars]
