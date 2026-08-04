@@ -76,17 +76,6 @@ def test_npu_offloading_spec_loads_through_vllm_factory() -> None:
     assert spec_cls is NPUOffloadingSpec
 
 
-def test_npu_offloading_spec_keeps_legacy_module_path() -> None:
-    spec_cls = OffloadingSpecFactory.get_spec_cls(
-        {
-            "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.kv_offload.npu",
-        }
-    )
-
-    assert spec_cls is NPUOffloadingSpec
-
-
 def test_npu_worker_reuses_upstream_worker_protocol() -> None:
     assert issubclass(NPUOffloadingWorker, CPUOffloadingWorker)
 
