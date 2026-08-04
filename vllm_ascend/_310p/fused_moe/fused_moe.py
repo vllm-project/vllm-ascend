@@ -160,5 +160,7 @@ class AscendMoERunner310(AscendMoERunner):
             routed_scaling_factor=routed_scaling_factor,
         )
 
-        self.multistream_overlap_shared_expert = False
+        ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
+        if ascend_shared_experts is not None:
+            ascend_shared_experts.multistream_overlap = False
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
