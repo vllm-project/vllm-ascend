@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from zlib import adler32
 
 import numpy as np
 import torch
@@ -37,7 +38,11 @@ import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pp_group, get_tp_group
@@ -70,6 +75,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -101,6 +107,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
@@ -120,6 +127,17 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_cache_tensors_for_sparse_kv_offload,
+    allocate_kv_offload_topk_profile_buffers,
+    init_sparse_kv_offload_manager,
+    reshape_kv_cache_tensors_for_sparse_kv_offload,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_gva_layerwise_config,
+    get_layerwise_physical_layer_index,
+    get_layerwise_storage_indices,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -548,6 +566,19 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
+
+        self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
+        self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
+        self.sparse_kv_offload_manager = None
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        # Per-request metadata consumed by the Sparse KV offload resident LRU.
+        self._offload_req_ids_tensor = None
+        self._offload_token_to_req = None
+        if self.sparse_kv_offload_enabled:
+            self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
+            self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+
     @property
     def use_dcp(self) -> bool:
         return self.dcp_size > 1
@@ -1761,6 +1792,7 @@ class NPUModelRunner(GPUModelRunner):
             # allocated blocks that may reuse the same physical KV cache IDs.
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
@@ -2764,6 +2796,49 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
+    def _update_kv_offload_request_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+    ) -> None:
+        """Populate per-request identity tensors for the Sparse KV offload LRU.
+
+        Request ids are adler32 hashes of the scheduler request id; rows are
+        reset whenever the occupying request changes. Ported from vllm-ascend
+        ``_update_sfa_request_metadata``.
+        """
+        if self._offload_req_ids_tensor is None or self._offload_token_to_req is None:
+            return
+        req_ids = self.input_batch.req_ids[:num_reqs]
+        self._offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
+        effective_num_reqs = min(num_reqs, len(req_ids))
+        req_id_values = np.asarray(
+            [
+                adler32(req_id.encode("utf-8"))
+                if isinstance(req_id, str)
+                else row + 1
+                for row, req_id in enumerate(req_ids[:effective_num_reqs])
+            ],
+            dtype=np.int64,
+        )
+        self._offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
+        self._offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
+
+        query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs + 1]
+        query_lens = np.diff(query_start_loc_cpu.numpy()).astype(np.int32, copy=False)
+        token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+        if token_to_req.shape[0] < num_tokens:
+            raise RuntimeError(
+                "KV offload token_to_req metadata is shorter than the scheduled token batch: "
+                f"metadata={token_to_req.shape[0]}, tokens={num_tokens}"
+            )
+        self._offload_token_to_req.np[:num_tokens] = token_to_req[:num_tokens]
+        if num_tokens_padded > num_tokens:
+            self._offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
+        self._offload_token_to_req.copy_to_gpu(num_tokens_padded)
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -2787,6 +2862,7 @@ class NPUModelRunner(GPUModelRunner):
             return {}, None
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
+        self._update_kv_offload_request_metadata(num_tokens, num_reqs, num_tokens_padded, num_reqs_padded)
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -2906,6 +2982,16 @@ class NPUModelRunner(GPUModelRunner):
             group_len = self.group_len.gpu[:num_reqs_padded],
             group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
             group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
+            req_ids_tensor=(
+                self._offload_req_ids_tensor.gpu[:num_reqs_padded]
+                if self._offload_req_ids_tensor is not None
+                else None
+            ),
+            token_to_req=(
+                self._offload_token_to_req.gpu[:num_tokens_padded]
+                if self._offload_token_to_req is not None
+                else None
+            ),
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -3402,12 +3488,23 @@ class NPUModelRunner(GPUModelRunner):
 
     def profile_run(self) -> None:
         self.eplb_warmup()
-        mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
-            mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
-            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
-        super().profile_run()
+        topk_profile_buffers: list[tuple[torch.Tensor, torch.Tensor]] = []
+        try:
+            if self.sparse_kv_offload_enabled:
+                topk_profile_buffers = allocate_kv_offload_topk_profile_buffers(
+                    getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec(),
+                    self.vllm_config,
+                    self.sparse_kv_offload_config,
+                )
+
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+            if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
+                mc2_tokens_capacity, self.vllm_config
+            ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            super().profile_run()
+        finally:
+            del topk_profile_buffers
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -3552,6 +3649,172 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
+    def _merge_kv_cache_tensors_for_layer_reuse(self, kv_cache_config: KVCacheConfig) -> None:
+        """Make transformer layers time-multiplex a smaller set of KV buffers."""
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is None:
+            return
+
+        old_tensors = kv_cache_config.kv_cache_tensors
+        if len(old_tensors) <= 1:
+            return
+        if any(len(tensor.shared_by) != 1 for tensor in old_tensors):
+            raise NotImplementedError(
+                "GVA layerwise KV cache reuse requires one KV cache tensor descriptor per layer."
+            )
+
+        layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
+        layer_layout, storage_slots = self._build_layerwise_reuse_layout(
+            layer_specs,
+            extra_config,
+        )
+        actual_layers = len(layer_layout)
+        if len(storage_slots) >= actual_layers:
+            return
+
+        self._validate_layerwise_reuse_layout(
+            kv_cache_config,
+            layer_specs,
+            layer_layout,
+        )
+
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        if actual_layers < base_layers:
+            logger.warning(
+                "Layer reuse expected at least %d layers, got %d; skip tensor merge.",
+                base_layers,
+                actual_layers,
+            )
+            return
+        if actual_layers > base_layers:
+            logger.info(
+                "Layer reuse includes %d base and %d MTP/spec-decode layer(s).",
+                base_layers,
+                actual_layers - base_layers,
+            )
+
+        tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+        new_tensors: list[KVCacheTensor] = []
+        slot_by_layer_name: dict[str, int] = {}
+        for slot_id, physical_layers in enumerate(storage_slots):
+            for component in ("main", "indexer"):
+                shared_by = [
+                    layer_layout[layer][component]
+                    for layer in physical_layers
+                    if component in layer_layout[layer]
+                ]
+                if not shared_by:
+                    continue
+                component_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
+                slot_sizes = {tensor.size for tensor in component_tensors}
+                if len(slot_sizes) != 1:
+                    raise ValueError(
+                        f"Layers assigned to one layerwise reuse slot must have equal "
+                        f"{component} KV cache tensor sizes."
+                    )
+                new_tensors.append(
+                    KVCacheTensor(
+                        shared_by=shared_by,
+                        size=component_tensors[0].size,
+                    )
+                )
+                slot_by_layer_name.update((layer_name, slot_id) for layer_name in shared_by)
+
+        kv_cache_config.kv_cache_tensors = new_tensors
+        self._layerwise_reuse_slot_by_layer_name = slot_by_layer_name
+        self._layerwise_reuse_num_slots = len(storage_slots)
+        logger.info(
+            "Layerwise KV cache reuse merged %d tensor descriptors into %d descriptors "
+            "across %d physical slots.",
+            len(old_tensors),
+            len(new_tensors),
+            len(storage_slots),
+        )
+
+    def _validate_layerwise_reuse_layout(
+        self,
+        kv_cache_config: KVCacheConfig,
+        layer_specs: dict[str, KVCacheSpec],
+        layer_layout: dict[int, dict[str, str]],
+    ) -> None:
+        """Validate topologies supported by physical layer buffer reuse."""
+        if len(kv_cache_config.kv_cache_groups) == 1:
+            return
+
+        indexer_layer_names = {
+            layer_name
+            for layer_name, layer_spec in layer_specs.items()
+            if isinstance(layer_spec, AscendSFAIndexerCacheSpec)
+        }
+        if not indexer_layer_names:
+            raise NotImplementedError(
+                "GVA layerwise KV cache reuse supports multiple KV cache groups "
+                "only for separated SFA main/indexer caches."
+            )
+
+        unsupported_specs = {
+            layer_name: type(layer_spec).__name__
+            for layer_name, layer_spec in layer_specs.items()
+            if not isinstance(
+                layer_spec,
+                (AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec),
+            )
+        }
+        if unsupported_specs:
+            details = ", ".join(
+                f"{layer_name}={spec_name}"
+                for layer_name, spec_name in sorted(unsupported_specs.items())
+            )
+            raise NotImplementedError(
+                "GVA layerwise multi-group buffer reuse only supports SFA "
+                f"main/indexer cache specs; unsupported cache specs: {details}."
+            )
+
+        for physical_layer, components in layer_layout.items():
+            indexer_layer_name = components.get("indexer")
+            if indexer_layer_name is None:
+                continue
+            main_layer_name = components.get("main")
+            if main_layer_name is None or not isinstance(
+                layer_specs[main_layer_name],
+                AscendMLAAttentionSpec,
+            ):
+                raise RuntimeError(
+                    "SFA indexer cache requires an Ascend MLA main cache at "
+                    f"physical layer {physical_layer}."
+                )
+
+    def _build_layerwise_reuse_layout(
+        self,
+        layer_specs: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[dict[int, dict[str, str]], list[list[int]]]:
+        """Group main/indexer cache names into physical reuse slots."""
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        layer_layout: dict[int, dict[str, str]] = {}
+        for layer_name, layer_spec in layer_specs.items():
+            physical_layer = get_layerwise_physical_layer_index(
+                layer_name,
+                base_layers,
+            )
+            component = "indexer" if isinstance(layer_spec, AscendSFAIndexerCacheSpec) else "main"
+            components = layer_layout.setdefault(physical_layer, {})
+            if component in components:
+                raise NotImplementedError(
+                    f"Layerwise reuse found multiple {component} cache descriptors "
+                    f"for physical layer {physical_layer}."
+                )
+            components[component] = layer_name
+
+        physical_layers = sorted(layer_layout)
+        if any("main" not in layer_layout[layer] for layer in physical_layers):
+            raise RuntimeError("Every physical layer must provide a main KV cache for layerwise reuse.")
+        storage_slots = [
+            [physical_layers[index] for index in slot]
+            for slot in get_layerwise_storage_indices(len(physical_layers), extra_config)
+        ]
+        return layer_layout, storage_slots
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3564,6 +3827,7 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        self._merge_kv_cache_tensors_for_layer_reuse(kv_cache_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
@@ -3574,6 +3838,12 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
+        if self.sparse_kv_offload_enabled:
+            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
+                self.vllm_config,
+                kv_cache_config,
+                self.sparse_kv_offload_config,
+            )
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
         if (
@@ -3592,7 +3862,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
+        if self.sparse_kv_offload_enabled:
+            self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
         if has_kv_transfer_group():
+            # Decode-side PD connectors bind their destinations to the CPU KV
+            # pool allocated and registered by KVOffloadDecodeManager.
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
         if self.model_config.enable_return_routed_experts:
@@ -3784,6 +4058,38 @@ class NPUModelRunner(GPUModelRunner):
 
         return dsa_k_tensor, dsa_k_scale_tensor
 
+    def _allocate_sfa_indexer_raw_cache(
+        self,
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        alignment: int,
+    ) -> tuple[torch.Tensor, ...]:
+        k_tensor_size = (
+            num_blocks
+            * spec.sfa_dcp_replicated_indexer_size
+            * spec.block_size
+            * spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype)
+        )
+        if not spec.scale_dim:
+            return (self._allocate_int8_cache_tensor(k_tensor_size, alignment),)
+
+        scale_tensor_size = (
+            num_blocks
+            * spec.sfa_dcp_replicated_indexer_size
+            * spec.block_size
+            * spec.num_kv_heads
+            * spec.scale_dim
+            * get_dtype_size(spec.scale_dtype)
+        )
+        return self._allocate_sparse_c8_indexer_tensors(
+            dsa_k_tensor_size=k_tensor_size,
+            dsa_k_scale_tensor_size=scale_tensor_size,
+            alignment=alignment,
+            scale_dtype=spec.scale_dtype,
+        )
+
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -3805,6 +4111,29 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        slot_by_layer_name = getattr(self, "_layerwise_reuse_slot_by_layer_name", {})
+        num_reuse_slots = getattr(self, "_layerwise_reuse_num_slots", 0)
+        c8_indexer_specs = [
+            spec
+            for spec in layer_kv_cache_spec.values()
+            if isinstance(spec, AscendSFAIndexerCacheSpec) and spec.cache_sparse_li_c8
+        ]
+        self._layerwise_c8_indexer_slot_buffers: list[tuple[torch.Tensor, ...]] = []
+        if num_reuse_slots and c8_indexer_specs:
+            indexer_page_sizes = {spec.page_size_bytes for spec in c8_indexer_specs}
+            if len(indexer_page_sizes) != 1:
+                raise ValueError(
+                    "Sparse-C8 layerwise reuse requires uniform indexer cache page sizes."
+                )
+            indexer_spec = c8_indexer_specs[0]
+            self._layerwise_c8_indexer_slot_buffers = [
+                self._allocate_sfa_indexer_raw_cache(
+                    indexer_spec,
+                    kv_cache_config.num_blocks,
+                    alignment,
+                )
+                for _ in range(num_reuse_slots)
+            ]
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -3854,38 +4183,23 @@ class NPUModelRunner(GPUModelRunner):
                     and layer_name not in kv_cache_raw_tensors
                 ):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-                    raw_cache: tuple[torch.Tensor, ...]
                     num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
-                    k_tensor_size = (
-                        num_blocks
-                        * current_kv_cache_spec.sfa_dcp_replicated_indexer_size
-                        * current_kv_cache_spec.block_size
-                        * current_kv_cache_spec.num_kv_heads
-                        * current_kv_cache_spec.head_size
-                        * get_dtype_size(current_kv_cache_spec.dtype)
-                    )
-                    if current_kv_cache_spec.scale_dim:
-                        scale_tensor_size = (
-                            num_blocks
-                            * current_kv_cache_spec.sfa_dcp_replicated_indexer_size
-                            * current_kv_cache_spec.block_size
-                            * current_kv_cache_spec.num_kv_heads
-                            * current_kv_cache_spec.scale_dim
-                            * get_dtype_size(current_kv_cache_spec.scale_dtype)
-                        )
-                        k_tensor, scale_tensor = self._allocate_sparse_c8_indexer_tensors(
-                            dsa_k_tensor_size=k_tensor_size,
-                            dsa_k_scale_tensor_size=scale_tensor_size,
-                            alignment=alignment,
-                            scale_dtype=current_kv_cache_spec.scale_dtype,
-                        )
-                        raw_cache = (k_tensor, scale_tensor)
+                    if current_kv_cache_spec.cache_sparse_li_c8 and self._layerwise_c8_indexer_slot_buffers:
+                        slot_ids = {
+                            slot_by_layer_name[layer_name_inner]
+                            for layer_name_inner in kv_cache_tensor.shared_by
+                        }
+                        if len(slot_ids) != 1:
+                            raise RuntimeError(
+                                "One shared indexer descriptor cannot span multiple layerwise reuse slots."
+                            )
+                        raw_cache = self._layerwise_c8_indexer_slot_buffers[slot_ids.pop()]
                     else:
-                        k_tensor = self._allocate_int8_cache_tensor(
-                            k_tensor_size,
+                        raw_cache = self._allocate_sfa_indexer_raw_cache(
+                            current_kv_cache_spec,
+                            num_blocks,
                             alignment,
                         )
-                        raw_cache = (k_tensor,)
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         kv_cache_raw_tensors[layer_name_inner] = raw_cache
@@ -3919,6 +4233,20 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                    if self.sparse_kv_offload_enabled:
+                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                        assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
+                        raw_tensors = allocate_kv_cache_tensors_for_sparse_kv_offload(
+                            k_tensor_size,
+                            v_tensor_size,
+                            alignment,
+                            self.tp_rank,
+                            self.sparse_kv_offload_config.keep_device_kv_cache,
+                            self._allocate_int8_cache_tensor,
+                        )
+                        assert len(kv_cache_tensor.shared_by) == 1, "Sparse KV offload do not support HMA."
+                        kv_cache_raw_tensors[layer_name] = raw_tensors
+                        continue
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
                     # are allocated as int8 raw bytes first and then viewed as
                     # the target dtype in _reshape_kv_cache_tensors.
@@ -4113,6 +4441,19 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
+                    if self.sparse_kv_offload_enabled:
+                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                        assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
+                        reshaped_tensors = reshape_kv_cache_tensors_for_sparse_kv_offload(
+                            kv_cache_raw_tensors[layer_name],
+                            current_kv_cache_spec,
+                            attn_backend,
+                            self.tp_rank,
+                            self.vllm_config,
+                            self.sparse_kv_offload_config,
+                        )
+                        kv_caches[layer_name] = reshaped_tensors
+                        continue
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
@@ -4525,7 +4866,7 @@ class NPUModelRunner(GPUModelRunner):
         if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
 
-        kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
+        kv_cache_spec: dict[str, list[KVCacheSpec] | KVCacheSpec] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
@@ -4579,6 +4920,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                        store_on_host=self.sparse_kv_offload_enabled,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
@@ -4651,6 +4993,8 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        if self.sparse_kv_offload_enabled:
+            self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
         return kv_cache_spec
 
     def _check_and_update_cudagraph_mode(
@@ -4766,7 +5110,6 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
-
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """

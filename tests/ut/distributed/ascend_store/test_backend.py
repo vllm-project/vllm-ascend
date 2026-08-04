@@ -608,6 +608,27 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
 
+    def test_batch_get_key_info_forwards_gva_flag(self):
+        b = self._make_backend()
+        key_infos = [MagicMock()]
+        b.store.batch_get_key_info.return_value = key_infos
+
+        self.assertIs(b.batch_get_key_info(["k1"], flag=1), key_infos)
+        b.store.batch_get_key_info.assert_called_once_with(["k1"], flag=1)
+
+    def test_batch_write_finish(self):
+        b = self._make_backend()
+        b.store.batch_write_finish.return_value = [0]
+
+        self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
+        b.store.batch_write_finish.assert_called_once_with(["k1"], [0])
+
+    def test_batch_write_finish_compatibility_with_old_memcache(self):
+        b = self._make_backend()
+        del b.store.batch_write_finish
+
+        self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
+
     def test_register_buffer(self):
         b = self._make_backend()
         b.register_buffer([100], [200])

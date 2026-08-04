@@ -58,9 +58,19 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_gva_layerwise_config,
+    get_layerwise_kv_cache_num_tensors,
+    get_layerwise_physical_layer_index,
+    get_layerwise_storage_indices,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_host_device_memory_usage_ratio,
+)
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -551,10 +561,60 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            memory_info = getattr(self, "_gva_layerwise_memory_info", None)
+            if memory_info is not None:
+                num_layers, num_slots, factor = memory_info
+            else:
+                num_layers = getattr(
+                    self,
+                    "_gva_layerwise_num_layers",
+                    self.model_config.get_num_layers(self.parallel_config),
+                )
+                num_slots = get_layerwise_kv_cache_num_tensors(num_layers, extra_config)
+                factor = num_layers / num_slots if num_slots is not None else 1.0
+            if factor != 1.0:
+                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
+                logger.info(
+                    "Layerwise KV cache reuse uses %d slots for %d layers; scale logical KV budget by %.3f.",
+                    num_slots,
+                    num_layers,
+                    factor,
+                )
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
+        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
+        if sparse_kv_offload_config.enabled:
+            """
+            A simple patch for Sparse KV offload: add additional available_memory according to the
+            ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
+            using all original available device memory without modify original kv_spec or vllm code.
+            For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
+            or reuse hisparse's host pool logic after it's merged to vllm.
+            """
+            keep_device_kv_cache = sparse_kv_offload_config.keep_device_kv_cache
+            if keep_device_kv_cache:
+                needed_dram_size_bytes = self.available_kv_cache_memory_bytes
+            else:
+                kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+                host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
+                needed_dram_size_bytes = host_device_memory_usage_ratio * self.available_kv_cache_memory_bytes
+            if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * 1024 * 1024 * 1024:
+                raise ValueError(
+                    f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
+                    f"user specified dram size ({sparse_kv_offload_config.dram_size_per_dp_GB} GB). "
+                    "Please increase sparse_kv_offload_config.dram_size_per_dp_GB if available on your device."
+                )
+            if not keep_device_kv_cache:
+                self.available_kv_cache_memory_bytes += needed_dram_size_bytes
+                logger.info_once(
+                    "Sparse KV offload is enabled, enlarge total available memory to "
+                    "%.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
+                )
 
         return int(self.available_kv_cache_memory_bytes)
 
@@ -846,8 +906,46 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    def _get_layerwise_kv_cache_memory_info(
+        self,
+        kv_cache_spec: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[int, int, float]:
+        if not kv_cache_spec:
+            return 0, 0, 1.0
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        num_layers = len(physical_layers)
+        num_slots = len(get_layerwise_storage_indices(num_layers, extra_config))
+        if num_slots >= num_layers:
+            return num_layers, num_slots, 1.0
+
+        indexer_specs = [spec for spec in kv_cache_spec.values() if isinstance(spec, AscendSFAIndexerCacheSpec)]
+        if not any(spec.cache_sparse_li_c8 for spec in indexer_specs):
+            return num_layers, num_slots, num_layers / num_slots
+
+        main_page_sizes = {
+            spec.page_size_bytes for spec in kv_cache_spec.values() if not isinstance(spec, AscendSFAIndexerCacheSpec)
+        }
+        indexer_page_sizes = {spec.page_size_bytes for spec in indexer_specs}
+        if len(main_page_sizes) != 1 or len(indexer_page_sizes) != 1:
+            raise ValueError("Sparse-C8 layerwise reuse requires uniform main and indexer cache page sizes.")
+        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        slot_page_bytes = next(iter(main_page_sizes)) + next(iter(indexer_page_sizes))
+        return num_layers, num_slots, logical_page_bytes / (num_slots * slot_page_bytes)
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
+                kv_cache_spec,
+                extra_config,
+            )
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            # reserve kv_cache_spec for sparse kv offload memory profile usage.
+            self.kv_cache_spec = kv_cache_spec
+        return kv_cache_spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.

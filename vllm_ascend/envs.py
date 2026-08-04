@@ -100,6 +100,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # KV transfer backend used by the SFA PD CPU offload connector. Valid
+    # values are "mooncake" (default) and "memfabric"; the connector currently
+    # requires "memfabric". This non-sensitive setting can be overridden by
+    # kv_connector_extra_config["transfer_backend"].
+    "VLLM_ASCEND_KV_TRANSFER_BACKEND": lambda: os.getenv("VLLM_ASCEND_KV_TRANSFER_BACKEND", "mooncake"),
+    # Enable non-sensitive SFA PD transfer diagnostics. 0 disables verbose
+    # per-request/per-layer logs (default); 1 enables them.
+    "VLLM_ASCEND_SFA_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_SFA_DEBUG", "0"))),
+    # Enable non-sensitive MemFabric KV checksum verification. 0 disables it
+    # (default); 1 enables it and incurs device-to-host synchronization.
+    "VLLM_ASCEND_MF_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_MF_VERIFY", "0"))),
 }
 
 # end-env-vars-definition

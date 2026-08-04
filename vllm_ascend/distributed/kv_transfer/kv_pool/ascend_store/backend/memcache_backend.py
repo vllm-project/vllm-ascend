@@ -139,7 +139,7 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]) -> list[Any]:
+    def batch_get_key_info(self, keys: list[str], flag: int = 0) -> list[Any]:
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MemcacheBackend.batch_get_key_info called before store initialization; "
@@ -148,12 +148,20 @@ class MemcacheBackend(Backend):
             )
             return []
         assert self.store is not None
-        return self.store.batch_get_key_info(keys)
+        return self.store.batch_get_key_info(keys, flag=flag)
 
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
         self.ensure_initialized()
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes)
+
+    def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
+        assert self.store is not None
+        finish = getattr(self.store, "batch_write_finish", None)
+        if finish is None:
+            # Older MemCache releases made writes visible in batch_copy.
+            return [0] * len(keys)
+        return finish(keys, results)
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
         assert self.store is not None

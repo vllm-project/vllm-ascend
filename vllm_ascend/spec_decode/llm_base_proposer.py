@@ -535,6 +535,36 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
 
+    def _prepare_dummy_kv_offload_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        query_start_loc_cpu: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if not getattr(self.runner, "sparse_kv_offload_enabled", False):
+            return None, None
+
+        req_ids_buffer = self.runner._offload_req_ids_tensor
+        token_to_req_buffer = self.runner._offload_token_to_req
+        if req_ids_buffer is None or token_to_req_buffer is None:
+            raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
+
+        query_lens = np.diff(
+            query_start_loc_cpu[: num_reqs + 1].numpy()
+        ).astype(np.int32, copy=False)
+        token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+        if token_to_req.shape[0] < num_tokens:
+            token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
+
+        req_ids_buffer.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
+        req_ids_buffer.copy_to_gpu(num_reqs)
+        token_to_req_buffer.np[:num_tokens] = token_to_req[:num_tokens]
+        token_to_req_buffer.copy_to_gpu(num_tokens)
+        return (
+            req_ids_buffer.gpu[:num_reqs],
+            token_to_req_buffer.gpu[:num_tokens],
+        )
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -583,6 +613,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
+                req_ids_tensor, token_to_req = self._prepare_dummy_kv_offload_metadata(
+                    num_tokens,
+                    num_reqs,
+                    self.query_start_loc.cpu,
+                )
 
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -611,6 +646,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_len=self.runner.group_len.gpu[:num_reqs],
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                    req_ids_tensor=req_ids_tensor,
+                    token_to_req=token_to_req,
                 )
                 if dcp_manager is not None:
                     # update long_seq related params and flatten block_table
@@ -1542,6 +1579,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
+            if getattr(self.runner, "sparse_kv_offload_enabled", False):
+                # Draft steps run exactly one token per request, while the
+                # inherited token_to_req still describes the verify-step
+                # layout (num_spec + 1 tokens per request). Rebuild it to the
+                # one-token-per-request layout so the Sparse KV offload path
+                # routes every decode row to its own request's CPU-pool
+                # blocks/seq_len; otherwise rows of requests >= 1 are mapped
+                # onto request 0 and attend another request's KV.
+                num_draft_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+                common_attn_metadata.token_to_req = self.arange[:num_draft_reqs]
+
         # The loop part
         used_update_positions += 1
 
@@ -1845,6 +1893,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.slot_mapping[token_indices]
         )
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
+        token_to_req = (
+            common_attn_metadata.token_to_req[token_indices]
+            if common_attn_metadata.token_to_req is not None
+            else None
+        )
 
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
@@ -1879,6 +1932,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=token_to_req,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -1974,6 +2029,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=common_attn_metadata.token_to_req,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
