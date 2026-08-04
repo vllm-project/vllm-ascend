@@ -42,6 +42,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -126,6 +127,13 @@ def build_attn_metadata(
         num_input_tokens = num_tokens
 
     attn_metadata: dict[str, Any] = {}
+    # DSA metadata is shared by the ratio-specific cache groups for one model
+    # execution. Keep the cache at the batch-builder scope, just as MRV1 does,
+    # so each DSA builder can reuse the split results and SAS metadata produced
+    # by earlier groups in this invocation.
+    prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
+    decode_ratio_to_sas_metadata: dict[Any, Any] = {}
+    common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
@@ -171,11 +179,25 @@ def build_attn_metadata(
                     if model_specific_attn_metadata is not None
                     else {}
                 )
+                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                    attn_metadata_extra_kwargs.update(
+                        num_reqs_actual=num_reqs,
+                        prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                        block_size=attn_group.kv_cache_spec.block_size,
+                    )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
+                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                    # Preserve sharing even if a builder replaces one of the
+                    # dictionaries while constructing its metadata.
+                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata
+                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata
+                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
