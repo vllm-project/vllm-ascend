@@ -546,7 +546,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata")
         assert self.prefill_ratio_to_sas_metadata is not None
         assert self.decode_ratio_to_sas_metadata is not None
-        self.block_size = kwargs.get("block_size", 128)
+        self.block_size = kwargs.get("block_size", self.kv_cache_spec.block_size)
 
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None

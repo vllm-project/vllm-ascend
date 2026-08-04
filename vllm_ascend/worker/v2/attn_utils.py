@@ -109,7 +109,6 @@ def build_attn_metadata(
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
-
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
     # an error.
@@ -118,6 +117,11 @@ def build_attn_metadata(
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
+
+    # MRV2 does not pass this Ascend-specific field; num_tokens already includes
+    # any execution padding.
+    if num_input_tokens <= 0:
+        num_input_tokens = num_tokens
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
