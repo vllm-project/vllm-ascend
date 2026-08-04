@@ -237,14 +237,40 @@ class SFAPDRD2HScheduler:
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
 
         self.side_channel_host = get_ip()
+        # Control-plane port = kv_port + data_parallel_rank * tp_size. This MUST
+        # use the GLOBAL data_parallel_rank (unique across every D engine that
+        # may share a host), never data_parallel_rank_local (per-host, SPMD-only):
+        # the local rank restarts at 0 on each host, so single-host multi-DP
+        # engines would all collide on kv_port + 0. With the global rank, both
+        # single-host and multi-host DP get disjoint port ranges.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
             + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
         )
+        # Surface the DP topology behind the port so single-host / multi-host DP
+        # deployments can be verified against the formula above.
+        pc = vllm_config.parallel_config
+        logger.info(
+            "SFAPDRD2H D DP topology: host=%s, kv_port=%d, data_parallel_rank=%d "
+            "(local=%s), data_parallel_size=%d (local=%s), tp_size=%d, "
+            "TP control-plane ports=[%d..%d]",
+            self.side_channel_host,
+            vllm_config.kv_transfer_config.kv_port,
+            pc.data_parallel_rank,
+            getattr(pc, "data_parallel_rank_local", None),
+            pc.data_parallel_size,
+            getattr(pc, "data_parallel_size_local", None),
+            pc.tensor_parallel_size,
+            self.side_channel_port,
+            self.side_channel_port + pc.tensor_parallel_size - 1,
+        )
 
-        # Decode offload reuses vLLM's normal block ids.  Main block ids index
-        # SparseKVOffloadManager's CPU tensors; no connector-private block pool
-        # is allocated.
+        # req_id -> (main_block_ids, indexer_block_ids): the per-request
+        # destination blocks this D node pulls remote KV into. main_block_ids
+        # index SparseKVOffloadManager's CPU pool; indexer_block_ids index
+        # rank-local HBM. Both are vLLM-managed block ids captured at alloc
+        # time, forwarded to the worker via build_connector_meta, and dropped
+        # when the request finishes (vLLM owns the blocks themselves).
         self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).

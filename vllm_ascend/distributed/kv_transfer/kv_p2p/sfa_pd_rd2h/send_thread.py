@@ -255,12 +255,21 @@ class MembPullSendingThread(threading.Thread):
         if endpoint_payloads:
             self.mark_layer_pending(layer_idx)
             self._pending_reads_by_layer[layer_idx] = len(endpoint_payloads)
+            # Contributor identity is a P-rank attribute, identical for every
+            # request this rank sends; read it once from any request meta.
+            any_meta = next(iter(send_task.send_request.values()))
+            group_member_idx = any_meta.group_member_idx
+            tp_ratio = any_meta.tp_ratio
             for (remote_host, remote_port), (read_reqs, done_ext_ids) in endpoint_payloads.items():
                 path = make_zmq_path("tcp", remote_host, remote_port)
                 dealer = self._ensure_dealer(path)
                 if path not in self._mf_meta_sent_paths:
                     self._send_mf_meta(path, dealer, encoder)
-                dealer.send(encoder.encode((READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_ext_ids)))
+                dealer.send(
+                    encoder.encode(
+                        (READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_ext_ids, group_member_idx, tp_ratio)
+                    )
+                )
                 logger.debug(
                     "MembPull P send READ_READY_BATCH: layer=%d (%s), endpoint=%s:%d, reqs=%d, done_reqs=%d",
                     layer_idx,

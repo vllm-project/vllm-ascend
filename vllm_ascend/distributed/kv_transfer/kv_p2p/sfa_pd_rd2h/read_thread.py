@@ -101,10 +101,35 @@ class MembPullReadThread(threading.Thread):
         self._p_layer_metas: dict[bytes, dict[str, Any]] = {}
         self._done_requests: set[str] = set()
         self._failed_requests: set[str] = set()
+        # Request completion needs every contributor in the group (unequal P/D TP):
+        # track which group_member_idx values have reported done per request, and the
+        # group size to wait for. A request enters _done_requests only once all `ratio`
+        # distinct contributors arrived. ratio == 1 completes on the first arrival.
+        self._done_contributors: dict[str, set[int]] = {}
+        self._expected_ratio: dict[str, int] = {}
         self._lock = threading.Lock()
         self._host = get_ip()
         self._stop_event = threading.Event()
         self.startup_error: BaseException | None = None
+
+    def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
+        """Accumulate a contributor's last-layer arrival; complete only when the whole group reported."""
+        with self._lock:
+            for ext_id in done_ext_ids:
+                self._expected_ratio.setdefault(ext_id, ratio)
+                contributors = self._done_contributors.setdefault(ext_id, set())
+                contributors.add(group_member_idx)
+                if len(contributors) >= self._expected_ratio[ext_id]:
+                    self._done_requests.add(ext_id)
+                    self._done_contributors.pop(ext_id, None)
+                    self._expected_ratio.pop(ext_id, None)
+
+    def discard_requests(self, ext_ids: set[str]) -> None:
+        """Drop partial contributor state for finished/cancelled requests."""
+        with self._lock:
+            for ext_id in ext_ids:
+                self._done_contributors.pop(ext_id, None)
+                self._expected_ratio.pop(ext_id, None)
 
     def get_and_clear_done(self) -> set[str]:
         with self._lock:
@@ -204,6 +229,10 @@ class MembPullReadThread(threading.Thread):
                             for entry in msg[3]
                         ]
                         done_ext_ids = list(msg[4]) if len(msg) > 4 else []
+                        # Contributor identity (unequal P/D TP). Absent = legacy single
+                        # contributor: member 0 of a 1-member group pulls everything.
+                        group_member_idx = int(msg[5]) if len(msg) > 5 else 0
+                        ratio = max(int(msg[6]), 1) if len(msg) > 6 else 1
                         logger.debug(
                             "MembPull D recv READ_READY_BATCH: layer=%d (%s), reqs=%d, done_reqs=%d",
                             layer_idx,
@@ -225,6 +254,8 @@ class MembPullReadThread(threading.Thread):
                                     read_reqs,
                                     p_session=p_session,
                                     p_layer_meta=p_layer_meta,
+                                    group_member_idx=group_member_idx,
+                                    ratio=ratio,
                                 )
                             sock.send_multipart((identity, b"", encoder.encode((READ_DONE, layer_idx))))
                             succeeded = True
@@ -250,8 +281,7 @@ class MembPullReadThread(threading.Thread):
                             with self._lock:
                                 self._failed_requests.update(failed_ids)
                         if succeeded and done_ext_ids:
-                            with self._lock:
-                                self._done_requests.update(done_ext_ids)
+                            self._record_chunk_done(done_ext_ids, group_member_idx, ratio)
 
                     else:
                         logger.error("MembPull got unexpected message %s", msg)
@@ -399,6 +429,8 @@ class MembPullReadThread(threading.Thread):
         want_info: bool,
         main_start_block: int = 0,
         indexer_start_block: int = 0,
+        group_member_idx: int = 0,
+        ratio: int = 1,
     ) -> tuple[list[int], list[int], list[int], dict[str, Any] | None]:
         state = self._state
         layer_name = layer["layer_name"]
@@ -423,6 +455,12 @@ class MembPullReadThread(threading.Thread):
                 f"allocated={len(all_d_indexer_ids)}"
             )
         d_indexer_ids = all_d_indexer_ids[indexer_start_block:indexer_end_block]
+        # Unequal P/D TP: this D rank is fed by `ratio` contributor P ranks. Split the
+        # indexer (full per D rank) across the group so each contributor pulls 1/ratio.
+        if ratio > 1 and d_indexer_ids:
+            sub_start, sub_end = _tp_block_range(len(d_indexer_ids), group_member_idx, ratio, indexer_start_block)
+            p_indexer_block_ids = p_indexer_block_ids[sub_start:sub_end]
+            d_indexer_ids = d_indexer_ids[sub_start:sub_end]
         logger.debug(
             "MembPull D resolve dest: layer=%s, req=%s, p_main_ids=%s, "
             "p_indexer_ids=%s, d_main_cpu_ids=%s, d_indexer_hbm_ids=%s",
@@ -445,13 +483,15 @@ class MembPullReadThread(threading.Thread):
         n_main = 0
         n_indexer = 0
 
-        has_cpu_destination = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None
-        if has_cpu_destination and len(p_main_block_ids) != len(d_main_ids):
+        # Main MLA is replicated across P ranks and already split across D TP; only the
+        # group's first contributor pulls it, so it is neither duplicated nor fine-split.
+        pull_main = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None and group_member_idx == 0
+        if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
                 f"MembPull main block count mismatch for req {ext_req_id}: "
                 f"P={len(p_main_block_ids)}, D={len(d_main_ids)}"
             )
-        if has_cpu_destination:
+        if pull_main:
             owned_start, owned_end = _tp_block_range(
                 len(d_main_ids),
                 self.tp_rank,
@@ -460,7 +500,7 @@ class MembPullReadThread(threading.Thread):
             )
             p_main_block_ids = p_main_block_ids[owned_start:owned_end]
             d_main_ids = d_main_ids[owned_start:owned_end]
-        n_main = len(d_main_ids) if has_cpu_destination else 0
+        n_main = len(d_main_ids) if pull_main else 0
         if n_main:
             p_main = np.array(p_main_block_ids, dtype=np.int64)
             d_main = np.array(d_main_ids, dtype=np.int64)
@@ -548,7 +588,17 @@ class MembPullReadThread(threading.Thread):
                 n_main,
                 n_indexer,
             )
-            return [], [], [], None
+            # Still report the (post-split) block ownership so the caller can tell a
+            # legitimately empty contributor slice from a failed descriptor build.
+            return [], [], [], {
+                "layer_name": layer_name,
+                "ext_req_id": ext_req_id,
+                "d_main_ids": d_main_ids,
+                "d_indexer_ids": d_indexer_ids,
+                "n_main": n_main,
+                "n_indexer": n_indexer,
+                "num_transfers": 0,
+            }
 
         peer_ptrs = np.concatenate(peer_chunks).tolist()
         local_ptrs = np.concatenate(local_chunks).tolist()
@@ -591,6 +641,8 @@ class MembPullReadThread(threading.Thread):
         read_reqs: list[tuple[str, list[int], list[int], int, int]],
         p_session: str | None = None,
         p_layer_meta: dict[str, Any] | None = None,
+        group_member_idx: int = 0,
+        ratio: int = 1,
     ) -> None:
         if p_session is None:
             p_session = self._p_session
@@ -621,6 +673,8 @@ class MembPullReadThread(threading.Thread):
                 want_info,
                 main_start_block,
                 indexer_start_block,
+                group_member_idx,
+                ratio,
             )
             if not local_ptrs:
                 owned_main_start, owned_main_end = _tp_block_range(
@@ -630,11 +684,14 @@ class MembPullReadThread(threading.Thread):
                     main_start_block,
                 )
                 owns_requested_main = (
-                    layer["k_cpu_ptr"] is not None
+                    group_member_idx == 0
+                    and layer["k_cpu_ptr"] is not None
                     and layer["v_cpu_ptr"] is not None
                     and owned_main_end > owned_main_start
                 )
-                owns_requested_indexer = layer["indexer"] is not None and bool(p_indexer_block_ids)
+                owns_requested_indexer = (
+                    layer["indexer"] is not None and read_info is not None and bool(read_info["d_indexer_ids"])
+                )
                 if owns_requested_main or owns_requested_indexer:
                     raise RuntimeError(
                         f"MembPull built no transfer descriptors for layer {layer_name}, req {ext_req_id}"
