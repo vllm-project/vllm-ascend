@@ -1219,9 +1219,9 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if decode_context_parallel_size <= 1:
         return
 
-    if speculative_config.method == "mtp" and speculative_config.num_speculative_tokens_per_batch_size:
+    if speculative_config.num_speculative_tokens_per_batch_size:
         raise ValueError(
-            "Dynamic speculative decoding with MTP and decode context "
+            "Dynamic speculative decoding and decode context "
             "parallelism is not supported by vLLM Ascend. Please set "
             "--decode-context-parallel-size to 1 or remove "
             "num_speculative_tokens_per_batch_size from "
