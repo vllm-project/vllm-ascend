@@ -47,7 +47,14 @@ class MooncakeBaseConnectorScheduler:
 
         self.vllm_config = vllm_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        self.kv_role = self.kv_transfer_config.kv_role
+        if (
+            self.kv_transfer_config.is_kv_consumer
+            == self.kv_transfer_config.is_kv_producer
+        ):
+            raise ValueError(
+                "Mooncake scheduler requires exactly one KV transfer role, "
+                f"got {self.kv_transfer_config.kv_role!r}"
+            )
         self.kv_cache_config = kv_cache_config
         self.engine_id = engine_id
         self.block_size = vllm_config.cache_config.block_size
@@ -63,6 +70,10 @@ class MooncakeBaseConnectorScheduler:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        assert self.pcp_size == 1, (
+            "Mooncake temporarily requires prefill context parallel size 1, "
+            f"got {self.pcp_size}"
+        )
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.max_device_id = (
             self.tp_size
