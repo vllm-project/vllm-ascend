@@ -1401,24 +1401,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         """FA3 graph capture — NPUGraph driver-level recording.
 
-        FA3 (PyTorch CustomOp) is invisible to the CANN task-group mechanism.
-        However, CANN runtime expects every layer to be framed by
-        ``graph_task_group_begin/End`` during capture; the wrappers are added
-        here to keep the stream state consistent for subsequent CANN layers,
-        even though the returned handle is empty and never used for update.
+        FA3 (PyTorch CustomOp) is invisible to the CANN task-group mechanism,
+        so no ``graph_task_group_begin/End`` wrappers are used — an empty task
+        group (FA3 not captured by CANN) corrupts CANN runtime state for
+        subsequent graph captures (e.g. the prefill CANN V1 graph), breaking
+        prefill accuracy.
 
         ``fa3_graph_params`` is the cached (scheduler_metadata, cache_seqlens,
         cu_seqlens_q, block_table) tuple from ``_get_fa3_graph_params``.  All
         are fixed-size NPU buffers whose addresses are captured and whose data
         is refreshed before each replay by ``update_graph_params``.
         """
-        stream = torch_npu.npu.current_stream()
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
-
-        # CANN runtime expects task-group framing for every layer — wrap FA3
-        # even though it is invisible to the op-level capture.
-        torch.npu.graph_task_group_begin(stream)
 
         if is_cache:
             from flash_attn_npu_v3 import flash_attn_with_kvcache as fa3_kvcache
@@ -1471,11 +1466,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
             )
-
-        # End task group framing. Handle is empty (FA3 not captured by CANN)
-        # and deliberately NOT stored in graph_params — the update phase uses
-        # graph_task_update_begin/End which cannot operate on empty handles.
-        torch.npu.graph_task_group_end(stream)
 
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
