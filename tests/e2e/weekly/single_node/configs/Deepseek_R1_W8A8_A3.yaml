@@ -68,6 +68,7 @@ test_cases:
       - "5500"
     benchmarks:
       <<: *benchmarks
+
   - name: "chunked_prefill_func_test_005"
     model: "Eco-Tech/DeepSeek-R1-0528-w8a8-mtp-QuaRot"
     envs:

@@ -69,6 +69,7 @@ _benchmarks_3500_50: &benchmarks_3500_50
     request_rate: 0
     baseline: 701.55
     threshold: 0.97
+
 _benchmarks_3500_20: &benchmarks_3500_20
   perf:
     case_type: performance
@@ -81,6 +82,7 @@ _benchmarks_3500_20: &benchmarks_3500_20
     request_rate: 0
     baseline: 115.03
     threshold: 0.97
+
 _benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
   perf_prefix_90:
     case_type: performance
@@ -104,6 +106,7 @@ _benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
     request_rate: 0
     baseline: 284.9
     threshold: 0.97
+
 _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
   perf_prefix_90:
     case_type: performance

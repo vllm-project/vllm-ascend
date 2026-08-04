@@ -76,4 +76,3 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,5,8,72,76,80,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}'
     benchmarks:
       <<: *benchmarks_perf1
-

@@ -75,4 +75,3 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
       <<: *benchmarks
-
