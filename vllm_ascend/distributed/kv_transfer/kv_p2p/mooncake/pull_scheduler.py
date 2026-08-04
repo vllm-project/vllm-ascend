@@ -57,7 +57,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self,
         host: str,
         port: int,
+        engine_id: str,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
+        tp_size: int,
         pp_size: int,
         ready_event: threading.Event,
     ) -> None:
@@ -65,21 +67,41 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         encoder = msgspec.msgpack.Encoder()
         self.host = host
         self.port = port
+        self.tp_size = tp_size
+        self.pp_size = pp_size
+        self.engine_id = engine_id
         metadata_by_tp_rank = self._group_metadata_by_tp_rank(metadata)
-        expected_pp_ranks = set(range(pp_size))
-        for tp_rank, metadata_by_pp_rank in metadata_by_tp_rank.items():
-            actual_pp_ranks = set(metadata_by_pp_rank)
-            if actual_pp_ranks != expected_pp_ranks:
-                raise ValueError(
-                    f"Incomplete Mooncake metadata for TP rank {tp_rank}: "
-                    f"got PP ranks {sorted(actual_pp_ranks)}, "
-                    f"expected {sorted(expected_pp_ranks)}"
-                )
-        self.encoded_metadata = {
+
+        worker_engine_ids = {
+            worker_metadata.engine_id
+            for metadata_by_pp_rank in metadata_by_tp_rank.values()
+            for worker_metadata in metadata_by_pp_rank.values()
+        }
+        if worker_engine_ids != {engine_id}:
+            raise ValueError(
+                "Mooncake worker metadata engine IDs do not match scheduler "
+                f"engine ID {engine_id!r}: {sorted(worker_engine_ids)!r}"
+            )
+
+        metadata_by_tp_rank = {
+            tp_rank: dict(sorted(metadata_by_pp_rank.items()))
+            for tp_rank, metadata_by_pp_rank in sorted(metadata_by_tp_rank.items())
+        }
+        self.encoded_metadata = encoder.encode(
+            MooncakeTransferMetadataGroups(
+                engine_id=engine_id,
+                scheduler_host=host,
+                scheduler_port=port,
+                metadata_by_tp_rank=metadata_by_tp_rank,
+            )
+        )
+        self.encoded_metadata_by_tp_rank = {
             tp_rank: encoder.encode(
                 MooncakeTransferMetadataGroups(
-                    tp_rank=tp_rank,
-                    metadata_by_pp_rank=dict(sorted(metadata_by_pp_rank.items())),
+                    engine_id=engine_id,
+                    scheduler_host=host,
+                    scheduler_port=port,
+                    metadata_by_tp_rank={tp_rank: metadata_by_pp_rank},
                 )
             )
             for tp_rank, metadata_by_pp_rank in metadata_by_tp_rank.items()
@@ -181,7 +203,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         if not isinstance(tp_rank, int):
             logger.warning("Invalid Mooncake metadata TP rank: %r", tp_rank)
             return None
-        return self.encoded_metadata.get(tp_rank)
+        if tp_rank == -1:
+            return self.encoded_metadata
+        return self.encoded_metadata_by_tp_rank.get(tp_rank)
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -300,7 +324,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._sending_thread = MooncakeSchedulerSendingThread(
             self.side_channel_host,
             self.side_channel_port,
+            self.engine_id,
             metadata,
+            self.tp_size,
             self.pp_size,
             ready_event,
         )

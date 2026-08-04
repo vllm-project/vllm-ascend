@@ -74,10 +74,12 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
 
 @dataclass(frozen=True)
 class MooncakeTransferMetadataGroups:
-    """All pipeline-stage metadata for one tensor-parallel rank."""
+    """All worker transfer metadata exposed by one DP scheduler."""
 
-    tp_rank: int
-    metadata_by_pp_rank: dict[int, MooncakeTransferMetadata]
+    engine_id: str
+    scheduler_host: str
+    scheduler_port: int
+    metadata_by_tp_rank: dict[int, dict[int, MooncakeTransferMetadata]]
 
 
 @dataclass

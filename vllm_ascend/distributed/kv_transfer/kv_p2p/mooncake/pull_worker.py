@@ -80,7 +80,7 @@ class MooncakePullRecvingThread(threading.Thread):
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
         self.remote_metadata: SizedDict = SizedDict()
-        self.request_queue: queue.Queue[tuple[str, int, dict[str, ReqMeta]]] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -89,12 +89,11 @@ class MooncakePullRecvingThread(threading.Thread):
     def add_requests(
         self,
         remote_engine_id: str,
-        remote_port: int,
         requests: dict[str, ReqMeta],
     ) -> None:
-        """Queue requests for one remote engine and scheduler port."""
+        """Queue requests for one remote engine."""
         if requests:
-            self.request_queue.put((remote_engine_id, remote_port, requests))
+            self.request_queue.put((remote_engine_id, requests))
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """Drain requests whose transfer attempt has completed."""
@@ -114,25 +113,32 @@ class MooncakePullRecvingThread(threading.Thread):
 
     def run(self) -> None:
         """Consume queued requests and invoke the transfer implementation."""
-        try:
-            torch.npu.set_device(self.device)
-        except Exception:
-            self.ready_event.set()
-            logger.exception("Failed to initialize the Mooncake pull thread device")
-            return
-
+        torch.npu.set_device(self.device)
         self.ready_event.set()
         while True:
-            remote_engine_id, remote_port, requests = self.request_queue.get()
+            remote_engine_id, requests = self.request_queue.get()
+            request_endpoints = {
+                (request.remote_host, request.remote_port)
+                for request in requests.values()
+            }
             try:
-                self._handle_requests(remote_engine_id, remote_port, requests)
-            except Exception:
+                remote_host, remote_port = self._get_remote_endpoint(
+                    request_endpoints
+                )
+                self._handle_requests(
+                    remote_engine_id,
+                    remote_host,
+                    remote_port,
+                    requests,
+                )
+            except Exception as exc:
                 for request_metadata in requests.values():
                     self._mark_request_failed(request_metadata)
                 logger.exception(
-                    "Mooncake pull failed for remote engine %s, port %d",
+                    "Mooncake pull failed for remote engine %s at %s: %s",
                     remote_engine_id,
-                    remote_port,
+                    sorted(request_endpoints),
+                    exc,
                 )
             finally:
                 for request_id in requests:
@@ -144,25 +150,66 @@ class MooncakePullRecvingThread(threading.Thread):
             for group_block_ids in request_metadata.local_block_ids:
                 self.invalid_block_ids.update(group_block_ids)
 
+    @staticmethod
+    def _get_remote_endpoint(
+        endpoints: set[tuple[str, int]],
+    ) -> tuple[str, int]:
+        if len(endpoints) != 1:
+            raise ValueError(
+                "Requests for one remote engine must share one scheduler "
+                f"endpoint, got {sorted(endpoints)}"
+            )
+        return next(iter(endpoints))
+
     def _handle_requests(
         self,
         remote_engine_id: str,
+        remote_host: str,
         remote_port: int,
         requests: dict[str, ReqMeta],
     ) -> None:
         """Fetch peer metadata and submit its aggregated requests."""
-        remote_hosts = {request.remote_host for request in requests.values()}
-        if len(remote_hosts) != 1:
-            raise ValueError(
-                "Mooncake requests grouped for one remote engine and port must "
-                f"share one host, got {sorted(remote_hosts)}"
-            )
-        remote_host = next(iter(remote_hosts))
         self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
 
         # Transfer planning and Mooncake READ submission are implemented next.
         # Until then, do not report an incomplete transfer as successful.
         raise NotImplementedError("Mooncake pull transfer submission is not implemented")
+
+    @staticmethod
+    def _validate_remote_metadata(
+        metadata: MooncakeTransferMetadataGroups,
+        expected_engine_id: str,
+    ) -> None:
+        if metadata.engine_id != expected_engine_id:
+            raise ValueError(
+                "Mooncake producer metadata engine ID mismatch: expected "
+                f"{expected_engine_id!r}, got {metadata.engine_id!r}"
+            )
+        if not metadata.metadata_by_tp_rank:
+            raise ValueError("Mooncake producer scheduler returned no worker metadata")
+
+        empty_tp_ranks = [
+            tp_rank
+            for tp_rank, metadata_by_pp_rank in metadata.metadata_by_tp_rank.items()
+            if not metadata_by_pp_rank
+        ]
+        if empty_tp_ranks:
+            raise ValueError(
+                "Mooncake producer scheduler returned no PP metadata for TP ranks "
+                f"{sorted(empty_tp_ranks)}"
+            )
+
+        unexpected_engine_ids = {
+            worker_metadata.engine_id
+            for metadata_by_pp_rank in metadata.metadata_by_tp_rank.values()
+            for worker_metadata in metadata_by_pp_rank.values()
+            if worker_metadata.engine_id != expected_engine_id
+        }
+        if unexpected_engine_ids:
+            raise ValueError(
+                "Mooncake producer worker metadata engine ID mismatch: expected "
+                f"{expected_engine_id!r}, got {sorted(unexpected_engine_ids)!r}"
+            )
 
     def _get_remote_metadata(
         self,
@@ -170,13 +217,7 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_host: str,
         remote_port: int,
     ) -> MooncakeTransferMetadataGroups:
-        cache_key = (
-            remote_engine_id,
-            remote_host,
-            remote_port,
-            self.tp_rank,
-        )
-        cached_metadata = self.remote_metadata.get(cache_key)
+        cached_metadata = self.remote_metadata.get(remote_engine_id)
         if cached_metadata is not None:
             return cached_metadata
 
@@ -186,7 +227,7 @@ class MooncakePullRecvingThread(threading.Thread):
             sock.setsockopt(zmq.RCVTIMEO, 1000)
             ensure_zmq_send(
                 sock,
-                self.encoder.encode((b"get_meta_msg", self.tp_rank)),
+                self.encoder.encode((b"get_meta_msg", -1)),
                 path,
             )
             metadata_bytes = ensure_zmq_recv(sock, path)
@@ -194,32 +235,12 @@ class MooncakePullRecvingThread(threading.Thread):
         if not metadata_bytes:
             raise RuntimeError(
                 "Mooncake producer scheduler returned no transfer metadata "
-                f"for TP rank {self.tp_rank} from {path}"
+                f"for engine {remote_engine_id!r} from {path}"
             )
 
         remote_metadata = self.decoder.decode(metadata_bytes)
-        if remote_metadata.tp_rank != self.tp_rank:
-            raise ValueError(
-                "Mooncake producer scheduler returned metadata for TP rank "
-                f"{remote_metadata.tp_rank}, expected {self.tp_rank}"
-            )
-        if not remote_metadata.metadata_by_pp_rank:
-            raise ValueError(
-                "Mooncake producer scheduler returned no PP metadata for "
-                f"TP rank {self.tp_rank}"
-            )
-        unexpected_engine_ids = {
-            metadata.engine_id
-            for metadata in remote_metadata.metadata_by_pp_rank.values()
-            if metadata.engine_id != remote_engine_id
-        }
-        if unexpected_engine_ids:
-            raise ValueError(
-                "Mooncake producer metadata engine ID mismatch: expected "
-                f"{remote_engine_id!r}, got {sorted(unexpected_engine_ids)!r}"
-            )
-
-        self.remote_metadata[cache_key] = remote_metadata
+        self._validate_remote_metadata(remote_metadata, remote_engine_id)
+        self.remote_metadata[remote_engine_id] = remote_metadata
         return remote_metadata
 
 
@@ -269,20 +290,16 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         if not metadata.requests:
             return
         if self.kv_transfer_config.is_kv_consumer:
-            request_groups: dict[str, dict[int, dict[str, ReqMeta]]] = {}
+            assert self._recving_thread is not None
+            request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
-                req_engine_id, req_remote_port = request_metadata.remote_engine_id, request_metadata.remote_port
-                requests_by_engine = request_groups.setdefault(req_engine_id, {})
-                requests_by_port = requests_by_engine.setdefault(req_remote_port, {})
-                requests_by_port[request_id] = request_metadata
+                requests = request_groups.setdefault(
+                    request_metadata.remote_engine_id, {}
+                )
+                requests[request_id] = request_metadata
 
-            for remote_engine_id, requests_by_port in request_groups.items():
-                for remote_port, requests_batch in requests_by_port.items():
-                    self._recving_thread.add_requests(
-                        remote_engine_id,
-                        remote_port,
-                        requests_batch,
-                    )
+            for remote_engine_id, requests in request_groups.items():
+                self._recving_thread.add_requests(remote_engine_id, requests)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Return requests with completed receive and send operations."""
