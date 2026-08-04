@@ -15,17 +15,16 @@
 # limitations under the License.
 #
 
-# Patch vllm's FusedMoE factory to use AscendMoERunner by default.
+# Patch vllm's MoE factory to use AscendMoERunner by default.
 #
-# vllm's FusedMoE is a factory function (not a class). deepseek_v2 and other
-# models do `from vllm.model_executor.layers.fused_moe import FusedMoE` and
-# call it directly, so we must patch the binding in the package __init__ as
-# well as the layer module before any model is imported.
+# vLLM v0.26.0 exports the factory as FusedMoE, while vLLM main renamed it
+# to FusedMoEFactory. Patch the exact binding for the active version lane in
+# both the package __init__ and layer module before any model is imported.
 #
 # Import order in worker.__init__:
-#   1. adapt_patch()  ->  this file runs  ->  FusedMoE patched
+#   1. adapt_patch()  ->  this file runs  ->  MoE factory patched
 #   2. from vllm_ascend import ops
-#   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
+#   3. model loading  ->  deepseek_v2 imported  ->  gets patched factory
 
 from typing import Any
 
@@ -33,10 +32,13 @@ import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 # Capture the real original before fused_moe.py's module-level code runs.
-_original_FusedMoE = _fused_moe_layer.FusedMoE
+if vllm_version_is("0.26.0"):
+    _original_fused_moe_factory = _fused_moe_layer.FusedMoE
+else:
+    _original_fused_moe_factory = _fused_moe_layer.FusedMoEFactory
 _DefaultAscendMoERunner: Any
 _DefaultAscendRoutedExperts: Any
 
@@ -53,7 +55,7 @@ else:
     _DefaultAscendRoutedExperts = AscendRoutedExperts
 
 
-def _ascend_FusedMoE(
+def _ascend_fused_moe_factory(
     *args,
     runner_cls=None,
     runner_args=None,
@@ -78,7 +80,7 @@ def _ascend_FusedMoE(
             )
         kwargs["enable_eplb"] = True
         kwargs["num_redundant_experts"] = configured_redundancy or upstream_redundancy
-    # 'hash' is a DeepSeek V4 flag already consumed before FusedMoE is called;
+    # 'hash' is a DeepSeek V4 flag already consumed before the MoE factory is called;
     # 'tid2eid' is Ascend-specific and belongs to AscendRoutedExperts.
     kwargs.pop("hash", None)
     tid2eid = kwargs.pop("tid2eid", None)
@@ -87,7 +89,7 @@ def _ascend_FusedMoE(
     routed_experts_args["n_shared_experts"] = n_shared_experts
     if tid2eid is not None:
         routed_experts_args["tid2eid"] = tid2eid
-    return _original_FusedMoE(
+    return _original_fused_moe_factory(
         *args,
         runner_cls=runner_cls,
         runner_args=runner_args,
@@ -97,5 +99,9 @@ def _ascend_FusedMoE(
     )
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+if vllm_version_is("0.26.0"):
+    _fused_moe_layer.FusedMoE = _ascend_fused_moe_factory
+    _fused_moe_pkg.FusedMoE = _ascend_fused_moe_factory
+else:
+    _fused_moe_layer.FusedMoEFactory = _ascend_fused_moe_factory
+    _fused_moe_pkg.FusedMoEFactory = _ascend_fused_moe_factory
