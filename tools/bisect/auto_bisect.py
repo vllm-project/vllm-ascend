@@ -340,7 +340,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--no-sync-external-versions",
         action="store_true",
-        help="record/check version history but do not install/switch vLLM, torch-npu, or CANN env",
+        help="record/check version history but do not install/switch vLLM or torch-npu",
     )
     p.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     p.add_argument("--repo-dir", default=str(REPO_ROOT))

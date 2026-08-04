@@ -118,9 +118,9 @@ python -m tools.bisect.auto_bisect \
 - torch-npu: `requirements.txt` 里的 `torch-npu==...`;
 - CANN: 当前 target 对应 Dockerfile 里的 `ARG CANN_VERSION`,如 A2 用 `Dockerfile`,A3 用 `Dockerfile.a3`,310P 用 `Dockerfile.310p`。
 
-这些版本变化点会记录到 Good 表同目录的 `version_history.csv`。如果 good 端点和 bad 端点的外部版本完全一致,本次二分忽略版本同步;如果端点版本不同,每个待测 commit 会先查表并同步到它历史对应的 vLLM / torch-npu / CANN profile,再运行测试。
+这些版本变化点会记录到 Good 表同目录的 `version_history.csv`。CANN 版本只从历史 Dockerfile 中记录,不在运行时切换,也不参与运行环境版本一致性检查。如果 good 端点和 bad 端点的 vLLM / torch-npu 版本完全一致,本次二分忽略版本同步;如果端点版本不同,每个待测 commit 会先查表并同步到它历史对应的 vLLM / torch-npu profile,再运行测试。
 
-> 这是为了解决"二分跨过外部版本变更点时,把依赖变化误判成 vllm-ascend 回归"的问题。若同步失败(例如当前容器没有目标 CANN toolkit),该轮会明确记为 SKIP。
+> 这是为了解决"二分跨过外部版本变更点时,把依赖变化误判成 vllm-ascend 回归"的问题。若 vLLM 或 torch-npu 同步失败,该轮会明确记为 SKIP;当前容器内的 CANN 版本不匹配不会导致 SKIP。
 
 ---
 
@@ -217,7 +217,7 @@ python -m tools.bisect.auto_bisect \
 
 #### `--version-table`
 
-- **作用**:记录 vLLM release tag / torch-npu / CANN 历史变化点的 CSV。
+- **作用**:记录 vLLM release tag / torch-npu / CANN 历史变化点的 CSV。CANN 只记录,不切换。
 - **默认**:不传时使用 `--good-table` 同目录下的 `version_history.csv`。
 - **逻辑**:工具从历史 commit 的指定文件自动抽取版本;端点版本不同才逐 commit 同步。
 
@@ -229,7 +229,7 @@ python -m tools.bisect.auto_bisect \
 
 #### `--no-sync-external-versions`
 
-- **作用**:仍记录/检查版本历史,但不安装或切换 vLLM、torch-npu、CANN 环境。
+- **作用**:仍记录/检查版本历史,但不安装或切换 vLLM、torch-npu 环境。CANN 始终只记录,不会切换。
 - **默认**:关(即默认会在端点版本不一致时自动同步)。
 - **何时用**:本地调试版本表生成逻辑,不想改当前 Python 环境时。
 

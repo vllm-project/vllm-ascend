@@ -18,6 +18,8 @@ The bisect signal should come from vllm-ascend changes, not from moving
 external dependencies. This module records, per vllm-ascend branch and target,
 the historical vLLM release tag, torch-npu pin, and CANN base version extracted
 from the version-controlled files that drive the nightly/weekly image builds.
+CANN is record-only because the toolkit is baked into the test image and is
+not switched during a bisect run.
 """
 
 from __future__ import annotations
@@ -77,13 +79,14 @@ class VersionProfile:
     cann_version: str
 
     def same_versions(self, other: VersionProfile) -> bool:
+        """Return whether the runtime-switchable dependencies are identical."""
         return (
             self.vllm_release_tag == other.vllm_release_tag
             and self.torch_npu_version == other.torch_npu_version
-            and self.cann_version == other.cann_version
         )
 
     def version_key(self) -> tuple[str, str, str]:
+        """Return the complete key used to record historical changes."""
         return (self.vllm_release_tag, self.torch_npu_version, self.cann_version)
 
     def to_dict(self) -> dict[str, str]:
@@ -260,23 +263,27 @@ class VersionHistory:
 
     def record_range(self, good: str, candidates: list[Candidate]) -> bool:
         commits = [good, *(candidate.commit for candidate in candidates)]
-        good_profile = extract_profile_at(self.repo, good, self.branch, self.target)
-        bad_profile = extract_profile_at(self.repo, candidates[-1].commit, self.branch, self.target)
-        if good_profile.same_versions(bad_profile):
-            self.append_missing([good_profile])
-            logger.info("[versions] endpoints use the same external versions; per-commit version sync disabled")
-            return False
-
+        profiles = [extract_profile_at(self.repo, commit, self.branch, self.target) for commit in commits]
         change_points: list[VersionProfile] = []
         previous_key: tuple[str, str, str] | None = None
-        for commit in commits:
-            profile = extract_profile_at(self.repo, commit, self.branch, self.target)
+        for profile in profiles:
             if profile.version_key() != previous_key:
                 change_points.append(profile)
                 previous_key = profile.version_key()
         self.append_missing(change_points)
+
+        good_profile = profiles[0]
+        bad_profile = profiles[-1]
+        if good_profile.same_versions(bad_profile):
+            logger.info(
+                "[versions] endpoints use the same vLLM/torch-npu versions; "
+                "CANN history recorded, per-commit version sync disabled"
+            )
+            return False
+
         logger.info(
-            "[versions] endpoints differ; per-commit version sync enabled (%d change point(s))",
+            "[versions] vLLM/torch-npu endpoints differ; per-commit sync enabled "
+            "(CANN is record-only, %d change point(s))",
             len(change_points),
         )
         return True
@@ -348,7 +355,6 @@ class ExternalVersionManager:
             return
         self._sync_vllm(profile, log_file)
         self._sync_torch_npu(profile, log_file)
-        self._sync_cann_env(profile)
 
     def _sync_vllm(self, profile: VersionProfile, log_file: Path | None) -> None:
         installed = os.getenv("VLLM_VERSION") or _installed_dist_version("vllm")
@@ -418,39 +424,6 @@ class ExternalVersionManager:
             ],
             log_file,
         )
-
-    def _sync_cann_env(self, profile: VersionProfile) -> None:
-        expected = profile.cann_version
-        current = current_cann_version()
-        if current == expected:
-            logger.info("[versions] CANN already matches %s", expected)
-            return
-
-        toolkit = Path(f"/usr/local/Ascend/ascend-toolkit/{expected}")
-        if not toolkit.exists():
-            raise VersionSyncError(
-                f"CANN version mismatch: expected {expected}, current {current or 'unknown'}, "
-                f"and {toolkit} is not installed in this container"
-            )
-        self._set_env("ASCEND_HOME_PATH", str(toolkit))
-        self._set_env("ASCEND_TOOLKIT_HOME", str(toolkit))
-        self._set_env("PATH", f"{toolkit / 'bin'}:{os.environ.get('PATH', '')}")
-        self._set_env(
-            "LD_LIBRARY_PATH",
-            f"{toolkit / 'lib64'}:{toolkit / 'lib64' / 'plugin' / 'opskernel'}:"
-            f"{toolkit / 'lib64' / 'plugin' / 'nnengine'}:{os.environ.get('LD_LIBRARY_PATH', '')}",
-        )
-        logger.info("[versions] CANN env switched to %s", expected)
-
-
-def current_cann_version() -> str | None:
-    arch = os.uname().machine if hasattr(os, "uname") else "aarch64"
-    info = Path(f"/usr/local/Ascend/ascend-toolkit/latest/{arch}-linux/ascend_toolkit_install.info")
-    if not info.exists():
-        return None
-    match = re.search(r"^version=(.+)$", info.read_text(encoding="utf-8", errors="ignore"), re.MULTILINE)
-    return match.group(1).strip() if match else None
-
 
 def generate_table(repo: Path, branch: str, target: str, output: str, since: str, until: str) -> None:
     good = git_ops.resolve_commit(repo, since)

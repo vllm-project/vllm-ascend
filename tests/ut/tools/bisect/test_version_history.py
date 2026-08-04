@@ -3,6 +3,7 @@ from pathlib import Path
 from tools.bisect import git_ops
 from tools.bisect.config import Candidate
 from tools.bisect.version_history import (
+    ExternalVersionManager,
     VersionHistory,
     VersionProfile,
     _extract_torch_npu,
@@ -71,6 +72,7 @@ def test_record_range_writes_only_change_points(monkeypatch, tmp_path: Path):
 def test_record_range_disables_sync_when_endpoints_match(monkeypatch, tmp_path: Path):
     table = tmp_path / "version_history.csv"
     profile = VersionProfile("main", "a2", "ignored", "v0.26.0", "2.10.0.post2", "9.0.1")
+    cann_versions = {"good": "9.0.0", "mid": "9.0.1", "bad": "9.0.1"}
     monkeypatch.setattr(
         "tools.bisect.version_history.extract_profile_at",
         lambda repo, commit, branch, target: VersionProfile(
@@ -79,7 +81,7 @@ def test_record_range_disables_sync_when_endpoints_match(monkeypatch, tmp_path: 
             commit,
             profile.vllm_release_tag,
             profile.torch_npu_version,
-            profile.cann_version,
+            cann_versions[commit],
         ),
     )
 
@@ -87,7 +89,23 @@ def test_record_range_disables_sync_when_endpoints_match(monkeypatch, tmp_path: 
     active = history.record_range("good", [_candidate("mid"), _candidate("bad")])
 
     assert active is False
-    assert len(table.read_text(encoding="utf-8").splitlines()) == 2
+    rows = table.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 3
+    assert rows[2].startswith("main,a2,mid,v0.26.0,2.10.0.post2,9.0.1")
+
+
+def test_sync_profile_ignores_cann(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+    manager = ExternalVersionManager(
+        VersionHistory(str(tmp_path / "version_history.csv"), tmp_path, "main", "a2"),
+        sync_enabled=True,
+    )
+    monkeypatch.setattr(manager, "_sync_vllm", lambda profile, log_file: calls.append("vllm"))
+    monkeypatch.setattr(manager, "_sync_torch_npu", lambda profile, log_file: calls.append("torch-npu"))
+
+    manager.sync_profile(VersionProfile("main", "a2", "commit", "v0.26.0", "2.10.0.post2", "missing-cann"))
+
+    assert calls == ["vllm", "torch-npu"]
 
 
 def test_lookup_uses_latest_reachable_change_point(monkeypatch, tmp_path: Path):
