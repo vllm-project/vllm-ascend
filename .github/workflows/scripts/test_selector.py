@@ -700,10 +700,17 @@ class TestSelector:
                                 if test_case not in existing and covered_in_func:
                                     # Display changed lines coverage if available, otherwise function coverage
                                     display_lines = covered_changed_lines if covered_changed_lines else set()
-                                    func_results.append((test_case, {changed_file: display_lines}, len(display_lines)
-                                                         or len(covered_in_func)))
-                                    print(f"  [Function match] {test_case} covers function '{func_name}' in"
-                                          f" {changed_file}")
+                                    func_results.append(
+                                        (
+                                            test_case,
+                                            {changed_file: display_lines},
+                                            len(display_lines) or len(covered_in_func),
+                                        )
+                                    )
+                                    print(
+                                        f"  [Function match] {test_case} covers function '{func_name}' in"
+                                        f" {changed_file}"
+                                    )
 
                 func_results.sort(key=lambda x: x[2], reverse=True)
 
@@ -726,8 +733,10 @@ class TestSelector:
             selected.sort(key=lambda x: x[2], reverse=True)
 
             if selected:
-                print(f"  Line match: {len(line_results)} tests, Function match: {len(func_results)} tests, "
-                      f"Total: {len(selected)} tests")
+                print(
+                    f"  Line match: {len(line_results)} tests, Function match: {len(func_results)} tests, "
+                    f"Total: {len(selected)} tests"
+                )
                 return selected, "line+function"
 
             # ===== Stage 3: Function-level matching (only when first two levels are empty) =====
