@@ -439,14 +439,21 @@ class MembPullReadThread(threading.Thread):
         if dest is None:
             raise RuntimeError(f"MembPull has no destination blocks on D for req {ext_req_id} (layer {layer_name})")
         all_d_main_ids, all_d_indexer_ids = dest
-        main_end_block = main_start_block + len(p_main_block_ids)
-        if main_end_block > len(all_d_main_ids):
-            raise RuntimeError(
-                f"MembPull main destination range is incomplete for req {ext_req_id}: "
-                f"range=[{main_start_block}, {main_end_block}), "
-                f"allocated={len(all_d_main_ids)}"
-            )
-        d_main_ids = all_d_main_ids[main_start_block:main_end_block]
+        # Only the group's first contributor (group_member_idx == 0) pulls main; the rest
+        # skip it entirely. P broadcasts the full p_main_block_ids to every contributor, so
+        # resolve/validate the main destination range only for the one that actually pulls
+        # (a non-zero contributor may have no main destination range for this chunk).
+        owns_main = group_member_idx == 0
+        d_main_ids: list[int] = []
+        if owns_main:
+            main_end_block = main_start_block + len(p_main_block_ids)
+            if main_end_block > len(all_d_main_ids):
+                raise RuntimeError(
+                    f"MembPull main destination range is incomplete for req {ext_req_id}: "
+                    f"range=[{main_start_block}, {main_end_block}), "
+                    f"allocated={len(all_d_main_ids)}"
+                )
+            d_main_ids = all_d_main_ids[main_start_block:main_end_block]
         indexer_end_block = indexer_start_block + len(p_indexer_block_ids)
         if indexer_end_block > len(all_d_indexer_ids):
             raise RuntimeError(
