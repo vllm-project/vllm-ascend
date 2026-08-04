@@ -1453,8 +1453,8 @@ The tables below provide recommended parameter configurations for different depl
 |--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
 |High Throughput (A3)|Server / Single Machine|16|16|1|16|4096|200000|3|
 |High Throughput (A3)|Multi-Node (per node)|16|16|1|16|4096|200000|3|
-|High Throughput (A3)|2P4D — Server-P Node|16|16|2|64|4096|131072|1|
-|High Throughput (A3)|2P4D — Server-D Node|16|4|16|8|32|200000|3|
+|High Throughput (A3)|2P4D — Server-P Node|16|16|1|64|4096|131072|1|
+|High Throughput (A3)|2P4D — Server-D Node|16|4|4|8|32|200000|3|
 |Low Latency (A3)|Server / Single Machine|16|16|1|8|4096|40960|3|
 |Low Latency (A2)|Server / Single Machine|8|8|1|4|4096|32768|3|
 |Low Latency (A3)|Multi-Node (per node)|16|16|1|8|4096|40960|3|

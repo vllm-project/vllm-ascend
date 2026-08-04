@@ -474,14 +474,14 @@ FlashComm1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1`) and the multi-group KV cache (`USE_
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
-Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 32).
+Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 16).
 
 **Deployment topology:**
 
 |Node group|Nodes|Parallelism|Engine ports|
 |----------|-----|-----------|------------|
-|Prefill|2 (node 0/1)|`DP4 TP8` (1 rank per node)|9081/9082 per node|
-|Decode|2 (node 0/1)|`DP32 TP1` (4 ranks per node)|9900-9915 per node|
+|Prefill|2 (node 0/1)|`DP4 TP8` (2 ranks per node)|9081/9082 per node|
+|Decode|2 (node 0/1)|`DP32 TP1` (16 ranks per node)|9900-9915 per node|
 
 Before you start, please
 
@@ -871,28 +871,28 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8  --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 4 --tp-size 8  --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8  --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 4 --tp-size 8  --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 3. Decode node 0
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 4. Decode node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
@@ -1703,14 +1703,14 @@ The tables below provide recommended parameter configurations for different depl
 |Low Latency (A3)|Server / Single Machine, [5.1.1.1](#5111-single-node-deployment)|16|8|2|12|8192|135000|3|
 |Low Latency (A2)|Multi-Node (per node), [5.1.2.1](#5121-multi-node-co-located-deployment)|8|8|1|16|4096|40000|5|
 |High Throughput (A3)|Multi-Node (per node), [5.1.1.2](#5112-multi-node-co-located-deployment)|16|8|2|16|8192|66000|3|
-|High Throughput (A3)|PD — Server-P Node, [5.1.1.3](#5113-prefill-decode-disaggregation)|8|8|1|64|8192|133120|1|
-|High Throughput (A3)|PD — Server-D Node, [5.1.1.3](#5113-prefill-decode-disaggregation)|4|1|4|32|164|133120|5|
+|High Throughput (A3)|PD — Server-P Node, [5.1.1.3](#5113-prefill-decode-disaggregation)|16|8|2|64|8192|133120|1|
+|High Throughput (A3)|PD — Server-D Node, [5.1.1.3](#5113-prefill-decode-disaggregation)|16|1|16|32|164|133120|5|
 |High Throughput (A2)|PD — Server-P Node, [5.1.2.2](#5122-prefill-decode-disaggregation)|8|8|1|256|8192|256000|1|
 |High Throughput (A2)|PD — Server-D Node, [5.1.2.2](#5122-prefill-decode-disaggregation)|4|4|2|128|256|256000|3|
 |Long Context 1M (A3)|Server / Single Machine, [5.2.1.1](#5211-single-node-1m-deployment)|16|16|1|32|16384|1024000|3|
 |Long Context 1M (A3)|Dual-Node (per node), [5.2.1.2](#5212-dual-node-co-located-1m-deployment)|16|8|2|8|16384|1024000|3|
-|Long Context 1M (A3)|PD — Server-P Node, [5.2.1.3](#5213-pd-disaggregation-1m-deployment)|8|8|2|8|16384|1024000|1|
-|Long Context 1M (A3)|PD — Server-D Node, [5.2.1.3](#5213-pd-disaggregation-1m-deployment)|8|8|2|32|128|1024000|3|
+|Long Context 1M (A3)|PD — Server-P Node, [5.2.1.3](#5213-pd-disaggregation-1m-deployment)|16|8|2|8|16384|1024000|1|
+|Long Context 1M (A3)|PD — Server-D Node, [5.2.1.3](#5213-pd-disaggregation-1m-deployment)|16|8|2|32|128|1024000|3|
 
 > For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Chapter 5](#5-deployment).
 
