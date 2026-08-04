@@ -1934,10 +1934,20 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
-    # vLLM's Hunyuan prompt update adds the image start/end tokens around
-    # this placeholder. Supplying the wrapper here would duplicate it.
+    # vLLM main (post vllm-project/vllm#49691) wraps the image placeholder
+    # with the start/end tokens in the prompt: its prompt-replacement target
+    # is now ``[image_start, image, image_end]``. vLLM v0.26.0 still targets
+    # the bare image token and adds the boundary tokens itself, so the bare
+    # placeholder is supplied there to avoid duplicate boundary tokens.
+    from vllm_ascend.utils import vllm_version_is
+
     placeholder = "<｜hy_place▁holder▁no▁102｜>"  # noqa: E501
-    return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
+    if vllm_version_is("0.26.0"):
+        image_placeholder = placeholder
+    else:
+        image_placeholder = "<｜hy_place▁holder▁no▁100｜>"  # noqa: E501
+        image_placeholder += f"{placeholder}<｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    return [f"<｜hy_begin▁of▁sentence｜>{image_placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
 PROMPT_CONFIGS = {

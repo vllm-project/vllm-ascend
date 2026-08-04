@@ -41,7 +41,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -96,6 +95,20 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.26.0"):
+    from vllm.model_executor.layers.fused_moe import (  # type: ignore[attr-defined]  # type: ignore[import-not-found]
+        FusedMoE,
+    )
+
+    FusedMoEFactory = FusedMoE
+else:
+    from vllm.model_executor.layers.fused_moe import (  # type: ignore[attr-defined]
+        FusedMoEFactory as _FusedMoEFactory,
+    )
+
+    FusedMoEFactory = _FusedMoEFactory
 
 
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
@@ -546,7 +559,7 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,

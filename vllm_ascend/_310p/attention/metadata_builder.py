@@ -20,7 +20,7 @@ from typing import Any
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
@@ -60,7 +60,7 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -69,7 +69,7 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         Initializes the metadata builder and the 310P-specific mask builder.
 
         Args:
-            kv_cache_spec (AttentionSpec): Specification for the KV cache (block size, etc.).
+            kv_cache_spec (KVCacheSpec): Specification for the KV cache (block size, etc.).
             layer_names (list[str]): List of layer names in the model.
             vllm_config (VllmConfig): Global vLLM configuration object.
             device (torch.device): The device (NPU) to run operations on.
