@@ -55,7 +55,7 @@ def test_adapted_router_uses_ascend_mapping_operation():
     router = _Router()
     patch_fused_moe._adapt_eplb_router(router, enable_eplb=True)
     assert isinstance(router.eplb_state, AscendEplbLayerState)
-    router.eplb_state.physical_id_lookup = torch.tensor([[0, 1]], dtype=torch.int32)
+    router.eplb_state.expert_replica_routing_table = torch.tensor([[0, 1]], dtype=torch.int32)
     topk_ids = torch.tensor([[1]], dtype=torch.int32)
     physical_ids = torch.tensor([[0]], dtype=torch.int32)
 
@@ -67,4 +67,4 @@ def test_adapted_router_uses_ascend_mapping_operation():
         result = router._apply_eplb_mapping(topk_ids)
 
     assert result is physical_ids
-    mapping_op.assert_called_once_with(topk_ids, router.eplb_state.physical_id_lookup)
+    mapping_op.assert_called_once_with(topk_ids, router.eplb_state.expert_replica_routing_table)

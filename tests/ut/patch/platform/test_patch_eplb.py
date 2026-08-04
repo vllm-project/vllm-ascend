@@ -124,7 +124,7 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     pending_result = SimpleNamespace(layer_idx=3)
     model_state = SimpleNamespace(pending_result=pending_result)
     refresh = MagicMock()
-    monkeypatch.setattr(patch_eplb, "refresh_model_lookups", refresh)
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
 
     def original_move(model_state, ep_rank, *, future_option=None):
         assert ep_rank == 2

@@ -11,7 +11,7 @@ from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
 from vllm_ascend.distributed.eplb_communicator import HcclEplbCommunicator
-from vllm_ascend.distributed.eplb_state import refresh_model_lookups
+from vllm_ascend.distributed.eplb_state import refresh_model_routing_tables
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 
@@ -89,7 +89,7 @@ def _wrap_move_to_workspace(original_move):
         layer_idx = pending_result.layer_idx if pending_result is not None else None
         result = original_move(*bound.args, **bound.kwargs)
         if layer_idx is not None:
-            refresh_model_lookups(model_state, layer_idx)
+            refresh_model_routing_tables(model_state, layer_idx)
         return result
 
     setattr(_move_to_workspace, _PATCH_MARKER, True)

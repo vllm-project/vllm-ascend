@@ -4,15 +4,15 @@
 import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
-EPLB_LOOKUP_NUM_ROWS = 1024
+EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS = 1024
 
 
-def build_physical_id_lookup(
+def build_expert_replica_routing_table(
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
     ep_rank: int,
 ) -> torch.Tensor:
-    """Build a rank-aware logical-to-global-physical expert lookup."""
+    """Build a rank-aware table for routing logical experts to replicas."""
     if logical_to_physical_map.ndim != 2:
         raise ValueError("logical_to_physical_map must be a 2D tensor.")
     if logical_replica_count.ndim != 1:
@@ -22,17 +22,21 @@ def build_physical_id_lookup(
 
     num_logical_experts = logical_replica_count.shape[0]
     device = logical_to_physical_map.device
-    table_rows = torch.arange(EPLB_LOOKUP_NUM_ROWS, dtype=torch.int64, device=device)[:, None]
+    table_rows = torch.arange(
+        EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+        dtype=torch.int64,
+        device=device,
+    )[:, None]
     logical_expert_ids = torch.arange(num_logical_experts, dtype=torch.int64, device=device)[None, :]
     replica_count = logical_replica_count.to(torch.int64).clamp_min(1)[None, :]
     replica_indices = (table_rows + ep_rank + logical_expert_ids) % replica_count
-    lookup = logical_to_physical_map.gather(1, replica_indices.T).T
-    return lookup.to(torch.int32).contiguous()
+    routing_table = logical_to_physical_map.gather(1, replica_indices.T).T
+    return routing_table.to(torch.int32).contiguous()
 
 
 def map_to_physical(
     topk_ids: torch.Tensor,
-    physical_id_lookup: torch.Tensor,
+    expert_replica_routing_table: torch.Tensor,
 ) -> torch.Tensor:
     """Map logical expert IDs to global physical IDs through a periodic table."""
     if topk_ids.numel() == 0:
@@ -42,29 +46,37 @@ def map_to_physical(
 
     logical_ids = topk_ids.to(torch.int64) if topk_ids.device.type == "cpu" else topk_ids
     num_rows, topk = topk_ids.shape
-    num_full_blocks, tail_rows = divmod(num_rows, EPLB_LOOKUP_NUM_ROWS)
+    num_full_blocks, tail_rows = divmod(
+        num_rows,
+        EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+    )
     mapped_blocks = []
 
     if num_full_blocks:
-        full_rows = num_full_blocks * EPLB_LOOKUP_NUM_ROWS
-        lookup_blocks = physical_id_lookup.view(
+        full_rows = num_full_blocks * EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS
+        routing_table_blocks = expert_replica_routing_table.view(
             1,
-            EPLB_LOOKUP_NUM_ROWS,
-            physical_id_lookup.shape[1],
+            EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+            expert_replica_routing_table.shape[1],
         ).expand(num_full_blocks, -1, -1)
         logical_id_blocks = logical_ids[:full_rows].view(
             num_full_blocks,
-            EPLB_LOOKUP_NUM_ROWS,
+            EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
             topk,
         )
-        mapped_blocks.append(torch.gather(lookup_blocks, 2, logical_id_blocks).reshape(full_rows, topk))
+        mapped_blocks.append(
+            torch.gather(routing_table_blocks, 2, logical_id_blocks).reshape(
+                full_rows,
+                topk,
+            )
+        )
 
     if tail_rows:
         mapped_blocks.append(
             torch.gather(
-                physical_id_lookup[:tail_rows],
+                expert_replica_routing_table[:tail_rows],
                 1,
-                logical_ids[num_full_blocks * EPLB_LOOKUP_NUM_ROWS :],
+                logical_ids[num_full_blocks * EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS :],
             )
         )
 
@@ -101,7 +113,7 @@ def record_local_expert_load(
 
 def _map_to_physical_fake(
     topk_ids: torch.Tensor,
-    physical_id_lookup: torch.Tensor,
+    expert_replica_routing_table: torch.Tensor,
 ) -> torch.Tensor:
     return torch.empty_like(topk_ids)
 

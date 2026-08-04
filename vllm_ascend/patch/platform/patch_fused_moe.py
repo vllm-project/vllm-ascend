@@ -69,10 +69,10 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
     if eplb_state is None:
         return topk_ids
     self._validate_eplb_state()
-    physical_id_lookup = eplb_state.physical_id_lookup
-    if physical_id_lookup is None:
+    expert_replica_routing_table = eplb_state.expert_replica_routing_table
+    if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
-    return torch.ops.vllm.ascend_eplb_map_to_physical(topk_ids, physical_id_lookup)
+    return torch.ops.vllm.ascend_eplb_map_to_physical(topk_ids, expert_replica_routing_table)
 
 
 def _adapt_eplb_router(router, enable_eplb: bool) -> None:

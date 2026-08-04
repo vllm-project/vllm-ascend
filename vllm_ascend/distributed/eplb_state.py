@@ -15,11 +15,11 @@ from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 
 class AscendEplbLayerState(_eplb_state.EplbLayerState):
-    """EPLB layer state with a graph-stable Ascend mapping lookup."""
+    """EPLB layer state with a graph-stable expert replica routing table."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.physical_id_lookup: torch.Tensor | None = None
+        self.expert_replica_routing_table: torch.Tensor | None = None
 
     @classmethod
     def from_upstream(cls, state: _eplb_state.EplbLayerState) -> "AscendEplbLayerState":
@@ -41,37 +41,45 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             logical_to_physical_map,
             logical_replica_count,
         )
-        self.refresh_physical_id_lookup()
+        self.refresh_expert_replica_routing_table()
 
-    def refresh_physical_id_lookup(self) -> None:
+    def refresh_expert_replica_routing_table(self) -> None:
         logical_to_physical_map = self.logical_to_physical_map
         logical_replica_count = self.logical_replica_count
         if logical_to_physical_map is None or logical_replica_count is None:
-            raise RuntimeError("Cannot build Ascend EPLB lookup before layer state is initialized.")
+            raise RuntimeError(
+                "Cannot build the expert replica routing table before Ascend EPLB layer state is initialized."
+            )
 
-        new_lookup = _eplb_ops.build_physical_id_lookup(
+        new_routing_table = _eplb_ops.build_expert_replica_routing_table(
             logical_to_physical_map,
             logical_replica_count,
             get_ep_group().rank_in_group,
         )
-        if self.physical_id_lookup is not None and self.physical_id_lookup.shape == new_lookup.shape:
-            self.physical_id_lookup.copy_(new_lookup, non_blocking=True)
+        if (
+            self.expert_replica_routing_table is not None
+            and self.expert_replica_routing_table.shape == new_routing_table.shape
+        ):
+            self.expert_replica_routing_table.copy_(
+                new_routing_table,
+                non_blocking=True,
+            )
         else:
-            self.physical_id_lookup = new_lookup
+            self.expert_replica_routing_table = new_routing_table
 
 
-def refresh_model_lookups(model_state: Any, layer_idx: int | None = None) -> None:
-    """Refresh all lookups, or one layer after an async map commit."""
+def refresh_model_routing_tables(model_state: Any, layer_idx: int | None = None) -> None:
+    """Refresh all routing tables, or one after an async map commit."""
     layers = list(model_state.model.moe_layers)
     selected_layers = enumerate(layers) if layer_idx is None else ((layer_idx, layers[layer_idx]),)
     for _, layer in selected_layers:
         layer_state = layer.eplb_state
         if isinstance(layer_state, AscendEplbLayerState):
-            layer_state.refresh_physical_id_lookup()
+            layer_state.refresh_expert_replica_routing_table()
 
 
 class AscendEplbState(_eplb_state.EplbState):
-    """Own Ascend lookup refreshes without patching upstream commit helpers."""
+    """Own Ascend routing-table refreshes without patching commit helpers."""
 
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
@@ -135,7 +143,7 @@ class AscendEplbState(_eplb_state.EplbState):
         result = super().rearrange(is_profile=is_profile, rank_mapping=rank_mapping)
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
-                refresh_model_lookups(model_state)
+                refresh_model_routing_tables(model_state)
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result
@@ -159,5 +167,5 @@ class AscendEplbState(_eplb_state.EplbState):
             num_valid_physical_experts=num_valid_physical_experts,
         )
         for model_state in state.model_states.values():
-            refresh_model_lookups(model_state)
+            refresh_model_routing_tables(model_state)
         return state

@@ -14,16 +14,20 @@ from vllm_ascend.distributed.eplb_state import (
 )
 
 
-def test_layer_state_builds_lookup_and_preserves_captured_tensor(monkeypatch):
-    old_lookup = torch.full((2, 2), -1, dtype=torch.int32)
-    new_lookup = torch.tensor([[0, 3], [2, 1]], dtype=torch.int32)
-    build_lookup = MagicMock(side_effect=[old_lookup, new_lookup])
+def test_layer_state_builds_routing_table_and_preserves_captured_tensor(monkeypatch):
+    old_routing_table = torch.full((2, 2), -1, dtype=torch.int32)
+    new_routing_table = torch.tensor([[0, 3], [2, 1]], dtype=torch.int32)
+    build_routing_table = MagicMock(side_effect=[old_routing_table, new_routing_table])
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
         lambda: SimpleNamespace(rank_in_group=1),
     )
-    monkeypatch.setattr(eplb_state._eplb_ops, "build_physical_id_lookup", build_lookup)
+    monkeypatch.setattr(
+        eplb_state._eplb_ops,
+        "build_expert_replica_routing_table",
+        build_routing_table,
+    )
     layer_state = AscendEplbLayerState()
 
     layer_state.set_layer_state(
@@ -32,15 +36,15 @@ def test_layer_state_builds_lookup_and_preserves_captured_tensor(monkeypatch):
         torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int32),
         torch.tensor([[2, 2]], dtype=torch.int32),
     )
-    captured_lookup = layer_state.physical_id_lookup
-    layer_state.refresh_physical_id_lookup()
+    captured_routing_table = layer_state.expert_replica_routing_table
+    layer_state.refresh_expert_replica_routing_table()
 
-    assert captured_lookup is old_lookup
-    assert layer_state.physical_id_lookup is captured_lookup
-    torch.testing.assert_close(captured_lookup, new_lookup)
+    assert captured_routing_table is old_routing_table
+    assert layer_state.expert_replica_routing_table is captured_routing_table
+    torch.testing.assert_close(captured_routing_table, new_routing_table)
 
 
-def test_sync_rearrange_refreshes_all_model_lookups(monkeypatch):
+def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     sentinel = object()
     model_states = {"model": object()}
 
@@ -51,7 +55,7 @@ def test_sync_rearrange_refreshes_all_model_lookups(monkeypatch):
 
     refresh = MagicMock()
     monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
-    monkeypatch.setattr(eplb_state, "refresh_model_lookups", refresh)
+    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     state = AscendEplbState.__new__(AscendEplbState)
     state.is_async = False
     state.model_states = model_states
@@ -62,14 +66,14 @@ def test_sync_rearrange_refreshes_all_model_lookups(monkeypatch):
     refresh.assert_called_once_with(model_states["model"])
 
 
-def test_async_rearrange_defers_lookup_refresh_to_workspace_hook(monkeypatch):
+def test_async_rearrange_defers_routing_table_refresh_to_workspace_hook(monkeypatch):
     monkeypatch.setattr(
         upstream_eplb_state.EplbState,
         "rearrange",
         lambda self, is_profile=False, rank_mapping=None: None,
     )
     refresh = MagicMock()
-    monkeypatch.setattr(eplb_state, "refresh_model_lookups", refresh)
+    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     state = AscendEplbState.__new__(AscendEplbState)
     state.is_async = True
     state.model_states = {"model": object()}
@@ -93,7 +97,7 @@ def test_from_mapping_refreshes_final_mapping(monkeypatch):
         "from_mapping",
         classmethod(upstream_from_mapping),
     )
-    monkeypatch.setattr(eplb_state, "refresh_model_lookups", refresh)
+    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
 
     state = AscendEplbState.from_mapping(
         model=object(),

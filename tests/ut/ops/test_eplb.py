@@ -4,8 +4,8 @@
 import torch
 
 from vllm_ascend.ops.fused_moe.eplb import (
-    EPLB_LOOKUP_NUM_ROWS,
-    build_physical_id_lookup,
+    EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
+    build_expert_replica_routing_table,
     map_to_physical,
     record_local_expert_load,
 )
@@ -20,31 +20,52 @@ def _eplb_inputs():
     return logical_to_physical_map, logical_replica_count
 
 
-def test_build_physical_id_lookup_applies_rank_and_expert_offsets():
+def test_build_expert_replica_routing_table_applies_rank_and_expert_offsets():
     logical_map, replica_count = _eplb_inputs()
 
-    rank0_lookup = build_physical_id_lookup(logical_map, replica_count, ep_rank=0)
-    rank1_lookup = build_physical_id_lookup(logical_map, replica_count, ep_rank=1)
+    rank0_routing_table = build_expert_replica_routing_table(
+        logical_map,
+        replica_count,
+        ep_rank=0,
+    )
+    rank1_routing_table = build_expert_replica_routing_table(
+        logical_map,
+        replica_count,
+        ep_rank=1,
+    )
 
-    assert rank0_lookup.shape == (EPLB_LOOKUP_NUM_ROWS, 3)
-    assert rank0_lookup.dtype == torch.int32
-    torch.testing.assert_close(rank0_lookup[0], torch.tensor([0, 5, 2], dtype=torch.int32))
-    torch.testing.assert_close(rank1_lookup[0], torch.tensor([4, 1, 2], dtype=torch.int32))
-    torch.testing.assert_close(rank0_lookup[1], rank1_lookup[0])
+    assert rank0_routing_table.shape == (EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS, 3)
+    assert rank0_routing_table.dtype == torch.int32
+    torch.testing.assert_close(
+        rank0_routing_table[0],
+        torch.tensor([0, 5, 2], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        rank1_routing_table[0],
+        torch.tensor([4, 1, 2], dtype=torch.int32),
+    )
+    torch.testing.assert_close(rank0_routing_table[1], rank1_routing_table[0])
 
 
 def test_map_to_physical_uses_periodic_rows():
     logical_map, replica_count = _eplb_inputs()
-    lookup = build_physical_id_lookup(logical_map, replica_count, ep_rank=0)
-    topk_ids = torch.zeros((EPLB_LOOKUP_NUM_ROWS + 1, 2), dtype=torch.int64)
+    routing_table = build_expert_replica_routing_table(
+        logical_map,
+        replica_count,
+        ep_rank=0,
+    )
+    topk_ids = torch.zeros(
+        (EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS + 1, 2),
+        dtype=torch.int64,
+    )
     topk_ids[:, 1] = 1
 
-    physical_ids = map_to_physical(topk_ids, lookup)
+    physical_ids = map_to_physical(topk_ids, routing_table)
 
     assert physical_ids[0, 0] == 0
-    assert physical_ids[EPLB_LOOKUP_NUM_ROWS - 1, 0] == 4
-    assert physical_ids[EPLB_LOOKUP_NUM_ROWS, 0] == physical_ids[0, 0]
-    assert physical_ids[EPLB_LOOKUP_NUM_ROWS, 1] == physical_ids[0, 1]
+    assert physical_ids[EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS - 1, 0] == 4
+    assert physical_ids[EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS, 0] == physical_ids[0, 0]
+    assert physical_ids[EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS, 1] == physical_ids[0, 1]
 
 
 def test_record_local_expert_load_updates_only_current_rank_slice():
