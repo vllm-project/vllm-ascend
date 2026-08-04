@@ -26,6 +26,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
@@ -115,28 +116,67 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
 
-    def _maybe_reduce_shared_expert_output(
-        self,
-        shared_output: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        # AscendSharedExperts.forward already handles shared expert TP all-reduce
-        # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
-        # via _maybe_reduce_final_output on the combined (shared + routed)
-        # output. Skip any additional reduction here.
-        return shared_output
+    # main2main compat: `fused_output_is_reduced` was added to upstream
+    # _maybe_reduce_shared_expert_output() in vllm main after 0.26.0.
+    # Ascend already reduces shared expert output in
+    # _forward_shared_experts, so the parameter is accepted for
+    # interface alignment only.
+    # Remove the version gate once 0.26.0 support is dropped.
+    if vllm_version_is("0.26.0"):
 
-    def _maybe_reduce_final_output(
-        self,
-        states: torch.Tensor,
-        trunc_size: int,
-    ) -> torch.Tensor:
-        # Sequence-parallel MoE returns a token-sharded result after EP
-        # reduce-scatter.  Qwen3Moe gathers those token shards across TP in
-        # the model, so a TP all-reduce here would sum different token
-        # segments and corrupt the sequence.
-        if not self.moe_config.is_sequence_parallel:
+        def _maybe_reduce_shared_expert_output(
+            self,
+            shared_output: torch.Tensor | None,
+        ) -> torch.Tensor | None:
+            # _forward_shared_experts already handles shared expert TP
+            # all-reduce for MC2/ALLTOALL/FUSED_MC2. For AllGather the
+            # reduction is done via _maybe_reduce_final_output on the
+            # combined (shared + routed) output.
+            return shared_output
+    else:
+
+        def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
+            self,
+            shared_output: torch.Tensor | None,
+            fused_output_is_reduced: bool | None = None,
+        ) -> torch.Tensor | None:
+            # Ascend handles shared expert reduction in
+            # _forward_shared_experts; the upstream kwarg is unused here.
+            _ = fused_output_is_reduced
+            return shared_output
+
+    # main2main compat: `output_is_reduced` was added to upstream
+    # _maybe_reduce_final_output() in vllm main after 0.26.0.
+    # Ascend already handles reduction in its own dispatch path, so
+    # the upstream kwarg is accepted for interface alignment only.
+    # Remove the version gate once 0.26.0 support is dropped.
+    if vllm_version_is("0.26.0"):
+
+        def _maybe_reduce_final_output(
+            self,
+            states: torch.Tensor,
+            trunc_size: int,
+        ) -> torch.Tensor:
+            # Sequence-parallel MoE returns a token-sharded result after EP
+            # reduce-scatter.  Qwen3Moe gathers those token shards across TP in
+            # the model, so a TP all-reduce here would sum different token
+            # segments and corrupt the sequence.
+            if not self.moe_config.is_sequence_parallel:
+                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+            return states[..., :trunc_size]
+    else:
+
+        def _maybe_reduce_final_output(  # type: ignore[misc]
+            self,
+            states: torch.Tensor,
+            trunc_size: int | None,
+            output_is_reduced: bool | None = None,
+        ) -> torch.Tensor:
+            _ = output_is_reduced
             states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
-        return states[..., :trunc_size]
+            if trunc_size is not None and trunc_size > 0:
+                return states[..., :trunc_size]
+            return states
 
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context
