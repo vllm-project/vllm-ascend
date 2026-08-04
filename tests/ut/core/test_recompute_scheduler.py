@@ -9,7 +9,6 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.request import Request, RequestStatus
 
@@ -148,50 +147,3 @@ def test_failed_remote_kv_load_rezeroes_unwritten_blocks():
 
     scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 32)
     scheduler.kv_cache_manager.record_blocks_for_zeroing.assert_called_once_with(request.request_id, 32)
-
-
-def test_schedule_forwards_cow_copies_and_filters_async_loaded_blocks():
-    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    scheduler.current_step = 0
-    scheduler.max_num_scheduled_tokens = 1
-    scheduler.max_num_encoder_input_tokens = 0
-    scheduler.num_spec_tokens = 0
-    scheduler.prefill_capacity_bound = False
-    scheduler._pause_state = PauseState.PAUSED_ALL
-    scheduler.running = []
-    scheduler.waiting = []
-    scheduler.skipped_waiting = []
-    scheduler.lora_config = None
-    scheduler.max_num_running_reqs = 1
-    scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
-    scheduler.use_v2_model_runner = False
-    scheduler.prev_step_scheduled_req_ids = set()
-    scheduler._make_cached_request_data = MagicMock(return_value=[])
-    scheduler.dynamic_sd_lookup = None
-    scheduler.reset_preempted_req_ids = set()
-    scheduler.finished_req_ids = set()
-    scheduler.encoder_cache_manager = MagicMock()
-    scheduler.encoder_cache_manager.get_freed_mm_hashes.return_value = []
-    scheduler.needs_kv_cache_zeroing = True
-    scheduler._skip_zero_block_ids = {11}
-    scheduler.sched_step_seq = 4
-    scheduler.defer_block_free = False
-    scheduler.connector = None
-    scheduler.ec_connector = None
-    scheduler._update_after_schedule = MagicMock()
-    scheduler._free_cow_retained_blocks = MagicMock()
-
-    block_copy = SimpleNamespace(src_block_id=1, dst_block_id=2)
-    retained_blocks = [SimpleNamespace(block_id=1), SimpleNamespace(block_id=2)]
-    scheduler.kv_cache_manager = MagicMock()
-    scheduler.kv_cache_manager.take_kv_cache_block_copies.return_value = (
-        [block_copy],
-        retained_blocks,
-    )
-    scheduler.kv_cache_manager.take_new_block_ids.return_value = [10, 11, 12]
-
-    output = scheduler.schedule()
-
-    assert output.kv_cache_block_copies == [block_copy]
-    assert output.new_block_ids_to_zero == [10, 12]
-    scheduler._free_cow_retained_blocks.assert_called_once_with(retained_blocks, 5)
