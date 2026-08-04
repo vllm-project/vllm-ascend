@@ -638,7 +638,6 @@
     - vllm_ascend/__init__.py
     - vllm_ascend/_build_info.py
     - vllm_ascend/_version.py
-    - vllm_ascend/version.py
     - vllm_ascend/ascend_config.py
     - vllm_ascend/ascend_forward_context.py
     - vllm_ascend/cpu_binding.py

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from functools import wraps
 from typing import Any, cast
 
@@ -26,7 +27,12 @@ from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, 
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
-from vllm_ascend.utils import create_hccl_pg_options, vllm_version_is
+from vllm_ascend.utils import create_hccl_pg_options
+
+# main2main compat: mirror vllm_ascend.utils.vllm_version_is without
+# importing vllm_ascend (which pulls in vllm) so that CPU-UT tests that
+# load this module from source via `_load_module()` do not break.
+_IS_VLLM_026 = os.getenv("VLLM_VERSION", "") == "0.26.0"
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
@@ -103,7 +109,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
     # has no all2all implementation, so we only accept the kwarg to keep
     # the interface aligned.
     # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    if _IS_VLLM_026:
 
         def __init__(
             self,

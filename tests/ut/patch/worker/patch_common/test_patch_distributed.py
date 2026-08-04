@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib.util import module_from_spec, spec_from_file_location
-from inspect import signature
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -86,7 +85,7 @@ def _load_module(module_name: str, module_path: Path) -> Any:
 
 
 @contextmanager
-def _load_patch_distributed_module(*, is_vllm_026: bool = False):
+def _load_patch_distributed_module():
     non_group_member = object()
     new_group_calls: list[dict[str, object]] = []
     destroy_process_group = MagicMock()
@@ -187,7 +186,6 @@ def _load_patch_distributed_module(*, is_vllm_026: bool = False):
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
-    utils_module.vllm_version_is = MagicMock(return_value=is_vllm_026)
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker
@@ -285,17 +283,6 @@ def _calls_with_backend(module_env, backend: str) -> list[dict[str, object]]:
 
 def test_group_coordinator_is_patched(module_env):
     assert module_env.parallel_state_module.GroupCoordinator is module_env.module.GroupCoordinatorPatch
-
-
-def test_group_coordinator_main_signature_uses_version_helper(module_env):
-    assert "use_all2all" in signature(module_env.module.GroupCoordinatorPatch.__init__).parameters
-    module_env.utils_module.vllm_version_is.assert_called_once_with("0.26.0")
-
-
-def test_group_coordinator_release_signature_uses_version_helper():
-    with _load_patch_distributed_module(is_vllm_026=True) as module_env:
-        assert "use_all2all" not in signature(module_env.module.GroupCoordinatorPatch.__init__).parameters
-        module_env.utils_module.vllm_version_is.assert_called_once_with("0.26.0")
 
 
 def test_group_coordinator_preserves_backend_for_inherited_helpers(module_env):

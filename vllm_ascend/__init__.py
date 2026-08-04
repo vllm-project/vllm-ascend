@@ -16,9 +16,8 @@
 #
 
 import importlib.util
+import os
 import sys
-
-from vllm_ascend.version import vllm_version_is
 
 _triton_available = importlib.util.find_spec("triton") is not None
 
@@ -28,7 +27,7 @@ _triton_available = importlib.util.find_spec("triton") is not None
 # discovery (importing vllm_ascend to resolve the plugin's `register()`
 # callback) before any `from triton.experimental import gluon` import
 # - including subprocesses such as `python -m vllm.model_executor.models.registry`.
-if not vllm_version_is("0.26.0"):
+if os.getenv("VLLM_VERSION", "") != "0.26.0":
     from types import ModuleType
 
     for _gluon_stub in (
