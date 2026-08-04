@@ -97,7 +97,6 @@ def record_stream(stream: torch.npu.Stream | None, *tensors: torch.Tensor | None
 def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
     if not enabled:
         return nullcontext()
-    import torchair as tng
 
     return torch.npu.npugraph_ex.scope.limit_core_num(aic_num, aiv_num)
 
