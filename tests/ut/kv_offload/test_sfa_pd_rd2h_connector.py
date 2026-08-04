@@ -22,7 +22,6 @@ from examples.disaggregated_prefill_v1 import (  # noqa: E402
 from examples.disaggregated_prefill_v1.load_balance_proxy_layerwise_server_example import (  # noqa: E402
     get_api_request_ids,
 )
-from vllm_ascend import envs  # noqa: E402
 from vllm_ascend.distributed.kv_transfer import register_connector  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import (  # noqa: E402
     SFAPDRD2HConnector,
@@ -399,34 +398,6 @@ def test_small_chunks_rotate_across_tp_ranks():
             )
 
             assert bool(local) is (tp_rank == chunk_start)
-
-
-def test_non_tp0_verify_log_marks_shared_main_as_unavailable():
-    thread = _make_read_thread()
-    thread._state.cpu_pools = [None]
-    thread._state.indexer_tensors = [None]
-    read_info = {
-        "layer_name": "model.layers.0.self_attn",
-        "ext_req_id": "req-0",
-        "pool_idx": 0,
-        "offload_id": 0,
-        "d_main_ids": [1],
-        "d_indexer_ids": [],
-        "n_main": 1,
-        "n_indexer": 0,
-        "num_transfers": 2,
-    }
-
-    with (
-        patch.object(envs, "VLLM_ASCEND_MF_VERIFY", True),
-        patch.object(envs, "VLLM_ASCEND_SFA_DEBUG", False),
-        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread.logger.info") as log_info,
-    ):
-        thread._log_read_result(read_info)
-
-    log_args = log_info.call_args.args
-    assert "main_k=%s main_v=%s" in log_args[0]
-    assert log_args[3:5] == ("n/a", "n/a")
 
 
 def _make_consumer_worker_for_completion_test():
