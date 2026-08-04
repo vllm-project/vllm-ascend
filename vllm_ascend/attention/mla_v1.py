@@ -1460,6 +1460,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 # npu_gather_pa_kv_cache requires matching dtypes for the
                 # key/value cache pair. A3 C8 stores latent cache in INT8 and
                 # RoPE cache in BF16, so gather the two PA-NZ caches separately.
+                # Gather's seq_offset addresses a block-table column, whereas
+                # chunked_context.starts is expressed in tokens. Chunk starts
+                # are block-aligned, so convert using the cache's runtime
+                # block size instead of assuming a fixed value.
+                chunk_block_offset = prefill_metadata.chunked_context.starts[i] // block_size
                 kv_c_unused = torch.empty_like(kv_c_normed)
                 k_pe_unused = torch.empty_like(k_pe)
                 DeviceOperator.kv_cache_load(
@@ -1467,7 +1472,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     cache_kv_c_for_load,
                     prefill_metadata.block_table,
                     context_seq_len_npu,
-                    prefill_metadata.chunked_context.starts[i],
+                    chunk_block_offset,
                     key=kv_c_normed,
                     value=kv_c_unused,
                     cache_mode="PA_NZ",
@@ -1477,7 +1482,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     cache_k_pe_for_load,
                     prefill_metadata.block_table,
                     context_seq_len_npu,
-                    prefill_metadata.chunked_context.starts[i],
+                    chunk_block_offset,
                     key=k_pe,
                     value=k_pe_unused,
                     cache_mode="PA_NZ",
