@@ -61,7 +61,6 @@ class NPUOffloadingSpec(_CPUOffloadingSpec):
             self.BLOCK_SIZE_ALIGNMENT,
         )
         super().__init__(config)
-        self._npu_worker: NPUOffloadingWorker | None = None
 
     @override
     def create_worker(
@@ -79,9 +78,12 @@ class NPUOffloadingSpec(_CPUOffloadingSpec):
         self,
         kv_caches: CanonicalKVCaches,
     ) -> OffloadingWorker:
-        if self._npu_worker is None:
-            self._npu_worker = self.create_worker(kv_caches)
-        return self._npu_worker
+        # CPUOffloadingSpec rejects non-CUDA/XPU platforms in get_worker().
+        # Keep its worker cache and lifecycle, replacing only that platform
+        # gate with the NPU-specific worker construction.
+        if self._worker is None:
+            self._worker = self.create_worker(kv_caches)
+        return self._worker
 
 
 # Compatibility alias for configurations that load this module directly.

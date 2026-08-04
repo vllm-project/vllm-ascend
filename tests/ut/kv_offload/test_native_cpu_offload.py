@@ -8,9 +8,11 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
+from vllm_ascend.kv_offload.native.cpu_npu import NPUOffloadingWorker
 from vllm_ascend.kv_offload.native.npu import NPUOffloadingSpec
 
 
@@ -67,8 +69,41 @@ def test_npu_offloading_spec_loads_through_vllm_factory() -> None:
     spec_cls = OffloadingSpecFactory.get_spec_cls(
         {
             "spec_name": "NPUOffloadingSpec",
+            "spec_module_path": "vllm_ascend.kv_offload.native.npu",
+        }
+    )
+
+    assert spec_cls is NPUOffloadingSpec
+
+
+def test_npu_offloading_spec_keeps_legacy_module_path() -> None:
+    spec_cls = OffloadingSpecFactory.get_spec_cls(
+        {
+            "spec_name": "NPUOffloadingSpec",
             "spec_module_path": "vllm_ascend.kv_offload.npu",
         }
     )
 
     assert spec_cls is NPUOffloadingSpec
+
+
+def test_npu_worker_reuses_upstream_worker_protocol() -> None:
+    assert issubclass(NPUOffloadingWorker, CPUOffloadingWorker)
+
+
+def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> None:
+    spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 1024}))
+    worker = object()
+    create_calls = 0
+
+    def create_worker(kv_caches):
+        nonlocal create_calls
+        create_calls += 1
+        return worker
+
+    monkeypatch.setattr(spec, "create_worker", create_worker)
+    kv_caches = object()
+
+    assert spec.get_worker(kv_caches) is worker
+    assert spec.get_worker(kv_caches) is worker
+    assert create_calls == 1

@@ -90,14 +90,10 @@ class NPUDmaCopyBackend:
     # Worker thread main loop
     # ------------------------------------------------------------------
     def _copy_loop(self) -> None:
-        # NOTE: matches upstream cuda backend semantics — no cross-stream
-        # sync. The scheduler manager only schedules stores for blocks
-        # whose KV data is **confirmed computed** (see
-        # ``confirmed_tokens`` in ``SimpleCPUOffloadScheduler``), so
-        # those blocks have long been written and visible across streams
-        # by the time we read them here. Loads target GPU blocks held
-        # by ``BlockPool.touch`` until load completes, so they are also
-        # safe to write without a barrier.
+        # Store jobs carry a compute-done event and wait on it before reading
+        # live NPU KV-cache blocks. Loads read stable pinned host memory and
+        # can be submitted immediately, matching the upstream DMA backend's
+        # ordering model.
         assert self._device is not None
         assert self._queue is not None
         assert self._load_stream is not None

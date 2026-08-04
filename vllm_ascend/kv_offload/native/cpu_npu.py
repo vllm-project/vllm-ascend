@@ -9,8 +9,7 @@ from collections import deque
 from dataclasses import dataclass
 
 import torch
-from typing_extensions import override
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.base import (
@@ -19,12 +18,12 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
-    OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
-
-logger = init_logger(__name__)
+from vllm.v1.kv_offload.cpu.gpu_worker import (
+    CPUOffloadingWorker,
+    compute_sub_block_ptrs,
+)
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
@@ -265,7 +264,7 @@ class SingleDirectionNPUOffloadingHandler:
         self.dst_tensors.clear()
 
 
-class NPUOffloadingWorker(OffloadingWorker):
+class NPUOffloadingWorker(CPUOffloadingWorker):
     """Native CPU offloading worker backed by Ascend batched DMA."""
 
     def __init__(
@@ -315,35 +314,3 @@ class NPUOffloadingWorker(OffloadingWorker):
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             npu_to_cpu=False,
         )
-
-    @override
-    def submit_store(
-        self,
-        job_id: int,
-        src_spec: GPULoadStoreSpec,
-        dst_spec: LoadStoreSpec,
-    ) -> bool:
-        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
-
-    @override
-    def submit_load(
-        self,
-        job_id: int,
-        src_spec: LoadStoreSpec,
-        dst_spec: GPULoadStoreSpec,
-    ) -> bool:
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
-
-    @override
-    def get_finished(self) -> list[TransferResult]:
-        return self._store_handler.get_finished() + self._load_handler.get_finished()
-
-    @override
-    def wait(self, job_ids: set[int]) -> None:
-        self._store_handler.wait(job_ids)
-        self._load_handler.wait(job_ids)
-
-    @override
-    def shutdown(self) -> None:
-        self._store_handler.shutdown()
-        self._load_handler.shutdown()

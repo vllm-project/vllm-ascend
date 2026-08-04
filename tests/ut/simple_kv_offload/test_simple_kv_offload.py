@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
+from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 from vllm_ascend.kv_offload.simple import worker as worker_module
 from vllm_ascend.kv_offload.simple.simple_cpu_offload_connector import (
@@ -42,7 +43,7 @@ def test_factory_registration_uses_consolidated_package(
     register_connector()
 
     assert registrations["SimpleCPUOffloadConnector"] == (
-        "vllm_ascend.simple_kv_offload.simple_cpu_offload_connector",
+        "vllm_ascend.kv_offload.simple.simple_cpu_offload_connector",
         "AscendSimpleCPUOffloadConnector",
     )
 
@@ -75,7 +76,7 @@ def test_connector_only_replaces_enabled_worker(
 
     monkeypatch.setattr(SimpleCPUOffloadConnector, "__init__", fake_upstream_init)
     monkeypatch.setattr(
-        "vllm_ascend.simple_kv_offload.simple_cpu_offload_connector.SimpleCPUOffloadNPUWorker",
+        "vllm_ascend.kv_offload.simple.simple_cpu_offload_connector.SimpleCPUOffloadNPUWorker",
         fake_npu_worker,
     )
 
@@ -174,3 +175,56 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
         load_stream,
         store_stream,
     )
+
+
+def test_get_finished_records_store_barrier_on_npu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEvent:
+        def __init__(self) -> None:
+            self.recorded_stream = None
+
+        def record(self, stream) -> None:
+            self.recorded_stream = stream
+
+    class RecordingBackend:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def launch_copy(self, *args, **kwargs) -> None:
+            self.calls.append(kwargs)
+
+    current_stream = object()
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(Event=FakeEvent, current_stream=lambda: current_stream),
+        raising=False,
+    )
+
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = RecordingBackend()
+    worker._connector_metadata = SimpleCPUOffloadMetadata(
+        load_event=1,
+        load_gpu_blocks=[2],
+        load_cpu_blocks=[3],
+        store_event=4,
+        store_gpu_blocks=[5],
+        store_cpu_blocks=[6],
+    )
+    worker._store_compute_done = None
+    worker._load_events = []
+    worker._store_events = []
+    worker._pending_load_event_indices = set()
+    worker._pending_store_event_indices = set()
+    worker._completed_store_events = {}
+
+    assert worker.get_finished(set()) == (None, None)
+
+    load_call, store_call = worker._backend.calls
+    assert load_call["is_store"] is False
+    assert "wait_event" not in load_call
+    assert store_call["is_store"] is True
+    store_event = store_call["wait_event"]
+    assert isinstance(store_event, FakeEvent)
+    assert store_event.recorded_stream is current_stream
