@@ -166,6 +166,7 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1694,6 +1695,19 @@ class NPUModelRunner(GPUModelRunner):
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
 
+    def _adjust_cudagraph_mode_for_kv_scale_calculation(
+        self,
+        cudagraph_mode: CUDAGraphMode,
+    ) -> CUDAGraphMode:
+        # vLLM 0.26.0 still supports runtime KV scale calculation. Upstream main
+        # removed this state in vllm-project/vllm#49389.
+        if not vllm_version_is("0.26.0"):
+            return cudagraph_mode
+        if self.calculate_kv_scales:  # type: ignore[has-type]
+            self.calculate_kv_scales = False  # type: ignore[has-type]
+            return CUDAGraphMode.NONE
+        return cudagraph_mode
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2006,13 +2020,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
-        # Set cudagraph mode to none if calc_kv_scales is true.
-        # KV scales calculation involves dynamic operations that are incompatible
-        # with CUDA graph capture.
-        if self.calculate_kv_scales:  # type: ignore[has-type]
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False  # type: ignore[has-type]
+        cudagraph_mode = self._adjust_cudagraph_mode_for_kv_scale_calculation(
+            cudagraph_mode
+        )
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)

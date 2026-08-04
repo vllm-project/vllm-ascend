@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -87,6 +88,40 @@ class TestNPUPlatform(TestBase):
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
+
+    @staticmethod
+    def _config_for_incompatible_cache_check(cache_config):
+        return SimpleNamespace(
+            model_config=None,
+            cache_config=cache_config,
+            observability_config=None,
+            scheduler_config=None,
+            speculative_config=None,
+            kv_transfer_config=None,
+            attention_config=None,
+            parallel_config=None,
+            compilation_config=None,
+        )
+
+    @patch("vllm_ascend.platform.vllm_version_is", return_value=False)
+    def test_fix_incompatible_config_main_skips_removed_kv_scale_field(self, mock_version):
+        cache_config = SimpleNamespace()
+        vllm_config = self._config_for_incompatible_cache_check(cache_config)
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertNotIn("calculate_kv_scales", vars(cache_config))
+        mock_version.assert_called_once_with("0.26.0")
+
+    @patch("vllm_ascend.platform.vllm_version_is", return_value=True)
+    def test_fix_incompatible_config_v026_disables_kv_scale_calculation(self, mock_version):
+        cache_config = SimpleNamespace(calculate_kv_scales=True)
+        vllm_config = self._config_for_incompatible_cache_check(cache_config)
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertFalse(cache_config.calculate_kv_scales)
+        mock_version.assert_called_once_with("0.26.0")
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")

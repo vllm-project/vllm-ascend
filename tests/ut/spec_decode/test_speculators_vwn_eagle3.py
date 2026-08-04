@@ -37,6 +37,7 @@ from vllm_ascend.models.llama_eagle3_vwn import (
     VwnLlamaDecoderLayer,
     VwnLlamaModel,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _HIDDEN = 2048
 _INTERMEDIATE = 6144
@@ -112,6 +113,15 @@ def _cpu_add_rms_norm_bias(x, residual, weight, bias, eps):
     return out, _, new_residual
 
 
+@contextmanager
+def _patch_legacy_kv_scale_op():
+    if vllm_version_is("0.26.0"):
+        with patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None):
+            yield
+    else:
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _mock_npu_env():
     """Patch TP group, Ascend config, and NPU ops so all tests run on CPU.
@@ -145,7 +155,7 @@ def _mock_npu_env():
         patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=_mock),
         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_cfg),
         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
-        patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None),
+        _patch_legacy_kv_scale_op(),
         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
         patch("vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather", lambda x, *a, **kw: x),
         patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True),

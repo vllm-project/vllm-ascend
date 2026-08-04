@@ -335,6 +335,7 @@ jobs:
         needs.ensure-csrc-cache.result == 'success'
       }}
     strategy:
+      fail-fast: false
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
@@ -361,6 +362,7 @@ jobs:
         needs.ensure-csrc-cache.result == 'success'
       }}
     strategy:
+      fail-fast: false
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
