@@ -532,7 +532,8 @@ class TestNPUWorker(TestBase):
             # Test execute_dummy_batch
             worker.execute_dummy_batch()
 
-            # Verify call
+            # Idle DP must join DFX world sync with busy execute_model peers.
+            mock_model_runner.dfx.sync_for_step.assert_called_once_with(allow_arm=False)
             mock_model_runner._dummy_run.assert_called_once_with(
                 num_tokens=mock_decode_token_per_req, uniform_decode=True
             )

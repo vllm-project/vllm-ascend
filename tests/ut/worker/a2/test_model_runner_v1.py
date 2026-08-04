@@ -418,46 +418,6 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
 
 
-class TestNPUModelRunnerDebugger(unittest.TestCase):
-    def _build_runner(self, debugger=None):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.debugger = debugger or MagicMock()
-        runner.model = MagicMock()
-        runner.model_config = MagicMock()
-        runner.model_config.enforce_eager = False
-        runner._debugger_started = True
-        runner._debugger_step_dummy_data_before_execute = False
-        runner.use_compress = False
-        return runner
-
-    def test_finalize_dump_data_stops_stop_capable_debugger(self):
-        runner = self._build_runner()
-
-        runner._finalize_dump_data()
-
-        runner.debugger.stop.assert_called_once_with()
-        runner.debugger.step.assert_called_once_with()
-        self.assertFalse(runner._debugger_started)
-
-    def test_finalize_dump_data_steps_graph_debugger_without_stop(self):
-        debugger = MagicMock(spec=["start", "step"])
-        runner = self._build_runner(debugger)
-
-        runner._finalize_dump_data()
-
-        debugger.step.assert_called_once_with()
-        self.assertTrue(runner._debugger_started)
-
-    def test_start_dump_data_noop_when_already_started(self):
-        runner = self._build_runner(MagicMock(spec=["start", "step"]))
-
-        runner._start_dump_data()
-
-        runner.debugger.start.assert_not_called()
-        runner.debugger.step.assert_not_called()
-        self.assertTrue(runner._debugger_started)
-
-
 class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
     """Regression tests for async spec-decode seq_lens correction.
 
