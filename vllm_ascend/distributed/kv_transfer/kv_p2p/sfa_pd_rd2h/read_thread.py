@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections.abc import Callable
@@ -15,7 +16,6 @@ import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     MF_META,
     READ_DONE,
@@ -169,9 +169,9 @@ class MembPullReadThread(threading.Thread):
                         logger.info(
                             "Received MF_META: P session=%s, %d layers", self._p_session, len(self._p_layer_meta)
                         )
-                        for layer_name, layer_meta in self._p_layer_meta.items():
-                            if envs.VLLM_ASCEND_SFA_DEBUG:
-                                logger.info(
+                        if logger.isEnabledFor(logging.DEBUG):
+                            for layer_name, layer_meta in self._p_layer_meta.items():
+                                logger.debug(
                                     "MembPull D recv MF_META layer=%s: base_addrs=%s, "
                                     "block_len=%s, block_size_scale=%s",
                                     layer_name,
@@ -204,14 +204,13 @@ class MembPullReadThread(threading.Thread):
                             for entry in msg[3]
                         ]
                         done_ext_ids = list(msg[4]) if len(msg) > 4 else []
-                        if envs.VLLM_ASCEND_SFA_DEBUG:
-                            logger.info(
-                                "MembPull D recv READ_READY_BATCH: layer=%d (%s), reqs=%d, done_reqs=%d",
-                                layer_idx,
-                                layer_name,
-                                len(read_reqs),
-                                len(done_ext_ids),
-                            )
+                        logger.debug(
+                            "MembPull D recv READ_READY_BATCH: layer=%d (%s), reqs=%d, done_reqs=%d",
+                            layer_idx,
+                            layer_name,
+                            len(read_reqs),
+                            len(done_ext_ids),
+                        )
                         succeeded = False
                         try:
                             p_session = self._p_sessions.get(identity)
@@ -229,14 +228,13 @@ class MembPullReadThread(threading.Thread):
                                 )
                             sock.send_multipart((identity, b"", encoder.encode((READ_DONE, layer_idx))))
                             succeeded = True
-                            if envs.VLLM_ASCEND_SFA_DEBUG:
-                                logger.info(
-                                    "MembPull D sent READ_DONE: layer=%d (%s), reqs=%d, done_reqs=%d",
-                                    layer_idx,
-                                    layer_name,
-                                    len(read_reqs),
-                                    len(done_ext_ids),
-                                )
+                            logger.debug(
+                                "MembPull D sent READ_DONE: layer=%d (%s), reqs=%d, done_reqs=%d",
+                                layer_idx,
+                                layer_name,
+                                len(read_reqs),
+                                len(done_ext_ids),
+                            )
                         except Exception as e:
                             logger.error(
                                 "MembPull batch read failed for layer %d (%s), reqs=%d: %s",
@@ -287,8 +285,8 @@ class MembPullReadThread(threading.Thread):
             logger.warning("MembPull _do_read: layer %s not in main names, skip", layer_name)
             return None
         offload_id = state.get_offload_layer_id(layer_name)
-        if pool_idx != offload_id and envs.VLLM_ASCEND_SFA_DEBUG:
-            logger.warning(
+        if pool_idx != offload_id:
+            logger.debug(
                 "MembPull _do_read: layer-order mismatch for %s -- pull _main_names "
                 "idx=%d != resident offload_id=%d. Using offload_id.",
                 layer_name,
@@ -425,17 +423,16 @@ class MembPullReadThread(threading.Thread):
                 f"allocated={len(all_d_indexer_ids)}"
             )
         d_indexer_ids = all_d_indexer_ids[indexer_start_block:indexer_end_block]
-        if envs.VLLM_ASCEND_SFA_DEBUG:
-            logger.info(
-                "MembPull D resolve dest: layer=%s, req=%s, p_main_ids=%s, "
-                "p_indexer_ids=%s, d_main_cpu_ids=%s, d_indexer_hbm_ids=%s",
-                layer_name,
-                ext_req_id,
-                p_main_block_ids,
-                p_indexer_block_ids,
-                d_main_ids,
-                d_indexer_ids,
-            )
+        logger.debug(
+            "MembPull D resolve dest: layer=%s, req=%s, p_main_ids=%s, "
+            "p_indexer_ids=%s, d_main_cpu_ids=%s, d_indexer_hbm_ids=%s",
+            layer_name,
+            ext_req_id,
+            p_main_block_ids,
+            p_indexer_block_ids,
+            d_main_ids,
+            d_indexer_ids,
+        )
         if not p_main_block_ids and not p_indexer_block_ids:
             raise RuntimeError(f"MembPull source block ids are empty for {layer_name}")
 
@@ -574,46 +571,19 @@ class MembPullReadThread(threading.Thread):
         return local_ptrs, peer_ptrs, lengths, info
 
     def _log_read_result(self, read_info: dict[str, Any]) -> None:
-        state = self._state
         layer_name = read_info["layer_name"]
-        ext_req_id = read_info["ext_req_id"]
-        pool_idx = read_info["pool_idx"]
-        offload_id = read_info["offload_id"]
-        d_main_ids = read_info["d_main_ids"]
-        d_indexer_ids = read_info["d_indexer_ids"]
-        if envs.VLLM_ASCEND_MF_VERIFY:
-            try:
-                cpu_pool = state.cpu_pools[offload_id]
-                if cpu_pool is None:
-                    mk = mv = "n/a"
-                else:
-                    k_cpu, v_cpu = cpu_pool
-                    mk = "%.6f" % (k_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0)
-                    mv = "%.6f" % (v_cpu[d_main_ids].float().sum().item() if d_main_ids else 0.0)
-                mi = state.indexer_tensors[pool_idx][d_indexer_ids].float().sum().item() if d_indexer_ids else 0.0
-                logger.info(
-                    "MFV D layer %s req %s main_k=%s main_v=%s idx_post=%.6f",
-                    layer_name,
-                    ext_req_id,
-                    mk,
-                    mv,
-                    mi,
-                )
-            except Exception as ve:
-                logger.warning("MFV D checksum failed for %s: %s", layer_name, ve)
-        if envs.VLLM_ASCEND_SFA_DEBUG:
-            logger.info(
-                "MembPull D finished read: layer=%s, req=%s, pool_idx=%d, "
-                "main=%d/%d blocks, indexer=%d/%d blocks (scale split), transfers=%d",
-                layer_name,
-                ext_req_id,
-                pool_idx,
-                read_info["n_main"],
-                len(d_main_ids),
-                read_info["n_indexer"],
-                len(d_indexer_ids),
-                read_info["num_transfers"],
-            )
+        logger.debug(
+            "MembPull D finished read: layer=%s, req=%s, pool_idx=%d, "
+            "main=%d/%d blocks, indexer=%d/%d blocks (scale split), transfers=%d",
+            layer_name,
+            read_info["ext_req_id"],
+            read_info["pool_idx"],
+            read_info["n_main"],
+            len(read_info["d_main_ids"]),
+            read_info["n_indexer"],
+            len(read_info["d_indexer_ids"]),
+            read_info["num_transfers"],
+        )
 
     def _do_read_batch(
         self,
@@ -631,7 +601,7 @@ class MembPullReadThread(threading.Thread):
         if layer is None:
             raise RuntimeError(f"MembPull cannot resolve P/D layout for {layer_name}")
 
-        want_info = bool(envs.VLLM_ASCEND_MF_VERIFY or envs.VLLM_ASCEND_SFA_DEBUG)
+        want_info = logger.isEnabledFor(logging.DEBUG)
         all_local_ptrs: list[int] = []
         all_peer_ptrs: list[int] = []
         all_lengths: list[int] = []
@@ -669,14 +639,13 @@ class MembPullReadThread(threading.Thread):
                     raise RuntimeError(
                         f"MembPull built no transfer descriptors for layer {layer_name}, req {ext_req_id}"
                     )
-                if envs.VLLM_ASCEND_SFA_DEBUG:
-                    logger.info(
-                        "MembPull D skips local no-op: layer=%s, req=%s, P main blocks=%d, P indexer blocks=%d",
-                        layer_name,
-                        ext_req_id,
-                        len(p_main_block_ids),
-                        len(p_indexer_block_ids),
-                    )
+                logger.debug(
+                    "MembPull D skips local no-op: layer=%s, req=%s, P main blocks=%d, P indexer blocks=%d",
+                    layer_name,
+                    ext_req_id,
+                    len(p_main_block_ids),
+                    len(p_indexer_block_ids),
+                )
                 continue
             all_local_ptrs.extend(local_ptrs)
             all_peer_ptrs.extend(peer_ptrs)
@@ -691,9 +660,9 @@ class MembPullReadThread(threading.Thread):
             # READ_DONE so its corresponding P rank can reuse the source.
             return
 
-        if envs.VLLM_ASCEND_SFA_DEBUG:
+        if want_info:
             atomic_total = sum(r.get("atomic_transfers", 0) for r in read_infos)
-            logger.info(
+            logger.debug(
                 "MembPull D start batched memfabric read: layer=%s, reqs=%d, "
                 "p_session=%s, transfers=%d (coalesced from %d)",
                 layer_name,

@@ -25,7 +25,6 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
     SfaPDConsumerMetadata,
@@ -125,18 +124,17 @@ class SFAPDRD2HProducerScheduler:
         )
         self._reqs_need_send_layerwise[request.request_id] = send_req_info
 
-        if envs.VLLM_ASCEND_SFA_DEBUG:
-            logger.info(
-                "SFAPD P register remote-decode req %s: local_block_ids=%s, "
-                "remote_host=%s, remote_port=%s, remote_tp_size=%s, "
-                "remote_cached_tokens=%s",
-                request.request_id,
-                local_block_ids,
-                params.get("remote_host"),
-                params.get("remote_port"),
-                params.get("remote_tp_size"),
-                remote_cache_tokens,
-            )
+        logger.debug(
+            "SFAPD P register remote-decode req %s: local_block_ids=%s, "
+            "remote_host=%s, remote_port=%s, remote_tp_size=%s, "
+            "remote_cached_tokens=%s",
+            request.request_id,
+            local_block_ids,
+            params.get("remote_host"),
+            params.get("remote_port"),
+            params.get("remote_tp_size"),
+            remote_cache_tokens,
+        )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         meta = SfaPDProducerMetadata()
@@ -148,12 +146,11 @@ class SFAPDRD2HProducerScheduler:
             if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
                 normalized = self._normalize_block_ids(new_blocks)
                 self._reqs_need_send_layerwise[req_id].extend_local_block_ids(normalized)
-                if envs.VLLM_ASCEND_SFA_DEBUG:
-                    logger.info(
-                        "SFAPD P extend remote-decode req %s: new_blocks=%s",
-                        req_id,
-                        normalized,
-                    )
+                logger.debug(
+                    "SFAPD P extend remote-decode req %s: new_blocks=%s",
+                    req_id,
+                    normalized,
+                )
 
         computed_tokens = dict(
             list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
@@ -184,22 +181,21 @@ class SFAPDRD2HProducerScheduler:
                 local_computed_tokens=send_req_info.local_computed_tokens,
                 local_transed_tokens=send_req_info.local_transferred_tokens,
             )
-            if envs.VLLM_ASCEND_SFA_DEBUG:
-                logger.info(
-                    "SFAPD P add transfer task req %s: local_block_ids=%s, "
-                    "local_transed_tokens=%s, local_computed_tokens=%s, "
-                    "remote_cache_tokens=%s, prompt_len=%s, chunk_finish=%s, "
-                    "remote_host=%s, remote_port=%s",
-                    req_id,
-                    send_req_info.local_block_ids,
-                    send_req_info.local_transferred_tokens,
-                    send_req_info.local_computed_tokens,
-                    request.kv_transfer_params.get("remote_cached_tokens"),
-                    len(request.all_token_ids),
-                    chunk_finish,
-                    request.kv_transfer_params.get("remote_host"),
-                    request.kv_transfer_params.get("remote_port"),
-                )
+            logger.debug(
+                "SFAPD P add transfer task req %s: local_block_ids=%s, "
+                "local_transed_tokens=%s, local_computed_tokens=%s, "
+                "remote_cache_tokens=%s, prompt_len=%s, chunk_finish=%s, "
+                "remote_host=%s, remote_port=%s",
+                req_id,
+                send_req_info.local_block_ids,
+                send_req_info.local_transferred_tokens,
+                send_req_info.local_computed_tokens,
+                request.kv_transfer_params.get("remote_cached_tokens"),
+                len(request.all_token_ids),
+                chunk_finish,
+                request.kv_transfer_params.get("remote_host"),
+                request.kv_transfer_params.get("remote_port"),
+            )
             if chunk_finish:
                 self._reqs_need_send_layerwise.pop(req_id)
         return meta
@@ -327,17 +323,16 @@ class SFAPDRD2HScheduler:
                 url=metaserver,
                 message=kv_transfer_params,
             )
-        if envs.VLLM_ASCEND_SFA_DEBUG:
-            logger.info(
-                "SFAPDRD2H D advertised req %s: indexer_hbm_ids=%s, "
-                "main_cpu_ids=%s, remote_host=%s, remote_port=%s, metaserver=%s",
-                request.request_id,
-                indexer_block_ids,
-                main_block_ids,
-                self.side_channel_host,
-                self.side_channel_port,
-                metaserver,
-            )
+        logger.debug(
+            "SFAPDRD2H D advertised req %s: indexer_hbm_ids=%s, "
+            "main_cpu_ids=%s, remote_host=%s, remote_port=%s, metaserver=%s",
+            request.request_id,
+            indexer_block_ids,
+            main_block_ids,
+            self.side_channel_host,
+            self.side_channel_port,
+            metaserver,
+        )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         meta = SfaPDConsumerMetadata()
