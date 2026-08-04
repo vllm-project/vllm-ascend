@@ -314,8 +314,6 @@ class BaseDeviceAdaptor:
         attn_metadata,
         use_mla_rope: bool = True,
     ):
-        if not use_mla_rope:
-            raise NotImplementedError("MLAPO without RoPE is only supported on A5.")
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
