@@ -958,11 +958,6 @@ class NPUPlatform(Platform):
         is_draft_model_prefill = False
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
-        moe_comm_type = select_moe_comm_method(
-            num_tokens,
-            vllm_config,
-        )
-        moe_comm_method = get_moe_comm_method(moe_comm_type)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -999,6 +994,15 @@ class NPUPlatform(Platform):
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
+
+        # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
+        # to ensure consistent communication method across all DP ranks
+        moe_comm_type = select_moe_comm_method(
+            max_tokens_across_dp,
+            vllm_config,
+        )
+        moe_comm_method = get_moe_comm_method(moe_comm_type)
+
         mc2_mask = None
         padded_num_tokens = None
         if num_tokens is not None:
@@ -1246,6 +1250,15 @@ class NPUPlatform(Platform):
                     "parameter=use_inductor_graph_partition, action: resetting to False."
                 )
                 vllm_config.compilation_config.use_inductor_graph_partition = False
+
+        # ==================== 11. VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS ====================
+        if envs_vllm.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS < 1836:
+            envs_vllm.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS = 3000
+            logger.info(
+                "The timeout interval of the HCCL operator is 1836s. Timeout in "
+                "seconds for execute_model RPC calls in multiprocessing must be "
+                "greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000"
+            )
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:

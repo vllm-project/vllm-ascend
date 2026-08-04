@@ -134,7 +134,10 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -293,7 +296,11 @@ def _select_a2_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
-    if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
+    if (
+        num_experts_per_device <= 24
+        and ep_world_size >= 16
+        and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
+    ):
         return MoECommType.MC2
     return MoECommType.ALLGATHER
 
@@ -310,7 +317,7 @@ def _select_a3_moe_comm_method(
         if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
             return MoECommType.FUSED_MC2
 
-    if num_tokens <= mc2_tokens_capacity:
+    if num_tokens is None or num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
 
     return MoECommType.ALLTOALL
@@ -327,7 +334,7 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    if num_tokens <= mc2_tokens_capacity and world_size > 1:
+    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
@@ -353,6 +360,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
+        is_draft_model (bool): Whether the model runs in MTP mode.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -370,7 +378,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
-        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine
+        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL

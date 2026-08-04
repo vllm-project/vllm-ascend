@@ -57,6 +57,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -127,6 +128,7 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
@@ -151,6 +153,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
+    embedding_tp_enable,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     enable_sp_by_pass,
@@ -158,9 +161,9 @@ from vllm_ascend.utils import (
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
-    is_hierarchical_communication_enabled,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
+    oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
 )
@@ -587,7 +590,9 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.use_dspark():
                     assert isinstance(self.drafter, AscendDSparkProposer)
                     self.use_aux_hidden_state_outputs = True
-                self.rejection_sampler = AscendRejectionSampler(self.sampler)
+                self.rejection_sampler = AscendRejectionSampler(
+                    self.sampler, self.speculative_config, self.device
+                )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -635,6 +640,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        allow_dp_padding: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -660,17 +666,7 @@ class NPUModelRunner(GPUModelRunner):
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
         # Create a tensor for num_tokens_after_padding
-        comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config)
-        is_mc2_with_hierarchical = (comm_method == MoECommType.MC2 and is_hierarchical_communication_enabled())
-        is_finegrained_tp = self.ascend_config.finegrained_tp_config.get_max_finegrained_tp_size() > 1
-        # There are three cases where padding between DPs is required:
-        # 1. comm_method == ALLGATHER;
-        # 2. comm_method == MC2 and is hierarchical communication, in this case,
-        #    the mc2 operator does not support dynamic batch size.
-        #    TODO(zzzzwwjj): It can be remove after op support this case.
-        # 3. when finegrained_tp is open, we need to ensure num_tokens remains consistent within finegrained_tp_group.
-        #    TODO(zzzzwwjj): We can do dp padding in finegrained_tp_group, instead of world_group.
-        if comm_method == MoECommType.ALLGATHER or is_mc2_with_hierarchical or is_finegrained_tp:
+        if allow_dp_padding or is_draft_model:
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )
@@ -1451,38 +1447,26 @@ class NPUModelRunner(GPUModelRunner):
                 num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
             )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
-            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
-
-            # prepare sampled_token_ids tensor（list → padded tensor）
-            sampled_token_ids = valid_sampled_token_ids
-            if isinstance(sampled_token_ids, list):
-                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
-                max_len = max(max_len, 1)
-                padded_list = [
-                    sublist + [-1] * (max_len - len(sublist))
-                    for sublist in sampled_token_ids
-                ]
-                sampled_token_ids_tensor = torch.tensor(
-                    padded_list, dtype=torch.int32, device=self.device
-                )
-            else:
-                sampled_token_ids_tensor = sampled_token_ids
-
-            (_token_ids, next_token_ids, draft_token_ids,
-             num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
+            batch_size = min(self.input_batch.num_reqs,
+                             self.token_ids_gpu_tensor.shape[0])
+            vocab_size = self.model_config.get_vocab_size()
+            (next_token_ids, draft_token_ids,
+             num_valid_draft_tokens, valid_sampled_tokens_count
+             ) = triton_ngram_spec_decode(
                 self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
                 self.num_tokens_no_spec_gpu[:batch_size],      # [B]
-                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
+                valid_sampled_token_ids,                       # list[list[int]] or [B, max_new_tokens]
                 self.discard_request_mask.gpu[:batch_size],    # [B]
-                vocab_size=self.model_config.get_vocab_size(),
+                vocab_size=vocab_size,
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
                 k=self.drafter.k,
             )
 
-            # only async scheduling, set prev_sampled_token_ids，
-            if self.use_async_scheduling:
-                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            # Communicate verified token count to scheduler for async scheduling.
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
 
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
@@ -1804,7 +1788,7 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output
                 )
 
-                if has_ec_transfer() and get_ec_transfer().is_producer:
+                if has_ec_transfer() and not get_ec_transfer().is_consumer:
                     self._start_dump_data()
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
@@ -2745,6 +2729,10 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
+                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
+                                  or enable_sp(self.vllm_config)
+                                  or oproj_tp_enable()
+                                  or embedding_tp_enable()),
             )
 
             # Extract DP padding if there is any
@@ -3672,6 +3660,11 @@ class NPUModelRunner(GPUModelRunner):
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+        compilation_config = getattr(self, "compilation_config", None)
+        if compilation_config is None:
+            compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
             group_spec = group_kv_cache_spec.kv_cache_spec
@@ -3680,6 +3673,12 @@ class NPUModelRunner(GPUModelRunner):
                     layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
                 else:
                     layer_kv_cache_spec[layer_name] = group_spec
+                if static_forward_context is not None:
+                    attn_layer = static_forward_context.get(layer_name)
+                    if isinstance(attn_layer, AttentionLayerBase):
+                        spec = attn_layer.get_kv_cache_spec(self.vllm_config)
+                        if isinstance(spec, AscendSFAIndexerCacheSpec):
+                            layer_kv_cache_spec[layer_name] = spec
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
@@ -4429,6 +4428,22 @@ class NPUModelRunner(GPUModelRunner):
             layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase, kv_cache_group_spec.layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
+
+            def backend_supports_kernel_block_size(
+                attn_backend: type[AttentionBackend],
+                block_size: int,
+            ) -> bool:
+                for supported_size in attn_backend.get_supported_kernel_block_sizes():
+                    if isinstance(supported_size, int):
+                        if block_size == supported_size:
+                            return True
+                    elif isinstance(supported_size, MultipleOf):
+                        if block_size % supported_size.base == 0:
+                            return True
+                    else:
+                        raise ValueError(f"Unknown supported size: {supported_size}")
+                return False
+
             # Dedupe based on full class name; this is a bit safer than
             # using the class itself as the key because when we create dynamic
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
@@ -4438,12 +4453,19 @@ class NPUModelRunner(GPUModelRunner):
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                if isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec):
+                # Prefer the backend declared by the layer itself. Some
+                # indexer-cache layers require their own metadata builder.
+                attn_backend = layers[layer_name].get_attn_backend()
+                if (
+                    isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec)
+                    and not backend_supports_kernel_block_size(
+                        attn_backend,
+                        layer_kv_cache_spec.block_size,
+                    )
+                ):
                     from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
                     attn_backend = AscendSFAIndexerBackend
-                else:
-                    attn_backend = layers[layer_name].get_attn_backend()
                 full_cls_name = attn_backend.full_cls_name()
                 key = (full_cls_name, layer_kv_cache_spec)
                 attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
@@ -4500,7 +4522,7 @@ class NPUModelRunner(GPUModelRunner):
             format. Layers that do not need KV cache are not included.
         """
 
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
 
         kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
@@ -4611,6 +4633,11 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=spec.dtype,
                         cache_dtype_str=spec.cache_dtype_str,
                     )
+                    attn_layer_names.add(layer_name)
+
+            elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
+                if isinstance(spec, AttentionSpec):
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:

@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -53,7 +53,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
       export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -76,9 +76,9 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -125,7 +125,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --max-model-len 1024
     ```
 
-=== "Atlas inference products"
+=== "Atlas 300I DUO"
 
     ```shell
     #!/bin/sh
@@ -141,11 +141,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
     ```
     Required  Parameter Descriptions:
 
-    `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+    `--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 Key Parameter Descriptions:
 
-- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -239,25 +239,25 @@ Here are two accuracy evaluation methods.
 2. Run follow code to execute the accuracy evaluation.
 
     ```python
-  
+
     import os
-    
+
     from mteb.models.vllm_wrapper import VllmCrossEncoderWrapper
-    
+
     if __name__ == "__main__":
         import mteb
-    
+
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    
+
         model = VllmCrossEncoderWrapper(f"/root/.cache/Qwen3-Reranker-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     enforce_eager=True,
                                     max_model_len=10240,
                                     hf_overrides={"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": True})
-    
+
         cache = mteb.ResultCache("/home/data/mteb_data")
         tasks = mteb.get_tasks(
             task_types=["Reranking"],

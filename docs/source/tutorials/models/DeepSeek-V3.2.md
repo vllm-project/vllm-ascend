@@ -33,7 +33,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -74,7 +74,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -492,7 +492,7 @@ Parameter descriptions:
     export ASCEND_TRANSPORT_PRINT=1
     export ACL_OP_INIT_MODE=1
     export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+    # Timeout (in seconds) for automatically releasing the prefiller's KV cache for a particular request.
     export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -747,10 +747,10 @@ Common Issues Tip: If you encounter issues with PD separation deployment, please
 
 Once your server is started, you can query the model with input prompts:
 
-**Note**:
+!!! note
 
-- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
-- `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
+    - `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
+    - `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
@@ -803,7 +803,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The performance result is:  
+The performance result is:
 
 **Hardware**: A3-752T, 4 node
 
