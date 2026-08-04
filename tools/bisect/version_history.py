@@ -27,11 +27,11 @@ import csv
 import importlib.metadata
 import logging
 import os
-import regex as re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import regex as re
 from packaging.version import InvalidVersion, Version
 
 from tools.bisect import git_ops
