@@ -107,9 +107,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         being replayed; otherwise tiling fails with
         ``queryT != last element of actualSequenceLengthQ``.
         """
-        query_lens_list = [
-            (i + 1) * self.num_query_per_req for i in range(num_reqs_padded)
-        ]
+        query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
             metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
