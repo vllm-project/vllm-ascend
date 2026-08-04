@@ -536,11 +536,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
 
         device = query.device
-        # Decode config: num_tokens requests, each with exactly 1 query token,
-        # KV length up to the model's max sequence length.
+        # Decode config: num_tokens requests, each with exactly 1 query token.
+        # max_seqlen_k uses the ACTUAL max KV length of the batch (not
+        # max_model_len) — get_scheduler_metadata allocates buffers sized by
+        # max_seqlen_k; using max_model_len allocates huge buffers that corrupt
+        # the memory profile and break prefill (CANN V1) accuracy.
         max_batch_size = num_tokens
         max_seqlen_q = 1
-        max_seqlen_k = getattr(self.vllm_config.model_config, "max_model_len", num_tokens)
+        max_seqlen_k = max(
+            attn_metadata.seq_lens_list if attn_metadata.seq_lens_list else [num_tokens]
+        )
         # Match the buffer's block-table width to the actual block table so
         # the pre-replay .copy_() shapes align.
         if attn_metadata.block_tables is not None:
