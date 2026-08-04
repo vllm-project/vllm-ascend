@@ -513,16 +513,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            # Select the fused CANN operator via env var. The fused op only
+            # Use the fused CANN operator when available. The fused op only
             # supports the non-PCP case; keep the Triton pipeline as default.
-            use_fused_chunk = get_ascend_config().enable_fused_chunk_gdn and get_pcp_group().world_size == 1
+            use_fused_chunk = self.use_fused_chunk_op and get_pcp_group().world_size == 1
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
                 # returns a copy, safe to clear in place.
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
-                (core_attn_out_non_spec, last_recurrent_state) = _chunk_gated_delta_rule_fused(
+                (core_attn_out_non_spec, last_recurrent_state) = self._chunk_gated_delta_rule_fused(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
