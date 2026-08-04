@@ -42,9 +42,9 @@ from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-    NPUIPCTrainerSendWeightsArgs,
     NPUIPCWeightTransferEngine,
 )
+from vllm_ascend.utils import vllm_version_is
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -163,14 +163,42 @@ def main():
     start_weight_update(BASE_URL)
 
     # Send weights via NPU IPC handles using HTTP mode.
-    # trainer_send_weights internally collects all parameters,
-    # creates IPC handles, and POSTs them to /update_weights.
+    # vllm main: the trainer-side path was refactored to a stateful
+    # ``IPCTrainerWeightTransferEngine`` driven by
+    # ``WeightTransferTrainerFactory.trainer_init`` + ``engine.send_weights()``,
+    # with HTTP transport delegated to ``HTTPVLLMWeightSyncClient``.
+    # vllm 0.26.0: the static ``NPUIPCWeightTransferEngine.trainer_send_weights``
+    # path is still the only entry point.
     print("Broadcasting weights via NPU IPC (HTTP)...")
-    trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
-    NPUIPCWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
-    )
+    if vllm_version_is("0.26.0"):
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+            NPUIPCTrainerSendWeightsArgs,
+        )
+
+        trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
+        NPUIPCWeightTransferEngine.trainer_send_weights(
+            iterator=train_model.named_parameters(),
+            trainer_args=trainer_args,
+        )
+    else:
+        from vllm.distributed.weight_transfer.base import ModuleSource
+        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+        from vllm.distributed.weight_transfer.factory import (
+            WeightTransferTrainerFactory,
+        )
+
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+            NPUIPCTrainerInitInfo,
+        )
+
+        client = HTTPVLLMWeightSyncClient(base_url=BASE_URL)
+        init_info = NPUIPCTrainerInitInfo(rank=0, packed=False)
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info,
+            client=client,
+            source=ModuleSource(train_model),
+        )
+        engine.send_weights()
 
     # Finish weight update (finalizes layerwise reload on the vLLM server)
     finish_weight_update(BASE_URL)

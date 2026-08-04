@@ -128,26 +128,62 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-            NPUIPCTrainerSendWeightsArgs,
             NPUIPCWeightTransferEngine,
         )
+        from vllm_ascend.utils import vllm_version_is
 
         _post(server, "init_weight_transfer_engine", json={"init_info": {}})
 
         _post(server, "pause")
         _post(server, "start_weight_update")
 
-        # trainer_send_weights POSTs to /update_weights itself; the server
-        # rebuilds tensors locally and loads them before the POST returns (no
-        # collective back to the trainer, so no background thread is needed).
-        # train_model stays referenced so the shared NPU storage outlives it.
-        trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=server.url_root)
-        NPUIPCWeightTransferEngine.trainer_send_weights(
-            iterator=train_model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+        if vllm_version_is("0.26.0"):
+            # 0.26.0: static trainer_send_weights — the trainer builds the
+            # HTTP payload itself and POSTs to /update_weights. The caller
+            # is responsible for /start_weight_update and /finish_weight_update
+            # around it.
+            from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+                NPUIPCTrainerSendWeightsArgs,
+            )
 
-        _post(server, "finish_weight_update")
+            trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=server.url_root)
+            NPUIPCWeightTransferEngine.trainer_send_weights(
+                iterator=train_model.named_parameters(),
+                trainer_args=trainer_args,
+            )
+
+            _post(server, "finish_weight_update")
+        else:
+            # main: stateful ``NPUIPCTrainerWeightTransferEngine`` driven via
+            # ``WeightTransferTrainerFactory.trainer_init``. The trainer engine
+            # drives init/start/finish/update over the ``HTTPVLLMWeightSyncClient``
+            # itself, so the surrounding manual ``_post`` calls are dropped.
+            from vllm.distributed.weight_transfer.base import ModuleSource
+            from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+            from vllm.distributed.weight_transfer.factory import (
+                WeightTransferTrainerFactory,
+            )
+
+            from vllm_ascend.distributed.weight_transfer import register_engine
+            from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+                NPUIPCTrainerInitInfo,
+            )
+
+            register_engine()
+
+            # The lifecycle probe above left a weight update active; the
+            # stateful engine drives its own start/finish lifecycle, so close
+            # the probe's update first.
+            _post(server, "finish_weight_update")
+
+            init_info = NPUIPCTrainerInitInfo(rank=0, packed=False)
+            engine = WeightTransferTrainerFactory.trainer_init(
+                init_info,
+                client=HTTPVLLMWeightSyncClient(base_url=server.url_root),
+                source=ModuleSource(train_model),
+            )
+            engine.send_weights()
+
         _post(server, "resume")
 
         outputs_after = _generate(client, MODEL_NAME, PROMPTS)
