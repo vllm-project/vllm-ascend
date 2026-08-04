@@ -74,6 +74,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    resolve_remote_layer_idx,
     split_if_not_byte_contiguous,
     string_to_int64_hash,
     zmq_ctx,
@@ -374,6 +375,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 )
             ]
         )
+        worker._layer_specs = dict(layer_specs)
 
         kv_group2layeridx = worker._build_kv_group2layeridx()
 
@@ -416,6 +418,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 )
             ]
         )
+        worker._layer_specs = {layer_name: shared_local_spec for layer_name in layer_names}
 
         kv_group2layeridx = worker._build_kv_group2layeridx()
 
@@ -443,6 +446,20 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertTrue(all(pull.num_group_pulls == 2 for pull in target_pulls))
         self.assertEqual(len(draft_pulls), 1)
         self.assertEqual(draft_pulls[0].num_group_pulls, 1)
+
+    def test_resolve_remote_layer_idx_uses_layer_name(self):
+        group_spec = {"layer_names": ["model.layers.3.self_attn"]}
+        self.assertEqual(
+            resolve_remote_layer_idx(
+                3,
+                group_spec,
+                [3],
+                {"model.layers.3.self_attn": 17},
+            ),
+            17,
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not contain layer"):
+            resolve_remote_layer_idx(3, group_spec, [3], {})
 
     def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
