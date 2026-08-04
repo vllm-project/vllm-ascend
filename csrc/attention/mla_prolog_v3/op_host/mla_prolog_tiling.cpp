@@ -14,6 +14,7 @@
  */
 
 #include <numeric>
+#include <limits>
 #include <functional>
 #include <algorithm>
 #include <graph/utils/type_utils.h>
@@ -54,37 +55,32 @@ inline auto Align(T num, T rnd) -> T
     return (((rnd) == 0) ? 0 : (((num) + (rnd)-1) / (rnd) * (rnd)));
 }
 
-inline uint64_t GetDefaultStride0(const gert::Shape &shape)
+inline bool GetDefaultStride0(const gert::Shape &shape, uint64_t &stride0)
 {
-    uint64_t stride0 = 1U;
+    stride0 = 1U;
     for (size_t dim = 1U; dim < shape.GetDimNum(); ++dim) {
-        stride0 *= static_cast<uint64_t>(shape.GetDim(dim));
+        const int64_t dimSize = shape.GetDim(dim);
+        if (dimSize < 0 ||
+            (dimSize != 0 && stride0 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) /
+                                                   static_cast<uint64_t>(dimSize))) {
+            return false;
+        }
+        stride0 *= static_cast<uint64_t>(dimSize);
     }
-    return stride0;
+    return true;
 }
 
-inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t inputIndex, uint32_t strideAttrIndex,
-                                       bool useStrideAttr, const gert::Shape &shape, const char *tensorName,
-                                       uint64_t &stride0)
+inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t inputIndex, const gert::Shape &shape,
+                                       const char *tensorName, uint64_t &stride0)
 {
     OP_CHECK_IF(shape.GetDimNum() == 0U,
-                OP_LOGE(context.GetNodeName(), "%s must not be a scalar tensor.", tensorName),
+                OP_LOGE(context.GetNodeName(), "%s rank must be greater than 0.", tensorName),
                 return ge::GRAPH_FAILED);
-    const uint64_t defaultStride0 = GetDefaultStride0(shape);
-    const auto *attrs = context.GetAttrs();
-    const int64_t *stride0Attr =
-        !useStrideAttr || attrs == nullptr ? nullptr : attrs->GetAttrPointer<int64_t>(strideAttrIndex);
-    if (stride0Attr != nullptr && *stride0Attr > 0) {
-        stride0 = static_cast<uint64_t>(*stride0Attr);
-        OP_LOGD(context.GetNodeName(), "%s stride0=%lu from aclTensor view stride, contiguous stride0=%lu.",
-                tensorName, stride0, defaultStride0);
-        return ge::GRAPH_SUCCESS;
-    }
-
-    auto *stride = context.GetRequiredInputStride(inputIndex);
-    if (stride == nullptr) {
-        stride = context.GetInputStride(inputIndex);
-    }
+    uint64_t defaultStride0 = 0U;
+    OP_CHECK_IF(!GetDefaultStride0(shape, defaultStride0),
+                OP_LOGE(context.GetNodeName(), "%s shape cannot be represented by an int64 stride.", tensorName),
+                return ge::GRAPH_FAILED);
+    auto *stride = context.GetInputStride(inputIndex);
     if (stride == nullptr || stride->GetDimNum() != shape.GetDimNum()) {
         stride0 = defaultStride0;
         OP_LOGD(context.GetNodeName(), "%s has no valid stride descriptor, use contiguous stride0=%lu.", tensorName,
@@ -104,7 +100,12 @@ inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t in
         expectedStride *= static_cast<uint64_t>(shape.GetDim(static_cast<size_t>(dim)));
     }
 
-    stride0 = static_cast<uint64_t>(stride->GetStride(MLA_PROLOG_DIM_INDEX_0));
+    const int64_t actualStride0 = stride->GetStride(MLA_PROLOG_DIM_INDEX_0);
+    OP_CHECK_IF(actualStride0 < 0 || static_cast<uint64_t>(actualStride0) < defaultStride0,
+                OP_LOGE(context.GetNodeName(), "%s dim0 stride must be at least %lu, but got %ld.", tensorName,
+                        defaultStride0, actualStride0),
+                return ge::GRAPH_FAILED);
+    stride0 = static_cast<uint64_t>(actualStride0);
     OP_LOGD(context.GetNodeName(), "%s stride0=%lu, contiguous stride0=%lu.", tensorName, stride0, defaultStride0);
     return ge::GRAPH_SUCCESS;
 }
@@ -770,12 +771,12 @@ ge::graphStatus MlaPrologTiling::ConvertContext(gert::TilingContext &context, Ml
     const bool isV3 = std::strncmp(mlaPrologContext.opType, V3_OP_NAME, OP_NAME_LEN) == 0;
     const uint32_t kvCacheIndex = isV3 ? KV_CACHE_INPUT_INDEX_V3 : KV_CACHE_INPUT_INDEX;
     const uint32_t krCacheIndex = isV3 ? KR_CACHE_INPUT_INDEX_V3 : KR_CACHE_INPUT_INDEX;
-    OP_CHECK_IF(GetCacheStride0(context, kvCacheIndex, KV_CACHE_STRIDE0_ATTR_INDEX, isV3, kvCacheShape,
-                               KV_CACHE_NAME, mlaPrologContext.kvCacheStride0) != ge::GRAPH_SUCCESS,
+    OP_CHECK_IF(GetCacheStride0(context, kvCacheIndex, kvCacheShape, KV_CACHE_NAME,
+                               mlaPrologContext.kvCacheStride0) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context.GetNodeName(), "Failed to get or validate kvCache strides."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(GetCacheStride0(context, krCacheIndex, KR_CACHE_STRIDE0_ATTR_INDEX, isV3, krCacheShape,
-                               KR_CACHE_NAME, mlaPrologContext.krCacheStride0) != ge::GRAPH_SUCCESS,
+    OP_CHECK_IF(GetCacheStride0(context, krCacheIndex, krCacheShape, KR_CACHE_NAME,
+                               mlaPrologContext.krCacheStride0) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context.GetNodeName(), "Failed to get or validate krCache strides."),
                 return ge::GRAPH_FAILED);
 

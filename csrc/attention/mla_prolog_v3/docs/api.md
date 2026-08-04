@@ -79,8 +79,6 @@
 | `tile_size` | int | `128` | pertile 时必须为 `128` | per-token-per-group tile |
 | `qc_qr_scale` | float | `1.0` | 有限浮点 | Query 尺度 \(\alpha_q\) |
 | `kc_scale` | float | `1.0` | 有限浮点 | Key 尺度 \(\alpha_{kv}\) |
-| `kv_cache_stride0` | int | `0` | `>=0`；`0` 表示按连续布局推导 | `kv_cache` 首轴 stride（元素个数）；由 aclnn 从 tensor view 自动填入 |
-| `kr_cache_stride0` | int | `0` | `>=0`；`0` 表示按连续布局推导 | `kr_cache` 首轴 stride（元素个数）；由 aclnn 从 tensor view 自动填入 |
 
 RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
 
