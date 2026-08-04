@@ -117,6 +117,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 The Qwen3-VL-Reranker model requires a specific chat template for proper formatting. Create a file named `qwen3_vl_reranker.jinja` with the following content:
 
 ```jinja
+{% raw %}
 <|im_start|>system
 Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
 <|im_start|>user
@@ -139,7 +140,7 @@ Judge whether the Document meets the requirements based on the Query and the Ins
     | first
 }}<|im_end|>
 <|im_start|>assistant
-
+{% endraw %}
 ```
 
 Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
