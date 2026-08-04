@@ -80,10 +80,7 @@ class VersionProfile:
 
     def same_versions(self, other: VersionProfile) -> bool:
         """Return whether the runtime-switchable dependencies are identical."""
-        return (
-            self.vllm_release_tag == other.vllm_release_tag
-            and self.torch_npu_version == other.torch_npu_version
-        )
+        return self.vllm_release_tag == other.vllm_release_tag and self.torch_npu_version == other.torch_npu_version
 
     def version_key(self) -> tuple[str, str, str]:
         """Return the complete key used to record historical changes."""
@@ -424,6 +421,7 @@ class ExternalVersionManager:
             ],
             log_file,
         )
+
 
 def generate_table(repo: Path, branch: str, target: str, output: str, since: str, until: str) -> None:
     good = git_ops.resolve_commit(repo, since)
