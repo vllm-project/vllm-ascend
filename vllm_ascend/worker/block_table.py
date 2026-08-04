@@ -569,7 +569,7 @@ class MultiGroupBlockTable:
             TOTAL_CP_WORLD_SIZE=total_cp_world_size,
             TOTAL_CP_RANK=total_cp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=bt0.cp_kv_cache_interleave_size,
-            PAD_ID=PAD_SLOT_ID,
+            PAD_ID=-1,
             TILE_BLOCK_SIZE=tile_block_size,
             BLOCK_TABLE_WINDOW_SIZE=window_size,
         )
@@ -589,8 +589,7 @@ class MultiGroupBlockTable:
             except AttributeError:
                 stream_cls = torch.cuda.Stream  # type: ignore[attr-defined]
             old_pool = MultiGroupBlockTable._stream_pool or []
-            new_streams = [stream_cls(device=self._device) for _ in range(num_streams -
-                                                                        len(old_pool))]
+            new_streams = [stream_cls() for _ in range(num_streams - len(old_pool))]
             MultiGroupBlockTable._stream_pool = old_pool + new_streams
         return MultiGroupBlockTable._stream_pool[:num_streams]
 
