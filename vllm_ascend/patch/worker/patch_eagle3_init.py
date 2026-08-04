@@ -32,6 +32,7 @@ checkpoint's global layer indices and keeps ``target_layer_count`` correct.
 
 Currently patches:
 - Eagle3LlamaForCausalLM (Qwen, LLaMA-based Eagle3 targets)
+- Eagle3Qwen3ForCausalLM (native Qwen3 Eagle3 targets)
 - Eagle3DeepseekV2ForCausalLM / Eagle3DeepseekV3ForCausalLM (DeepSeek-V2/V3,
   Kimi K2/K2.6)
 """
@@ -51,9 +52,11 @@ from vllm.model_executor.models.llama_eagle3 import (
     LlamaModel,
     get_draft_quant_config,
 )
+from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.model_executor.models.utils import maybe_prefix
 
 logger = logging.getLogger(__name__)
+_original_eagle3_qwen3_init = Eagle3Qwen3ForCausalLM.__init__
 
 
 def _patched_eagle3_llama_init(self, *, vllm_config, prefix: str = ""):
@@ -120,10 +123,23 @@ def _patched_eagle3_deepseek_v2_init(self, *, vllm_config, prefix: str = ""):
     )
 
 
+def _patched_eagle3_qwen3_init(self, *, vllm_config, prefix: str = ""):
+    model_config = vllm_config.model_config
+    original_get_num_layers = model_config.get_num_layers
+    total_num_layers = model_config.get_total_num_hidden_layers()
+    model_config.get_num_layers = lambda _: total_num_layers
+    try:
+        _original_eagle3_qwen3_init(self, vllm_config=vllm_config, prefix=prefix)
+    finally:
+        model_config.get_num_layers = original_get_num_layers
+
+
 Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_llama_init
 Eagle3DeepseekV2ForCausalLM.__init__ = _patched_eagle3_deepseek_v2_init
+Eagle3Qwen3ForCausalLM.__init__ = _patched_eagle3_qwen3_init
 
 logger.info(
-    "Patched Eagle3LlamaForCausalLM and Eagle3DeepseekV2ForCausalLM "
+    "Patched Eagle3LlamaForCausalLM, Eagle3Qwen3ForCausalLM, and "
+    "Eagle3DeepseekV2ForCausalLM "
     "__init__ to use get_total_num_hidden_layers() for target_layer_num."
 )
