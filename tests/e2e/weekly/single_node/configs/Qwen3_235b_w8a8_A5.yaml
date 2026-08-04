@@ -66,7 +66,7 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "vllm_Qwen3_235B_Accuracy_FULL_Graph_GPQA"
-    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
+    model: "vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
