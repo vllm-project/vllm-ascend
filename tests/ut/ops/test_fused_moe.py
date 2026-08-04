@@ -81,26 +81,71 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method.maybe_make_prepare_finalize() is None
 
 
-def test_ascend_routed_experts_owns_unquantized_method(monkeypatch):
+def test_ascend_routed_experts_uses_parent_unquantized_method_during_init(monkeypatch):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     routed_experts.tid2eid = object()
     moe_config = MagicMock()
+    parent_method = object()
+    parent_get_quant_method = MagicMock(return_value=parent_method)
     monkeypatch.setattr(
-        AscendUnquantizedFusedMoEMethod,
-        "dispatch_forward",
-        lambda self, compile_native=False: self.forward_native,
-    )
-    monkeypatch.setattr(
-        routed_experts_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False)),
+        routed_experts_module.RoutedExperts,
+        "_get_quant_method",
+        parent_get_quant_method,
     )
 
     method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
 
-    assert isinstance(method, AscendUnquantizedFusedMoEMethod)
-    assert method.moe is moe_config
-    assert method.tid2eid is routed_experts.tid2eid
+    assert method is parent_method
+    parent_get_quant_method.assert_called_once_with("model.layers.0.mlp", None, moe_config)
+
+
+@pytest.mark.parametrize("quant_config", [None, object()])
+def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_init(monkeypatch, quant_config):
+    moe_config = MagicMock()
+    parent_method = object()
+    ascend_method = object()
+    init_methods = []
+
+    def parent_init(layer, *args, **kwargs):
+        nn.Module.__init__(layer)
+        layer.quant_config = quant_config
+        layer.moe_config = moe_config
+        layer.quant_method = parent_method
+        layer.custom_routing_function = None
+        layer.e_score_correction_bias = None
+        init_methods.append(layer.quant_method)
+
+    ascend_method_factory = MagicMock(return_value=ascend_method)
+    monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "AscendUnquantizedFusedMoEMethod",
+        ascend_method_factory,
+    )
+    monkeypatch.setattr(AscendRoutedExperts, "init_eplb", lambda self, n_shared_experts: None)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
+            enable_shared_expert_dp=False,
+        ),
+    )
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(is_deepseek_mla=False)),
+    )
+
+    routed_experts = AscendRoutedExperts(tid2eid="tid2eid")
+
+    assert init_methods == [parent_method]
+    if quant_config is None:
+        assert routed_experts.quant_method is ascend_method
+        ascend_method_factory.assert_called_once_with(moe_config, tid2eid="tid2eid")
+    else:
+        assert routed_experts.quant_method is parent_method
+        ascend_method_factory.assert_not_called()
 
 
 def test_ascend_routed_experts_passes_tid2eid_to_quant_config():
