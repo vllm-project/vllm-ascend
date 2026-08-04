@@ -82,6 +82,11 @@ class SfaPDProducerReqMeta:
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
     do_virtual: bool = False
+    # Contributor-group identity for unequal P/D TP. ratio = p_tp // d_tp P ranks
+    # map to one D rank; group_member_idx is this rank's index within that group.
+    # ratio == 1 (equal TP) degenerates to a single contributor.
+    tp_ratio: int = 1
+    group_member_idx: int = 0
 
 
 class SfaPDProducerMetadata(KVConnectorMetadata):
