@@ -27,6 +27,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device_allocator import use_sleep_persistent_allocation
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -514,17 +515,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     raise ImportError("Please install scipy") from e
                 log_dim = math.ceil(math.log2(indexer_head_dim))
                 dim_padded = 2**log_dim
-                if self.vllm_config.model_config.enable_sleep_mode:
-                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-                    # sleep/wake does not treat it as KV cache.
-                    from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-                    allocator = CaMemAllocator.get_instance()
-                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                        AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                        ).to(torch.bfloat16)
-                else:
+                # Hadamard is immutable control state and must remain available
+                # across sleep/wake instead of being discarded with the KV cache.
+                with use_sleep_persistent_allocation(
+                    enabled=self.vllm_config.model_config.enable_sleep_mode
+                ):
                     AscendDSAMetadataBuilder.hadamard = torch.tensor(
                         hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
                     ).to(torch.bfloat16)

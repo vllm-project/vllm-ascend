@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device_allocator import use_sleep_persistent_allocation
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -465,11 +466,17 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         assert self.num_local_experts > 0, "Expected at least one expert"
         if self.num_local_experts > 1:
-            self.expert_ids_per_ep_rank = torch.tensor(
-                [i % self.num_local_experts for i in range(self.num_experts)],
-                dtype=torch.int32,
-                device=torch.npu.current_device(),
-            )
+            # This is ALLTOALL dispatcher state, not model weight data. Keep
+            # it mapped across level-2 sleep/wake instead of restoring an
+            # empty discarded allocation.
+            with use_sleep_persistent_allocation(
+                enabled=get_current_vllm_config().model_config.enable_sleep_mode
+            ):
+                self.expert_ids_per_ep_rank = torch.tensor(
+                    [i % self.num_local_experts for i in range(self.num_experts)],
+                    dtype=torch.int32,
+                    device=torch.npu.current_device(),
+                )
 
         local_expert_indices_offset = self.ep_rank * self.num_local_experts
 
