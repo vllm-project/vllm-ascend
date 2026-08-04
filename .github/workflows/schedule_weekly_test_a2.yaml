@@ -56,7 +56,7 @@ on:
         default: false
         type: boolean
       build_type:
-        description: 'Build type: daily or release. Daily uses swr.cn-north-4 and quay.io base image.'
+        description: 'Build type: daily or release.'
         required: false
         default: 'release'
         type: choice
