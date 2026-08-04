@@ -571,7 +571,7 @@ class MultiGroupBlockTable:
             except AttributeError:
                 stream_cls = torch.cuda.Stream  # type: ignore[attr-defined]
             old_pool = MultiGroupBlockTable._stream_pool or []
-            new_streams = [stream_cls() for _ in range(num_streams - len(old_pool))]
+            new_streams = [stream_cls(device=self._device) for _ in range(num_streams - len(old_pool))]
             MultiGroupBlockTable._stream_pool = old_pool + new_streams
         return MultiGroupBlockTable._stream_pool[:num_streams]
 
