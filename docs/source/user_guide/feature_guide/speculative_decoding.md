@@ -545,7 +545,7 @@ implies that:
 #### Dynamic SD Eagle Drafter
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --speculative-config '{
     "method": "eagle",
     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
@@ -561,7 +561,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 #### Dynamic SD Eagle3 Drafter
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --speculative-config '{
     "method": "eagle3",
     "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
