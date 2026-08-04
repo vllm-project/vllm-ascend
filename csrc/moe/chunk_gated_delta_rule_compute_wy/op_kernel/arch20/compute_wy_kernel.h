@@ -19,6 +19,8 @@ constexpr uint32_t FIXED_CHUNK_SIZE = 64;
 constexpr uint32_t ATTEN_ELEMS = FIXED_CHUNK_SIZE * FIXED_CHUNK_SIZE;
 constexpr uint32_t BLOCK_BYTES = 32;
 constexpr uint32_t HALF_PER_BLOCK = BLOCK_BYTES / sizeof(half);
+constexpr uint32_t FLOAT_PER_BLOCK = BLOCK_BYTES / sizeof(float);
+constexpr uint32_t FLOAT_VEC_LEN = 64;
 constexpr uint32_t MAX_SAFE_HEAD_DIM = 128;
 constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 
@@ -83,7 +85,7 @@ class KernelComputeWy {
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
     cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
                    mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, tiling->workspaceOffset,
-                   perCoreWorkspaceBytes_, usedCoreNum_);
+                   perCoreWorkspaceBytes_, usedCoreNum_, kHeadDim_, vHeadDim_);
 
     uint32_t maxAlign = (alignK_ > alignV_ ? alignK_ : alignV_);
     if (maxAlign < FIXED_CHUNK_SIZE) {
@@ -242,14 +244,14 @@ class KernelComputeWy {
              vHeadIdx * static_cast<uint32_t>(sizeof(half)), FIXED_CHUNK_SIZE);
       PipeBarrier<PIPE_V>();
       Cast(dstLocal, betaHalf, RoundMode::CAST_NONE, FIXED_CHUNK_SIZE);
-      // Vector wrote dstLocal; the row-scale loops read it on the scalar unit.
-      SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     } else {
       const uint64_t base = chunkBase + vHeadIdx;
       for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
         const half val = betaGm_.GetValue(base + static_cast<uint64_t>(i) * vNumHead_);
         dstLocal.SetValue(i, static_cast<float>(val));
       }
+      // Scalar SetValue → vector Brcb/Mul in BroadcastMulRowsFloat.
+      SyncEvent<HardEvent::S_V>(HardEvent::S_V);
     }
     PipeBarrier<PIPE_V>();
   }
@@ -305,12 +307,25 @@ class KernelComputeWy {
     PipeBarrier<PIPE_V>();
   }
 
-  // Row-scale by beta, read from the scalar cache rather than GetValue per row.
+  // Row-scale: dst[i, :] *= scalePerRow[i]. Pure vector path — Brcb expands each
+  // scale into one 32B block, then Mul replays that block across the row
+  // (src1BlkStride=0) and advances one block per row (src1RepStride=1).
+  // brcbScratch must hold rowsCount * FLOAT_PER_BLOCK floats.
   __aicore__ inline void BroadcastMulRowsFloat(LocalTensor<float> dst, const LocalTensor<float> rows,
-                                               const LocalTensor<float> scalePerRow, uint32_t rowsCount,
-                                               uint32_t cols, uint32_t lda) const {
-    for (uint32_t row = 0; row < rowsCount; ++row) {
-      Muls(dst[row * lda], rows[row * lda], scalePerRow.GetValue(row), cols);
+                                               const LocalTensor<float> scalePerRow, LocalTensor<float> brcbScratch,
+                                               uint32_t rowsCount, uint32_t cols, uint32_t lda) const {
+    const uint32_t blockCount = (rowsCount + FLOAT_PER_BLOCK - 1) / FLOAT_PER_BLOCK;
+    Brcb(brcbScratch, scalePerRow, blockCount, {1, static_cast<uint16_t>(FLOAT_PER_BLOCK)});
+    PipeBarrier<PIPE_V>();
+
+    const uint8_t repStride = static_cast<uint8_t>(lda / FLOAT_PER_BLOCK);
+    const BinaryRepeatParams rp{1, 1, 0, repStride, repStride, 1};
+    uint32_t col = 0;
+    for (; col + FLOAT_VEC_LEN <= cols; col += FLOAT_VEC_LEN) {
+      Mul(dst[col], rows[col], brcbScratch, FLOAT_VEC_LEN, rowsCount, rp);
+    }
+    if (col < cols) {
+      Mul(dst[col], rows[col], brcbScratch, cols - col, rowsCount, rp);
     }
     PipeBarrier<PIPE_V>();
   }
@@ -352,7 +367,8 @@ class KernelComputeWy {
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
     SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     LoadBetaChunk(betaLocal, kHalf, chunkKElems_, b, tokenStart, vHeadIdx);
-    BroadcastMulRowsFloat(kBeta, kFloat, betaLocal, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
+    // scratch: Brcb workspace (64*8), then reused as gRaw / gemm / ApplyLambda mat.
+    BroadcastMulRowsFloat(kBeta, kFloat, betaLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     // Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS, so attnLocal is always a safe g-load scratch.
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, scratch, attnLocal, ATTEN_ELEMS);
 
@@ -368,9 +384,9 @@ class KernelComputeWy {
     ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
 
     // RHS halves: βV in vFloat, γ·Kβ in kBeta (in-place doubling targets).
-    BroadcastMulRowsFloat(vFloat, vFloat, betaLocal, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
+    BroadcastMulRowsFloat(vFloat, vFloat, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_);
     // kBeta already contains βK for the Gram matmul; only apply γ = exp(a) in place.
-    BroadcastMulRowsFloat(kBeta, kBeta, expGLocal, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
+    BroadcastMulRowsFloat(kBeta, kBeta, expGLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
 
     // Nilpotent doubling: R ← (I−A)⁻¹ R without forming T.
     // UploadP uses qHalf (>=64*64). U R-half uses vHalf (>=64*V); W R-half uses kHalf (>=64*K).
