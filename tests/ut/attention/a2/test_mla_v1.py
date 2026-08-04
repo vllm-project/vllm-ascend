@@ -2106,6 +2106,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast", side_effect=lambda cache, *_: cache)
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator.kv_cache_load")
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
@@ -2114,6 +2115,7 @@ class TestAscendMLAImpl(TestBase):
         mock_fia,
         mock_update,
         mock_cache_load,
+        _mock_format_cast,
         mock_get_device_type,
     ):
         self.impl.fa_quant_layer = True
@@ -2186,8 +2188,6 @@ class TestAscendMLAImpl(TestBase):
         latent_call, rope_call = mock_cache_load.call_args_list
         self.assertEqual(latent_call.args[0].shape, (1, 1, 1, 32))
         self.assertEqual(rope_call.args[0].shape, (1, 1, 1, 16))
-        self.assertEqual(latent_call.kwargs["cache_mode"], "PA_NZ")
-        self.assertEqual(rope_call.kwargs["cache_mode"], "PA_NZ")
         expected = (quantized_kv.squeeze().to(torch.float32) * self.impl.fak_descale_float).to(torch.bfloat16)
         torch.testing.assert_close(captured_kv_b_inputs[0], expected)
 

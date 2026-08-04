@@ -547,34 +547,6 @@ void transpose_kv_cache_by_block(
 
 }
 
-void npu_gather_pa_kv_cache(
-    const at::Tensor& key_cache,
-    const at::Tensor& value_cache,
-    const at::Tensor& block_tables,
-    const at::Tensor& seq_lens,
-    at::Tensor& key,
-    at::Tensor& value,
-    const c10::optional<at::Tensor>& seq_offset,
-    bool is_seq_lens_cumsum,
-    bool cache_is_pa_nz)
-{
-    // op-plugin infers cache_mode from the tensor's NPU format tag.  K3 A3
-    // C8 keeps the vLLM pool tagged ND while Scatter writes PA-NZ bytes, so
-    // the caller must be able to choose the physical layout explicitly.
-    const char* cache_mode = cache_is_pa_nz ? "PA_NZ" : "Norm";
-    EXEC_NPU_CMD(
-        aclnnGatherPaKvCache,
-        key_cache,
-        value_cache,
-        block_tables,
-        seq_lens,
-        key,
-        value,
-        seq_offset,
-        cache_mode,
-        is_seq_lens_cumsum);
-}
-
 void device_print(c10::string_view msg)
 {
     auto payload = std::make_unique<DevicePrintPayload>();
@@ -2697,13 +2669,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
-
-    ops.def(
-        "npu_gather_pa_kv_cache(Tensor key_cache, Tensor value_cache, Tensor block_tables, Tensor seq_lens, "
-        "Tensor(a!) key, Tensor(b!) value, *, Tensor? seq_offset=None, "
-        "bool is_seq_lens_cumsum=False, bool cache_is_pa_nz=False) -> ()"
-    );
-    ops.impl("npu_gather_pa_kv_cache", torch::kPrivateUse1, &vllm_ascend::npu_gather_pa_kv_cache);
 
     ops.def(
         "npu_copy_and_expand_eagle_inputs(Tensor target_token_ids, Tensor target_positions, "

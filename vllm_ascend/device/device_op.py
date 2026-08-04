@@ -33,7 +33,7 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
@@ -303,27 +303,7 @@ class BaseDeviceAdaptor:
         seq_starts,
         key,
         value,
-        cache_mode: str | None = None,
     ):
-        if cache_mode is not None:
-            if cache_mode != "PA_NZ":
-                raise ValueError(f"Unsupported Gather PA cache mode: {cache_mode}")
-            if not enable_custom_op():
-                raise RuntimeError("PA-NZ Gather requires the vLLM-Ascend custom-op extension.")
-            # The source tensor may retain an ND descriptor even when the
-            # backing bytes were written in PA-NZ order. Unlike op-plugin's
-            # public wrapper, this path forwards PA_NZ explicitly to CANN.
-            torch.ops._C_ascend.npu_gather_pa_kv_cache(
-                cache_kv_c,
-                cache_k_pe,
-                block_table,
-                context_seq_len_npu.contiguous(),
-                key,
-                value,
-                seq_offset=seq_starts,
-                cache_is_pa_nz=True,
-            )
-            return
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,

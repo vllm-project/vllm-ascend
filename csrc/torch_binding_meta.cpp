@@ -518,31 +518,6 @@ void transpose_kv_cache_by_block_meta(
     return;
 }
 
-void npu_gather_pa_kv_cache_meta(
-    const at::Tensor& key_cache,
-    const at::Tensor& value_cache,
-    const at::Tensor& block_tables,
-    const at::Tensor& seq_lens,
-    at::Tensor& key,
-    at::Tensor& value,
-    const c10::optional<at::Tensor>& seq_offset,
-    bool is_seq_lens_cumsum,
-    bool cache_is_pa_nz)
-{
-    // Gather writes into the caller-provided output tensors. Keep an explicit
-    // Meta implementation so this side-effectful op can be captured by graph
-    // compilation without attempting a real CANN dispatch.
-    (void)key_cache;
-    (void)value_cache;
-    (void)block_tables;
-    (void)seq_lens;
-    (void)key;
-    (void)value;
-    (void)seq_offset;
-    (void)is_seq_lens_cumsum;
-    (void)cache_is_pa_nz;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 npu_copy_and_expand_eagle_inputs_meta(
     const at::Tensor &target_token_ids,
@@ -1875,8 +1850,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
-    // Explicit PA-NZ Gather for ND-tagged cache pools.
-    ops.impl("npu_gather_pa_kv_cache", &vllm_ascend::meta::npu_gather_pa_kv_cache_meta);
     // npu_sign_bits_pack
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
