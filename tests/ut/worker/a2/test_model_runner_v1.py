@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
@@ -665,6 +666,34 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(spec_decode_metadata.draft_token_ids.tolist(), [-1, -1, -1])
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
+
+
+class TestNPUModelRunnerKVScaleCompatibility(unittest.TestCase):
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.vllm_version_is",
+        return_value=False,
+    )
+    def test_main_does_not_access_removed_kv_scale_state(self, mock_version):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+
+        mode = runner._adjust_cudagraph_mode_for_kv_scale_calculation(CUDAGraphMode.FULL)
+
+        self.assertEqual(mode, CUDAGraphMode.FULL)
+        mock_version.assert_called_once_with("0.26.0")
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.vllm_version_is",
+        return_value=True,
+    )
+    def test_v026_disables_cudagraph_for_runtime_kv_scales(self, mock_version):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.calculate_kv_scales = True
+
+        mode = runner._adjust_cudagraph_mode_for_kv_scale_calculation(CUDAGraphMode.FULL)
+
+        self.assertEqual(mode, CUDAGraphMode.NONE)
+        self.assertFalse(runner.calculate_kv_scales)
+        mock_version.assert_called_once_with("0.26.0")
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
