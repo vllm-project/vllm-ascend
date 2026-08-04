@@ -57,6 +57,7 @@ jobs:
         needs: resolve-tag
         uses: ./.github/workflows/_ensure_csrc_cache.yaml
         with:
+          pr_key: ${{ github.event.pull_request.number }}
           source_ref: ${{ github.sha }}
           target_ids: '["a2-arm64-ubuntu"]'
 

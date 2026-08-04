@@ -120,6 +120,7 @@ jobs:
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
       source_ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
       base_ref: main
@@ -130,6 +131,7 @@ jobs:
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       vllm: ${{ needs.select-tests.outputs.main_commit }}
       ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
       base_ref: main
@@ -143,6 +145,7 @@ jobs:
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       vllm: ${{ needs.select-tests.outputs.release_tag }}
       ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
       base_ref: main

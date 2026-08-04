@@ -190,6 +190,7 @@ jobs:
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
+      pr_key: ${{ github.event.client_payload.pull_request.number }}
       target_ids: ${{ needs.e2e-test.outputs.csrc_cache_target_ids }}
       source_ref: ${{ needs.e2e-test.outputs.pr_sha }}
       base_ref: ${{ needs.e2e-test.outputs.pr_base_ref }}
@@ -207,6 +208,7 @@ jobs:
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
+      pr_key: ${{ github.event.client_payload.pull_request.number }}
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ needs.e2e-test.outputs.pr_sha }}
       base_ref: ${{ needs.e2e-test.outputs.pr_base_ref }}
