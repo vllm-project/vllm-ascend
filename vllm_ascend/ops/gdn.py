@@ -40,6 +40,7 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 logger = logging.getLogger(__name__)
 
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     _fused_chunk_available: bool | None = None
 
