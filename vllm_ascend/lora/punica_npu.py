@@ -9,8 +9,8 @@ from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
-@torch.library.custom_op("vllm_ascend::moe_lora_bmm_expand_slice", mutates_args={"y"})
-def _moe_lora_bmm_expand_slice_op(
+@torch.library.custom_op("vllm_ascend::lora_bmm_expand_slice", mutates_args={"y"})
+def _lora_bmm_expand_slice_op(
     y: torch.Tensor,
     x: torch.Tensor,
     w_t_all: torch.Tensor,
@@ -57,8 +57,8 @@ def _moe_lora_bmm_expand_slice_op(
         y_slice.copy_(delta)
 
 
-@_moe_lora_bmm_expand_slice_op.register_fake
-def _moe_lora_bmm_expand_slice_fake(
+@_lora_bmm_expand_slice_op.register_fake
+def _lora_bmm_expand_slice_fake(
     y: torch.Tensor,
     x: torch.Tensor,
     w_t_all: torch.Tensor,
@@ -112,7 +112,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._force_lora_bmm_expand_slice = False
 
     def enable_compatible_lora_bmm_expand_slice(self) -> None:
-        """Use the compatible expand-slice path for the language wrapper."""
+        """Use the compatible expand-slice path for shared-expert models."""
         self._force_lora_bmm_expand_slice = True
 
     def _requires_bmm_expand_slice(self, x: torch.Tensor, y_slice_size: int) -> bool:
@@ -232,14 +232,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        """Drop-in expand-slice replacement for shared-experts LoRA.
+        """Drop-in replacement for incompatible packed LoRA-B layouts.
 
-        Replaces both sgmv_expand_slice and bgmv_expand_slice when a wrapped
-        MoE layer has shared experts. It is dispatched through a mutating torch
-        custom op so Dynamo fullgraph keeps it opaque instead of tracing the
+        It replaces sgmv_expand_slice and bgmv_expand_slice for shared-expert
+        models or tensor shapes unsupported by the fused Ascend op. Dispatching
+        through a mutating custom op keeps Dynamo fullgraph from tracing the
         dynamic size nodes that trip vLLM graph splitting.
         """
-        _moe_lora_bmm_expand_slice_op(
+        _lora_bmm_expand_slice_op(
             y,
             x,
             w_t_all,

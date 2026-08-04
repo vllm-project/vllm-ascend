@@ -3,11 +3,11 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
+import torch
 from vllm.lora.layers.base import BaseLayerWithLoRA
 
 from vllm_ascend.lora.fused_moe import AscendFusedMoEWithLoRA
-from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
-from vllm_ascend.patch.worker.patch_lora_vlm_prefix import _enable_wrapped_language_model_expand_slice
+from vllm_ascend.lora.punica_npu import PunicaWrapperNPU, _lora_bmm_expand_slice_op
 
 
 @pytest.mark.parametrize("shared_experts", [None, object()])
@@ -30,23 +30,6 @@ def test_shared_experts_select_compatible_expand_slice(shared_experts) -> None:
     else:
         punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_called_once_with()
     base_layer.set_lora_context.assert_called_once_with("context")
-
-
-@pytest.mark.parametrize("language_prefix", ["", "language_model"])
-def test_wrapped_language_model_selects_compatible_expand_slice(language_prefix: str) -> None:
-    punica_wrapper = Mock()
-    manager = SimpleNamespace(
-        supports_mm=True,
-        mm_mapping=SimpleNamespace(language_model=[language_prefix]),
-        punica_wrapper_mapping={language_prefix: punica_wrapper},
-    )
-
-    _enable_wrapped_language_model_expand_slice(manager)
-
-    if language_prefix:
-        punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_called_once_with()
-    else:
-        punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -99,3 +82,29 @@ def test_expand_slice_path_follows_model_structure_and_tensor_shape(
             slice_size,
             True,
         )
+
+
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_compatible_lora_bmm_expand_slice_matches_reference(add_inputs: bool) -> None:
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    weights = torch.tensor(
+        [
+            [[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]],
+            [[[2.0, 0.0], [0.0, 2.0], [1.0, -1.0]]],
+        ]
+    )
+    indices = torch.tensor([0, 1, -1], dtype=torch.long)
+    y = torch.ones((3, 5))
+
+    _lora_bmm_expand_slice_op(y, x, weights, indices, 1, 3, add_inputs)
+
+    delta = torch.stack(
+        [
+            x[0] @ weights[0, 0].T,
+            x[1] @ weights[1, 0].T,
+            torch.zeros(3),
+        ]
+    )
+    expected = torch.ones((3, 5))
+    expected[:, 1:4] = expected[:, 1:4] + delta if add_inputs else delta
+    torch.testing.assert_close(y, expected)
