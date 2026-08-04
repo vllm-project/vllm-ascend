@@ -58,8 +58,8 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 | 11 | add_rms_norm | ✅ | `_C_ascend.npu_add_rms_norm_bias` | `torch_npu.npu_add_rms_norm` + `x.add_(bias)` | 同当前 | torch_npu pip 包 | bias 不再融合 |
 | 12 | dispatch_ffn_combine `[A3]` | ✅ | `_C_ascend.*` | `super().fused_experts()` | 同当前 | 无独立内核 | 基类非融合路径 |
 | 13 | dispatch_gmm_combine_decode `[A3]` | ✅ | `_C_ascend.*` | `super().fused_experts()` | 同当前 | 无独立内核 | 同上 |
-| 14 | quant_lightning_indexer | 📋 | `_C_ascend.npu_vllm_quant_lightning_indexer` | `custom.npu_quant_lightning_indexer` | `cann_ops_transformer.quant_lightning_indexer` | ot exp, attention/quant_lightning_indexer/, arch35 ✅ | `layout_k` 改 `PA_BBND`；参数改名；`quant_mode` 按 arch 锁定 |
-| 15 | quant_lightning_indexer_metadata | 📋 | `_C_ascend.npu_vllm_quant_lightning_indexer_metadata` | `custom.npu_quant_lightning_indexer_metadata` | `cann_ops_transformer.quant_lightning_indexer_metadata` | ot exp, AICPU | 新增 `seqused_k`/`cmp_residual_k`；删除 `device`/`pre_tokens`/`next_tokens` |
+| 14 | quant_lightning_indexer | ✅ | `_C_ascend.npu_vllm_quant_lightning_indexer` | `cann_ops_transformer.quant_lightning_indexer` | 同当前 | ot 非 exp, attention/quant_lightning_indexer_v2/, arch35 ✅ | whl C++ 调 V2 aclnn；`.run` 编译 `quant_lightning_indexer_v2`；`layout_k` 改 `PA_BBND`；`quant_mode` 按 arch 锁定（A5=1 FP8, A3=2 INT8）；`seqused_q` 用 per-batch query token 数 |
+| 15 | quant_lightning_indexer_metadata | ✅ | `_C_ascend.npu_vllm_quant_lightning_indexer_metadata` | `cann_ops_transformer.quant_lightning_indexer_metadata` | 同当前 | ot 非 exp, attention/quant_lightning_indexer_v2_metadata/, AICPU | 同上；新增 `seqused_k`/`cmp_residual_k`；删除 `device`/`pre_tokens`/`next_tokens`/`max_seqlen_*` |
 | 16 | sparse_attn_sharedkv `[A3]` | ✅ | `_C_ascend.npu_sparse_attn_sharedkv` | `cann_ops_transformer.sparse_flash_mla` | 同当前 | ot 非 exp, attention/sparse_flash_mla/, arch35 ✅ | 算子名变更；`seqused_kv`→`seqused_ori_kv`；`PA_ND`→`PA_BBND`；新增 `seqused_cmp_kv`/`cmp_residual_kv`/`topk_value_mode` |
 | 17 | sparse_attn_sharedkv_metadata `[A3]` | ✅ | `_C_ascend.npu_sparse_attn_sharedkv_metadata` | `cann_ops_transformer.sparse_flash_mla_metadata` | 同当前 | ot 非 exp, AICPU | 同上；新增 `max_seqlen_cmp_kv`；删除 `device` |
 | 18 | kv_quant_sparse_attn_sharedkv `[A5]` | ✅ | `_C_ascend.npu_kv_quant_sparse_attn_sharedkv` | `cann_ops_transformer.mixed_quant_sparse_flash_mla` | 同当前 | ot 非 exp, attention/mixed_quant_sparse_flash_mla/, arch35 ✅ | A5 路径；`kv_quant_mode`→`quant_mode`；删除 `tile_size` |
@@ -76,8 +76,8 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 
 | 进度 | 数量 | 说明 |
 |------|:---:|------|
-| ✅ 完成 | 17 | 已对齐 DSV4，当前=目标 |
-| 📋 待执行 | 2 | 当前用 cann-recipes wrapper，目标切到 ops-transformer |
+| ✅ 完成 | 19 | 已对齐 DSV4，当前=目标 |
+| 📋 待执行 | 0 | 全部完成 |
 | ⏳ 暂缓 | 3 | 依赖 ops-nn 打包或需改 hash 路径为 native fallback |
 | ❌ 阻塞 | 4 | graph capture 不兼容或无外部对应 |
 | **合计** | 26 | |
@@ -90,7 +90,7 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 | `vllm_ascend/attention/dsa_v1.py` | inplace_partial_rotary_mul/compressor→cann_ops_transformer；rms_norm_dynamic_quant/quant_lightning_indexer→custom；compressor_metadata 保留 `_C_ascend` |
 | `vllm_ascend/attention/context_parallel/dsa_cp.py` | 同上 |
 | `vllm_ascend/models/deepseek_v4.py` | mhc_pre_sinkhorn/mhc_post→cann_ops_transformer |
-| `vllm_ascend/device/device_op.py` | compressor→cann_ops_transformer；kv_compress_epilog/indexer_quant_cache→cann_ops_transformer；sparse_flash_mla/mixed_quant_sparse_flash_mla→cann_ops_transformer；scatter_nd_update→torch_npu；moe_gating_top_k/moe_init_routing→torch_npu；swiglu_group_quant→custom |
+| `vllm_ascend/device/device_op.py` | compressor→cann_ops_transformer；kv_compress_epilog/indexer_quant_cache→cann_ops_transformer；sparse_flash_mla/mixed_quant_sparse_flash_mla→cann_ops_transformer；quant_lightning_indexer quant_mode→DeviceOperator.get_qli_quant_mode()；scatter_nd_update→torch_npu；moe_gating_top_k/moe_init_routing→torch_npu；swiglu_group_quant→custom |
 | `vllm_ascend/ops/fused_moe/experts_selector.py` | moe_gating_top_k_hash→custom |
 | `vllm_ascend/ops/fused_moe/fused_moe.py` | swiglu_group_quant→custom；dequant_swiglu_quant→torch_npu |
 | `vllm_ascend/ops/fused_moe/fused_moe_0_23_0.py` | 同上 |
@@ -107,21 +107,25 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 
 ### 3.1 ops-transformer（非 experimental）
 
-**已打包算子（8 个）**：
+**已打包算子（9 个，含 metadata）**：
 ```
-inplace_partial_rotary_mul,kv_compress_epilog,indexer_quant_cache,mhc_pre_sinkhorn,mhc_post,compressor,sparse_flash_mla,mixed_quant_sparse_flash_mla
+inplace_partial_rotary_mul,kv_compress_epilog,indexer_quant_cache,mhc_pre_sinkhorn,mhc_post,compressor,sparse_flash_mla,mixed_quant_sparse_flash_mla,quant_lightning_indexer_v2
 ```
+
+> ⚠️ metadata 算子（`sparse_flash_mla_metadata`、`mixed_quant_sparse_flash_mla_metadata`、`quant_lightning_indexer_v2_metadata`）**必须手动在 `--ops` 中列出**，不会随主算子自动编译。
+>
+> ℹ️ `quant_lightning_indexer_v2` 的 whl C++ 扩展（`csrc/quant_lightning_indexer.cpp`）调用 V2 aclnn 符号（`aclnnQuantLightningIndexerV2` / `aclnnQuantLightningIndexerV2Metadata`），因此 `.run` 包必须编译 `quant_lightning_indexer_v2`（不是 V1 的 `quant_lightning_indexer`）。
 
 ```bash
 cd ops-transformer
 
 # A3
 bash build.sh --pkg --soc=ascend910_93 \
-  --ops=inplace_partial_rotary_mul,kv_compress_epilog,indexer_quant_cache,mhc_pre_sinkhorn,mhc_post,compressor,sparse_flash_mla,mixed_quant_sparse_flash_mla
+  --ops=inplace_partial_rotary_mul,kv_compress_epilog,indexer_quant_cache,mhc_pre_sinkhorn,mhc_post,compressor,sparse_flash_mla,sparse_flash_mla_metadata,mixed_quant_sparse_flash_mla,mixed_quant_sparse_flash_mla_metadata,quant_lightning_indexer_v2,quant_lightning_indexer_v2_metadata
 
 # A5
 bash build.sh --pkg --soc=ascend950 \
-  --ops=inplace_partial_rotary_mul,kv_compress_epilog,indexer_quant_cache,mhc_pre_sinkhorn,mhc_post,compressor,sparse_flash_mla,mixed_quant_sparse_flash_mla
+  --ops=inplace_partial_rotary_mul,kv_compress_epilog,indexer_quant_cache,mhc_pre_sinkhorn,mhc_post,compressor,sparse_flash_mla,sparse_flash_mla_metadata,mixed_quant_sparse_flash_mla,mixed_quant_sparse_flash_mla_metadata,quant_lightning_indexer_v2,quant_lightning_indexer_v2_metadata
 
 # 安装
 ./build_out/cann-ops-transformer-custom_linux-*.run
@@ -129,27 +133,7 @@ bash build.sh --pkg --soc=ascend950 \
 
 ### 3.2 ops-transformer（experimental）
 
-**已打包算子（2 个）**：
-```
-quant_lightning_indexer,quant_lightning_indexer_metadata
-```
-
-```bash
-cd ops-transformer
-
-# A3
-bash build.sh --pkg --experimental --vendor_name=experimental --soc=ascend910_93 \
-  --ops=quant_lightning_indexer,quant_lightning_indexer_metadata
-
-# A5
-bash build.sh --pkg --experimental --vendor_name=experimental --soc=ascend950 \
-  --ops=quant_lightning_indexer,quant_lightning_indexer_metadata
-
-# 安装
-./build_out/cann-ops-transformer-experimental_linux-*.run
-```
-
-> ⚠️ experimental 编译列表**不能**包含 compressor/mhc_post 等与非 experimental 同名 OP_ADD 且参数不兼容的算子。
+> **不再需要**。quant_lightning_indexer + metadata 已迁移到非 experimental（3.1），experimental 包无算子。
 
 ### 3.3 cann-recipes-infer
 
@@ -194,28 +178,21 @@ COMPILE_CUSTOM_KERNELS=1 pip install -e .
 
 `csrc/build_aclnn.sh` 已按 SOC 版本精简编译列表：
 - **A2 (ascend910b)**：不动，保留全部原始算子
-- **A3 (ascend910_93)**：移除已迁移算子，保留 20 个
+- **A3 (ascend910_93)**：移除已迁移算子，保留 18 个
 - **A5 (ascend950)**：移除已迁移算子，保留 6 个（compressor_metadata、load_index_kv_cache、causal_conv1d、recurrent_gated_delta_rule、chunk_fwd_o、chunk_gated_delta_rule_fwd_h）
 
 ### 3.7 编译顺序
 
 1. ops-transformer 非 experimental（.run）
-2. ops-transformer experimental（.run，--vendor_name=experimental）
-3. cann-recipes-infer（.run + whl）
-4. ops-transformer whl 包
-5. vllm-ascend csrc
+2. cann-recipes-infer（.run + whl）
+3. ops-transformer whl 包
+4. vllm-ascend csrc
 
 ---
 
 ## 4. 后续迁移计划
 
-### 4.1 待执行（📋，2 个）
-
-| # | 算子 | 当前 | 目标 | 方案 |
-|---|------|------|------|------|
-| 14-15 | quant_lightning_indexer + metadata | `custom.*` (wrapper, ot exp kernel) | `cann_ops_transformer.*` | 切换 Python API；`layout_k` 改 `PA_BBND`；参数改名 |
-
-### 4.2 暂缓（⏳，3 个）
+### 4.1 暂缓（⏳，3 个）
 
 | # | 算子 | 遗留问题 |
 |---|------|---------|
@@ -255,8 +232,8 @@ COMPILE_CUSTOM_KERNELS=1 pip install -e .
 | InplacePartialRotaryMul | ✅ | ❌ | ✅ | ✅ | ⚠️ | A5: ot / A2A3: vllm | A5 已移除；A2/A3 需移除 |
 | MhcPost | ❌ | ✅ | ✅ | ❌ | ⚠️ | exp / ot | exp 编译列表不含 mhc_post |
 | KvCompressEpilog | ✅ | ❌ | ✅ | ✅ | ⚠️ | A5: ot / A2A3: vllm | A5 已移除；A2/A3 需移除 |
-| QuantLightningIndexer | ❌ | ✅(已打包) | ✅(有源码未打包) | ❌ | ⚠️ | exp | exp 优先；非 exp 有完整源码但未打包 |
-| QuantLightningIndexerMetadata | ❌ | ✅(已打包) | ❌ | ❌ | 无 | exp | 仅 exp 有 |
+| QuantLightningIndexerV2 | ❌ | ✅(已打包) | ✅(已打包) | ❌ | ⚠️ | ot 非 exp | whl C++ 调 V2 aclnn；`.run` 编译 `quant_lightning_indexer_v2`；A2A3 vllm csrc 需移除 |
+| QuantLightningIndexerV2Metadata | ❌ | ✅(已打包) | ✅(已打包) | ❌ | 无 | ot 非 exp | 同上 |
 | RmsNormDynamicQuant | ✅ | ❌ | ❌ | ✅ | ⚠️ | A5: rc / A2A3: vllm | A5 已移除 |
 | SparseFlashMla | ❌ | ❌ | ✅(已打包) | ❌ | 无 | ot | 新增非 exp 算子，无同名冲突 |
 | MixedQuantSparseFlashMla | ❌ | ❌ | ✅(已打包) | ❌ | 无 | ot | A5 only (arch35)；A3 无 kernel 但 op_def 注册无害 |

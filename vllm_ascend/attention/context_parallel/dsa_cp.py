@@ -860,27 +860,21 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
-            max_seqlen_q = max(1, int(seq_lens_q.max().item()))
-            max_seqlen_k = max(1, int(seq_lens.max().item()))
-            metadata = torch.ops.custom.npu_quant_lightning_indexer_metadata(
-                actual_seq_lengths_query=query_start_loc[1:].clone(),
-                actual_seq_lengths_key=seq_lens.clone(),
-                num_heads_q=self.model_config.hf_config.index_n_heads,
-                num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,
-                query_quant_mode=0,
-                key_quant_mode=0,
+            metadata = torch.ops.cann_ops_transformer.quant_lightning_indexer_metadata(
+                self.model_config.hf_config.index_n_heads,
+                1,
+                self.model_config.hf_config.index_head_dim,
+                self.model_config.hf_config.index_topk,
+                DeviceOperator.get_qli_quant_mode(),
+                cu_seqlens_q=query_start_loc.clone(),
+                seqused_q=seq_lens_q,
+                seqused_k=seq_lens // 4,
+                cmp_residual_k=seq_lens % 4,
                 batch_size=num_reqs,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=self.model_config.hf_config.index_topk,
-                sparse_mode=3,
-                pre_tokens=(1 << 63) - 1,
-                next_tokens=(1 << 63) - 1,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
                 cmp_ratio=4,
-                device=str(self.seqused_q.device),
             )
         self.common_ratio_to_sas_metadata[cache_key] = metadata
         self.req_qli_metadata[:1024] = metadata
@@ -1637,26 +1631,26 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert indexer_kv_scale_metadata.req_metadata is not None
         qli_metadata = indexer_kv_scale_metadata.req_metadata.qli_metadata
         block_table = indexer_kv_scale_metadata.req_metadata.block_table
-        topk_idxs, _ = torch.ops.custom.npu_quant_lightning_indexer(
-            query=q,
-            key=indexer_k_cache,
-            weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
-            query_dequant_scale=DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
-            key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
-            actual_seq_lengths_query=actual_seq_lengths_query[1:],
-            actual_seq_lengths_key=actual_seq_lengths_key,
+        cp_seqused_q = actual_seq_lengths_query[1:] - actual_seq_lengths_query[:-1]
+        topk_idxs, _ = torch.ops.cann_ops_transformer.quant_lightning_indexer(
+            q,
+            indexer_k_cache,
+            DeviceOperator.prepare_dsa_indexer_weights(weights),
+            DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
+            DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
+            self.index_topk,
+            DeviceOperator.get_qli_quant_mode(),
+            cu_seqlens_q=actual_seq_lengths_query,
+            seqused_q=cp_seqused_q,
+            seqused_k=actual_seq_lengths_key // 4,
+            cmp_residual_k=actual_seq_lengths_key % 4,
             block_table=block_table,
             metadata=qli_metadata,
-            query_quant_mode=0,
-            key_quant_mode=0,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=self.index_topk,
-            sparse_mode=3,
-            pre_tokens=(1 << 63) - 1,
-            next_tokens=(1 << 63) - 1,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
             cmp_ratio=4,
-            return_value=False,
+            return_value=0,
         )
         return topk_idxs
 

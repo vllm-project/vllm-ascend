@@ -624,6 +624,11 @@ class BaseDeviceAdaptor:
         return q_quant, q_scale
 
     @staticmethod
+    def get_qli_quant_mode():
+        """Returns quant_mode for quant_lightning_indexer. Non-A5: 2 (INT8)."""
+        return 2
+
+    @staticmethod
     def _to_flat_slot_mapping(slot_mapping, cache):
         """Convert slot_mapping to flat 1D index compatible with scatter_nd_update_asc.
         Handles 2D [N, 2] (block_id, block_offset) → flat: block_id * block_size + block_offset.
@@ -1387,6 +1392,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Quantize indexer query. A5: fp8 quant, no extra scale conversion."""
         q_quant, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.float8_e4m3fn)
         return q_quant, q_scale
+
+    @staticmethod
+    def get_qli_quant_mode():
+        """Returns quant_mode for quant_lightning_indexer. A5: 1 (FP8)."""
+        return 1
 
     @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
