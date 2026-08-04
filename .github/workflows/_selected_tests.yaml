@@ -84,7 +84,6 @@ jobs:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
     container:
-      # image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }     } 
       image: quay.nju.edu.cn/canuunac/cann:9.0.1-950-ubuntu22.04-py3.12-arm64
       env:
         VLLM_LOGGING_LEVEL: ERROR
@@ -100,11 +99,6 @@ jobs:
         UV_SYSTEM_PYTHON: 1
         DEBUG_STAGE: pre_test
     steps:
-      # - name: DEBUG_EARLY_SLEEP_HOLD
-      #   if: ${{ matrix.group.npu_type != 'cpu' }}
-      #   run: |
-      #     echo "Pod is running, hold for local kubectl exec debug"
-      #     sleep 99999
       - name: Check NPU availability
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
@@ -244,12 +238,6 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
-          
-      # - name: POST_INSTALL_SLEEP_HOLD
-      #   if: ${{ matrix.group.npu_type != 'cpu' }}
-      #   run: |
-      #     echo "vllm‑ascend install finished, hold pod for manual kubectl exec debug"
-      #     sleep 99999
           
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
