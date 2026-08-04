@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -206,8 +206,8 @@ msgid ""
 msgstr "这些设置必须在宿主机操作系统上以root权限应用，而非容器内部。"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:167
-msgid "4.1"
-msgstr "4.1"
+msgid "4.1 Set CPU Frequency Governor to `performance`"
+msgstr "4.1将CPU频率调节器设置为`performance`"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:169
 msgid "Set CPU Frequency Governor to `performance`"
@@ -347,3 +347,6 @@ msgstr "典型推荐范围：50000–100000"
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:248
 msgid "Higher values encourage threads to stay on the same CPU core"
 msgstr "较高的值鼓励线程停留在同一CPU核心上"
+
+#~ msgid "4.1"
+#~ msgstr "4.1"

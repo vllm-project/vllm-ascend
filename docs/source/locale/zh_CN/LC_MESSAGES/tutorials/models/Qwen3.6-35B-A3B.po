@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -87,22 +87,23 @@ msgstr "3.1 模型权重"
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:21
 msgid ""
 "`Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products "
-"(64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas "
-"inference products. [Download model "
+"(64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I"
+" DUO. [Download model "
 "weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B)."
 msgstr ""
 "`Qwen3.6-35B-A3B`（BF16版本）：需要1个Atlas A3推理产品（64G x 16）节点、1个Atlas A2推理产品（64G x "
-"8）节点，或Atlas推理产品。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B)。"
+"8）节点，或Atlas 300I "
+"DUO。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B)。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:22
 msgid ""
 "`Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference "
 "products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or "
-"Atlas inference products. [Download model "
+"Atlas 300I DUO. [Download model "
 "weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8)."
 msgstr ""
-"`Qwen3.6-35B-A3B-w8a8`（量化版本）：需要 1 个 Atlas A3 推理产品（64G x 16）节点、1 个 Atlas A2 "
-"推理产品（64G x 8）节点或 Atlas 推理产品。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"`Qwen3.6-35B-A3B-w8a8`（量化版本）：需要1个Atlas A3推理产品（64G x 16）节点、1个Atlas A2推理产品（64G"
+" x 8）节点，或Atlas 300I DUO。[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/Qwen3.6-35B-A3B-w8a8)。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:24
@@ -123,11 +124,11 @@ msgid ""
 "`quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas A2 inference "
 "products, `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas A3"
 " inference products, and `quay.io/ascend/vllm-"
-"ascend:|vllm_ascend_version|-310p` for Atlas inference products."
+"ascend:|vllm_ascend_version|-310p` for Atlas 300I DUO."
 msgstr ""
-"根据您的机器类型选择镜像。例如，Atlas A2 推理产品使用 `quay.io/ascend/vllm-"
-"ascend:|vllm_ascend_version|`，Atlas A3 推理产品使用 `quay.io/ascend/vllm-"
-"ascend:|vllm_ascend_version|-a3`，Atlas 推理产品使用 `quay.io/ascend/vllm-"
+"根据您的机器类型选择镜像。例如，Atlas A2推理产品使用`quay.io/ascend/vllm-"
+"ascend:|vllm_ascend_version|`，Atlas A3推理产品使用`quay.io/ascend/vllm-"
+"ascend:|vllm_ascend_version|-a3`，Atlas 300I DUO使用`quay.io/ascend/vllm-"
 "ascend:|vllm_ascend_version|-310p`。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:32
@@ -145,8 +146,8 @@ msgid "Atlas A2 inference products"
 msgstr "Atlas A2 推理产品"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:150
 msgid ""
@@ -168,12 +169,11 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:161
 msgid ""
-"For Atlas inference products, source installation may pull in `triton` and "
-"`triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas "
-"inference products:"
+"For Atlas 300I DUO, source installation may pull in `triton` and `triton-"
+"ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:"
 msgstr ""
-"对于 Atlas 推理产品，源码安装可能会拉取 `triton` 和 `triton-ascend`。在 Atlas 推理产品上运行 vLLM-"
-"Ascend 之前，请卸载它们："
+"对于Atlas 300I DUO，源码安装可能会引入`triton`和`triton-ascend`。在Atlas 300I DUO上运行vLLM-"
+"Ascend之前，请先卸载它们："
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:169
 msgid "5 Online Service Deployment"
@@ -187,12 +187,11 @@ msgstr "5.1 单节点在线部署"
 msgid ""
 "Single-node deployment runs both Prefill and Decode on the same node. "
 "`Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G"
-" x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas inference "
-"products. The W8A8 version needs `--quantization ascend`."
+" x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas 300I DUO. The "
+"W8A8 version needs `--quantization ascend`."
 msgstr ""
-"单节点部署将 Prefill 和 Decode 运行在同一个节点上。`Qwen3.6-35B-A3B-w8a8` 可以部署在 1 个 Atlas A3 "
-"推理产品（64G x 16）或 1 个 Atlas A2 推理产品（64G x 8）或 Atlas 推理产品上。W8A8 版本需要 "
-"`--quantization ascend`。"
+"单节点部署在同一节点上运行Prefill和Decode。`Qwen3.6-35B-A3B-w8a8`可以部署在1个Atlas A3推理产品（64G x "
+"16）或1个Atlas A2推理产品（64G x 8）或Atlas 300I DUO上。W8A8版本需要`--quantization ascend`。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md
 msgid "Atlas A2 inference products / Atlas A3 inference products"
@@ -306,15 +305,15 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:259
 msgid ""
-"`--dtype float16` is used for Atlas inference products to match the Atlas "
-"inference execution path."
-msgstr "`--dtype float16` 用于Atlas推理产品，以匹配Atlas推理执行路径。"
+"`--dtype float16` is used for Atlas 300I DUO to match the Atlas inference "
+"execution path."
+msgstr "`--dtype float16`用于Atlas 300I DUO，以匹配Atlas推理执行路径。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:260
 msgid ""
 "`--max-num-seqs 16` limits concurrent active requests to reduce KV cache and"
-" graph capture pressure on Atlas inference products."
-msgstr "`--max-num-seqs 16` 限制并发活跃请求数，以降低Atlas推理产品上的KV缓存和图捕获压力。"
+" graph capture pressure on Atlas 300I DUO."
+msgstr "`--max-num-seqs 16`限制并发活动请求数，以减少Atlas 300I DUO上的KV缓存和图捕获压力。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:261
 msgid ""
@@ -327,27 +326,27 @@ msgstr "`--gpu-memory-utilization` 控制KV缓存容量。如果启动或运行�
 msgid ""
 "`--additional-config` with `\"ascend_compilation_config\": "
 "{\"enable_npugraph_ex\": false}` is required because `enable_npugraph_ex` is"
-" not supported on Atlas inference products."
+" not supported on Atlas 300I DUO."
 msgstr ""
-"`--additional-config` 需要包含 `\"ascend_compilation_config\": "
-"{\"enable_npugraph_ex\": false}`，因为Atlas推理产品不支持 `enable_npugraph_ex`。"
+"`--additional-config`需要包含`\"ascend_compilation_config\": "
+"{\"enable_npugraph_ex\": false}`，因为Atlas 300I DUO不支持`enable_npugraph_ex`。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:263
 #, python-brace-format
 msgid ""
 "`--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\", "
 "\"cudagraph_capture_sizes\": [1,2,4,8,16]}'` enables decode ACLGraph replay "
-"and explicitly limits capture sizes for Atlas inference products."
+"and explicitly limits capture sizes for Atlas 300I DUO."
 msgstr ""
 "`--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\", "
-"\"cudagraph_capture_sizes\": [1,2,4,8,16]}'` "
-"启用解码ACLGraph重放，并显式限制Atlas推理产品的捕获大小。"
+"\"cudagraph_capture_sizes\": [1,2,4,8,16]}'`为Atlas 300I DUO启用decode "
+"ACLGraph重放，并显式限制捕获大小。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:264
 msgid ""
 "`--no-enable-prefix-caching` is the default recommendation for this Atlas "
-"inference products example to reduce memory pressure."
-msgstr "`--no-enable-prefix-caching` 是该Atlas推理产品示例的默认建议，用于降低内存压力。"
+"300I DUO example to reduce memory pressure."
+msgstr "`--no-enable-prefix-caching`是此Atlas 300I DUO示例的默认建议，以减少内存压力。"
 
 #: ../../source/tutorials/models/Qwen3.6-35B-A3B.md:266
 #, python-brace-format
@@ -965,3 +964,6 @@ msgid ""
 "latency serving, compare TTFT and TPOT with and without this option."
 msgstr ""
 "**解决方案：** 高吞吐量服务使用`--async-scheduling`。对于低延迟服务，请对比启用和禁用此选项时的TTFT和TPOT。"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -233,7 +233,7 @@ msgstr "运行以下脚本执行在线推理。"
 #: ../../source/tutorials/models/GLM5.md:156
 #: ../../source/tutorials/models/GLM5.md:238
 #: ../../source/tutorials/models/GLM5.md:283
-#: ../../source/tutorials/models/GLM5.md:1425
+#: ../../source/tutorials/models/GLM5.md:1430
 msgid ""
 "Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
 msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
@@ -648,10 +648,25 @@ msgid "8"
 msgstr "8"
 
 #: ../../source/tutorials/models/GLM5.md:1423
+msgid ""
+"For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr "完整的启动命令和参数说明请参考[第5章](#5-online-service-deployment)中的部署示例。"
+
+#: ../../source/tutorials/models/GLM5.md:1425
+msgid ""
+"**Notice:** `max-model-len` and `max-num-seqs` need to be set according to "
+"the actual usage scenario. For other settings, please refer to the "
+"**[Deployment](#5-online-service-deployment)** chapter."
+msgstr ""
+"**注意：** `max-model-len` 和 `max-num-seqs` "
+"需要根据实际使用场景进行设置。其他设置请参考**[部署](#5-online-service-deployment)**章节。"
+
+#: ../../source/tutorials/models/GLM5.md:1428
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/GLM5.md:1427
+#: ../../source/tutorials/models/GLM5.md:1432
 msgid ""
 "**Q: How to solve ValueError: Tokenizer class TokenizersBackend does not "
 "exist or is not currently imported?**"
@@ -659,15 +674,15 @@ msgstr ""
 "**问：如何解决ValueError: Tokenizer class TokenizersBackend does not exist or is "
 "not currently imported？**"
 
-#: ../../source/tutorials/models/GLM5.md:1429
+#: ../../source/tutorials/models/GLM5.md:1434
 msgid "A: Please update the version of transformers to 5.2.0"
 msgstr "答：请将transformers版本更新至5.2.0"
 
-#: ../../source/tutorials/models/GLM5.md:1431
+#: ../../source/tutorials/models/GLM5.md:1436
 msgid "**Q: How to enable function calling for GLM-5?**"
 msgstr "**问：如何为GLM-5启用函数调用？**"
 
-#: ../../source/tutorials/models/GLM5.md:1433
+#: ../../source/tutorials/models/GLM5.md:1438
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在vLLM启动命令中添加以下配置"
 

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -57,11 +57,11 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:12
 msgid ""
-"For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend "
-"`v0.18.0` or later. Do not use the demonstration version above on this "
-"hardware."
+"For **Atlas 300I DUO**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or "
+"later. Do not use the demonstration version above on this hardware."
 msgstr ""
-"对于**Atlas推理产品**，Qwen3-VL Dense需要vLLM-Ascend `v0.18.0`或更高版本。请勿在此硬件上使用上述演示版本。"
+"对于 **Atlas 300I DUO**，Qwen3-VL Dense 需要 vLLM-Ascend `v0.18.0` "
+"或更高版本。请勿在此硬件上使用上述演示版本。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:15
 msgid "2 Supported Features"
@@ -92,8 +92,9 @@ msgstr "3.1 模型权重"
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:25
 msgid ""
 "Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or "
-"Atlas inference products:"
-msgstr "在Atlas 800I A2（64G × 8）、Atlas 800 A3（64G × 16）或Atlas推理产品上需要1张卡："
+"Atlas 300I DUO:"
+msgstr ""
+"在 Atlas 800I A2 (64G × 8)、Atlas 800 A3 (64G × 16) 或 Atlas 300I DUO 上需要 1 张卡："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:27
 msgid ""
@@ -119,8 +120,9 @@ msgstr ""
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:31
 msgid ""
 "Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or "
-"Atlas inference products:"
-msgstr "在Atlas 800I A2（64G × 8）、Atlas 800 A3（64G × 16）或Atlas推理产品上需要2张卡："
+"Atlas 300I DUO:"
+msgstr ""
+"在 Atlas 800I A2 (64G × 8)、Atlas 800 A3 (64G × 16) 或 Atlas 300I DUO 上需要 2 张卡："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:33
 msgid ""
@@ -157,8 +159,8 @@ msgid "A2 / A3 series"
 msgstr "A2 / A3系列"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md
-msgid "Atlas inference products"
-msgstr "Atlas推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:111
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:156
@@ -203,10 +205,11 @@ msgstr "克隆并安装vLLM-Ascend仓库："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:148
 msgid ""
-"Atlas inference products do not support `triton` or `triton-ascend`. Source "
+"Atlas 300I DUO does not support `triton` or `triton-ascend`. Source "
 "installation may pull them in automatically; uninstall them manually before "
 "running:"
-msgstr "Atlas推理产品不支持`triton`或`triton-ascend`。源码安装可能会自动拉取它们；请在运行前手动卸载："
+msgstr ""
+"Atlas 300I DUO 不支持 `triton` 或 `triton-ascend`。源码安装可能会自动引入这些依赖；运行前请手动卸载："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:162
 msgid ""
@@ -238,8 +241,8 @@ msgid "Run docker container to start the vLLM server on single-NPU:"
 msgstr "运行docker容器在单NPU上启动vLLM服务器："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:203
-msgid "On Atlas inference products:"
-msgstr "在Atlas推理产品上："
+msgid "On Atlas 300I DUO:"
+msgstr "在 Atlas 300I DUO 上："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:205
 msgid "Only `float16` dtype is supported."
@@ -259,10 +262,10 @@ msgstr ""
 msgid ""
 "`--additional-config` with `\"ascend_compilation_config\": "
 "{\"enable_npugraph_ex\": false}` is required because `enable_npugraph_ex` is"
-" not supported on Atlas inference products."
+" not supported on Atlas 300I DUO."
 msgstr ""
-"需要`--additional-config`包含`\"ascend_compilation_config\": "
-"{\"enable_npugraph_ex\": false}`，因为Atlas推理产品不支持`enable_npugraph_ex`。"
+"需要使用带有 `\"ascend_compilation_config\": {\"enable_npugraph_ex\": false}` 的 "
+"`--additional-config`，因为 Atlas 300I DUO 不支持 `enable_npugraph_ex`。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:212
 msgid "Key Parameter Descriptions:"
@@ -342,6 +345,30 @@ msgid ""
 msgstr ""
 "执行后即可获得结果，以下为 `vllm-ascend:0.11.0rc3` 中 `Qwen3-VL-8B-Instruct` 的结果，仅供参考。"
 
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:289
+msgid "Tasks"
+msgstr "任务"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:289
+msgid "Value"
+msgstr "值"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:289
+msgid "Stderr"
+msgstr "标准错误"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:289
+msgid "mmmu_val"
+msgstr "mmmu_val"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:289
+msgid "0.5389"
+msgstr "0.5389"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:289
+msgid "0.0159"
+msgstr "0.0159"
+
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:297
 msgid "**Using AISBench**"
 msgstr "**使用 AISBench**"
@@ -371,6 +398,38 @@ msgid ""
 "`Qwen3-VL-8B-Instruct` in `vllm-ascend:0.23.0rc1` for reference only."
 msgstr ""
 "执行后即可获得结果，以下为 `vllm-ascend:0.23.0rc1` 中 `Qwen3-VL-8B-Instruct` 的结果，仅供参考。"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "text_vqa"
+msgstr "text_vqa"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "gen"
+msgstr "gen"
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:311
+msgid "80.57"
+msgstr "80.57"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:317
 msgid "8 Performance Evaluation"
@@ -617,3 +676,6 @@ msgid ""
 msgstr ""
 "常见环境、安装及通用参数问题请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas推理产品"
