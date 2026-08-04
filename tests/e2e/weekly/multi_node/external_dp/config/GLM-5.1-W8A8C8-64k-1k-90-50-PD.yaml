@@ -333,12 +333,12 @@ benchmarks:
 
       perf:
         case_type: performance
-        dataset_path_local: /mnt/share/g60049161/datasets/
+        dataset_path: vllm-ascend/xxxx
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 512
         max_out_len: 1024
         batch_size: 128
         request_rate: 3.15
-        baseline: 29.60
+        baseline: 2722.60
         threshold: 0.97
