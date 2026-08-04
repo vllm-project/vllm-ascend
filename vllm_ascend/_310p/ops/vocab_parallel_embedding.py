@@ -24,7 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead, AscendVocabParallelEmbedding
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 
 
 class AscendUnquantizedEmbeddingMethod310(UnquantizedEmbeddingMethod):
@@ -63,20 +63,61 @@ class AscendParallelLMHead310(AscendParallelLMHead):
     Register ParallelLMHead as a custom op for Atlas 310p.
     """
 
-    def __init__(
-        self,
-        num_embeddings: int,
-        embedding_dim: int,
-        bias: bool = False,
-        params_dtype: torch.dtype | None = None,
-        org_num_embeddings: int | None = None,
-        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__(
-            num_embeddings, embedding_dim, bias, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
-        )
+    # main2main compat: `disable_tp` was added to upstream
+    # ParallelLMHead.__init__() in vllm main after 0.26.0.
+    # Remove the version gate once 0.26.0 support is dropped.
+    if vllm_version_is("0.26.0"):
 
-        if quant_config is None:
-            self.quant_method = AscendUnquantizedEmbeddingMethod310()
+        def __init__(
+            self,
+            num_embeddings: int,
+            embedding_dim: int,
+            bias: bool = False,
+            params_dtype: torch.dtype | None = None,
+            org_num_embeddings: int | None = None,
+            padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+        ):
+            super().__init__(
+                num_embeddings,
+                embedding_dim,
+                bias,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+            )
+
+            if quant_config is None:
+                self.quant_method = AscendUnquantizedEmbeddingMethod310()
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            num_embeddings: int,
+            embedding_dim: int,
+            bias: bool = False,
+            params_dtype: torch.dtype | None = None,
+            org_num_embeddings: int | None = None,
+            padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+            *,
+            disable_tp: bool = False,
+        ):
+            super().__init__(
+                num_embeddings,
+                embedding_dim,
+                bias,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+                disable_tp=disable_tp,  # type: ignore[call-arg]
+            )
+
+            if quant_config is None:
+                self.quant_method = AscendUnquantizedEmbeddingMethod310()

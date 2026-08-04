@@ -47,6 +47,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   ASCEND_LOG_DEVICE_FLUSH_TIMEOUT: "0"
@@ -277,3 +278,4 @@ benchmarks:
     top_p: 0.95
     ignore_eos: false
     thinking: true
+

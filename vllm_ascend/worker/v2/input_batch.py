@@ -85,9 +85,15 @@ class AscendInputBatch(InputBatch):
             num_tokens,
             input_buffers,
         )
-        # seq_len equals to query_len
-        input_buffers.seq_lens_np[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens_np[num_reqs - 1] += num_tokens % num_reqs
+        # Evenly distribute num_tokens across requests instead of dumping the
+        # whole remainder on the last request.
+        # The old distribution could make the last dummy request's seq_len
+        # exceed max_model_len, causing attention kernels to read block-table
+        # entries past the tensor end (garbage page IDs / illegal memory access).
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens_np[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens_np[num_reqs:] = 0
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
