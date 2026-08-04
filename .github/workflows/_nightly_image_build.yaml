@@ -42,7 +42,7 @@ on:
       cann_version:
         required: false
         type: string
-        default: '2026.07.29'
+        default: '2026.08.03'
         description: "CANN version for base image tag"
     secrets:
       HW_USERNAME:
