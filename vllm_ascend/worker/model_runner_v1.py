@@ -140,6 +140,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -568,6 +569,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDraftModelProposer
             | AscendDflashProposer
             | AscendDSparkProposer
+            | AscendGemma4Proposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -3019,9 +3021,14 @@ class NPUModelRunner(GPUModelRunner):
                 # build per-step attention metadata for the active MTP layer.
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
+            elif self.speculative_config and isinstance(self.drafter, AscendGemma4Proposer):
+                self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer 
-                    | AscendDSparkProposer):
+                if isinstance(
+                    self.drafter,
+                    AscendEagleProposer | AscendGemma4Proposer
+                    | AscendDraftModelProposer | AscendDflashProposer | AscendDSparkProposer,
+                ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -3586,11 +3593,24 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
+                AscendEagleProposer
+                | AscendGemma4Proposer
+                | AscendDflashProposer
+                | AscendDSparkProposer
+                | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            kernel_block_sizes = (
+                self.kernel_block_sizes[0]
+                if isinstance(self.kernel_block_sizes, list)
+                else self.kernel_block_sizes
+            )
+            if isinstance(self.drafter, AscendGemma4Proposer):
+                assert isinstance(self.kernel_block_sizes, list)
+                kernel_block_sizes = [
+                    sizes if isinstance(sizes, int) else sizes[0]
+                    for sizes in self.kernel_block_sizes
+                ]
+            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -4697,7 +4717,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer | AscendGemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
