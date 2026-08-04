@@ -203,13 +203,19 @@ class SFAPDRD2HConsumerWorker:
         return
 
     def _cleanup_request_state(self, req_ids: set[str]) -> None:
+        ext_ids = set()
         for req_id in req_ids:
             ext_id = get_external_request_id(req_id)
+            ext_ids.add(ext_id)
             self._cpu_blocks_by_req.pop(req_id, None)
             self.request_map.pop(ext_id, None)
             self._dest_blocks_by_req.pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
+        # Drop any partial contributor-completion state so a dead contributor or a
+        # retried external id cannot complete a later request on stale arrivals.
+        if self._mf_read_thread is not None:
+            self._mf_read_thread.discard_requests(ext_ids)
 
     def _gather_tp_read_status(
         self,
@@ -515,6 +521,8 @@ class SFAPDRD2HProducerWorker:
                     prefill_tp_rank=self.tp_rank,
                 )
                 tp_ratio = self.tp_size // remote_tp_size
+                req_meta.tp_ratio = tp_ratio
+                req_meta.group_member_idx = self.tp_rank % tp_ratio
                 old_remote_port = req_meta.remote_port
                 req_meta.remote_port = req_meta.remote_port + remote_tp_rank
                 _validate_tcp_port(

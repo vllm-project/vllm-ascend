@@ -590,6 +590,9 @@ def test_send_thread_wires_both_cache_group_block_lists():
     assert sent_message[0] == READ_READY_BATCH
     assert sent_message[3] == [("req-0", [3, 4], [7], 0, 0)]
     assert sent_message[4] == ["req-0"]
+    # Contributor identity defaults: single contributor group (member 0 of ratio 1).
+    assert sent_message[5] == 0
+    assert sent_message[6] == 1
 
 
 def test_send_thread_slices_each_group_at_chunk_boundaries():
@@ -655,6 +658,8 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
 
     sent_message = dealer.send.call_args.args[0]
     assert sent_message[3] == [("req-0", [11], [20], 1, 0)]
+    assert sent_message[5] == 0
+    assert sent_message[6] == 1
 
 
 @pytest.mark.parametrize("all_groups", [False, True])
@@ -975,6 +980,11 @@ def test_metaserver_callback_clears_completed_future():
         (8, 4, 0, 0),
         (8, 4, 3, 1),
         (8, 4, 7, 3),
+        # 16 -> 4 fold (tp_ratio=4): the unequal-TP topology this connector targets.
+        (16, 4, 0, 0),
+        (16, 4, 3, 0),
+        (16, 4, 4, 1),
+        (16, 4, 15, 3),
     ],
 )
 def test_prefill_to_decode_tp_rank_mapping(p_tp, d_tp, p_rank, expected_d_rank):
@@ -986,6 +996,60 @@ def test_prefill_to_decode_tp_rank_mapping(p_tp, d_tp, p_rank, expected_d_rank):
         )
         == expected_d_rank
     )
+
+
+@pytest.mark.parametrize(
+    ("dp_rank", "tp_size", "expected_port"),
+    [
+        # Single-host DP4 (tp_size=4): global ranks 0..3 -> disjoint port ranges.
+        (0, 4, 1000),
+        (1, 4, 1004),
+        (2, 4, 1008),
+        (3, 4, 1012),
+        # Multi-host DP4: same global-rank formula applies per host (host disambiguates).
+        (3, 4, 1012),
+        # Unequal-TP decode side (D tp_size=4), wider DP.
+        (5, 4, 1020),
+    ],
+)
+def test_d_side_control_plane_port_uses_global_dp_rank(dp_rank, tp_size, expected_port):
+    """SFAPDRD2HScheduler must derive the TP control-plane port from the GLOBAL
+    data_parallel_rank (never the per-host local rank) so single-host and
+    multi-host DP both get disjoint per-engine port ranges."""
+    kv_port = 1000
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))],
+        num_blocks=8,
+    )
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_port=kv_port, engine_id="d0"),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            data_parallel_rank=dp_rank,
+            data_parallel_rank_local=0,  # SPMD local rank; must NOT drive the port
+            data_parallel_size=8,
+            data_parallel_size_local=4,
+        ),
+    )
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.get_ip",
+            return_value="decode-host",
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.infer_sfa_component_group_ids",
+            return_value=(0, 0),
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.ThreadPoolExecutor",
+            return_value=MagicMock(),
+        ),
+    ):
+        scheduler = SFAPDRD2HScheduler(vllm_config, use_layerwise=True, kv_cache_config=kv_cache_config)
+
+    assert scheduler.side_channel_port == expected_port
+    # Guard: never derive the port from the per-host local rank (which is 0 here).
+    assert scheduler.side_channel_port != kv_port + 0 * tp_size or dp_rank == 0
 
 
 @pytest.mark.parametrize(
@@ -1059,3 +1123,161 @@ def test_connector_shutdown_delegates_to_active_components():
 
     connector.connector_worker.shutdown.assert_called_once_with()
     connector.connector_scheduler.shutdown.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Contributor-group split (unequal P/D TP)
+# ---------------------------------------------------------------------------
+
+
+def _make_indexer_only_read_thread(indexer_dest: list[int]) -> MembPullReadThread:
+    thread = MembPullReadThread.__new__(MembPullReadThread)
+    thread.tp_rank = 0
+    thread._state = ConsumerReadState(
+        num_blocks=64,
+        tp_size=1,
+        layer_metadata={},
+        main_name_to_idx={},
+        cpu_pools=[],
+        main_gva_bases=[],
+        main_block_lens=[],
+        indexer_tensors=[],
+        indexer_scale_tensors=[],
+        dest_blocks_by_req={"req-0": ([], indexer_dest)},
+        get_offload_layer_id=lambda _: 0,
+    )
+    return thread
+
+
+def test_member0_pulls_main_and_indexer_slice():
+    # ratio=2: member 0 pulls main (replicated, no split) + its indexer half.
+    thread = _make_indexer_only_read_thread([10, 11, 12, 13])
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+
+    local, peer, lengths, info = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[1, 2],
+        p_indexer_block_ids=[7, 8, 9, 10],
+        want_info=True,
+        group_member_idx=0,
+        ratio=2,
+    )
+
+    assert info is not None
+    assert info["n_main"] == 2  # member 0 pulls the whole main share
+    assert info["n_indexer"] == 2  # and the first half of the indexer
+    # indexer half = d blocks [10, 11] -> d_base 8000 + {10,11}*5
+    assert 8050 in local and 8055 in local
+    assert 8060 not in local and 8065 not in local
+
+
+def test_nonzero_member_skips_main_and_pulls_other_indexer_slice():
+    thread = _make_indexer_only_read_thread([10, 11, 12, 13])
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+
+    local, peer, lengths, info = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[1, 2],
+        p_indexer_block_ids=[7, 8, 9, 10],
+        want_info=True,
+        group_member_idx=1,
+        ratio=2,
+    )
+
+    assert info is not None
+    assert info["n_main"] == 0  # main is contributor-0 only
+    assert info["n_indexer"] == 2  # second half of the indexer
+    # main K/V destinations absent
+    assert 3000 not in local and 4000 not in local
+    # indexer second half = d blocks [12, 13]
+    assert 8060 in local and 8065 in local
+    assert 8050 not in local and 8055 not in local
+
+
+def test_indexer_slices_are_disjoint_and_cover_full_range():
+    thread = _make_indexer_only_read_thread([10, 11, 12, 13])
+    layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None)
+    covered: set[int] = set()
+    for member in range(4):
+        local, _, _, info = thread._build_req_descriptors(
+            layer,
+            "req-0",
+            p_main_block_ids=[],
+            p_indexer_block_ids=[7, 8, 9, 10],
+            want_info=True,
+            group_member_idx=member,
+            ratio=4,
+        )
+        assert info is not None
+        d_ids = set(info["d_indexer_ids"])
+        assert covered.isdisjoint(d_ids)
+        covered |= d_ids
+    assert covered == {10, 11, 12, 13}
+
+
+def test_ratio_one_degenerates_to_full_pull():
+    thread = _make_indexer_only_read_thread([10, 11, 12, 13])
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+
+    _, _, _, info = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[1, 2],
+        p_indexer_block_ids=[7, 8, 9, 10],
+        want_info=True,
+        group_member_idx=0,
+        ratio=1,
+    )
+
+    assert info is not None
+    assert info["n_main"] == 2
+    assert info["n_indexer"] == 4  # full indexer, no split
+
+
+def _make_completion_thread() -> MembPullReadThread:
+    thread = MembPullReadThread.__new__(MembPullReadThread)
+    thread._done_requests = set()
+    thread._failed_requests = set()
+    thread._done_contributors = {}
+    thread._expected_ratio = {}
+    thread._lock = threading.Lock()
+    return thread
+
+
+def test_request_done_requires_all_contributors():
+    thread = _make_completion_thread()
+    thread._record_chunk_done(["req-0"], 0, 4)
+    thread._record_chunk_done(["req-0"], 1, 4)
+    thread._record_chunk_done(["req-0"], 2, 4)
+    assert "req-0" not in thread._done_requests
+    thread._record_chunk_done(["req-0"], 3, 4)
+    assert "req-0" in thread._done_requests
+    # contributor state released once complete
+    assert "req-0" not in thread._done_contributors
+    assert "req-0" not in thread._expected_ratio
+
+
+def test_duplicate_contributor_does_not_double_count():
+    thread = _make_completion_thread()
+    thread._record_chunk_done(["req-0"], 0, 3)
+    thread._record_chunk_done(["req-0"], 0, 3)  # same member re-delivers
+    thread._record_chunk_done(["req-0"], 1, 3)
+    assert "req-0" not in thread._done_requests  # still missing member 2
+
+
+def test_ratio_one_completes_immediately():
+    thread = _make_completion_thread()
+    thread._record_chunk_done(["req-0"], 0, 1)
+    assert "req-0" in thread._done_requests
+
+
+def test_discard_requests_clears_partial_contributor_state():
+    thread = _make_completion_thread()
+    thread._record_chunk_done(["req-0"], 0, 4)
+    assert "req-0" in thread._done_contributors
+    thread.discard_requests({"req-0"})
+    assert "req-0" not in thread._done_contributors
+    assert "req-0" not in thread._expected_ratio
+
