@@ -2823,6 +2823,8 @@ class MooncakeConnectorWorker:
                 for group_idx, (group_spec, _) in self.kv_group2layeridx.items()
             ]
             use_transfer_group_block_ids = len(kv_cache_group_ids) != len(set(kv_cache_group_ids))
+            local_block_ids: list[list[int]]
+            remote_block_ids: list[list[int]]
             if use_transfer_group_block_ids:
                 local_block_ids = [[] for _ in self.kv_group2layeridx]
                 remote_block_ids = [[] for _ in self.kv_group2layeridx]
