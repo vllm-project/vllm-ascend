@@ -1,0 +1,78 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Upload good table
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      vllm_ascend_branch:
+        required: true
+        type: string
+      test_frequency:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+
+jobs:
+  upload:
+    name: Upload ${{ inputs.test_frequency }}/good_table.csv
+    runs-on: ${{ inputs.runner }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+    steps:
+      - name: Stage good table
+        id: stage
+        env:
+          TEST_FREQUENCY: ${{ inputs.test_frequency }}
+          TABLE_ROOT: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}
+          ARTIFACT_ROOT: ${{ runner.temp }}/good-table-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          case "$TEST_FREQUENCY" in
+            nightly|weekly) ;;
+            *)
+              echo "::error::Unsupported test frequency: $TEST_FREQUENCY"
+              exit 1
+              ;;
+          esac
+
+          source_path="${TABLE_ROOT}/${TEST_FREQUENCY}/good_table.csv"
+          if [ ! -f "$source_path" ]; then
+            echo "::warning::Good table not found: $source_path"
+            echo "has_file=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          destination="${ARTIFACT_ROOT}/${TEST_FREQUENCY}"
+          mkdir -p "$destination"
+          cp "$source_path" "$destination/good_table.csv"
+          echo "has_file=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload good table artifact
+        if: steps.stage.outputs.has_file == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/good-table-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

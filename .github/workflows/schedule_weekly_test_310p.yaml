@@ -58,6 +58,11 @@ on:
         required: false
         default: false
         type: boolean
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
+        required: false
+        default: '{}'
+        type: string
 
 permissions:
   contents: read
@@ -84,8 +89,6 @@ env:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
-    if: >-
-      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.parse.outputs.run }}
@@ -98,7 +101,9 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ inputs.test_cases }}'.trim();
+            const testCases = context.eventName === 'schedule'
+              ? 'all'
+              : '${{ inputs.test_cases }}'.trim();
 
             core.setOutput('ref', context.sha || 'unknown');
 
@@ -128,7 +133,7 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
+            input_branch="${{ github.event_name == 'schedule' && 'main' || inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
@@ -193,6 +198,8 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: 310p
+      test_frequency: weekly
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -208,6 +215,34 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ github.event_name == 'schedule' || inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: tests/e2e/weekly/single_node/configs/
+
+  upload-good-table:
+    name: Upload weekly good table
+    needs: [setup-vars, parse-trigger, single-node-tests]
+    if: >-
+      always() &&
+      inputs.request_id == '' &&
+      needs.setup-vars.result == 'success' &&
+      needs.parse-trigger.outputs.run == 'true'
+    strategy:
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+    uses: ./.github/workflows/_upload_good_table.yaml
+    with:
+      runner: linux-aarch64-310p-4
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      test_frequency: weekly
+      artifact_name: good-table-weekly-310p-${{ matrix.vllm_ascend_branch }}
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip

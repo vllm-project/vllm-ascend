@@ -10,10 +10,12 @@
 #
 # Args: $1 = config_name
 #       $2 = csv_path
+#       $3 = max_age_days (default: 3)
+#       $4 = soc (optional; filters new-schema rows)
 #
 # Writes to $GITHUB_OUTPUT:
 #   commit_age_days  - days since last success
-#   is_old           - true if > 3 days
+#   is_old           - true if older than max_age_days
 #   last_status      - status from table
 #   last_date        - date from table
 # ============================================================
@@ -21,9 +23,16 @@ set -euo pipefail
 
 CONFIG_NAME="${1:-}"
 CSV_PATH="${GOOD_TABLE:-$2}"
+MAX_AGE_DAYS="${3:-3}"
+BISECT_SOC="${4:-}"
 
 if [ -z "$CONFIG_NAME" ]; then
   echo "ERROR: no config name provided"
+  exit 1
+fi
+
+if ! [[ "$MAX_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: max_age_days must be a non-negative integer, got '${MAX_AGE_DAYS}'"
   exit 1
 fi
 
@@ -38,8 +47,12 @@ if [ ! -f "$CSV_PATH" ]; then
   exit 0
 fi
 
-# Find matching rows, only consider success rows (match name column only)
-ROWS=$(grep "^${CONFIG_NAME}," "$CSV_PATH" | grep -F ',success,' || true)
+# Match the name and, for new-schema rows, the current SoC. Legacy seven-column
+# rows have no SoC and remain eligible during migration.
+ROWS=$(awk -F',' -v name="$CONFIG_NAME" -v soc="$BISECT_SOC" '
+  NR > 1 && $1 == name && tolower($4) == "success" &&
+  (soc == "" || NF < 9 || $7 == soc) { print }
+' "$CSV_PATH")
 
 if [ -z "$ROWS" ]; then
   echo ">>> No success row for '${CONFIG_NAME}' → skip"
@@ -89,10 +102,10 @@ AGE_DAYS=$(( (NOW - LAST_TS) / 86400 ))
 
 echo "commit_age_days=${AGE_DAYS}" >> "$GITHUB_OUTPUT"
 
-if [ "$AGE_DAYS" -gt 3 ]; then
+if [ "$AGE_DAYS" -gt "$MAX_AGE_DAYS" ]; then
   echo "is_old=true" >> "$GITHUB_OUTPUT"
-  echo ">>> ${CONFIG_NAME} last_status=${LAST_STATUS} date=${LAST_DATE} age=${AGE_DAYS}d (> 3 days) → old"
+  echo ">>> ${CONFIG_NAME} last_status=${LAST_STATUS} date=${LAST_DATE} age=${AGE_DAYS}d (> ${MAX_AGE_DAYS} days) → old"
 else
   echo "is_old=false" >> "$GITHUB_OUTPUT"
-  echo ">>> ${CONFIG_NAME} last_status=${LAST_STATUS} date=${LAST_DATE} age=${AGE_DAYS}d (<= 3 days) → recent"
+  echo ">>> ${CONFIG_NAME} last_status=${LAST_STATUS} date=${LAST_DATE} age=${AGE_DAYS}d (<= ${MAX_AGE_DAYS} days) → recent"
 fi

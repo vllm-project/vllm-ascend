@@ -47,6 +47,15 @@ jobs:
       dispatch_310p: ${{ steps.resolve.outputs.dispatch_310p }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
       aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
+      bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
+      bisect_good_commit: ${{ steps.resolve.outputs.bisect_good_commit }}
+      bisect_bad_commit: ${{ steps.resolve.outputs.bisect_bad_commit }}
+      bisect_fail_confirm_retries: ${{ steps.resolve.outputs.bisect_fail_confirm_retries }}
+      bisect_trial_timeout: ${{ steps.resolve.outputs.bisect_trial_timeout }}
+      bisect_barrier_timeout: ${{ steps.resolve.outputs.bisect_barrier_timeout }}
+      bisect_no_verify_good: ${{ steps.resolve.outputs.bisect_no_verify_good }}
+      bisect_no_verify_bad: ${{ steps.resolve.outputs.bisect_no_verify_bad }}
+      bisect_force_initial_build: ${{ steps.resolve.outputs.bisect_force_initial_build }}
       command: ${{ steps.resolve.outputs.command }}
     steps:
       - name: Install system dependencies
@@ -132,16 +141,96 @@ jobs:
           AOP_ENABLED="false"
           IS_A3_560T="false"
           NEXT_IS_BRANCH=0
+          NEXT_IS_GOOD_COMMIT=0
+          NEXT_IS_BAD_COMMIT=0
+          NEXT_IS_FAIL_CONFIRM_RETRIES=0
+          NEXT_IS_TRIAL_TIMEOUT=0
+          NEXT_IS_BARRIER_TIMEOUT=0
+          BISECT_GOOD_COMMIT=""
+          BISECT_BAD_COMMIT="HEAD"
+          BISECT_FAIL_CONFIRM_RETRIES=""
+          BISECT_TRIAL_TIMEOUT=""
+          BISECT_BARRIER_TIMEOUT=""
+          BISECT_NO_VERIFY_GOOD="false"
+          BISECT_NO_VERIFY_BAD="false"
+          BISECT_FORCE_INITIAL_BUILD="false"
+          PENDING_OPTION=""
+          # Preserve slash-command tokens literally; do not expand '*' or '?'
+          # against files in the runner workspace.
+          set -f
           for WORD in $ALL_ARGS; do
+            case "$WORD" in
+              --good-commit|--bad-commit|--fail-confirm-retries|--trial-timeout|--barrier-timeout|\
+              --no-verify-good|--no-verify-bad|--force-initial-build)
+                if [ "$AOP_ENABLED" != "true" ]; then
+                  echo "ERROR: $WORD must appear after --aop_enabled"
+                  exit 1
+                fi
+                ;;
+            esac
+
+            if [ -n "$PENDING_OPTION" ] && [[ "$WORD" == --* ]]; then
+              echo "ERROR: $PENDING_OPTION requires a value"
+              exit 1
+            fi
+
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
               BRANCH="$WORD"
               NEXT_IS_BRANCH=0
+            elif [ "$NEXT_IS_GOOD_COMMIT" = "1" ]; then
+              BISECT_GOOD_COMMIT="$WORD"
+              NEXT_IS_GOOD_COMMIT=0
+              PENDING_OPTION=""
+            elif [ "$NEXT_IS_BAD_COMMIT" = "1" ]; then
+              BISECT_BAD_COMMIT="$WORD"
+              NEXT_IS_BAD_COMMIT=0
+              PENDING_OPTION=""
+            elif [ "$NEXT_IS_FAIL_CONFIRM_RETRIES" = "1" ]; then
+              BISECT_FAIL_CONFIRM_RETRIES="$WORD"
+              NEXT_IS_FAIL_CONFIRM_RETRIES=0
+              PENDING_OPTION=""
+            elif [ "$NEXT_IS_TRIAL_TIMEOUT" = "1" ]; then
+              BISECT_TRIAL_TIMEOUT="$WORD"
+              NEXT_IS_TRIAL_TIMEOUT=0
+              PENDING_OPTION=""
+            elif [ "$NEXT_IS_BARRIER_TIMEOUT" = "1" ]; then
+              BISECT_BARRIER_TIMEOUT="$WORD"
+              NEXT_IS_BARRIER_TIMEOUT=0
+              PENDING_OPTION=""
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
             elif [ "$WORD" = "--aop_enabled" ]; then
+              if [ -z "$TEST_CASES" ]; then
+                echo "ERROR: --aop_enabled must appear after at least one test case"
+                exit 1
+              fi
               AOP_ENABLED="true"
             elif [ "$WORD" = "--a3-560t" ]; then
               IS_A3_560T="true"
+            elif [ "$WORD" = "--good-commit" ]; then
+              NEXT_IS_GOOD_COMMIT=1
+              PENDING_OPTION="$WORD"
+            elif [ "$WORD" = "--bad-commit" ]; then
+              NEXT_IS_BAD_COMMIT=1
+              PENDING_OPTION="$WORD"
+            elif [ "$WORD" = "--fail-confirm-retries" ]; then
+              NEXT_IS_FAIL_CONFIRM_RETRIES=1
+              PENDING_OPTION="$WORD"
+            elif [ "$WORD" = "--trial-timeout" ]; then
+              NEXT_IS_TRIAL_TIMEOUT=1
+              PENDING_OPTION="$WORD"
+            elif [ "$WORD" = "--barrier-timeout" ]; then
+              NEXT_IS_BARRIER_TIMEOUT=1
+              PENDING_OPTION="$WORD"
+            elif [ "$WORD" = "--no-verify-good" ]; then
+              BISECT_NO_VERIFY_GOOD="true"
+            elif [ "$WORD" = "--no-verify-bad" ]; then
+              BISECT_NO_VERIFY_BAD="true"
+            elif [ "$WORD" = "--force-initial-build" ]; then
+              BISECT_FORCE_INITIAL_BUILD="true"
+            elif [[ "$WORD" == --* ]]; then
+              echo "ERROR: unknown option: $WORD"
+              exit 1
             else
               if [ -z "$TEST_CASES" ]; then
                 TEST_CASES="$WORD"
@@ -151,6 +240,34 @@ jobs:
             fi
           done
 
+          if [ -n "$PENDING_OPTION" ]; then
+            echo "ERROR: $PENDING_OPTION requires a value"
+            exit 1
+          fi
+
+          if [ -n "$BISECT_GOOD_COMMIT" ] &&
+             ! [[ "$BISECT_GOOD_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "ERROR: --good-commit must be a 7-40 character hexadecimal commit SHA"
+            exit 1
+          fi
+          if [ "$BISECT_BAD_COMMIT" != "HEAD" ] &&
+             ! [[ "$BISECT_BAD_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "ERROR: --bad-commit must be HEAD or a 7-40 character hexadecimal commit SHA"
+            exit 1
+          fi
+          if [ -n "$BISECT_FAIL_CONFIRM_RETRIES" ] &&
+             ! [[ "$BISECT_FAIL_CONFIRM_RETRIES" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: --fail-confirm-retries must be a non-negative integer"
+            exit 1
+          fi
+          for TIMEOUT_VALUE in "$BISECT_TRIAL_TIMEOUT" "$BISECT_BARRIER_TIMEOUT"; do
+            if [ -n "$TIMEOUT_VALUE" ] &&
+               { ! [[ "$TIMEOUT_VALUE" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+                 [[ "$TIMEOUT_VALUE" =~ ^0+([.]0+)?$ ]]; }; then
+              echo "ERROR: bisect timeout values must be positive numbers"
+              exit 1
+            fi
+          done
           if [ -z "$TEST_CASES" ]; then
             gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
               -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
@@ -158,11 +275,30 @@ jobs:
             exit 1
           fi
 
+          printf -v BISECT_ARGS_JSON \
+            '{"good_commit":"%s","bad_commit":"%s","fail_confirm_retries":"%s","trial_timeout":"%s","barrier_timeout":"%s","no_verify_good":%s,"no_verify_bad":%s,"force_initial_build":%s}' \
+            "$BISECT_GOOD_COMMIT" \
+            "$BISECT_BAD_COMMIT" \
+            "$BISECT_FAIL_CONFIRM_RETRIES" \
+            "$BISECT_TRIAL_TIMEOUT" \
+            "$BISECT_BARRIER_TIMEOUT" \
+            "$BISECT_NO_VERIFY_GOOD" \
+            "$BISECT_NO_VERIFY_BAD" \
+            "$BISECT_FORCE_INITIAL_BUILD"
 
           {
             echo "test_cases=$TEST_CASES"
             echo "branch=$BRANCH"
             echo "aop_enabled=$AOP_ENABLED"
+            echo "bisect_good_commit=$BISECT_GOOD_COMMIT"
+            echo "bisect_bad_commit=$BISECT_BAD_COMMIT"
+            echo "bisect_fail_confirm_retries=$BISECT_FAIL_CONFIRM_RETRIES"
+            echo "bisect_trial_timeout=$BISECT_TRIAL_TIMEOUT"
+            echo "bisect_barrier_timeout=$BISECT_BARRIER_TIMEOUT"
+            echo "bisect_no_verify_good=$BISECT_NO_VERIFY_GOOD"
+            echo "bisect_no_verify_bad=$BISECT_NO_VERIFY_BAD"
+            echo "bisect_force_initial_build=$BISECT_FORCE_INITIAL_BUILD"
+            echo "bisect_args_json=$BISECT_ARGS_JSON"
           } >> "$GITHUB_OUTPUT"
 
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
@@ -227,6 +363,7 @@ jobs:
         id: dispatch_a2
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -238,7 +375,8 @@ jobs:
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -268,6 +406,7 @@ jobs:
         id: dispatch_a3
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -279,7 +418,8 @@ jobs:
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -309,6 +449,7 @@ jobs:
         id: dispatch_a3_560t
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -320,7 +461,8 @@ jobs:
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -391,6 +533,7 @@ jobs:
         id: dispatch_weekly_a3
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -402,7 +545,8 @@ jobs:
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -432,6 +576,7 @@ jobs:
         id: dispatch_weekly_310p
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           REQUEST_ID='${{ github.run_id }}'
@@ -442,7 +587,9 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
+            -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
           _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')

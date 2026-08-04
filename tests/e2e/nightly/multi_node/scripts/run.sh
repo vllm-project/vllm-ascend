@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+BISECT_SOC="${1:-}"
+MAX_GOOD_AGE_DAYS="${2:-3}"
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
@@ -67,6 +70,7 @@ show_vllm_info() {
     cd "$WORKSPACE"
     echo "Installed vLLM-related Python packages:"
     pip list | grep vllm || echo "No vllm packages found."
+    echo "torch-npu Version: $(pip show torch_npu 2>/dev/null | awk '/^Version:/{print $2}' || true)"
 
     echo ""
     echo "============================"
@@ -110,7 +114,11 @@ show_vllm_info() {
 check_npu_info() {
     echo "====> Check NPU info"
     npu-smi info
-    cat "/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
+    local info_file="/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
+    if [ -f "$info_file" ]; then
+        cat "$info_file"
+        echo "CANN Version: $(grep '^version=' "$info_file" | head -n1 | cut -d= -f2 | tr -d '\"')"
+    fi
 }
 
 check_and_config() {
@@ -248,12 +256,14 @@ run_tests_with_log() {
             echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
+            build_bisect_extra_args
             python -m tools.bisect.auto_bisect \
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
-                --bad-commit HEAD \
+                --bad-commit "${BISECT_BAD_COMMIT:-HEAD}" \
                 --coord-dir "${coord}" \
-                --release-file "${release}"
+                --release-file "${release}" \
+                "${BISECT_EXTRA_ARGS[@]}"
             while [ ! -f "$release" ]; do sleep 5; done
             echo "Worker: release signal received, exiting"
             exit 1
@@ -263,11 +273,33 @@ run_tests_with_log() {
     fi
 }
 
+# Build additional bisect args without word splitting or pathname expansion.
+build_bisect_extra_args() {
+    BISECT_EXTRA_ARGS=()
+    [ -n "${BISECT_GOOD_COMMIT:-}" ] && BISECT_EXTRA_ARGS+=(--good-commit "$BISECT_GOOD_COMMIT")
+    [ -n "${BISECT_FAIL_CONFIRM_RETRIES:-}" ] &&
+        BISECT_EXTRA_ARGS+=(--fail-confirm-retries "$BISECT_FAIL_CONFIRM_RETRIES")
+    [ -n "${BISECT_TRIAL_TIMEOUT:-}" ] && BISECT_EXTRA_ARGS+=(--trial-timeout-s "$BISECT_TRIAL_TIMEOUT")
+    [ -n "${BISECT_BARRIER_TIMEOUT:-}" ] &&
+        BISECT_EXTRA_ARGS+=(--barrier-timeout-s "$BISECT_BARRIER_TIMEOUT")
+    [ "${BISECT_NO_VERIFY_GOOD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-verify-good)
+    [ "${BISECT_NO_VERIFY_BAD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--no-verify-bad)
+    [ "${BISECT_FORCE_INITIAL_BUILD:-}" = "true" ] && BISECT_EXTRA_ARGS+=(--force-initial-build)
+    # Keep native source and built artifacts consistent across bisect jumps.
+    BISECT_EXTRA_ARGS+=(--native-check since-build)
+    [ -n "${BISECT_CONFIG_BASE_PATH:-}" ] &&
+        BISECT_EXTRA_ARGS+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
+}
+
 # Run AOP decision pipeline on failure: classify → check age → bisect-or-exit
 # Same logic as _e2e_nightly_multi_node.yaml AOP hooks.
 aop_pipeline() {
     local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
     local table="${GOOD_TABLE:-}"
+    local env_table=""
+    if [ -n "$table" ]; then
+        env_table="${ENV_TABLE:-$(dirname "$table")/env_table.csv}"
+    fi
     # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
     local case_name="${BENCHMARK_JOB_NAME#*-}"
     if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then
@@ -280,6 +312,7 @@ aop_pipeline() {
     echo "  Case name   : ${case_name}"
     echo "  Rules file  : ${rules}"
     echo "  Table file  : ${table}"
+    echo "  Env table   : ${env_table:-N/A}"
     echo "  Log prefix  : ${LOG_PREFIX}"
     echo "  BENCHMARK_JOB_NAME: ${BENCHMARK_JOB_NAME:-}"
     echo "============================================"
@@ -338,8 +371,10 @@ aop_pipeline() {
     # ---- Step 2: Check age ----
     echo ""
     echo "--- [2/3] Check commit age ---"
+    if [ -n "${BISECT_GOOD_COMMIT:-}" ]; then
+        echo "  Explicit good commit supplied; skipping good-table lookup and age gate"
+    else
     echo "  Looking up: ${case_name}"
-    local skip_age=0
     if [ ! -f "$table" ]; then
         echo "  Table file not found: ${table}"
         echo "  Decision: no table → SKIP"
@@ -347,9 +382,13 @@ aop_pipeline() {
         return 1
     fi
 
-    # Only consider success rows
+    # Match the name and, for new-schema rows, the current SoC. Legacy
+    # seven-column rows have no SoC and remain eligible during migration.
     local success_rows
-    success_rows=$(grep "^${case_name}," "$table" | grep -F ',success,' || true)
+    success_rows=$(awk -F',' -v name="$case_name" -v soc="$BISECT_SOC" '
+        NR > 1 && $1 == name && tolower($4) == "success" &&
+        (soc == "" || NF < 9 || $7 == soc) { print }
+    ' "$table")
     if [ -z "$success_rows" ]; then
         echo "  No success row found for '${case_name}'"
         echo "  Decision: no success entry → SKIP"
@@ -386,12 +425,19 @@ aop_pipeline() {
     fi
     now_ts=$(date +%s)
     age_days=$(( (now_ts - last_ts) / 86400 ))
-    echo "  Last success: ${best_date} (${age_days} days ago, threshold: 3 days)"
+    local max_age_days="$MAX_GOOD_AGE_DAYS"
+    if ! [[ "$max_age_days" =~ ^[0-9]+$ ]]; then
+        echo "  Invalid max good age: ${max_age_days}"
+        echo "  Decision: invalid age threshold → SKIP"
+        return 1
+    fi
+    echo "  Last success: ${best_date} (${age_days} days ago, threshold: ${max_age_days} days)"
 
-    if [ "$age_days" -gt 3 ]; then
-        echo "  Decision: old commit (> 3 days) → SKIP"
+    if [ "$age_days" -gt "$max_age_days" ]; then
+        echo "  Decision: old commit (> ${max_age_days} days) → SKIP"
         echo "=== AOP Pipeline (Pod) - END (age skip) ==="
         return 1
+    fi
     fi
 
     # ---- Step 3: Bisect ----
@@ -403,6 +449,19 @@ aop_pipeline() {
     echo "  Name        : ${case_name}"
     local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
     echo "  Coord dir   : ${coord}"
+
+    if [ -n "$env_table" ]; then
+        local run_link="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-vllm-project/vllm-ascend}/actions/runs/${GITHUB_RUN_ID:-unknown}"
+        echo "  Recording current failure runtime environment: ${env_table}"
+        python tests/e2e/nightly/scripts/update_good_table.py \
+            --cache-csv "$table" \
+            --env-table "$env_table" \
+            --status failure \
+            --test-name "$case_name" \
+            --test-path "${CONFIG_YAML_PATH}" \
+            --scene multi_node \
+            --run-link "$run_link" || true
+    fi
 
     # Wait for all workers to signal ready
     echo "  Waiting for workers..."
@@ -418,13 +477,19 @@ aop_pipeline() {
 
     cd "$WORKSPACE/vllm-ascend"
     local bisect_rc=0
+    local env_table_args=()
+    [ -n "$env_table" ] && env_table_args=(--env-table "$env_table")
+    build_bisect_extra_args
     python -m tools.bisect.auto_bisect \
         --scene multi_node \
         --config-yaml "${CONFIG_YAML_PATH}" \
-        --bad-commit HEAD \
+        --bad-commit "${BISECT_BAD_COMMIT:-HEAD}" \
         --good-table "${table}" \
         --name "${case_name}" \
-        --coord-dir "${coord}" || bisect_rc=$?
+        --soc "$BISECT_SOC" \
+        --coord-dir "${coord}" \
+        "${env_table_args[@]}" \
+        "${BISECT_EXTRA_ARGS[@]}" || bisect_rc=$?
     echo "  bisect completed (exit code: ${bisect_rc})"
     echo "=== AOP Pipeline (Pod) - END ==="
     return 1

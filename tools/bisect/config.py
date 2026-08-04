@@ -50,6 +50,10 @@ DEFAULT_GOOD_TABLE = os.getenv(
     "BISECT_GOOD_TABLE",
     "/root/.cache/nightly_bisect/good_table.csv",
 )
+DEFAULT_ENV_TABLE = os.getenv(
+    "BISECT_ENV_TABLE",
+    str(Path(DEFAULT_GOOD_TABLE).with_name("env_table.csv")),
+)
 SAMPLE_GOOD_TABLE = str(Path(__file__).resolve().parent / "good_table.sample.csv")
 
 # Where per-run artifacts (logs, state, final report) are written.
@@ -148,6 +152,7 @@ class BisectInput:
     config_yaml: str  # CONFIG_YAML_PATH value: the whole failing case file
     bad_commit: str  # current failing commit (resolved to full sha later)
     name: str | None = None  # nightly case name, to match the good-table 'name'
+    soc: str | None = None  # hardware generation, to disambiguate good-table rows
     config_base_path: str | None = None  # CONFIG_BASE_PATH override (multi/ext dp)
     good_commit: str | None = None  # explicit good; else looked up in the table
     good_vllm_commit: str | None = None  # paired vLLM commit of the good row
@@ -166,6 +171,8 @@ class BisectOptions:
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
     good_table_path: str = DEFAULT_GOOD_TABLE
+    env_table_path: str = DEFAULT_ENV_TABLE
+    env_by_commit: dict[str, dict[str, str]] = field(default_factory=dict)
     # Re-confirm a FAIL this many extra times before trusting it (flaky guard).
     fail_confirm_retries: int = 1
     # Verify the endpoints before searching (good must PASS, bad must FAIL).

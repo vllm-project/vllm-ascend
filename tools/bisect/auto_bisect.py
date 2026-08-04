@@ -36,6 +36,7 @@ from tools.bisect import git_ops, report
 from tools.bisect.build_manager import BuildError, BuildManager
 from tools.bisect.config import (
     DEFAULT_COORD_DIR,
+    DEFAULT_ENV_TABLE,
     DEFAULT_GOOD_TABLE,
     DEFAULT_WORK_DIR,
     REPO_ROOT,
@@ -47,6 +48,8 @@ from tools.bisect.config import (
     TrialResult,
     Verdict,
 )
+from tools.bisect.env_manager import EnvSwitchError
+from tools.bisect.env_table import EnvTable
 from tools.bisect.good_table import GoodTable
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
@@ -98,14 +101,14 @@ class Bisector:
                 log_path=str(log_path),
                 note=note,
             )
-        except BuildError as exc:
+        except (BuildError, EnvSwitchError) as exc:
             result = TrialResult(
                 candidate=candidate,
                 verdict="SKIP",
                 duration_s=time.time() - start,
                 rebuilt=True,
                 log_path=str(log_path),
-                note=f"build failed -> SKIP: {exc}".splitlines()[0],
+                note=f"deploy/env failed -> SKIP: {exc}".splitlines()[0],
             )
         finally:
             self.runner.teardown()
@@ -223,6 +226,8 @@ class Bisector:
 
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
+        env_by_commit = EnvTable(self.opt.env_table_path).resolve_for_commits(self.repo, self.inp, [good, *candidates])
+        self.opt.env_by_commit = {commit: env.to_dict() for commit, env in env_by_commit.items()}
 
         state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(
             good=good.commit, bad=bad.commit, hi=len(candidates) - 1
@@ -262,7 +267,10 @@ class Bisector:
         if self.inp.good_commit:
             return self.inp.good_commit
         entry = GoodTable(self.opt.good_table_path).lookup_last_good(
-            name=self.inp.name, config_yaml=self.inp.config_yaml
+            name=self.inp.name,
+            config_yaml=self.inp.config_yaml,
+            soc=self.inp.soc,
+            scene=self.inp.scene,
         )
         if entry is None:
             raise SystemExit(
@@ -294,12 +302,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--name",
         default=None,
-        help="nightly case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
+        help="case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
     )
+    p.add_argument("--soc", default=None, help="hardware generation used to select the matching good-table row")
     p.add_argument("--bad-commit", default=os.getenv("VLLM_ASCEND_REF", "HEAD"))
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
     p.add_argument("--config-base-path", default=os.getenv("CONFIG_BASE_PATH"))
     p.add_argument("--good-table", default=DEFAULT_GOOD_TABLE)
+    p.add_argument("--env-table", default=DEFAULT_ENV_TABLE)
     p.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     p.add_argument("--repo-dir", default=str(REPO_ROOT))
     p.add_argument(
@@ -391,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         scene=args.scene,
         config_yaml=args.config_yaml,
         name=args.name,
+        soc=args.soc,
         bad_commit=args.bad_commit,
         config_base_path=args.config_base_path,
         good_commit=args.good_commit,
@@ -400,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         work_dir=args.work_dir,
         coord_dir=args.coord_dir,
         good_table_path=args.good_table,
+        env_table_path=args.env_table,
         fail_confirm_retries=args.fail_confirm_retries,
         verify_good=not args.no_verify_good,
         verify_bad=not args.no_verify_bad,

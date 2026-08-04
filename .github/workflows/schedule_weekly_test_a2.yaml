@@ -55,7 +55,6 @@ on:
         required: false
         default: false
         type: boolean
-
 permissions:
   contents: read
   pull-requests: read
@@ -83,8 +82,6 @@ env:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
-    if: >-
-      github.event_name == 'workflow_dispatch'
     runs-on: linux-aarch64-a2b3-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
@@ -97,7 +94,9 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ inputs.test_cases }}'.trim();
+            const testCases = context.eventName === 'schedule'
+              ? 'all'
+              : '${{ inputs.test_cases }}'.trim();
 
             core.setOutput('ref', context.sha || 'unknown');
 
@@ -130,7 +129,7 @@ jobs:
           {
             echo "cann_image=${{ env.CANN_IMAGE }}"
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
+            input_branch="${{ github.event_name == 'schedule' && 'main' || inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
