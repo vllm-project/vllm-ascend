@@ -13,16 +13,177 @@ Provides two logging mechanisms:
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
+# Second-level strftime pattern; milliseconds are appended in formatTime.
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+
+
+def _format_time_ms(formatter: logging.Formatter, record: logging.LogRecord, datefmt: str | None = None) -> str:
+    """Format record time with millisecond precision (strftime has no %f here)."""
+    ct = formatter.converter(record.created)
+    s = time.strftime(datefmt or _DATE_FORMAT, ct)
+    return f"{s}.{int(record.msecs):03d}"
+
 
 _LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
 _LOG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def init_logger_ascend(name: str) -> logging.Logger:
+    """Logger under ``vllm_ascend.*`` (Ascend handler), not ``vllm.*``.
+
+    Nesting under ``vllm.`` makes records hit the root ``vllm`` StreamHandler,
+    whose level tracks ``VLLM_LOGGING_LEVEL`` (often INFO). That filters out
+    DEBUG even when package / module logger levels are DEBUG.
+    Ascend's own handler stays at DEBUG; levels are gated by
+    :func:`apply_ascend_log_level`.
+    """
+    return init_logger(name)
+
+
+def _resolve_log_level(level: str) -> int:
+    return getattr(logging, str(level).upper(), logging.INFO)
+
+
+def _normalize_debug_module(entry: str) -> str:
+    """Map config entry to a ``vllm_ascend.*`` logger name."""
+    name = str(entry).strip().strip(".")
+    if not name:
+        return ""
+    if name == "vllm_ascend" or name.startswith("vllm_ascend."):
+        return name
+    if name.startswith("vllm.vllm_ascend"):
+        # Legacy tree → primary Ascend namespace.
+        return name[len("vllm.") :] if name.startswith("vllm.") else name
+    return f"vllm_ascend.{name}"
+
+
+def _iter_ascend_logger_names() -> list[str]:
+    names: list[str] = []
+    for name in list(logging.Logger.manager.loggerDict):
+        if not isinstance(name, str):
+            continue
+        if name.startswith("vllm_ascend.") or name.startswith("vllm.vllm_ascend."):
+            names.append(name)
+    return names
+
+
+def _set_logger_tree_level(prefix: str, level: int) -> None:
+    """Set ``prefix`` and any already-created ``prefix.*`` loggers."""
+    logging.getLogger(prefix).setLevel(level)
+    legacy = f"vllm.{prefix}" if prefix.startswith("vllm_ascend") else None
+    if legacy:
+        logging.getLogger(legacy).setLevel(level)
+    dotted = prefix + "."
+    legacy_dotted = (legacy + ".") if legacy else None
+    for name in _iter_ascend_logger_names():
+        if (
+            name == prefix
+            or name.startswith(dotted)
+            or legacy
+            and (name == legacy or (legacy_dotted and name.startswith(legacy_dotted)))
+        ):
+            logging.getLogger(name).setLevel(level)
+
+
+_last_applied_ascend_log: tuple[str, tuple[str, ...]] | None = None
+
+
+def apply_ascend_log_level(
+    level: str = "INFO",
+    debug_modules: list[str] | None = None,
+) -> None:
+    """Apply package root level and per-module DEBUG whitelist.
+
+    Args:
+        level: Level for the ``vllm_ascend`` root logger (e.g. ``INFO``).
+        debug_modules: Relative module paths forced to DEBUG, such as
+            ``\"dfx\"`` or ``\"dfx.runtime_config\"`` (mapped to
+            ``vllm_ascend.<entry>``). Full ``vllm_ascend.*`` names are also
+            accepted.
+    """
+    global _last_applied_ascend_log
+
+    configure_ascend_logging()
+    root_level = _resolve_log_level(level)
+    debug_list = list(debug_modules or ())
+    level_key = str(level).upper()
+    debug_key = tuple(debug_list)
+    needs_debug = root_level <= logging.DEBUG or bool(debug_list)
+    announce = _last_applied_ascend_log != (level_key, debug_key)
+
+    ascend = logging.getLogger("vllm_ascend")
+    ascend.setLevel(root_level)
+    ascend.propagate = False
+    # Keep handlers able to emit DEBUG; logger.level is the gate.
+    for h in ascend.handlers:
+        if h.level > logging.DEBUG:
+            h.setLevel(logging.DEBUG)
+
+    legacy = logging.getLogger("vllm.vllm_ascend")
+    legacy.setLevel(root_level)
+    # Avoid INFO-filtered ``vllm`` StreamHandler swallowing DEBUG.
+    legacy.propagate = False
+    if ascend.handlers:
+        for h in ascend.handlers:
+            if h not in legacy.handlers:
+                legacy.addHandler(h)
+
+    # Reset known children to the root level (clears a prior debug whitelist).
+    for name in _iter_ascend_logger_names():
+        logging.getLogger(name).setLevel(root_level)
+
+    for entry in debug_list:
+        prefix = _normalize_debug_module(entry)
+        if not prefix or prefix == "vllm_ascend":
+            # Root already set; ignore empty / redundant root entries.
+            if prefix == "vllm_ascend":
+                ascend.setLevel(logging.DEBUG)
+                legacy.setLevel(logging.DEBUG)
+            continue
+        _set_logger_tree_level(prefix, logging.DEBUG)
+
+    if needs_debug:
+        # Outer collectors (e.g. UC) often attach INFO-level handlers on root /
+        # ``vllm``. Lower those handlers so DEBUG records are not dropped after
+        # our loggers allow them. Logger levels elsewhere stay unchanged.
+        for h in logging.root.handlers:
+            if h.level > logging.DEBUG:
+                h.setLevel(logging.DEBUG)
+        vllm_logger = logging.getLogger("vllm")
+        for h in vllm_logger.handlers:
+            if h.level > logging.DEBUG:
+                h.setLevel(logging.DEBUG)
+        for name in list(logging.Logger.manager.loggerDict):
+            if not isinstance(name, str):
+                continue
+            # Huawei UC / slog-style module loggers seen in the wild.
+            # Force DEBUG even when level is NOTSET (otherwise effective level
+            # stays WARNING/ERROR via root and UC DEBUG never appears).
+            if name.upper() == "UC" or name.endswith(".UC"):
+                lg = logging.getLogger(name)
+                if lg.level == logging.NOTSET or lg.level > logging.DEBUG:
+                    lg.setLevel(logging.DEBUG)
+                for h in lg.handlers:
+                    if h.level > logging.DEBUG:
+                        h.setLevel(logging.DEBUG)
+
+    _last_applied_ascend_log = (level_key, debug_key)
+    if announce:
+        # INFO so operators can confirm apply even when DEBUG is still filtered.
+        logging.getLogger("vllm_ascend.logger").info(
+            "[ascend_log] applied level=%s debug=%s effective=%s",
+            level_key,
+            debug_list,
+            logging.getLevelName(ascend.getEffectiveLevel()),
+        )
 
 
 def _use_color() -> bool:
@@ -83,12 +244,18 @@ def _format_with_ascend_prefix(self, record, super_format):
 class AscendFormatter(NewLineFormatter):
     """Extends NewLineFormatter with [vllm-ascend] prefix and module name."""
 
+    def formatTime(self, record, datefmt=None):
+        return _format_time_ms(self, record, datefmt)
+
     def format(self, record):
         return _format_with_ascend_prefix(self, record, super().format)
 
 
 class AscendColoredFormatter(ColoredFormatter):
     """Extends ColoredFormatter with [vllm-ascend] prefix and module name."""
+
+    def formatTime(self, record, datefmt=None):
+        return _format_time_ms(self, record, datefmt)
 
     def format(self, record):
         return _format_with_ascend_prefix(self, record, super().format)
@@ -143,10 +310,7 @@ def _setup_file_logging(log_dir: str | None = None) -> None:
     file_handler = RotatingAscendFileHandler(target_dir)
     vllm_logger = logging.getLogger("vllm")
     ascend_logger = logging.getLogger("vllm_ascend")
-    log_level = logging.INFO
-    if vllm_logger.handlers:
-        log_level = vllm_logger.handlers[0].level
-    file_handler.setLevel(log_level)
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT))
     vllm_logger.addHandler(file_handler)
     ascend_logger.addHandler(file_handler)
@@ -196,7 +360,7 @@ def configure_ascend_logging() -> None:
         stream = sys.stderr
 
     handler = logging.StreamHandler(stream)
-    handler.setLevel(envs.VLLM_LOGGING_LEVEL)
+    handler.setLevel(logging.DEBUG)
 
     if _use_color():
         handler.setFormatter(AscendColoredFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT))
@@ -206,3 +370,6 @@ def configure_ascend_logging() -> None:
     ascend_logger.addHandler(handler)
     ascend_logger.setLevel(envs.VLLM_LOGGING_LEVEL)
     ascend_logger.propagate = False
+
+    # Package logger levels are owned by ``apply_ascend_log_level``
+    # (driven by DFX ``ascend_log``); do not force DEBUG here.
