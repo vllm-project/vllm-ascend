@@ -24,6 +24,10 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 
+from vllm_ascend._310p.attention.parallel_draft_attention import (
+    FIA_SUPPORTED_METHODS,
+    forward_parallel_draft_fia,
+)
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
@@ -32,6 +36,7 @@ from vllm_ascend._310p.attention.metadata_builder import (
     AscendAttentionMetadataBuilder310,
     get_query_lens_cpu,
 )
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -108,6 +113,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.support_compressed_mask = is_compressed_mask_supported()
+        # Set once by the custom FIA adapter after its first successful scope check.
+        # Everything that check covers is a startup invariant, so it runs once per
+        # impl and still raises before any wrong output can be produced.
+        self._fia_scope_validated = False
 
     def _flash_attention(
         self,
@@ -219,8 +228,18 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             The output tensor after flash attention.
         """
-        real_tokens = int(attn_metadata.seq_lens.sum().item())
+        # ATB's SelfAttention encoder reads seq_len from host memory. In non-spec
+        # runs the builder hands out a CPU tensor, so this held implicitly; but
+        # parallel drafting (DFlash/DSpark) makes the builder return a device
+        # tensor for the A2/A3 FIA path (attention_v1.py: parallel_drafting
+        # branch), and passing that straight through segfaults ATB with
+        # "tensor.hostData is null". Coerce to host here -- the mirror of
+        # forward_paged_attention, which coerces seq_lens to device for the paged
+        # op. Each path pins seq_lens to what its own operator needs.
         seq_len = attn_metadata.seq_lens
+        if seq_len.device.type != "cpu":
+            seq_len = seq_len.cpu()
+        real_tokens = int(seq_len.sum().item())
         aligned_tokens = int(query.shape[0])
         delta = aligned_tokens - real_tokens
 
@@ -252,8 +271,6 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
         qlens = get_query_lens_cpu(attn_metadata)
         if qlens is None:
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
             if _EXTRA_CTX.capturing:
                 raise RuntimeError(
                     "310P splitfuse requires attn_metadata.query_lens_cpu during graph capture; "
@@ -327,6 +344,35 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             NotImplementedError: If the attention state is not supported on 310P.
         """
         state = attn_metadata.attn_state
+
+        # Everything below this block is causal. Test `causal` first because it is
+        # local and false for almost every call: that keeps the causal path free of
+        # the forward-context lookup _EXTRA_CTX needs, which it never required
+        # before, and skips that lookup per layer per step.
+        if not attn_metadata.causal:
+            # DFlash/DSpark parallel drafting is the only non-causal path that
+            # reaches forward_impl; pooling's non-causal case returns earlier in
+            # forward(). self.vllm_config is bound in
+            # AscendAttentionBackendImpl.__init__ via get_current_vllm_config().
+            spec_config = self.vllm_config.speculative_config
+            is_parallel_draft_adn = (
+                _EXTRA_CTX.is_draft_model
+                and spec_config is not None
+                and spec_config.method in FIA_SUPPORTED_METHODS
+                and state == AscendAttentionState.ChunkedPrefill
+            )
+            if is_parallel_draft_adn:
+                return forward_parallel_draft_fia(self, query, attn_metadata, output)
+            # Falling through would hand a non-causal request to the split-fuse
+            # kernel, which returns a plausible but wrong result instead of
+            # failing, so refuse here.
+            raise NotImplementedError(
+                f"310P has no non-causal attention path for attn_state={state}, "
+                f"is_draft_model={_EXTRA_CTX.is_draft_model}, "
+                f"method={getattr(spec_config, 'method', None)}. Only DFlash/DSpark draft "
+                f"ChunkedPrefill is routed to custom FIA in this scope."
+            )
+
         # Condition for PrefillNoCache: No previous tokens have been processed yet
         if state == AscendAttentionState.PrefillNoCache:
             output = self.forward_prefill_310(query, key, value, attn_metadata, output)

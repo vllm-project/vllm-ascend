@@ -12,8 +12,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.utils import is_310p
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -42,6 +42,16 @@ class AscendDSparkProposer(AscendDflashProposer):
             self.num_query_per_req = self.num_speculative_tokens
         else:
             self.num_query_per_req = 1 + self.num_speculative_tokens
+        if is_310p() and not self.sample_from_anchor:
+            # The 310P draft attention route pins the query block to K, and the
+            # expansion fallback below is only validated for the anchor-first
+            # layout. A bonus-anchor checkpoint would silently shift every slot
+            # and token index by one instead of failing, so refuse up front.
+            raise NotImplementedError(
+                "DSpark with dspark_bonus_anchor=True is not supported on 310P; "
+                "only the anchor-first layout (num_query_per_req == "
+                "num_speculative_tokens) is validated on this device."
+            )
 
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
@@ -231,40 +241,49 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
         # / token_indices.
         draft_attn_groups = getattr(self, "draft_attn_groups", [])
+        if is_310p():
+            # Qwen3-8B DSpark has 5 identical attention layers, which vLLM merges
+            # into a single KV cache group. The per-group machinery here exists for
+            # DeepSeek-V4 DSpark; 310P has only been validated for the single-group
+            # case, so refuse rather than silently expanding just one of several.
+            active_gids = [
+                g.kv_cache_group_id
+                for g in draft_attn_groups
+                if self._per_group_block_table_buffers.get(g.kv_cache_group_id) is not None
+            ]
+            if len(active_gids) != 1:
+                raise NotImplementedError(
+                    f"310P DSpark drafting only covers a single draft KV cache group, got "
+                    f"{active_gids}. Multi-group DSpark (DeepSeek-V4) is out of scope."
+                )
+
         for attn_group in draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             gid_block_table = self._per_group_block_table_buffers.get(gid)
             if gid_block_table is None:
                 continue
             kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
-                # Inputs
-                next_token_ids_ptr=next_token_ids,
-                target_positions_ptr=target_positions,
-                context_slot_mapping_ptr=self._per_group_slot_mappings[gid],
-                # Outputs
-                out_input_ids_ptr=self.input_ids,
-                out_context_positions_ptr=self._context_positions_buffer,
-                out_query_positions_ptr=self.positions,
-                out_context_slot_mapping_ptr=self._per_group_context_slot_mapping_buffers[gid],
-                out_query_slot_mapping_ptr=self._per_group_query_slot_mapping_buffers[gid],
-                out_token_indices_ptr=token_indices_to_sample,
-                # Block table
-                block_table_ptr=gid_block_table,
-                block_table_stride=gid_block_table.stride(0),
-                # Metadata
-                query_start_loc_ptr=cad.query_start_loc,
-                seq_lens_ptr=cad.seq_lens,
-                num_rejected_tokens_ptr=num_rejected_tokens_gpu,
-                # Scalars
+            self._expand_drafting_inputs(
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                context_slot_mapping=self._per_group_slot_mappings[gid],
+                out_input_ids=self.input_ids,
+                out_context_positions=self._context_positions_buffer,
+                out_query_positions=self.positions,
+                out_context_slot_mapping=self._per_group_context_slot_mapping_buffers[gid],
+                out_query_slot_mapping=self._per_group_query_slot_mapping_buffers[gid],
+                out_token_indices=token_indices_to_sample,
+                block_table=gid_block_table,
+                query_start_loc=cad.query_start_loc,
+                seq_lens=cad.seq_lens,
+                num_rejected_tokens=(num_rejected_tokens_gpu if has_num_rejected else None),
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 block_size=kv_block_size,
                 num_query_per_req=self.num_query_per_req,
                 num_speculative_tokens=self.num_speculative_tokens,
                 total_input_tokens=self._dflash_num_context,
                 batch_size=batch_size,
-                HAS_NUM_REJECTED=has_num_rejected,
-                SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                sample_from_anchor=self.sample_from_anchor,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
@@ -341,12 +360,16 @@ class AscendDSparkProposer(AscendDflashProposer):
             draft_attn_metadatas=[],
         ):
             if is_profile:
-                self.model.precompute_and_store_context_kv(context_states, context_positions)
-                self.model(
-                    input_ids=self.input_ids[:num_query_total],
-                    positions=self._get_positions(num_query_total),
-                    inputs_embeds=None,
-                )
+                # Both forwards must run with the 310P drafting RoPE flag on: they
+                # use different positions (context vs query, different lengths) and
+                # neither refreshes the global cos/sin slice on its own here.
+                with self._profile_rope_context():
+                    self.model.precompute_and_store_context_kv(context_states, context_positions)
+                    self.model(
+                        input_ids=self.input_ids[:num_query_total],
+                        positions=self._get_positions(num_query_total),
+                        inputs_embeds=None,
+                    )
 
             else:
                 self._dflash_num_context = num_input_tokens

@@ -32,9 +32,14 @@ import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
+# DFlash's context KV precompute is device-neutral and needed on 310P too; its
+# RoPE branches internally. DSpark inherits the same model-side implementation,
+# so it needs no patch of its own (its mask token is handled by the platform
+# patch patch_speculative_config).
+import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa

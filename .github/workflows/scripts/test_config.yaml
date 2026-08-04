@@ -52,6 +52,12 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/_310p
+    # The 310P parallel-drafting route is reached through these shared files, so
+    # a change to them must run the 310P suites too; vllm_ascend/_310p alone
+    # would leave the DFlash/DSpark path untested on this device.
+    - vllm_ascend/spec_decode/dflash_proposer.py
+    - vllm_ascend/spec_decode/dspark_proposer.py
+    - vllm_ascend/patch/worker/patch_qwen3_dflash.py
   tests:
     - tests/ut/_310p
     - tests/e2e/pull_request/one_card/_310p

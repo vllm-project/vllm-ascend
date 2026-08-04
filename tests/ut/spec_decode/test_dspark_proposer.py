@@ -81,7 +81,14 @@ class _DSparkProposerTestBase:
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
 
-        with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
+        # These cases cover device-independent configuration, so pin is_310p
+        # off: on a 310P-built install it is true, and the proposer refuses the
+        # bonus-anchor layout there (that refusal has its own coverage in
+        # tests/ut/_310p/spec_decode/).
+        with (
+            patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init),
+            patch("vllm_ascend.spec_decode.dspark_proposer.is_310p", return_value=False),
+        ):
             proposer = AscendDSparkProposer(vllm_config, device)
 
         num_query_total = num_reqs * proposer.num_query_per_req
@@ -197,10 +204,10 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     @pytest.mark.parametrize("dp_padding", MULTI_DP_PADDING_SIZES)
     def test_positions_not_pre_sliced(self, monkeypatch, dp_padding):
         """``cad.positions`` must be the full buffer, not ``[:num_query_total]``."""
-        monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
-            MagicMock(),
-        )
+        # Stub the dispatch entry point rather than the Triton launcher behind it:
+        # `_expand_drafting_inputs` picks a backend from `is_310p()`, so patching one
+        # backend leaves the test taking the other one on that device.
+        monkeypatch.setattr(AscendDSparkProposer, "_expand_drafting_inputs", MagicMock())
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         num_query_total = num_reqs * block_size
         num_input_tokens = num_query_total + dp_padding
@@ -217,10 +224,10 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     def test_positions_full_and_padded_for_dsa(self, monkeypatch, dp_padding):
         """After set_inputs_first_pass + _pad_draft_buffers, positions[:num_input]
         is full-length and zero-padded in the DP region."""
-        monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
-            MagicMock(),
-        )
+        # Stub the dispatch entry point rather than the Triton launcher behind it:
+        # `_expand_drafting_inputs` picks a backend from `is_310p()`, so patching one
+        # backend leaves the test taking the other one on that device.
+        monkeypatch.setattr(AscendDSparkProposer, "_expand_drafting_inputs", MagicMock())
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         num_query_total = num_reqs * block_size
         num_input_tokens = num_query_total + dp_padding

@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -8,8 +9,13 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+# Safe to import at module scope even where Triton is absent (310P CI uninstalls
+# it): vllm.triton_utils substitutes a placeholder whose `jit` is a no-op
+# decorator, so the kernel object exists and only fails if actually launched --
+# which the dispatch in _expand_drafting_inputs never does on 310P.
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.utils import is_310p
 
 
 class AscendDflashProposer(AscendEagleProposer):
@@ -60,6 +66,128 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self.parallel_drafting_hidden_state_tensor = None
 
+    @contextmanager
+    def _profile_rope_context(self):
+        """Keep the 310P drafting RoPE flag on for the whole profile branch.
+
+        dummy_run(is_profile=True) calls precompute_and_store_context_kv and then
+        model(...) directly, bypassing _run_merged_draft, which is what normally
+        turns this flag on. Without it neither forward refreshes the global cos/sin
+        slice, so both silently reuse whatever the target's dummy run left behind
+        -- and the two need different positions anyway (context_positions vs query
+        positions, different lengths).
+
+        Shared with AscendDSparkProposer, which inherits it.
+        """
+        if not is_310p():
+            yield
+            return
+
+        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+
+        AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
+        try:
+            yield
+        finally:
+            AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
+
+    def _expand_drafting_inputs(
+        self,
+        *,
+        next_token_ids,
+        target_positions,
+        context_slot_mapping,
+        out_input_ids,
+        out_context_positions,
+        out_query_positions,
+        out_context_slot_mapping,
+        out_query_slot_mapping,
+        out_token_indices,
+        block_table,
+        query_start_loc,
+        seq_lens,
+        num_rejected_tokens,
+        parallel_drafting_token_id,
+        block_size,
+        num_query_per_req,
+        num_speculative_tokens,
+        total_input_tokens,
+        batch_size,
+        sample_from_anchor,
+    ) -> None:
+        """Expand DFlash/DSpark drafting inputs.
+
+        310P has no Triton and uses the vectorized PyTorch equivalent; every other
+        device keeps the original kernel launch. Both write in place into the same
+        persistent buffers.
+
+        Shared with AscendDSparkProposer, which inherits this method. Note that the
+        names looked up inside it always resolve from *this* module, whichever
+        subclass is calling.
+        """
+        if is_310p():
+            from vllm_ascend._310p.spec_decode.parallel_drafting_inputs import (
+                expand_parallel_drafting_inputs,
+                resolve_310p_block_size,
+            )
+
+            # 310P reads the selected BlockTable size and pins it to FIA_BLOCK_SIZE.
+            # The caller's `block_size` is deliberately ignored here and left intact
+            # for the Triton path below, so A2/A3 keeps its exact current source.
+            expand_parallel_drafting_inputs(
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                context_slot_mapping=context_slot_mapping,
+                out_input_ids=out_input_ids,
+                out_context_positions=out_context_positions,
+                out_query_positions=out_query_positions,
+                out_context_slot_mapping=out_context_slot_mapping,
+                out_query_slot_mapping=out_query_slot_mapping,
+                out_token_indices=out_token_indices,
+                block_table=block_table,
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                num_rejected_tokens=num_rejected_tokens,
+                parallel_drafting_token_id=parallel_drafting_token_id,
+                block_size=resolve_310p_block_size(self),
+                num_query_per_req=num_query_per_req,
+                num_speculative_tokens=num_speculative_tokens,
+                total_input_tokens=total_input_tokens,
+                batch_size=batch_size,
+                sample_from_anchor=sample_from_anchor,
+            )
+            return
+
+        copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+            # Inputs
+            next_token_ids_ptr=next_token_ids,
+            target_positions_ptr=target_positions,
+            context_slot_mapping_ptr=context_slot_mapping,
+            # Outputs
+            out_input_ids_ptr=out_input_ids,
+            out_context_positions_ptr=out_context_positions,
+            out_query_positions_ptr=out_query_positions,
+            out_context_slot_mapping_ptr=out_context_slot_mapping,
+            out_query_slot_mapping_ptr=out_query_slot_mapping,
+            out_token_indices_ptr=out_token_indices,
+            # Block table
+            block_table_ptr=block_table,
+            block_table_stride=block_table.stride(0),
+            # Metadata
+            query_start_loc_ptr=query_start_loc,
+            seq_lens_ptr=seq_lens,
+            num_rejected_tokens_ptr=(num_rejected_tokens if num_rejected_tokens is not None else 0),
+            # Scalars
+            parallel_drafting_token_id=parallel_drafting_token_id,
+            block_size=block_size,
+            num_query_per_req=num_query_per_req,
+            num_speculative_tokens=num_speculative_tokens,
+            total_input_tokens=total_input_tokens,
+            batch_size=batch_size,
+            HAS_NUM_REJECTED=num_rejected_tokens is not None,
+            SAMPLE_FROM_ANCHOR=sample_from_anchor,
+        )
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -92,33 +220,29 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
-        copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
-            # Inputs
-            next_token_ids_ptr=next_token_ids,
-            target_positions_ptr=target_positions,
-            context_slot_mapping_ptr=cad.slot_mapping,
-            # Outputs
-            out_input_ids_ptr=self.input_ids,
-            out_context_positions_ptr=self._context_positions_buffer,
-            out_query_positions_ptr=self.positions,
-            out_context_slot_mapping_ptr=self._context_slot_mapping_buffers,
-            out_query_slot_mapping_ptr=self._slot_mapping_buffer,
-            out_token_indices_ptr=token_indices_to_sample,
-            # Block table
-            block_table_ptr=cad.block_table_tensor,
-            block_table_stride=cad.block_table_tensor.stride(0),
-            # Metadata
-            query_start_loc_ptr=cad.query_start_loc,
-            seq_lens_ptr=cad.seq_lens,
-            num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
-            # Scalars
+        self._expand_drafting_inputs(
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            context_slot_mapping=cad.slot_mapping,
+            out_input_ids=self.input_ids,
+            out_context_positions=self._context_positions_buffer,
+            out_query_positions=self.positions,
+            out_context_slot_mapping=self._context_slot_mapping_buffers,
+            out_query_slot_mapping=self._slot_mapping_buffer,
+            out_token_indices=token_indices_to_sample,
+            block_table=cad.block_table_tensor,
+            query_start_loc=cad.query_start_loc,
+            seq_lens=cad.seq_lens,
+            num_rejected_tokens=(num_rejected_tokens_gpu if has_num_rejected else None),
+            # Unchanged from before: the dispatch swaps in the selected BlockTable
+            # size on 310P only, so the Triton path keeps this exact source.
             parallel_drafting_token_id=self.parallel_drafting_token_id,
             block_size=self.kernel_block_size,
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
             batch_size=batch_size,
-            HAS_NUM_REJECTED=has_num_rejected,
+            sample_from_anchor=False,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -227,12 +351,16 @@ class AscendDflashProposer(AscendEagleProposer):
             draft_attn_metadatas=multi_steps_attn_metadata,
         ):
             if is_profile:
-                self.model.precompute_and_store_context_kv(context_states, context_positions)
-                self.model(
-                    input_ids=self.input_ids[:num_query_total],
-                    positions=self._get_positions(num_query_total),
-                    inputs_embeds=None,
-                )
+                # Both forwards must run with the 310P drafting RoPE flag on: they
+                # use different positions (context vs query, different lengths) and
+                # neither refreshes the global cos/sin slice on its own here.
+                with self._profile_rope_context():
+                    self.model.precompute_and_store_context_kv(context_states, context_positions)
+                    self.model(
+                        input_ids=self.input_ids[:num_query_total],
+                        positions=self._get_positions(num_query_total),
+                        inputs_embeds=None,
+                    )
 
             else:
                 self._dflash_num_context = num_input_tokens
