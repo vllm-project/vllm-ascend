@@ -37,7 +37,8 @@ class WyCubeGemm {
   __aicore__ inline void Init(const TCubeTiling *attnTiling, const TCubeTiling *squareTiling,
                               const TCubeTiling *applyUTiling, const TCubeTiling *applyWTiling, TPipe *pipe,
                               LocalTensor<uint8_t> localWs, uint32_t localWsBytes, GM_ADDR workspace,
-                              uint64_t workspaceOffset, uint32_t perCoreBytes, uint32_t usedCoreNum)
+                              uint64_t workspaceOffset, uint32_t perCoreBytes, uint32_t usedCoreNum,
+                              uint32_t kHeadDim, uint32_t vHeadDim)
   {
     pipe_ = pipe;
     perCoreBytes_ = perCoreBytes;
@@ -54,6 +55,20 @@ class WyCubeGemm {
 
     localWs_ = localWs;
     (void)localWsBytes;
+
+    // Shapes are fixed for the launch; configure once. SetTensorA/B stay at call sites.
+    // Attn SingleShape stays in the K-loop: the last slice may be a partial kCur.
+    mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kHeadDim));
+    mmAttn_.SetLocalWorkspace(localWs_);
+    mmSquare_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmSquare_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmSquare_.SetLocalWorkspace(localWs_);
+    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(vHeadDim), WY_CUBE_CHUNK);
+    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(vHeadDim), WY_CUBE_CHUNK);
+    mmApplyU_.SetLocalWorkspace(localWs_);
+    mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(kHeadDim), WY_CUBE_CHUNK);
+    mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(kHeadDim), WY_CUBE_CHUNK);
+    mmApplyW_.SetLocalWorkspace(localWs_);
 
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
     const uint64_t coreBase =
@@ -76,9 +91,7 @@ class WyCubeGemm {
 
     for (uint32_t k0 = 0; k0 < kDim; k0 += WY_CUBE_CHUNK) {
       const uint32_t kCur = (kDim - k0) < WY_CUBE_CHUNK ? (kDim - k0) : WY_CUBE_CHUNK;
-      mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kDim));
       mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
-      mmAttn_.SetLocalWorkspace(localWs_);
       mmAttn_.SetTensorA(aGm_[k0], false);
       mmAttn_.SetTensorB(bGm_[k0], true);
       if (k0 == 0) {
@@ -105,9 +118,6 @@ class WyCubeGemm {
     WaitMte3ToMte2();
     PipeBarrier<PIPE_ALL>();
 
-    mmSquare_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    mmSquare_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    mmSquare_.SetLocalWorkspace(localWs_);
     mmSquare_.SetTensorA(aGm_, false);
     mmSquare_.SetTensorB(bGm_, false);
     mmSquare_.IterateAll(pUb);
@@ -140,16 +150,10 @@ class WyCubeGemm {
     PipeBarrier<PIPE_ALL>();
 
     if (useU) {
-      mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyU_.SetLocalWorkspace(localWs_);
       mmApplyU_.SetTensorA(aGm_, false);
       mmApplyU_.SetTensorB(bGm_, false);
       mmApplyU_.IterateAll(floatScratch);
     } else {
-      mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyW_.SetLocalWorkspace(localWs_);
       mmApplyW_.SetTensorA(aGm_, false);
       mmApplyW_.SetTensorB(bGm_, false);
       mmApplyW_.IterateAll(floatScratch);
