@@ -19,9 +19,13 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import DPVllmRunner, VllmRunner
 
 
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_qwen3_5_27b_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
@@ -40,6 +44,8 @@ def test_qwen3_5_27b_distributed_mp_tp4():
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(4)
 def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
     example_prompts = [
         "Hello, my name is",

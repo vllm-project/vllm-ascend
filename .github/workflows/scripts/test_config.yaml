@@ -846,20 +846,45 @@ estimated_times:
   tests/ut/worker/a2/test_worker_v1.py: 40
   tests/ut/worker/a2/test_worker_v2.py: 30
 
+# === Marker Routing ===
+# Maps ``@pytest.mark.requires_hardware`` / ``@pytest.mark.requires_npus``
+# marker argument values to runner-key components.
+# Used by select_tests.py's AST-based marker scanner to route test files
+# that carry these markers, as an alternative to directory-based routing.
+# When a test file has markers, marker routing takes priority over the
+# directory-based runner_mapping.
+marker_routing:
+  requires_hardware:
+    "310P": 310p
+    A2: a2
+    A3: a3
+    A5: a5
+  requires_npus:
+    1: x1
+    2: x2
+    4: x4
+    8: x8
+
 # === Runner Mapping ===
 # Maps test paths to runner types using regex patterns.
-# Each entry has a ``default`` runner and an optional ``310p`` override
-# for files whose name contains ``_310p``.
+# Each entry has a ``default`` runner and optional overrides for
+# filename conventions (``_310p``, ``_a2``, ``_a3``).
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2_x1
     310p: 310p_x1
+    a2: a2_x1
+    a3: a3_x1
   tests/e2e/pull_request/two_card:
     default: a3_x2
+    a2: a2_x2
+    a3: a3_x2
   tests/e2e/pull_request/four_card:
     default: a3_x4
     310p: 310p_x4
+    a2: a2_x4
+    a3: a3_x4
   tests/e2e/pull_request/eight_card:
     default: a3_x8
   tests/ut/.+/a3_2:
@@ -869,7 +894,11 @@ runner_mapping:
 
 # === Partition Configuration ===
 # Controls how tests are split across parallel runners of the same type.
-# Key format: <npu_type>_x<num_npus>
+# Key formats (used in order of priority):
+#   <soc_label>_x<num_npus>                — SOC-specific (e.g. ascend910_9392_x4)
+#   <npu_type>_x<num_npus>               — generic (e.g. a3_x4)
+# SOC-specific entries take priority; if absent, the generic entry is used
+# for both SOC and non-SOC tests of that chip type.
 # Only runner types that can appear in test routing need entries.
 # Unlisted types default to 1 (no partition).
 partition:
@@ -880,3 +909,5 @@ partition:
   a3_x4: 3
   a3_x8: 1
   cpu_x0: 1
+  # SOC-specific examples (uncomment and adjust as needed):
+  # ascend910_9392_x4: 1

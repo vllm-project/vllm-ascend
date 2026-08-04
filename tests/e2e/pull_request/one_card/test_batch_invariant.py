@@ -117,6 +117,8 @@ def _extract_step_logprobs(request_output):
         "cudagraph_capture_sizes": [1, 32, 64],
     },
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
@@ -234,6 +236,8 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         "cudagraph_capture_sizes": [1, 32, 64],
     },
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
@@ -434,6 +438,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: 
         "cudagraph_capture_sizes": [1, 32, 64],
     },
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_simple_generation(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -471,6 +477,8 @@ def test_simple_generation(vllm_runner, monkeypatch: pytest.MonkeyPatch):
     quantization="BF16",
     graph_mode="piecewise",
 )
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.MonkeyPatch):
     """
     This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.

@@ -29,6 +29,8 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_embed_models_correctness(model: str):
     queries = ["What is the capital of China?", "Explain gravity"]
 
@@ -59,6 +61,8 @@ def test_embed_models_correctness(model: str):
     )
 
 
+@pytest.mark.requires_hardware("310P")
+@pytest.mark.requires_npus(1)
 def test_bge_m3_correctness():
     queries = ["What is the capital of China?", "Explain gravity"]
 

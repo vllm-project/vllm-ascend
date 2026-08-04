@@ -10,6 +10,8 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.requires_hardware("ascend910_9392")
+@pytest.mark.requires_npus(2)
 def test_qwen3_vl_sp_tp2(model: str) -> None:
     prompts = [
         "Hello, my name is",

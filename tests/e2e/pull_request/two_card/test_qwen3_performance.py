@@ -51,6 +51,8 @@ baseline_throughput = 1514.0  # baseline throughput for Qwen3-8B, measured with 
 
 
 @pytest.mark.skip(reason="Temporarily skipped due to flaky failures, pending investigation.")
+@pytest.mark.requires_hardware("A3")
+@pytest.mark.requires_npus(2)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.asyncio
 async def test_models(model: str) -> None:

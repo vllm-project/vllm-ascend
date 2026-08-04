@@ -235,6 +235,8 @@ def register_pattern_safe(pattern_class, vllm_config, eps, pattern_key):
 @pytest.mark.parametrize("eps", [1e-5])
 @pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.parametrize("sp_enable", [False, True])
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_rmsnorm_quant_fusion(
     dtype: torch.dtype,
     hidden_size: int,

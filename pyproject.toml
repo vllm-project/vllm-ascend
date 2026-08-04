@@ -94,4 +94,6 @@ docstring-code-format = true
 markers = [
     "e2e_model: E2E test model identifier(s)",
     "e2e_coverage: E2E test coverage dimensions (arch, feature, parallel, deploy, hardware, quantization, graph_mode)",
+    "requires_hardware: Run only on specified NPU chip types (A2, A3, 310P, A5) or detailed SOC versions (e.g. ascend910_9362).",
+    "requires_npus: Run only when visible NPU count is one of the specified values.",
 ]

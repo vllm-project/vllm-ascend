@@ -32,6 +32,8 @@ from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
     graph_mode="full_and_piecewise",
 )
 @wait_until_npu_memory_free()
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_dense_default_full_and_piecewise_graph():
     """Verify dense generation on the default FULL_AND_PIECEWISE graph path."""
     runner_kwargs = {

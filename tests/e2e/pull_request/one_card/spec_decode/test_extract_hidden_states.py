@@ -140,6 +140,8 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
 
 
 @pytest.mark.parametrize("case", CASES)
+@pytest.mark.requires_hardware("A2")
+@pytest.mark.requires_npus(1)
 def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
     """Extract hidden states from the target model and validate the dump."""
     with tempfile.TemporaryDirectory() as tmpdirname:
