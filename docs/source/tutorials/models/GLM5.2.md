@@ -166,40 +166,24 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 
 Key Parameter Descriptions:
 
-The parameters are organized into three categories: version-added parameters, performance-related parameters, and model-specific parameters. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
-
-**Version-added / changed parameters:**
-
-- `--additional-config '{"enable_dsa_cp": true}'`: Enables DSA context parallelism to accelerate long-context prefill. Since v0.21.0, DSA-CP is decoupled from FlashComm1 and must be enabled explicitly. Note: with DSA-CP enabled, `layer_sharding` cannot include `o_proj`.
-- `--additional-config '{"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'`: Enables the sparse full attention (SFA) optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; `enable_sparse_sfa_c8` additionally enables the SFA DCP path (available since v0.23.0) and is turned off in this scenario.
-- `--additional-config '{"enable_balance_scheduling": true}'`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler. This replaces the deprecated environment variable `VLLM_ASCEND_BALANCE_SCHEDULING`. TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
-- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Enables an additional stream to overlap the computation of shared experts, improving decode efficiency.
-
-**Performance-related parameters:**
-
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication and computation overhead (mainly benefits the prefill path).
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=0`: Disables the fused `dispatch_ffn_combine`/`mega_moe` operator in this scenario. It is disabled here because it conflicts with `multistream_overlap_shared_expert`; turn it on in multi-node scenarios where it is beneficial.
-- `--max-model-len 135000`: Maximum context length (input + output) per request. Set it according to your actual usage scenario; a smaller value leaves more memory for KV cache and higher concurrency.
-- `--max-num-seqs 12`: Maximum number of concurrent sequences. Larger values improve throughput but consume more KV cache memory.
-- `--max-num-batched-tokens 8192`: Maximum number of tokens processed in a single batch. Controls the prefill chunk size.
-- `--gpu-memory-utilization 0.92`: NPU memory utilization fraction. Reduce it if OOM occurs.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding. `num_speculative_tokens` controls how many tokens are speculated per step — higher values (3-5) improve throughput but consume more memory. `enforce_eager: true` is required because GLM-5.2 does not support graph-mode speculative decoding.
-- `HCCL_BUFFSIZE=200`: HCCL communication buffer size. Larger values (e.g. `400` for multi-node, `768` for 1M context) may improve communication throughput at the cost of additional memory.
-- `OMP_NUM_THREADS=1` / `OMP_PROC_BIND=false`: CPU thread settings recommended for NPU inference to avoid thread oversubscription.
-- `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`: Enables expandable memory segments to reduce NPU memory fragmentation.
+Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
 **Model-specific parameters:**
 
-- `--tool-call-parser glm47` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable function calling for GLM-5.2.
-- `--speculative-config '{"method": "deepseek_mtp"}'`: Uses the DeepSeek-style MTP draft head of GLM-5.2 for speculative decoding.
-- `--enable-expert-parallel`: Enables expert parallelism for the MoE architecture of GLM-5.2. Must be enabled for this model.
+- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.2.
 - `--quantization ascend`: Enables Ascend quantization for the w4a8c8 quantized weights.
-- `--data-parallel-size 2` / `--tensor-parallel-size 8`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w4a8c8 weights.
-- `--api-server-count 1`: Number of OpenAI-compatible API server instances on this node.
+- `--data-parallel-size 2` / `--tensor-parallel-size 8`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w4a8c8 weights. For low-latency scenarios, use `dp1tp16` instead and turn off expert parallel, at the cost of lower throughput.
+- `--tool-call-parser glm47` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable function calling for GLM-5.2.
+- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.2. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.2 does not support graph-mode speculative decoding.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2=0`: Disables the fused `dispatch_ffn_combine`/`mega_moe` operators in this scenario because they conflict with `multistream_overlap_shared_expert`; turn them on in multi-node scenarios where they are beneficial.
 
-**Notice:**
-For low-latency scenarios, we recommend using `dp1tp16` (`--data-parallel-size 1`, `--tensor-parallel-size 16`) and turning off expert parallel, at the cost of lower throughput.
+**`--additional-config` fields (Ascend-specific optimizations):**
+
+- `"enable_dsa_cp": true`: Enables DSA context parallelism to accelerate long-context prefill. Since v0.21.0, DSA-CP is decoupled from FlashComm1 and must be enabled explicitly. With DSA-CP enabled, `layer_sharding` cannot include `o_proj`.
+- `"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; `enable_sparse_sfa_c8` additionally enables the SFA DCP path (available since v0.23.0) and is turned off in this scenario.
+- `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. It replaces the deprecated environment variable `VLLM_ASCEND_BALANCE_SCHEDULING`; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
+- `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream, improving decode efficiency.
 
 ##### 5.1.1.2 Multi-Node Co-Located Deployment
 

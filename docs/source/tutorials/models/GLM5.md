@@ -247,29 +247,23 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Key Parameter Descriptions:
 
-**Common Environment Variables for single-node deployment:**
+Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
-- `HCCL_OP_EXPANSION_MODE="AIV"`: Enables AIV mode for HCCL communication, required for optimal performance on Atlas series NPUs.
-- `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`: Enables expandable memory segments to reduce NPU memory fragmentation.
-- `HCCL_BUFFSIZE`: HCCL communication buffer size. Larger values may improve communication throughput at the cost of additional memory. Typical values: `200` for w4a8/w8a8 single-node, `256` for multi-node.
-- `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in v1 scheduler.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm communication optimization to reduce AllReduce overhead on prefill nodes. Note: with FlashComm enabled, `layer_sharding` list cannot include `o_proj` as an element.
-- `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess operation fusion operator (MlaPreprocessOperation). This is enabled by default for w8a8 quantized models and significantly improves Decode performance, but consumes more NPU memory. If reducing memory usage is a higher priority, disable it by setting `VLLM_ASCEND_ENABLE_MLAPO=0`. Recommended for w8a8 scenarios; w4a8 scenarios may not benefit.
+**Model-specific parameters:**
 
-**Key vllm serve parameters:**
-
-- `--enable-expert-parallel`: Enables expert parallelism for the MoE architecture of GLM-5. Must be enabled for this model.
+- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.
 - `--tensor-parallel-size 16` / `--tensor-parallel-size 8`: Tensor parallelism within each DP rank. For A3 (16 NPUs), use `tp16`; for A2 (8 NPUs), use `tp8`.
 - `--quantization ascend`: Enables Ascend quantization for w4a8/w8a8 quantized weights.
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding. `num_speculative_tokens` controls how many tokens are speculated per step — higher values (3-5) improve throughput but consume more memory. `method: "deepseek_mtp"` is used for GLM-5's MTP draft model. `enforce_eager: true` is required because GLM-5 does not support graph-mode speculative decoding.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables CUDA graph capture for the decode phase only, improving Decode performance by reducing kernel launch overhead.
-- `--enable-chunked-prefill`: Enables chunked prefill to split long prompts into smaller chunks, improving TTFT for long-context scenarios and preventing prefill from blocking decode.
-- `--enable-prefix-caching`: Enables KV cache prefix caching to reuse KV cache across requests sharing common prefixes (e.g., system prompts), improving throughput.
-- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Enables an additional stream to overlap the computation of shared experts, improving efficiency. Note: this is automatically disabled when `VLLM_ASCEND_ENABLE_FUSED_MC2=1`, as the two optimizations conflict.
-- `--max-model-len`: Maximum total context length (input + output tokens) per request.
-- `--max-num-seqs`: Maximum number of concurrent sequences. Larger values improve throughput but consume more KV cache memory. For single-node A3, typically set to `8`–`16`.
-- `--max-num-batched-tokens`: Maximum number of tokens processed in a single batch. Typically `4096` for GLM-5 to balance throughput and latency.
-- `--gpu-memory-utilization`: NPU memory utilization fraction. Set to `0.95` to maximize available KV cache memory. Reduce if OOM errors occur.
+- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with GLM-5's DeepSeek-style MTP draft model. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5 does not support graph-mode speculative decoding.
+- `--enable-chunked-prefill` / `--enable-prefix-caching`: Recommended for long-context and multi-user scenarios — chunked prefill splits long prompts to improve TTFT, prefix caching reuses KV cache for shared prefixes (e.g., system prompts).
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
+- `--additional-config '{"multistream_overlap_shared_expert": true}'`: Overlaps shared-expert computation on an additional stream. Note: automatically disabled when `VLLM_ASCEND_ENABLE_FUSED_MC2=1`, as the two optimizations conflict.
+
+**Key environment variables:**
+
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication overhead (mainly benefits the prefill path). With FlashComm enabled, `layer_sharding` cannot include `o_proj`.
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess fusion operator (MlaPreprocessOperation). Enabled by default for w8a8 models — significantly improves Decode performance but consumes more NPU memory; set `VLLM_ASCEND_ENABLE_MLAPO=0` if memory is a priority. Recommended for w8a8; w4a8 may not benefit.
+- `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler.
 
 **Performance tuning notes for single-node:**
 
