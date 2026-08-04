@@ -386,7 +386,7 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
     from vllm import LLM, SamplingParams
 
     def main():
-        with tempfile.TemporaryDirectory() as tmpdirname:
+        with tempfile.TemporaryDirectory() as tmpdir:
             llm = LLM(
                 model="Qwen/Qwen3-8B",
                 tensor_parallel_size=1,
@@ -404,7 +404,7 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
                     "kv_connector": "ExampleHiddenStatesConnector",
                     "kv_role": "kv_producer",
                     "kv_connector_extra_config": {
-                        "shared_storage_path": tmpdirname,
+                        "shared_storage_path": tmpdir,
                     },
                 },
             )
@@ -432,11 +432,13 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
 
 - Online inference
 
+    For improved performance, it is recommended to use a RAM-mounted file system such as `/dev/shm/` for online usage in which the client cleans up the files soon after they are generated.
+
     ```shell
     vllm serve Qwen/Qwen3-8B \
       --tensor-parallel-size 1 \
       --speculative-config '{"method": "extract_hidden_states", "num_speculative_tokens": 1, "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [2, 18, 34]}}}' \
-      --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/tmp/hidden_states"}}'
+      --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
     ```
 
 Key configuration parameters:
