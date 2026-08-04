@@ -10,7 +10,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -25,7 +25,6 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
@@ -164,7 +163,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def __init__(
         self,
-        kv_cache_spec: AscendMLAAttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -267,7 +266,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     def get_cudagraph_support(
         cls: type["AscendDSACPMetadataBuilder"],
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.

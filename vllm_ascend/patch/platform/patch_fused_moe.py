@@ -33,10 +33,15 @@ import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 # Capture the real original before fused_moe.py's module-level code runs.
-_original_FusedMoE = _fused_moe_layer.FusedMoE
+# vllm main renamed the FusedMoE factory function to FusedMoEFactory
+# (vllm-project/vllm#44941).
+if vllm_version_is("0.26.0"):
+    _original_FusedMoE = _fused_moe_layer.FusedMoE
+else:
+    _original_FusedMoE = _fused_moe_layer.FusedMoEFactory
 _DefaultAscendMoERunner: Any
 _DefaultAscendRoutedExperts: Any
 
@@ -97,5 +102,9 @@ def _ascend_FusedMoE(
     )
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+if vllm_version_is("0.26.0"):
+    _fused_moe_layer.FusedMoE = _ascend_FusedMoE
+    _fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+else:
+    _fused_moe_layer.FusedMoEFactory = _ascend_FusedMoE
+    _fused_moe_pkg.FusedMoEFactory = _ascend_FusedMoE
