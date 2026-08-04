@@ -37,7 +37,7 @@ def vllm_version_is(target_vllm_version: str) -> bool:
         else:
             vllm_version = get_distribution_version("vllm")
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
+        return Version(vllm_version).public == Version(target_vllm_version).public
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
