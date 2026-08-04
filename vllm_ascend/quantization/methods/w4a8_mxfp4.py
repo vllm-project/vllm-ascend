@@ -25,10 +25,6 @@ from vllm.distributed import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    ensure_mxfp4_linear_available,
-)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
@@ -40,7 +36,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
 
     def __init__(self):
-        ensure_mxfp4_linear_available("W8A8_MXFP8 linear quantization")
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -169,8 +164,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 activation=getattr(layer, "activation", "silu"),
                 mxfp_act_quant_type=torch.float8_e4m3fn,
                 mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
-                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
+                mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,

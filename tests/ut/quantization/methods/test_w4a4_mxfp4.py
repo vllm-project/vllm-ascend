@@ -12,11 +12,9 @@ from vllm_ascend.quantization.methods.w4a4_mxfp4 import (
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.ensure_mxfp4_linear_available")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
-    def setUp(self, mock_vllm, mock_ensure):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ensure.return_value = None
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
 
     def test_get_weight_various_input_sizes(self):
@@ -62,13 +60,11 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     hidden_size = 128
     intermediate_size = 256
 
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.ensure_mxfp4_moe_available")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ensure):
+    def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
-        mock_ensure.return_value = None
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
     def test_get_weight_static_method(self):
