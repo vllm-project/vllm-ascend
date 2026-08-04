@@ -22,7 +22,7 @@ import math
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -3962,8 +3962,8 @@ class NPUModelRunner(GPUModelRunner):
     def _adjust_kv_layout(
         self,
         raw_tensor: torch.Tensor,
-        kv_cache_shape_list: list[int],
-        kv_cache_dtype_list: list[int],
+        kv_cache_shape_list: Sequence[Sequence[int]],
+        kv_cache_dtype_list: Sequence[torch.dtype],
         page_size_bytes: int,
         overlap_full_kv_cache: bool = False,
         packing: tuple[int, int] | None = None,
