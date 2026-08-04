@@ -820,15 +820,6 @@ class KVCacheRecvingThread(threading.Thread):
             raw_layer_indices = layer_indices
             layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
 
-            def resolve_remote_layer_idx(local_layer_idx: int) -> int | None:
-                layer_names = group_spec.get("layer_names", [])
-                try:
-                    pos = raw_layer_indices.index(local_layer_idx)
-                    layer_name = layer_names[pos]
-                except (ValueError, IndexError):
-                    return None
-                return remote_layer_name_to_idx.get(layer_name)
-
             if not layer_indices:
                 continue
             tp_num_need_pulls = group_pull.num_group_pulls
@@ -872,7 +863,12 @@ class KVCacheRecvingThread(threading.Thread):
 
             if is_mamba_group:
                 for layer_idx in layer_indices:
-                    remote_layer_idx = resolve_remote_layer_idx(layer_idx)
+                    remote_layer_idx = resolve_remote_layer_idx(
+                        layer_idx,
+                        group_spec,
+                        raw_layer_indices,
+                        remote_layer_name_to_idx,
+                    )
                     start_meta_idx = len(src_list)
                     self._append_mamba_transfer_meta(
                         src_list,
@@ -909,7 +905,12 @@ class KVCacheRecvingThread(threading.Thread):
                 continue
 
             for layer_idx in layer_indices:
-                remote_layer_idx = resolve_remote_layer_idx(layer_idx)
+                remote_layer_idx = resolve_remote_layer_idx(
+                    layer_idx,
+                    group_spec,
+                    raw_layer_indices,
+                    remote_layer_name_to_idx,
+                )
                 for cache_idx in range(len(local_kv_caches_base_addrs[layer_idx])):
                     src_layer_base_addr = local_kv_caches_base_addrs[layer_idx][cache_idx]
                     dst_layer_base_addr = remote_kv_caches_base_addrs[remote_layer_idx][cache_idx]
@@ -3909,6 +3910,25 @@ def build_layer_name_to_metadata_idx(
         for layer_name, layer_idx in zip(layer_names, layer_indices):
             layer_name_to_idx[layer_name] = layer_idx
     return layer_name_to_idx
+
+
+def resolve_remote_layer_idx(
+    local_layer_idx: int,
+    group_spec: dict[str, Any],
+    local_layer_indices: list[int],
+    remote_layer_name_to_idx: dict[str, int],
+) -> int:
+    """Resolve a remote metadata index by the stable cache-layer name."""
+    layer_names = group_spec.get("layer_names", [])
+    try:
+        position = local_layer_indices.index(local_layer_idx)
+        layer_name = layer_names[position]
+    except (ValueError, IndexError) as error:
+        raise RuntimeError(f"Cannot resolve local KV metadata index {local_layer_idx} to a layer name.") from error
+    try:
+        return remote_layer_name_to_idx[layer_name]
+    except KeyError as error:
+        raise RuntimeError(f"Remote KV metadata does not contain layer {layer_name!r}.") from error
 
 
 def get_prefill_pp_indices(
