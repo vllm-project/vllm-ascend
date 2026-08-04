@@ -307,7 +307,15 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+    def mla_preprocess_only_decode(
+        atten_obj,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        use_mla_rope: bool = True,
+    ):
+        if not use_mla_rope:
+            raise NotImplementedError("MLAPO without RoPE is only supported on A5.")
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
@@ -1397,14 +1405,25 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+    def mla_preprocess_only_decode(
+        atten_obj,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        use_mla_rope: bool = True,
+    ):
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz].unsqueeze(1)
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
         dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+        if use_mla_rope:
+            cos_shape = attn_metadata.decode.cos.shape
+            cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
+            sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+        else:
+            # A5 MLA prolog treats two absent rotary inputs as RoPE disabled.
+            cos = None
+            sin = None
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
             token_x=hidden_states,

@@ -931,13 +931,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
-        if not self.use_mla_rope and (self.fa_quant_layer or self.enable_mlapo):
-            # Both optimized preprocess paths fuse rotary reordering into the
-            # q/kv prolog. A no-RoPE positional slice must remain in checkpoint
-            # order, so use the explicit no-RoPE baseline instead.
-            logger.warning_once("FA quant/MLAPO is disabled for MLA layers with RoPE disabled.")
-            self.fa_quant_layer = False
-            self.enable_mlapo = False
         if self.fa_quant_layer:
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
@@ -2082,7 +2075,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states.contiguous(), need_gather_q_kv
             )
             decode_preprocess_res, prefill_preprocess_res = DeviceOperator.mla_preprocess_only_decode(
-                self, hidden_states, kv_cache, attn_metadata
+                self,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                use_mla_rope=self.use_mla_rope,
             )
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(

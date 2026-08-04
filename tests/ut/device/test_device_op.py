@@ -1,9 +1,75 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+
+
+@pytest.mark.parametrize("use_mla_rope", [True, False])
+def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
+    num_tokens = 2
+    num_heads = 4
+    kv_lora_rank = 8
+    rope_dim = 6
+    hidden_size = 16
+    hidden_states = torch.randn(num_tokens, hidden_size)
+    cos = torch.randn(num_tokens, 1, 1, rope_dim)
+    sin = torch.randn_like(cos)
+    kv_cache = (
+        torch.randn(4, 1, 1, kv_lora_rank),
+        torch.randn(4, 1, 1, rope_dim),
+    )
+    attn_metadata = SimpleNamespace(
+        num_decode_tokens=num_tokens,
+        decode=SimpleNamespace(cos=cos, sin=sin),
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int32),
+    )
+    atten_obj = SimpleNamespace(
+        weight_dq=mock.MagicMock(),
+        weight_uq_qr=mock.MagicMock(),
+        W_UK_T=mock.MagicMock(),
+        weight_dkv_kr=mock.MagicMock(),
+        q_a_layernorm=SimpleNamespace(weight=SimpleNamespace(data=mock.MagicMock())),
+        kv_a_layernorm=SimpleNamespace(weight=SimpleNamespace(data=mock.MagicMock())),
+        weight_dq_scale=mock.MagicMock(),
+        weight_uq_qr_scale=mock.MagicMock(),
+        weight_dkv_kr_scale=mock.MagicMock(),
+        fa_quant_layer=False,
+        fak_descale_reciprocal=None,
+        num_heads=num_heads,
+        kv_lora_rank=kv_lora_rank,
+        reorg_decode_q=mock.MagicMock(side_effect=lambda q_nope, q_pe: (q_nope, q_pe)),
+    )
+    query_nope = torch.randn(num_tokens, num_heads, kv_lora_rank)
+    query_rope = torch.randn(num_tokens, num_heads, rope_dim)
+
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant",
+            return_value=(hidden_states.unsqueeze(1), mock.MagicMock()),
+        ),
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
+            return_value=(query_nope, query_rope, None, None, None),
+        ) as mock_prolog,
+    ):
+        A5DeviceAdaptor.mla_preprocess_only_decode(
+            atten_obj,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            use_mla_rope=use_mla_rope,
+        )
+
+    call_kwargs = mock_prolog.call_args.kwargs
+    if use_mla_rope:
+        torch.testing.assert_close(call_kwargs["rope_cos"], cos.view(num_tokens, 1, rope_dim))
+        torch.testing.assert_close(call_kwargs["rope_sin"], sin.view(num_tokens, 1, rope_dim))
+    else:
+        assert call_kwargs["rope_cos"] is None
+        assert call_kwargs["rope_sin"] is None
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
