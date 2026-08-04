@@ -1114,6 +1114,10 @@ def main():
     if not changed_files_with_lines:
         print("\n=== No product source code changes found in PR ===")
         print("skipping test recommendation.")
+        # Write empty result file
+        with open("recommended_pytest_paths.txt", "w", encoding="utf-8") as f:
+            pass
+        print("\nResults saved to: recommended_pytest_paths.txt")
         return
 
     # 3. Select test cases
