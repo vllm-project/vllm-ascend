@@ -252,6 +252,7 @@ jobs:
         case: ${{ fromJson(needs.multi-node-runner.outputs.multi_node_json) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
+      should_run: true  
       soc_version: a5
       runner: linux-aarch64-a5-8
       name: ${{ matrix.case.name }}
@@ -284,6 +285,7 @@ jobs:
         case: ${{ fromJson(needs.single-node-runner.outputs.single_node_json) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
+      should_run: true  
       runner: linux-aarch64-a5-8
       name: ${{ matrix.case.name }}
       config_file_path: ${{ matrix.case.config_file_path }}
