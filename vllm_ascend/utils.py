@@ -1534,7 +1534,7 @@ def get_compressed_pos_and_indices(
 
         # Note(qcs): some models use compress_ratio=0 as non-compression tag.
         if compress_ratio > 1:
-            compressed_historical_len = num_computed_tokens // compress_ratio
+            compressed_historical_len: np.ndarray = num_computed_tokens // compress_ratio
             compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
         else:
             compressed_historical_len = num_computed_tokens
@@ -1550,7 +1550,7 @@ def get_compressed_pos_and_indices(
             pos_starts - prefix_offsets, num_new_compressed_pos
         )
 
-        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
+        req_indices_compressed: np.ndarray = np.repeat(arrange_np, num_new_compressed_pos)
         req_indices_compressed_list.append(req_indices_compressed)
         positions_compressed_list.append(compressed_pos_ids)
         num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)

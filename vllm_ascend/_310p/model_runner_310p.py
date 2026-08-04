@@ -261,7 +261,7 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        req_indices: np.ndarray = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
         if not scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = num_scheduled_tokens
@@ -399,18 +399,18 @@ class NPUModelRunner310(NPUModelRunner):
                 num_sched = num_scheduled_tokens[req_idx]
 
                 if req_idx not in self.input_batch.req_prompt_embeds:
-                    output_idx += num_sched
+                    output_idx += int(num_sched)
                     continue
 
                 if num_sched <= 0:
-                    output_idx += num_sched
+                    output_idx += int(num_sched)
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
                 start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
 
                 if start_pos >= req_embeds.shape[0]:
-                    output_idx += num_sched
+                    output_idx += int(num_sched)
                     continue
 
                 end_pos = start_pos + num_sched
@@ -422,7 +422,7 @@ class NPUModelRunner310(NPUModelRunner):
                         req_embeds[start_pos:actual_end]
                     )
 
-                output_idx += num_sched
+                output_idx += int(num_sched)
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -520,13 +520,12 @@ class NPUModelRunner310(NPUModelRunner):
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
             spec_decode_metadata = None
-            num_draft_tokens = None
-            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+            num_sampled_tokens: np.ndarray = np.ones(num_reqs, dtype=np.int32)
             logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
         else:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            num_draft_tokens: np.ndarray = np.zeros(num_reqs, dtype=np.int32)
             new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
-            num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
+            num_decode_draft_tokens: np.ndarray = np.full(num_reqs, -1, dtype=np.int32)
             for (
                 req_id,
                 draft_token_ids,

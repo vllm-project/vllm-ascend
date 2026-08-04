@@ -361,9 +361,9 @@ class DCPManager:
         assert full_req_indices is not None
         assert full_cu_num_tokens is not None
         token_counts = np.diff(np.concatenate(([0], full_cu_num_tokens)))
-        token_starts = np.repeat(full_cu_num_tokens - token_counts, token_counts)
+        token_starts: np.ndarray = np.repeat(full_cu_num_tokens - token_counts, token_counts)
         query_positions = arange_np[: self.async_rebuild_num_tokens] - token_starts
-        full_positions = np.empty(self.async_rebuild_num_tokens, dtype=np.int64)
+        full_positions: np.ndarray = np.empty(self.async_rebuild_num_tokens, dtype=np.int64)
         np.add(
             base_num_computed_tokens[full_req_indices],
             query_positions,

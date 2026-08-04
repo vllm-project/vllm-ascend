@@ -100,7 +100,7 @@ class NPUInputBatch(InputBatch):
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens: np.ndarray = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec_cpu_tensor = torch.zeros(
             (max_num_reqs,),
             device="cpu",
@@ -191,7 +191,7 @@ class NPUInputBatch(InputBatch):
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
         # lora related
-        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
+        self.request_lora_mapping: np.ndarray = np.zeros((self.max_num_reqs,), dtype=np.int64)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
@@ -224,7 +224,7 @@ class NPUInputBatch(InputBatch):
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
-        self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
+        self.logits_processing_needs_token_ids: np.ndarray = np.zeros(max_num_reqs, dtype=bool)
 
         self.req_output_token_ids: list[list[int] | None] = []
 

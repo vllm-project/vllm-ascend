@@ -148,6 +148,11 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
             tensor_parallel_size=1,
             enforce_eager=case.enforce_eager,
             enable_chunked_prefill=False,
+            # vllm #50991 enables prefix caching by default for hybrid models,
+            # which forces mamba_cache_mode='align' and asserts chunked prefill.
+            # The hybrid (GatedDeltaNet) case runs with chunked prefill disabled,
+            # so pin the pre-#50991 default to keep mamba_cache_mode='none'.
+            enable_prefix_caching=False,
             speculative_config={
                 "method": "extract_hidden_states",
                 "num_speculative_tokens": 1,

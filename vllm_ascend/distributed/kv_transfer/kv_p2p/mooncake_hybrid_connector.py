@@ -1954,7 +1954,7 @@ class MooncakeConnectorWorker:
             num_kv_head = 1
         else:
             num_kv_head = self.num_key_value_heads
-        ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
+        ori_data: np.ndarray = np.arange(prefill_tp_size * self._prefill_pp_size)
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
         # random split prefill tp list

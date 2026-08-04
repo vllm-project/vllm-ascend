@@ -95,7 +95,7 @@ class BlockTable:
         if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
-        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_blocks_per_row: np.ndarray = np.zeros(max_num_reqs, dtype=np.int32)
         self.slot_mapping = self._make_buffer(self.max_num_batched_tokens + 2 * self.max_num_reqs, dtype=torch.int32)
 
         self.kernel_sizes = kernel_sizes
@@ -213,7 +213,7 @@ class BlockTable:
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
             # but we need to map them to the correct logical block table indices
-            logical_block_idx = positions // self.block_size
+            logical_block_idx: np.ndarray = positions // self.block_size
 
             # Account for the expanded logical table
             # (always needed with unified tensor)
@@ -223,7 +223,7 @@ class BlockTable:
                 req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
             )
 
-            block_offsets = positions % self.block_size
+            block_offsets: np.ndarray = positions % self.block_size
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             np.add(
                 block_numbers * self.block_size,

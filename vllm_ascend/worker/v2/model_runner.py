@@ -311,7 +311,7 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np: np.ndarray = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
@@ -407,7 +407,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
-        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np: np.ndarray = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
             self.req_states.num_computed_tokens_np[idx_mapping_np],
             num_scheduled_tokens,

@@ -242,7 +242,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
-        self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
+        self.token_arange_np: np.ndarray = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
         self.draft_window_size = None
@@ -1823,7 +1823,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # [0, 2, 6, 9] ->
         # [0, 0, 2, 2, 2, 2, 6, 6, 6]
         #  _r1_  ____r2____  ___r3__
-        new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1], new_num_tokens_per_req_np)
+        new_query_start_locs_expanded: np.ndarray = np.repeat(new_query_start_loc_np[:-1], new_num_tokens_per_req_np)
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
@@ -1833,7 +1833,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # [0, q1, q1 + q2] ->
         # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
         #  _r1_  _____r2_______  ___________r3____________
-        old_query_start_locs_expanded = np.repeat(query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np)
+        old_query_start_locs_expanded: np.ndarray = np.repeat(
+            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np
+        )
         # Final token indices are:
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2

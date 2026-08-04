@@ -61,7 +61,7 @@ class BlockTable(AscendBlockTable):
             query_start_loc_np = self._to_numpy(query_start_loc)[: num_reqs + 1]
             positions_np = self._to_numpy(positions)
             counts = np.diff(query_start_loc_np)
-            req_indices_np = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
+            req_indices_np: np.ndarray = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
             if req_indices_np.shape[0] != positions_np.shape[0]:
                 raise ValueError(
                     "query_start_loc and positions describe different token counts: "

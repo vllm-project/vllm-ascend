@@ -64,7 +64,7 @@ class SwiftBalanceEplb(EplbPolicy):
             workload_layer = expert_workload[layer_idx].copy()
             for npu_idx in range(npu_num):
                 for expert_idx in range(experts_per_npu):
-                    workload_dict[int(placement_layer[npu_idx][expert_idx])] += workload_layer[npu_idx][expert_idx]
+                    workload_dict[int(placement_layer[npu_idx][expert_idx])] += int(workload_layer[npu_idx][expert_idx])
             for expert_idx in range(num_original_expert):
                 workload_new[layer_idx][expert_idx] = workload_dict[expert_idx]
         return workload_new
@@ -157,7 +157,7 @@ class SwiftBalanceEplb(EplbPolicy):
         num_ranks = len(single_layer_deployment)
         redundant_expert_pos: list[list[int]] = [[] for _ in range(num_ranks)]
         num_redundant_experts = 0
-        expert_from_rank = np.zeros(self.num_original_experts, dtype=np.int64)
+        expert_from_rank: np.ndarray = np.zeros(self.num_original_experts, dtype=np.int64)
         existing_experts = set()
 
         for index in range(self.num_experts_per_rank):
@@ -194,7 +194,7 @@ class SwiftBalanceEplb(EplbPolicy):
         """
 
         current_weights = initial_weights.copy()
-        redundant_assignments = np.zeros(self.num_original_experts, dtype=np.int64)
+        redundant_assignments: np.ndarray = np.zeros(self.num_original_experts, dtype=np.int64)
 
         for i in range(num_redundant_experts):
             sorted_indices = np.argsort([w for _, w in current_weights], kind="stable")[::-1]
@@ -210,7 +210,7 @@ class SwiftBalanceEplb(EplbPolicy):
                     current_weights[index] = (expert_id, new_avg_weight)
                     break
 
-        update_weight = np.zeros(self.num_original_experts, dtype=np.float32)
+        update_weight: np.ndarray = np.zeros(self.num_original_experts, dtype=np.float32)
         for expert_id, expert_weight in current_weights:
             update_weight[expert_id] = expert_weight
 
@@ -262,7 +262,7 @@ class SwiftBalanceEplb(EplbPolicy):
                     num_per_existing_expert[expert_id] += 1
                     break
 
-        rank_loads = np.zeros(len(rank_assignments), dtype=np.float32)
+        rank_loads: np.ndarray = np.zeros(len(rank_assignments), dtype=np.float32)
         for rank_id, rank in enumerate(rank_assignments):
             for index, expert_id in enumerate(rank):
                 rank_loads[rank_id] += update_workload[expert_id]
@@ -313,14 +313,14 @@ class SwiftBalanceEplb(EplbPolicy):
         on the current deployment
         """
 
-        num_per_existing_expert = np.zeros(self.num_original_experts, dtype=np.int64)
+        num_per_existing_expert: np.ndarray = np.zeros(self.num_original_experts, dtype=np.int64)
 
         for rank in rank_assignments:
             for expert_id in rank:
                 if expert_id != -1:
                     num_per_existing_expert[expert_id] += 1
 
-        update_workload = np.full(self.num_original_experts, fill_value=-1, dtype=np.float32)
+        update_workload: np.ndarray = np.full(self.num_original_experts, fill_value=-1, dtype=np.float32)
 
         for expert_id, weight in initial_weights:
             num_cur_expert = num_per_existing_expert[expert_id]
@@ -362,7 +362,7 @@ class SwiftBalanceEplb(EplbPolicy):
 
         num_ranks = len(rank_assignments)
         rev_expert_per_rank = defaultdict(set)
-        num_com_between_rank = np.zeros((num_ranks, num_ranks), dtype=np.int64)
+        num_com_between_rank: np.ndarray = np.zeros((num_ranks, num_ranks), dtype=np.int64)
 
         for expert_id, weight in redundant_expert_list:
             candidate = -1

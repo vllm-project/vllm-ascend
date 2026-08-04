@@ -45,6 +45,12 @@ def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
         dtype="bfloat16",
         max_model_len=2048,
         max_num_batched_tokens=1024,
+        # vllm #50991 enables prefix caching by default for hybrid models, which
+        # forces mamba_cache_mode='align'. On Ascend 'align' routes the hybrid
+        # postprocess onto a fused GPU Triton kernel the Ascend backend cannot
+        # compile (see vllm_ascend/patch/platform/patch_mamba_config.py), so pin
+        # the pre-#50991 default (prefix caching off / mamba_cache_mode='none').
+        enable_prefix_caching=False,
         limit_mm_per_prompt={"image": 1},
         mm_processor_kwargs={
             "min_pixels": 28 * 28,

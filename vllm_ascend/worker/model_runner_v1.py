@@ -842,7 +842,7 @@ class NPUModelRunner(GPUModelRunner):
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        req_indices: np.ndarray = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
         # Get the attention state.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -943,12 +943,12 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Skip if this request doesn't have embeddings
                 if req_idx not in self.input_batch.req_prompt_embeds:
-                    output_idx += num_sched
+                    output_idx += int(num_sched)
                     continue
 
                 # Skip if no tokens scheduled
                 if num_sched <= 0:
-                    output_idx += num_sched
+                    output_idx += int(num_sched)
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
@@ -956,7 +956,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Skip if trying to read beyond available embeddings
                 if start_pos >= req_embeds.shape[0]:
-                    output_idx += num_sched
+                    output_idx += int(num_sched)
                     continue
 
                 # Copy available embeddings
@@ -969,7 +969,7 @@ class NPUModelRunner(GPUModelRunner):
                         req_embeds[start_pos:actual_end]
                     )
 
-                output_idx += num_sched
+                output_idx += int(num_sched)
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1201,18 +1201,17 @@ class NPUModelRunner(GPUModelRunner):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
-            num_draft_tokens = None
-            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+            num_sampled_tokens: np.ndarray = np.ones(num_reqs, dtype=np.int32)
             logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            num_draft_tokens: np.ndarray = np.zeros(num_reqs, dtype=np.int32)
             # For chunked prefills, use -1 as mask rather than 0, as guided
             # decoding may rollback speculative tokens.
             new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
-            num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
+            num_decode_draft_tokens: np.ndarray = np.full(num_reqs, -1, dtype=np.int32)
             for (
                 req_id,
                 draft_token_ids,
@@ -1317,7 +1316,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
+        num_sampled_tokens: np.ndarray = num_draft_tokens + 1
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
@@ -1325,9 +1324,9 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
-        logits_indices = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        logits_indices_np: np.ndarray = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        logits_indices += self._arange_scratch[: cu_num_sampled_tokens[-1]]
+        logits_indices_np += self._arange_scratch[: cu_num_sampled_tokens[-1]]
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
@@ -1337,19 +1336,23 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
         total_num_draft_tokens = cu_num_draft_tokens[-1]
         # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens, num_draft_tokens)
+        cumsums_offsets: np.ndarray = np.repeat(cu_num_draft_tokens - num_draft_tokens, num_draft_tokens)
         # [0, 1, 2, 0, 1, 0]
         arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
         # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
+        target_logits_indices_np: np.ndarray = np.repeat(cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
         # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += arange
+        target_logits_indices_np += arange
 
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
         cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).pin_memory().to(self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).pin_memory().to(self.device, non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).pin_memory().to(self.device, non_blocking=True)
+        logits_indices = (
+            torch.from_numpy(logits_indices_np).pin_memory().to(self.device, non_blocking=True)
+        )
+        target_logits_indices = (
+            torch.from_numpy(target_logits_indices_np).pin_memory().to(self.device, non_blocking=True)
+        )
         bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(self.device, non_blocking=True)
 
         # Compute the draft token ids.
@@ -1946,7 +1949,7 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
                     num_reqs = self.input_batch.num_reqs
-                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                    req_indices: np.ndarray = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
                     dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
                     np.add(
                         self.input_batch.num_computed_tokens_cpu[req_indices],

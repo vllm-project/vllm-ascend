@@ -34,6 +34,11 @@ def test_qwen3_5_27b_distributed_mp_tp4():
         max_model_len=4096,
         gpu_memory_utilization=0.90,
         distributed_executor_backend="mp",
+        # vllm #50991 enables prefix caching by default for hybrid models, which
+        # forces mamba_cache_mode='align' and routes the hybrid postprocess onto
+        # the fused GPU Triton kernel the Ascend backend cannot compile. Pin the
+        # pre-#50991 default (prefix caching off / mamba_cache_mode='none').
+        enable_prefix_caching=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model
@@ -61,6 +66,11 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [4, 8, 12, 16],
         },
+        # vllm #50991 enables prefix caching by default for hybrid models, which
+        # forces mamba_cache_mode='align' and routes the hybrid postprocess onto
+        # the fused GPU Triton kernel the Ascend backend cannot compile. Pin the
+        # pre-#50991 default (prefix caching off / mamba_cache_mode='none').
+        enable_prefix_caching=False,
         speculative_config={
             "method": "qwen3_5_mtp",
             "num_speculative_tokens": 3,

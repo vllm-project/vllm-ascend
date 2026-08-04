@@ -38,6 +38,11 @@ def test_qwen3_5_35b_a3b_w8a8_tp2_without_ep():
         gpu_memory_utilization=0.9,
         distributed_executor_backend="mp",
         cudagraph_capture_sizes=[1, 2, 4, 8],
+        # vllm #50991 enables prefix caching by default for hybrid models, which
+        # forces mamba_cache_mode='align' and routes the hybrid postprocess onto
+        # the fused GPU Triton kernel the Ascend backend cannot compile. Pin the
+        # pre-#50991 default (prefix caching off / mamba_cache_mode='none').
+        enable_prefix_caching=False,
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(EXAMPLE_PROMPTS, max_tokens=5)
 

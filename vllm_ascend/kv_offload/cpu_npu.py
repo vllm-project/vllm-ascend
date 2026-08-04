@@ -41,7 +41,7 @@ def expand_block_ids(
     assert skip_count < block_size_factor
 
     # Vectorized: compute all sub-block IDs at once
-    bases = block_ids * block_size_factor
+    bases: np.ndarray = block_ids * block_size_factor
     offsets = np.arange(block_size_factor)
     # shape: (num_blocks, block_size_factor) -> ravel to 1D
     all_ids = (bases[:, None] + offsets[None, :]).ravel()
