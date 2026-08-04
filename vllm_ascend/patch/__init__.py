@@ -493,6 +493,7 @@
 # ** 20. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
+#   2. `vllm.config.vllm.VllmConfig._get_v2_model_runner_unsupported_features`
 #    Why:
 #       Upstream vLLM enables the v2 model runner not only via the
 #       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
@@ -502,9 +503,12 @@
 #       enabling by model architecture can crash. We override the
 #       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
 #       model/framework checks to the NPU runner itself.
+#       Qwen3 Eagle3 PP is implemented by the Ascend V2 runner but remains in
+#       upstream's unsupported-feature list.
 #    How:
 #       Monkey-patch VllmConfig.use_v2_model_runner to return
 #       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       Remove only the Qwen3 Eagle3 PP marker during V2 validation.
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
@@ -679,7 +683,8 @@
 #    How：
 #       Patch the affected Eagle3 draft models to use
 #       `get_total_num_hidden_layers()` instead, which matches the checkpoint's
-#       global layer indices and keeps `target_layer_count` correct.
+#       global layer indices and keeps `target_layer_count` correct, including
+#       native Qwen3 Eagle3 draft models.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific Eagle3 + PP weight-loading fix.
 #    Future Plan:
@@ -1149,6 +1154,26 @@
 #       replace InputBatch with AscendInputBatch.
 #    Future Plan:
 #       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
+#
+# ** 29a. File: worker/patch_v2/patch_spec_decode_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. Qwen3Model.forward and PP intermediate tensor allocation
+#   2. PPHandler sampled-token broadcast methods
+#    Why:
+#       Upstream numbers Eagle3 layers locally on each PP rank and does not carry
+#       auxiliary states to the next rank. Upstream PP also broadcasts accepted
+#       target tokens before the last rank has generated the next draft tokens,
+#       leaving non-last ranks with stale local draft state.
+#    How:
+#       Use global Qwen3 layer indices, append auxiliary states to MRV2
+#       `IntermediateTensors`, mirror them in dummy buffers, and send accepted
+#       target tokens plus next-step draft tokens through the same fixed-shape
+#       V2 PP queue slot for every speculative method that supports MRV2 PP.
+#    Related PR (if no, explain why):
+#       No, this enables the Ascend MRV2 implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports Eagle3 states and speculative draft
+#       tokens through PP. Method-specific PP restrictions remain unchanged.
 #
 # ** 30. File: worker/patch_v2/patch_model_state.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
