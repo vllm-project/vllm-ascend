@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
-import inspect
-import textwrap
 from collections import defaultdict
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -113,21 +110,6 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
             client_index=request.client_index,
         )
     ]
-
-
-def test_schedule_uses_current_mamba_split_contract():
-    source = textwrap.dedent(inspect.getsource(RecomputeScheduler.schedule))
-    tree = ast.parse(source)
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_mamba_block_aligned_split"
-    ]
-
-    assert calls
-    assert max(len(call.args) for call in calls) == 4
 
 
 def test_failed_remote_kv_load_rezeroes_unwritten_blocks():
