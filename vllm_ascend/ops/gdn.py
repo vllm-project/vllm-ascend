@@ -90,7 +90,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             torch.npu.synchronize()
             logger.info("npu_chunk_gated_delta_rule smoke test passed; using fused chunk path.")
             cls._fused_chunk_available = True
-        except Exception as e:
+        except Exception:
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
