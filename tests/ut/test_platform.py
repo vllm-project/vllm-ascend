@@ -391,7 +391,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             self.assertLogs(logger="vllm", level="INFO") as cm,
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -420,7 +420,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             self.assertLogs(logger="vllm", level="INFO") as cm,
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -464,7 +464,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             self.assertLogs(logger="vllm", level="WARNING") as cm,
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -558,7 +558,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -590,7 +590,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -624,7 +624,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
             patch.object(platform.logger, "warning") as mock_warning,
         ):
@@ -669,7 +669,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -723,7 +723,7 @@ class TestNPUPlatform(TestBase):
 
                 with (
                     pytest.raises(ValueError, match=message),
-                    patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -750,7 +750,7 @@ class TestNPUPlatform(TestBase):
                 )
 
                 with (
-                    patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -780,7 +780,7 @@ class TestNPUPlatform(TestBase):
                 )
 
                 with (
-                    patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -809,7 +809,7 @@ class TestNPUPlatform(TestBase):
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
         with (
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
             patch.object(platform.logger, "warning") as mock_warning,
         ):
@@ -827,7 +827,9 @@ class TestNPUPlatform(TestBase):
         vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy="recompute")
 
         with pytest.raises(AssertionError, match="Hybrid models do not support recompute mode kv load failure policy"):
-            self.platform._validate_kv_load_failure_policy(vllm_config)
+            from vllm_ascend import platform
+
+            platform._validate_kv_load_failure_policy(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -856,7 +858,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"enable_balance_scheduling.*PD-mixed.*PD-disaggregated"),
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -888,7 +890,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"enable_balance_scheduling.*PD-mixed.*PD-disaggregated"),
-            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -918,28 +920,36 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.prefill_context_parallel_size = 2
 
         with pytest.raises(ValueError, match="Prefill Context Parallel"):
-            self.platform._validate_parallel_config(vllm_config)
+            from vllm_ascend import platform
+
+            platform._validate_parallel_config(vllm_config)
 
     def test_validate_parallel_config_defers_pcp_validation_to_model_runner_v2(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.prefill_context_parallel_size = 2
 
-        self.platform._validate_parallel_config(vllm_config)
+        from vllm_ascend import platform
+
+        platform._validate_parallel_config(vllm_config)
 
     def test_validate_parallel_config_accepts_dp_only(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.prefill_context_parallel_size = 1
 
-        self.platform._validate_parallel_config(vllm_config)
+        from vllm_ascend import platform
+
+        platform._validate_parallel_config(vllm_config)
 
     def test_validate_parallel_config_accepts_neither(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.data_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
 
-        self.platform._validate_parallel_config(vllm_config)
+        from vllm_ascend import platform
+
+        platform._validate_parallel_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
