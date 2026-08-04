@@ -110,15 +110,17 @@ python -m tools.bisect.auto_bisect \
 
 > bad 端点(==HEAD)因为容器已构建好,默认是 `already built` 直接跳过编译。
 
-### 6.1 vLLM 版本配套检查(自动)
+### 6.1 外部版本历史同步(自动)
 
-每切到一个 commit,工具会读取该 commit 的 `.github/vllm-release-tag.commit`(它钉死了这个 commit 配套的 vLLM tag,如 `v0.22.1`),与容器实际 vLLM(优先 `VLLM_VERSION` 环境变量,否则 `vllm.__version__`)比对:
+工具会从 vllm-ascend 历史 commit 的固定文件里抽取版本信息:
 
-- **配套**(release 段一致,忽略 `v` 前缀和 dev/local 后缀)→ 正常跑;
-- **不配套**(如 commit 钉 `v0.22.1`、容器是 `0.21.0`)→ 该 commit **直接判 SKIP**,日志写明 `vllm version mismatch: this commit pins ... but the container has ...`,**不再浪费一次 pytest 跑出莫名的 rc=4**;
-- 容器是无法解析的 dev 构建 → 宽松放行(交给 pytest 判定)。
+- vLLM release tag: `.github/vllm-release-tag.commit`;
+- torch-npu: `requirements.txt` 里的 `torch-npu==...`;
+- CANN: 当前 target 对应 Dockerfile 里的 `ARG CANN_VERSION`,如 A2 用 `Dockerfile`,A3 用 `Dockerfile.a3`,310P 用 `Dockerfile.310p`。
 
-> 这是为了解决"二分跨过 vLLM 版本变更点时,老 commit 在当前容器里跑不起来"的问题。若某端点因 vLLM 不配套被 SKIP,二分会明确报错中止(见第七节)。
+这些版本变化点会记录到 Good 表同目录的 `version_history.csv`。如果 good 端点和 bad 端点的外部版本完全一致,本次二分忽略版本同步;如果端点版本不同,每个待测 commit 会先查表并同步到它历史对应的 vLLM / torch-npu / CANN profile,再运行测试。
+
+> 这是为了解决"二分跨过外部版本变更点时,把依赖变化误判成 vllm-ascend 回归"的问题。若同步失败(例如当前容器没有目标 CANN toolkit),该轮会明确记为 SKIP。
 
 ---
 
@@ -130,10 +132,10 @@ python -m tools.bisect.auto_bisect \
 - 退出码 `0` 但 `benchmark_results/` 里**任一 case 的 json `pass_fail=fail`**(精度/性能未达基线)→ **FAIL**;
 - 退出码 `0` 且无回归 → **PASS**;
 - 退出码 `2/3/4/5` 或超时(收集失败、conftest ImportError、环境问题等)→ **SKIP**;
-- **vLLM 版本不配套**(见 6.1)→ **SKIP**(带明确原因);
+- **外部版本同步失败**(见 6.1)→ **SKIP**(带明确原因);
 - SKIP 不作为二分信号,类似 `git bisect skip`。
 
-端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / vLLM 不配套),会**明确报错并中止**而不是给错误结论。
+端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / 外部版本同步失败),会**明确报错并中止**而不是给错误结论。
 
 ---
 
@@ -211,7 +213,27 @@ python -m tools.bisect.auto_bisect \
 - **默认**:`None`(不传)→ 退回用 `--config-yaml` 匹配 `yaml/path`。
 - **何时用**:一个 YAML 对应多种 nightly job 名、或 `name` 与文件名不一致时,用它锁定正确的行。
 
-### 9.4 编译控制(决定何时 `pip install -e .`)
+### 9.4 外部版本历史
+
+#### `--version-table`
+
+- **作用**:记录 vLLM release tag / torch-npu / CANN 历史变化点的 CSV。
+- **默认**:不传时使用 `--good-table` 同目录下的 `version_history.csv`。
+- **逻辑**:工具从历史 commit 的指定文件自动抽取版本;端点版本不同才逐 commit 同步。
+
+#### `--version-target`
+
+- **作用**:指定 CANN Dockerfile 来源,可选 `a2`、`a3`、`310p`。
+- **默认**:从 `BISECT_VERSION_TARGET`、`SOC_VERSION`、runner/config 名称推断;AOP 单机会按 runner 名称传入。
+- **何时用**:自动推断不准,或同一分支在不同硬件 target 上二分时。
+
+#### `--no-sync-external-versions`
+
+- **作用**:仍记录/检查版本历史,但不安装或切换 vLLM、torch-npu、CANN 环境。
+- **默认**:关(即默认会在端点版本不一致时自动同步)。
+- **何时用**:本地调试版本表生成逻辑,不想改当前 Python 环境时。
+
+### 9.5 编译控制(决定何时 `pip install -e .`)
 
 #### `--native-check`
 
@@ -233,7 +255,7 @@ python -m tools.bisect.auto_bisect \
 - **默认**:关(即默认**启用**该假设)。
 - **何时用**:容器里装的不是 HEAD、或被改过,需要工具不要偷懒跳过首轮编译时。
 
-### 9.5 稳健性与校验
+### 9.6 稳健性与校验
 
 #### `--fail-confirm-retries`
 
@@ -253,7 +275,7 @@ python -m tools.bisect.auto_bisect \
 - **默认**:`5400`(90 分钟)。
 - **调整**:大模型起服务 + aisbench 很慢时适当调大,避免正常用例被误杀成 SKIP。
 
-### 9.6 多机参数(`--scene multi_node` 时)
+### 9.7 多机参数(`--scene multi_node` 时)
 
 #### `--num-nodes`
 
@@ -275,7 +297,7 @@ python -m tools.bisect.auto_bisect \
 - **能不能不填**:**在 LWS 环境下可以不填**——`/root/.cache` 正是各节点挂载的同一块共享 PVC(`shared-volume`,nightly 的结果也写在这里),所以默认值天然各节点共享。
 - **何时必须填**:**非 LWS、或 `/root/.cache` 不是共享挂载**时,必须显式指定为一个所有节点都能读写的同一共享路径(网络盘/PVC),否则屏障同步失效。
 
-### 9.7 路径与输出
+### 9.8 路径与输出
 
 #### `--work-dir`
 
