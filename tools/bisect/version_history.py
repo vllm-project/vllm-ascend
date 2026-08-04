@@ -123,11 +123,11 @@ def _extract_arg(content: str, name: str) -> str | None:
 
 
 def _extract_torch_npu(requirements: str, pyproject: str | None = None) -> str:
-    req_match = re.search(r"^\s*torch-npu==([^\s#]+)", requirements, re.MULTILINE)
+    req_match = re.search(r"^\s*torch-npu\s*==\s*([^\s#]+)", requirements, re.MULTILINE)
     if req_match:
         return req_match.group(1)
     if pyproject:
-        pyproject_match = re.search(r"[\"']torch-npu==([^\"']+)[\"']", pyproject)
+        pyproject_match = re.search(r"[\"']torch-npu\s*==\s*([^\"'] +)[\"']", pyproject)
         if pyproject_match:
             return pyproject_match.group(1)
     raise VersionHistoryError("torch-npu pin is missing from requirements.txt/pyproject.toml")
