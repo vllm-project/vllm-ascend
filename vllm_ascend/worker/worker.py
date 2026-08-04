@@ -113,6 +113,15 @@ class NPUWorker(WorkerBase):
             parallel_config.distributed_executor_backend in ("ray", "external_launcher")
             or parallel_config.data_parallel_backend == "ray"
         )
+        logger.info(
+            "NPUWorker init: is_ray_backend=%s, "
+            "distributed_executor_backend=%s, data_parallel_backend=%s, "
+            "assigned_physical_gpu_ids=%s",
+            is_ray_backend,
+            parallel_config.distributed_executor_backend,
+            parallel_config.data_parallel_backend,
+            parallel_config.assigned_physical_gpu_ids,
+        )
         if is_ray_backend and parallel_config.assigned_physical_gpu_ids is not None:
             evar = current_platform.device_control_env_var
             new_val = ",".join(str(d) for d in parallel_config.assigned_physical_gpu_ids)
