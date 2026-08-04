@@ -590,15 +590,20 @@ class MembPullReadThread(threading.Thread):
             )
             # Still report the (post-split) block ownership so the caller can tell a
             # legitimately empty contributor slice from a failed descriptor build.
-            return [], [], [], {
-                "layer_name": layer_name,
-                "ext_req_id": ext_req_id,
-                "d_main_ids": d_main_ids,
-                "d_indexer_ids": d_indexer_ids,
-                "n_main": n_main,
-                "n_indexer": n_indexer,
-                "num_transfers": 0,
-            }
+            return (
+                [],
+                [],
+                [],
+                {
+                    "layer_name": layer_name,
+                    "ext_req_id": ext_req_id,
+                    "d_main_ids": d_main_ids,
+                    "d_indexer_ids": d_indexer_ids,
+                    "n_main": n_main,
+                    "n_indexer": n_indexer,
+                    "num_transfers": 0,
+                },
+            )
 
         peer_ptrs = np.concatenate(peer_chunks).tolist()
         local_ptrs = np.concatenate(local_chunks).tolist()
