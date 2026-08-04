@@ -219,5 +219,3 @@ test_cases:
     benchmarks:
       <<: *benchmarks_prefix_128k_50
 
-
-
