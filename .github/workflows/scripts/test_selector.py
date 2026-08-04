@@ -61,10 +61,12 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         print(f"  Warning: Failed to read diff file for test file detection: {e}")
         return test_files_found
 
-    # Pattern to match test file paths: tests/[subdirs/]test_*.py
+    # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
     # In diff output: +++ b/tests/ut/core/test_xxx.py
-    # Test files must be in tests/ directory and start with test_
-    test_file_pattern = re.compile(r"^\+\+\+ [ab]/(tests/.+/test_\w+\.py)", re.MULTILINE)
+    # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
+    test_file_pattern = re.compile(
+        r"^\+\+\+ [ab]/(?:tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py)", re.MULTILINE
+    )
 
     changed_test_files = set()
     for match in test_file_pattern.finditer(diff_content):
