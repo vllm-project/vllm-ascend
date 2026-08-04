@@ -1,6 +1,7 @@
 import math
 from contextlib import nullcontext  # For limit_core_num conditional context management
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Callable, ClassVar, TypeAlias
 
 import torch
@@ -98,7 +99,7 @@ def limit_core_num(enabled: bool, aic_num: int, aiv_num: int):
         return nullcontext()
     import torchair as tng
 
-    return tng.scope.limit_core_num(aic_num, aiv_num)
+    return torch.npu.npugraph_ex.scope.limit_core_num(aic_num, aiv_num)
 
 
 # mypy: disable-error-code="has-type"
