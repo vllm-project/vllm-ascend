@@ -861,10 +861,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
-        legacy_eplb_fields = sorted(set(eplb_config) - {"load_scope"})
+        legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
         if legacy_eplb_fields:
             raise ValueError(
-                "Model Runner V2 only accepts 'load_scope' in "
+                "Model Runner V2 only accepts 'load_collection_phase' in "
                 "additional_config.eplb_config; legacy fields are not supported: "
                 f"{', '.join(legacy_eplb_fields)}."
             )
@@ -875,9 +875,9 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls. "
                 "Unset them and use --enable-eplb with Model Runner V2."
             )
-        load_scope = eplb_config.get("load_scope", "all")
-        if load_scope != "all" and not vllm_config.parallel_config.enable_eplb:
-            raise ValueError("additional_config.eplb_config.load_scope requires --enable-eplb.")
+        load_collection_phase = eplb_config.get("load_collection_phase", "all")
+        if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb:
+            raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
             if upstream_eplb_config.use_async:
@@ -894,10 +894,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             # default before this platform hook runs. Ascend maps torch_nccl
             # to torch.distributed over the HCCL device process group.
             upstream_eplb_config.communicator = "torch_nccl"
-    elif "load_scope" in eplb_config:
+    elif "load_collection_phase" in eplb_config:
         raise ValueError(
-            "additional_config.eplb_config.load_scope is only supported by Model Runner V2; "
-            "use eplb_heat_collection_stage with Model Runner V1."
+            "additional_config.eplb_config.load_collection_phase is only supported by "
+            "Model Runner V2; use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")

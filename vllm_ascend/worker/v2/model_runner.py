@@ -134,11 +134,11 @@ class NPUModelRunner(GPUModelRunner):
             and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
         )
-        load_scope = self.ascend_config.eplb_config.load_scope
+        load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
         self.eplb = AscendEPLBController(
             parallel_config,
             device,
-            load_scope=load_scope if parallel_config.enable_eplb else "all",
+            load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
         )
 
         # because we will override these attribute, delete these attribute to
@@ -373,7 +373,7 @@ class NPUModelRunner(GPUModelRunner):
         num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
         batch_has_prefill = bool(np.any(is_prefilling_np))
-        self.eplb.set_batch_scope(batch_has_prefill)
+        self.eplb.set_batch_phase(batch_has_prefill)
 
         # Get prefill tokens if any.
         if batch_has_prefill:

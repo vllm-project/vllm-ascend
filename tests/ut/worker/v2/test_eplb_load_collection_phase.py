@@ -10,12 +10,12 @@ import torch
 from vllm_ascend.distributed.eplb_state import AscendEplbState
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
-    is_eplb_load_scope_matched,
+    is_eplb_load_collection_phase_matched,
 )
 
 
-class TestEplbLoadScope(unittest.TestCase):
-    def test_batch_scope_semantics(self):
+class TestEplbLoadCollectionPhase(unittest.TestCase):
+    def test_load_collection_phase_semantics(self):
         cases = [
             ("all", [True, False], True),
             ("all", [False, False], True),
@@ -24,15 +24,21 @@ class TestEplbLoadScope(unittest.TestCase):
             ("prefill", [False, False], False),
             ("decode", [False, False], True),
         ]
-        for load_scope, is_prefilling, expected in cases:
-            with self.subTest(load_scope=load_scope, is_prefilling=is_prefilling):
+        for load_collection_phase, is_prefilling, expected in cases:
+            with self.subTest(
+                load_collection_phase=load_collection_phase,
+                is_prefilling=is_prefilling,
+            ):
                 self.assertIs(
-                    is_eplb_load_scope_matched(load_scope, any(is_prefilling)),
+                    is_eplb_load_collection_phase_matched(
+                        load_collection_phase,
+                        any(is_prefilling),
+                    ),
                     expected,
                 )
 
     @staticmethod
-    def _make_controller(load_scope="all", log_balancedness=False):
+    def _make_controller(load_collection_phase="all", log_balancedness=False):
         parallel_config = SimpleNamespace(
             enable_eplb=True,
             eplb_config=SimpleNamespace(log_balancedness=log_balancedness),
@@ -40,7 +46,7 @@ class TestEplbLoadScope(unittest.TestCase):
         controller = AscendEPLBController(
             parallel_config,
             torch.device("cpu"),
-            load_scope=load_scope,
+            load_collection_phase=load_collection_phase,
         )
         controller._has_registered_models = True
         return controller
@@ -53,18 +59,21 @@ class TestEplbLoadScope(unittest.TestCase):
 
         self.assertIsInstance(controller.state, AscendEplbState)
 
-    def test_non_matching_scope_turns_regular_step_into_dummy(self):
-        controller = self._make_controller(
-            load_scope="prefill",
-            log_balancedness=True,
-        )
-        state = MagicMock()
-        controller.state = state
-        controller.set_batch_scope(batch_has_prefill=False)
+    def test_rank_local_phase_filter_preserves_global_stats_schedule(self):
+        for batch_has_prefill, expected_dummy in ((True, False), (False, True)):
+            with self.subTest(batch_has_prefill=batch_has_prefill):
+                controller = self._make_controller(
+                    load_collection_phase="prefill",
+                    log_balancedness=True,
+                )
+                state = MagicMock()
+                state._should_record_current_step.return_value = True
+                controller.state = state
+                controller.set_batch_phase(batch_has_prefill=batch_has_prefill)
 
-        controller.step()
+                controller.step()
 
-        state.step.assert_called_once_with(True, False, log_stats=False)
+                state.step.assert_called_once_with(expected_dummy, False, log_stats=True)
 
     def test_closed_upstream_window_discards_recorded_load(self):
         controller = self._make_controller()

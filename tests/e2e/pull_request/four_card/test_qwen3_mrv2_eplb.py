@@ -52,7 +52,7 @@ def _run_dp2_tp2(*, enable_eplb: bool):
                     "log_balancedness_interval": 1,
                     "use_async": False,
                 },
-                "additional_config": {"eplb_config": {"load_scope": "all"}},
+                "additional_config": {"eplb_config": {"load_collection_phase": "prefill"}},
             }
         )
 

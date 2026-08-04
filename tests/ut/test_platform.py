@@ -85,11 +85,11 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
-    def test_validate_eplb_config_allows_v2_load_scope(self):
+    def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
-        vllm_config.additional_config = {"eplb_config": {"load_scope": "prefill"}}
+        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "prefill"}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
@@ -113,13 +113,15 @@ class TestNPUPlatform(TestBase):
             "torch_nccl",
         )
 
-    def test_validate_eplb_config_allows_batch_scope_with_dbo_and_spec_decode(self):
+    def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(
+        self,
+    ):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
         vllm_config.parallel_config.enable_dbo = True
         vllm_config.speculative_config = object()
-        vllm_config.additional_config = {"eplb_config": {"load_scope": "decode"}}
+        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
@@ -132,10 +134,10 @@ class TestNPUPlatform(TestBase):
         with self.assertRaisesRegex(ValueError, "legacy fields are not supported: dynamic_eplb"):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_rejects_v1_load_scope(self):
+    def test_validate_eplb_config_rejects_v1_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = False
-        vllm_config.additional_config = {"eplb_config": {"load_scope": "decode"}}
+        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
 
         with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
             _validate_eplb_config(vllm_config)

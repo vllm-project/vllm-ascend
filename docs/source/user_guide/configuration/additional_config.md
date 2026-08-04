@@ -128,10 +128,11 @@ The details of each configuration option are as follows:
 
 The accepted fields depend on the model runner:
 
-- **Model Runner V2** accepts only `load_scope` here. Configure upstream EPLB
-  through `--enable-eplb` and `--eplb-config`, and set
+- **Model Runner V2** accepts only `load_collection_phase` here. Configure
+  upstream EPLB through `--enable-eplb` and `--eplb-config`, and set
   `--eplb-config.use_async false` on Ascend.
-- **Model Runner V1** accepts the legacy fields below except `load_scope`.
+- **Model Runner V1** accepts the legacy fields below except
+  `load_collection_phase`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
 
 Mixing the two schemas fails during startup instead of silently ignoring
@@ -147,7 +148,7 @@ configuration.
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_scope`                     | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
+| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
 
 **scheduler_config**
 

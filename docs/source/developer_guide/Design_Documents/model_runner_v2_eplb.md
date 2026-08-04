@@ -46,7 +46,7 @@ flowchart LR
 | Component | Responsibility |
 | --- | --- |
 | Upstream `EPLBController` and `EplbState` | Load windows, policy, placement calculation, and rearrangement ordering |
-| `AscendEPLBController` | Batch load-scope filtering and construction of Ascend state |
+| `AscendEPLBController` | Batch load-collection-phase filtering and construction of Ascend state |
 | `AscendEplbState` and `AscendEplbLayerState` | Stable device lookup derived from committed upstream placement |
 | Router adapter | Per-instance logical-to-physical ID mapping without replacing the upstream router class |
 | Fused MoE EPLB helpers | Device lookup and post-compute physical load recording |
@@ -67,10 +67,10 @@ Model Runner V2 uses the upstream control plane. V1-only controls and V2 EPLB
 configuration cannot be mixed.
 
 At the start of a Model Runner V2 batch, the runner tells
-`AscendEPLBController` whether the batch belongs to the configured load scope.
-The scope may collect all batches, prefill batches, or decode batches. A mixed
-batch containing prefill work is classified as prefill. This decision is made
-once per batch rather than once per token or MoE layer.
+`AscendEPLBController` whether the batch belongs to the configured load
+collection phase. The phase may collect all batches, prefill batches, or decode
+batches. A mixed batch containing prefill work is classified as prefill. This
+decision is made once per batch rather than once per token or MoE layer.
 
 Each MoE layer then follows one routing path:
 
@@ -80,7 +80,11 @@ Each MoE layer then follows one routing path:
 3. The quantization method receives the routing weights and physical IDs and
    runs fused MoE. It does not select experts again.
 4. After compute, the local slice of executed physical expert counts is added
-   to the upstream load window when the batch is in scope.
+   to the upstream load window when its collection phase is enabled.
+
+Phase selection filters only the load submitted by a rank. Every rank still
+advances the upstream EPLB state machine and participates in its collectives in
+the same order, even when local batches belong to different phases.
 
 The lookup is a fixed-shape device tensor whose object identity remains stable.
 When placement changes, `AscendEplbLayerState` builds the new values and copies

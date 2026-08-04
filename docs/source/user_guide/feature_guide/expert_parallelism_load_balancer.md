@@ -8,7 +8,7 @@ vLLM Ascend provides two EPLB integration paths:
 
 - **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
   configuration, policy, load window, and rearrangement lifecycle. Ascend adds
-  an HCCL weight-transfer backend and the `load_scope` extension.
+  an HCCL weight-transfer backend and the `load_collection_phase` extension.
 - **Model Runner V1 (MRv1)** retains the legacy vLLM Ascend dynamic, recording,
   and static EPLB modes.
 
@@ -97,7 +97,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --eplb-config.use_async false \
   --eplb-config.log_balancedness true \
   --eplb-config.log_balancedness_interval 1 \
-  --additional-config '{"eplb_config":{"load_scope":"all"}}'
+  --additional-config '{"eplb_config":{"load_collection_phase":"all"}}'
 ```
 
 MRv2 uses the upstream `EPLBConfig` fields:
@@ -116,9 +116,9 @@ MRv2 uses the upstream `EPLBConfig` fields:
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
 
-#### MRv2 Load Collection Scope
+#### MRv2 Load Collection Phase
 
-`load_scope` is the only MRv2 EPLB field under
+`load_collection_phase` is the only MRv2 EPLB field under
 `additional_config.eplb_config`. It controls which batch phases contribute to
 the upstream load window; it does not disable routing or MoE computation for
 non-matching batches.
@@ -131,8 +131,10 @@ non-matching batches.
 
 Classification is performed once per batch. A batch containing any prefill
 request is classified entirely as prefill; otherwise it is decode. A batch
-that does not match `load_scope` does not contribute load and does not advance
-the EPLB load window.
+that does not match `load_collection_phase` does not contribute load and does
+not advance the EPLB load window. It still participates in the global EPLB
+scheduling and communication sequence so that data-parallel ranks remain
+synchronized.
 
 For example, to collect only prefill load:
 
@@ -141,7 +143,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-expert-parallel \
   --enable-eplb \
   --eplb-config.use_async false \
-  --additional-config '{"eplb_config":{"load_scope":"prefill"}}'
+  --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
 
 > [!IMPORTANT]
@@ -230,8 +232,8 @@ The `eplb_heat_collection_stage` option is intended for prefill-decode aggregati
 
 > [!IMPORTANT]
 > This section describes the MRv1-only `eplb_heat_collection_stage` field.
-> MRv2 uses `load_scope` as described above; the two fields have different
-> batch-classification semantics and are not interchangeable.
+> MRv2 uses `load_collection_phase` as described above; the two fields have
+> different batch-classification semantics and are not interchangeable.
 
 Use `eplb_heat_collection_stage` to select the stage whose expert heat contributes to EPLB:
 

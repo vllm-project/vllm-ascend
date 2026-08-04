@@ -101,14 +101,20 @@ class TestAscendConfig(TestBase):
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
 
-    def test_eplb_load_scope_defaults_to_all(self):
-        self.assertEqual(EplbConfig().load_scope, "all")
+    def test_eplb_load_collection_phase_defaults_to_all(self):
+        self.assertEqual(EplbConfig().load_collection_phase, "all")
 
-    def test_eplb_load_scope_validation(self):
-        self.assertEqual(EplbConfig({"load_scope": "prefill"}).load_scope, "prefill")
-        self.assertEqual(EplbConfig({"load_scope": "decode"}).load_scope, "decode")
-        with self.assertRaisesRegex(ValueError, "load_scope must be one of"):
-            EplbConfig({"load_scope": "prompt"})
+    def test_eplb_load_collection_phase_validation(self):
+        self.assertEqual(
+            EplbConfig({"load_collection_phase": "prefill"}).load_collection_phase,
+            "prefill",
+        )
+        self.assertEqual(
+            EplbConfig({"load_collection_phase": "decode"}).load_collection_phase,
+            "decode",
+        )
+        with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
+            EplbConfig({"load_collection_phase": "prompt"})
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

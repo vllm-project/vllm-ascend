@@ -14,12 +14,15 @@ from vllm.v1.worker.gpu.eplb_utils import EPLBController
 from vllm_ascend.distributed.eplb_state import AscendEplbState
 
 
-def is_eplb_load_scope_matched(load_scope: str, batch_has_prefill: bool) -> bool:
-    """Return whether the whole batch belongs to the configured load scope."""
-    if load_scope == "all":
+def is_eplb_load_collection_phase_matched(
+    load_collection_phase: str,
+    batch_has_prefill: bool,
+) -> bool:
+    """Return whether the batch belongs to the configured collection phase."""
+    if load_collection_phase == "all":
         return True
-    batch_scope = "prefill" if batch_has_prefill else "decode"
-    return load_scope == batch_scope
+    batch_phase = "prefill" if batch_has_prefill else "decode"
+    return load_collection_phase == batch_phase
 
 
 def _unwrap_moe(model: nn.Module) -> nn.Module:
@@ -29,17 +32,17 @@ def _unwrap_moe(model: nn.Module) -> nn.Module:
 
 
 class AscendEPLBController(EPLBController):
-    """Construct Ascend state and apply batch-scoped load collection."""
+    """Construct Ascend state and apply phase-filtered load collection."""
 
     def __init__(
         self,
         parallel_config: Any,
         device: torch.device,
-        load_scope: str = "all",
+        load_collection_phase: str = "all",
     ) -> None:
         super().__init__(parallel_config, device)
-        self.load_scope = load_scope
-        self._scope_matched = True
+        self.load_collection_phase = load_collection_phase
+        self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
         self.state = None
@@ -47,9 +50,9 @@ class AscendEPLBController(EPLBController):
         if self.parallel_config.enable_eplb:
             self.state = AscendEplbState(self.parallel_config, self.device)
 
-    def set_batch_scope(self, batch_has_prefill: bool) -> None:
-        self._scope_matched = is_eplb_load_scope_matched(
-            self.load_scope,
+    def set_batch_phase(self, batch_has_prefill: bool) -> None:
+        self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
+            self.load_collection_phase,
             batch_has_prefill,
         )
 
@@ -62,16 +65,23 @@ class AscendEPLBController(EPLBController):
         if not self.parallel_config.enable_eplb or self.suppressed or state is None or not self._has_registered_models:
             return
 
-        if not is_dummy and not is_profile:
-            if not self._scope_matched:
-                state.step(True, False, log_stats=False)
-                return
-            elif not state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness):
-                # Ascend records local GMM counts after every MoE call. Clear
-                # them once per pass while the upstream window is closed.
-                for model_state in state.model_states.values():
-                    model_state.expert_load_pass.zero_()
-        super().step(is_dummy=is_dummy, is_profile=is_profile)
+        discard_current_load = not is_profile and not self._load_collection_phase_matched
+        if (
+            not is_dummy
+            and not is_profile
+            and not discard_current_load
+            and not state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
+        ):
+            # Ascend records local GMM counts after every MoE call. Clear
+            # them once per pass while the upstream window is closed.
+            for model_state in state.model_states.values():
+                model_state.expert_load_pass.zero_()
+
+        # Phase selection may change the load submitted by each rank, but all
+        # ranks must advance the EPLB state machine and enter collectives in
+        # the same order. Treat a non-matching batch as an EPLB dummy step and
+        # let the upstream controller preserve the global logging schedule.
+        super().step(is_dummy=is_dummy or discard_current_load, is_profile=is_profile)
 
     def setup_from_mapping(
         self,
