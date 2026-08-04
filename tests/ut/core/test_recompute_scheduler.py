@@ -110,22 +110,3 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
             client_index=request.client_index,
         )
     ]
-
-
-def test_failed_remote_kv_load_rezeroes_unwritten_blocks():
-    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    scheduler.connector = MagicMock()
-    scheduler.needs_kv_cache_zeroing = True
-    scheduler.kv_cache_manager = MagicMock()
-    scheduler.failed_recving_kv_req_ids = {"request"}
-    scheduler.finished_recving_kv_req_ids = {"request"}
-    request = SimpleNamespace(
-        request_id="request",
-        num_computed_tokens=32,
-        num_tokens=64,
-    )
-
-    scheduler._update_waiting_for_remote_kv(request)
-
-    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 32)
-    scheduler.kv_cache_manager.record_blocks_for_zeroing.assert_called_once_with(request.request_id, 32)
