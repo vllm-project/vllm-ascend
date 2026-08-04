@@ -562,22 +562,25 @@ class BaseDeviceAdaptor:
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
         """Returns the metadata-building operator for sparse attention."""
-        return torch.ops.custom.npu_sparse_attn_sharedkv_metadata
+        return torch.ops.cann_ops_transformer.sparse_flash_mla_metadata
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
-        """Returns kwargs for sparse attention metadata builder."""
-        return {"device": str(device)}
+        """Returns kwargs for sparse attention metadata builder.
+        A3: cmp_mask_mode=3 for C1A (cann-recipes: A3 metadata kernel
+        requires causal mode 3)."""
+        return {"cmp_mask_mode": 3}
 
     @staticmethod
     def get_dsa_sparse_attn_op():
         """Returns the sparse attention operator."""
-        return torch.ops.custom.npu_sparse_attn_sharedkv
+        return torch.ops.cann_ops_transformer.sparse_flash_mla
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs():
-        """Returns base kwargs for sparse attention (extended by caller)."""
-        return {}
+        """Returns base kwargs for sparse attention (extended by caller).
+        A3: cmp_mask_mode=3 for C1A default."""
+        return {"cmp_mask_mode": 3}
 
     @staticmethod
     def get_dsa_compressor_slot_mapping_format():
@@ -1341,19 +1344,19 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
-        return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata
+        return torch.ops.cann_ops_transformer.mixed_quant_sparse_flash_mla_metadata
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
-        return {"kv_quant_mode": 1}
+        return {"quant_mode": 1, "rope_head_dim": 64, "cmp_mask_mode": 0}
 
     @staticmethod
     def get_dsa_sparse_attn_op():
-        return torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv
+        return torch.ops.cann_ops_transformer.mixed_quant_sparse_flash_mla
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs():
-        return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
+        return {"quant_mode": 1, "rope_head_dim": 64, "cmp_mask_mode": 0}
 
     @staticmethod
     def get_dsa_compressor_slot_mapping_format():

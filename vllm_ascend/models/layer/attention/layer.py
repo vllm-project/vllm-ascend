@@ -37,9 +37,9 @@ def get_dsv4_block_sizes():
         32: [[32, 32, 2, 8], [4160, 32768]],
     }
     _DSV4_BLOCK_SIZES_A5 = {
-        128: [[128, 128, 8, 16], [16896, 81920]],
-        64: [[64, 64, 4, 8], [8448, 40960]],
-        32: [[32, 32, 2, 4], [4224, 20480]],
+        128: [[128, 128, 8, 16], [16896, 77824]],
+        64: [[64, 64, 4, 8], [8448, 38912]],
+        32: [[32, 32, 2, 4], [4224, 19456]],
     }
     if get_ascend_device_type() in {AscendDeviceType.A5}:
         return _DSV4_BLOCK_SIZES_A5
@@ -180,9 +180,13 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
-        cached_head_size = (
-            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
-        )
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            # nope(fp8 1B) + rope(bf16 2B) + scales(bf16 2B per group, group_size=64), align_up(32B)
+            assert self.rope_head_dim is not None
+            nope_head_dim = self.head_size - self.rope_head_dim
+            cached_head_size = (nope_head_dim + 2 * self.rope_head_dim + 2 * nope_head_dim // 64 + 31) & ~31
+        else:
+            cached_head_size = self.head_size
         return AscendMLAAttentionSpec(
             block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,

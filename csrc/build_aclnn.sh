@@ -115,8 +115,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"
-        "sparse_attn_sharedkv"
-        "sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"
         "hc_pre_inv_rms"
         "hc_pre"

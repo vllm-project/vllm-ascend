@@ -753,16 +753,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=prefill_query_start_loc,
                     cu_seqlens_cmp_kv=None,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
-                    max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
+                    seqused_ori_kv=self.seq_lens[reqs_start:],
                     batch_size=len(self.seq_lens[reqs_start:]),
                     cmp_ratio=1,
                     ori_mask_mode=4,  # 4:sliding window
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -770,7 +768,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         elif self.compressor_ratio == 4:
             if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
                 self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
+                    **{**metadata_kwargs, "cmp_mask_mode": 3},
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -778,19 +776,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=prefill_query_start_loc,
                     cu_seqlens_cmp_kv=cu_c4_cmp_seqlen_list,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
-                    max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
+                    seqused_ori_kv=self.seq_lens[reqs_start:],
+                    seqused_cmp_kv=self.seq_lens[reqs_start:] // 4,
+                    cmp_residual_kv=self.seq_lens[reqs_start:] % 4,
                     batch_size=len(self.seq_lens[reqs_start:]),
                     cmp_topk=index_topk,
-                    # topk=index_topk,
                     cmp_ratio=4,
                     ori_mask_mode=4,
-                    cmp_mask_mode=3,
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -798,7 +794,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         else:
             if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
                 self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
+                    **{**metadata_kwargs, "cmp_mask_mode": 3},
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -806,17 +802,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=prefill_query_start_loc,
                     cu_seqlens_cmp_kv=cu_c128_cmp_seqlen_list,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
-                    max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
+                    seqused_ori_kv=self.seq_lens[reqs_start:],
+                    seqused_cmp_kv=self.seq_lens[reqs_start:] // 128,
+                    cmp_residual_kv=self.seq_lens[reqs_start:] % 128,
                     batch_size=len(self.seq_lens[reqs_start:]),
                     cmp_ratio=128,  #
                     ori_mask_mode=4,  # 4:sliding window
-                    cmp_mask_mode=3,  # 3:causal
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -982,17 +977,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                     cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[: self.num_decodes],  # cached
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
+                    seqused_ori_kv=self.seq_lens[: self.num_decodes],  # cached
                     batch_size=len(self.seq_lens[: self.num_decodes]),  # cached
                     cmp_ratio=1,
                     ori_mask_mode=4,
-                    cmp_mask_mode=3,
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -1000,7 +992,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         elif self.compressor_ratio == 4:
             if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
                 self.decode_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
+                    **{**metadata_kwargs, "cmp_mask_mode": 3},
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -1008,19 +1000,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                     cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[: self.num_decodes],  # cached
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
+                    seqused_ori_kv=self.seq_lens[: self.num_decodes],  # cached
+                    seqused_cmp_kv=self.seq_lens[: self.num_decodes] // 4,
+                    cmp_residual_kv=self.seq_lens[: self.num_decodes] % 4,
                     batch_size=len(self.seq_lens[: self.num_decodes]),  # cached
                     cmp_topk=index_topk,
-                    # topk=index_topk,
                     cmp_ratio=4,
                     ori_mask_mode=4,
-                    cmp_mask_mode=3,
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1028,7 +1018,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         else:
             if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
                 self.decode_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
+                    **{**metadata_kwargs, "cmp_mask_mode": 3},
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -1036,17 +1026,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                     cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[: self.num_decodes],
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
+                    seqused_ori_kv=self.seq_lens[: self.num_decodes],
+                    seqused_cmp_kv=self.seq_lens[: self.num_decodes] // 128,
+                    cmp_residual_kv=self.seq_lens[: self.num_decodes] % 128,
                     batch_size=len(self.seq_lens[: self.num_decodes]),
                     cmp_ratio=128,
                     ori_mask_mode=4,
-                    cmp_mask_mode=3,
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1180,7 +1169,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_prefill_tokens = kwargs.get("num_prefill_tokens")
         query_start_loc = common_attn_metadata.query_start_loc
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
-        seq_lens_q = prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
         seq_lens = common_attn_metadata.seq_lens[reqs_start:]
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -1202,16 +1190,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_ori_kv=prefill_query_start_loc,
             cu_seqlens_cmp_kv=None,
             seqused_q=self.seqused_q,
-            seqused_kv=seq_lens,
-            max_seqlen_q=seq_lens_q.max(),
-            max_seqlen_kv=seq_lens.max(),
+            seqused_ori_kv=seq_lens,
             batch_size=len(seq_lens),
             cmp_ratio=1,
             ori_mask_mode=4,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv="PA_BBND",
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1252,16 +1238,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_decode_tokens_typed = num_decode_tokens or 0
         query_start_loc = common_attn_metadata.query_start_loc[: num_decodes_typed + 1]
         seq_lens = common_attn_metadata.seq_lens
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_decodes_typed + 1]
-        max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-
-        if common_attn_metadata._seq_lens_cpu is not None:
-            _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        else:
-            _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-        max_seqlen_kv = torch.max(_seq_lens_cpu[:num_decodes]).item()
 
         input_positions = common_attn_metadata.positions[:num_decode_tokens_typed].long()
         # disable use_cache, otherwise, draft_index>0 will override draft_index=0
@@ -1283,17 +1259,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
             cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
             seqused_q=self.seqused_q,
-            seqused_kv=seq_lens[:num_decodes],
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
+            seqused_ori_kv=seq_lens[:num_decodes],
             batch_size=len(seq_lens[:num_decodes]),
             cmp_ratio=1,
             ori_mask_mode=4,
-            cmp_mask_mode=3,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv="PA_BBND",
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1947,7 +1920,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_kv=swa_kv_cache,
                 ori_block_table=swa_prefill_metadata.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
-                seqused_kv=actual_seq_lengths_key,
+                seqused_ori_kv=actual_seq_lengths_key,
                 sinks=self.attn_sink,
                 metadata=common_prefill_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
@@ -1956,7 +1929,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv="PA_BBND",
                 **extra_attn_kwargs,
             )[0]
 
@@ -2097,18 +2070,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_block_table=swa_prefill_metadata.block_table,
                     cmp_block_table=compressor_prefill_metadata.block_table,
                     cu_seqlens_q=actual_seq_lengths_query,
-                    seqused_kv=actual_seq_lengths_key,
+                    seqused_ori_kv=actual_seq_lengths_key,
+                    seqused_cmp_kv=actual_seq_lengths_key // 4,
+                    cmp_residual_kv=actual_seq_lengths_key % 4,
                     sinks=self.attn_sink,
                     metadata=common_prefill_metadata.sas_metadata,
                     softmax_scale=self.softmax_scale,
                     cmp_ratio=self.compress_ratio,
                     ori_mask_mode=4,
-                    cmp_mask_mode=3,
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
-                    **extra_attn_kwargs,
+                    layout_kv="PA_BBND",
+                    **{**extra_attn_kwargs, "cmp_mask_mode": 3},
                 )[0]
             else:
                 DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
@@ -2121,18 +2095,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_block_table=swa_prefill_metadata.block_table,
                     cmp_block_table=compressor_prefill_metadata.block_table,
                     cu_seqlens_q=actual_seq_lengths_query,
-                    seqused_kv=actual_seq_lengths_key,
+                    seqused_ori_kv=actual_seq_lengths_key,
+                    seqused_cmp_kv=actual_seq_lengths_key // 128,
+                    cmp_residual_kv=actual_seq_lengths_key % 128,
                     sinks=self.attn_sink,
                     metadata=common_prefill_metadata.sas_metadata,
                     softmax_scale=self.softmax_scale,
                     cmp_ratio=self.compress_ratio,
                     ori_mask_mode=4,
-                    cmp_mask_mode=3,
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
-                    **extra_attn_kwargs,
+                    layout_kv="PA_BBND",
+                    **{**extra_attn_kwargs, "cmp_mask_mode": 3},
                 )[0]
         return attn_output
 
@@ -2391,7 +2366,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_kv=swa_kv_cache,
                 ori_block_table=swa_decode_metadata.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
-                seqused_kv=actual_seq_lengths_key,
+                seqused_ori_kv=actual_seq_lengths_key,
                 sinks=self.attn_sink,
                 metadata=swa_decode_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
@@ -2400,7 +2375,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv="PA_BBND",
                 **extra_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
@@ -2412,18 +2387,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_block_table=swa_decode_metadata.block_table,
                 cmp_block_table=compressor_decode_metadata.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
-                seqused_kv=actual_seq_lengths_key,
+                seqused_ori_kv=actual_seq_lengths_key,
+                seqused_cmp_kv=actual_seq_lengths_key // 4,
+                cmp_residual_kv=actual_seq_lengths_key % 4,
                 sinks=self.attn_sink,
                 metadata=compressor_decode_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=self.compress_ratio,
                 ori_mask_mode=4,
-                cmp_mask_mode=3,
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
-                **extra_attn_kwargs,
+                layout_kv="PA_BBND",
+                **{**extra_attn_kwargs, "cmp_mask_mode": 3},
             )[0]
         else:
             attn_output = attn_op(
@@ -2433,18 +2409,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_block_table=swa_decode_metadata.block_table,
                 cmp_block_table=compressor_decode_metadata.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
-                seqused_kv=actual_seq_lengths_key,
+                seqused_ori_kv=actual_seq_lengths_key,
+                seqused_cmp_kv=actual_seq_lengths_key // 128,
+                cmp_residual_kv=actual_seq_lengths_key % 128,
                 sinks=self.attn_sink,
                 metadata=compressor_decode_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=self.compress_ratio,
                 ori_mask_mode=4,
-                cmp_mask_mode=3,
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
-                **extra_attn_kwargs,
+                layout_kv="PA_BBND",
+                **{**extra_attn_kwargs, "cmp_mask_mode": 3},
             )[0]
         return attn_output
 

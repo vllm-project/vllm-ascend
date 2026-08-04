@@ -466,9 +466,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens_cpu[:num_reqs],
             use_cache=False,
         )
-        local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
-        max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
-        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
         start_pos = self.seq_lens[:num_reqs] - seq_lens_q
 
@@ -478,7 +475,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_heads = self.model_config.hf_config.num_attention_heads
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-        metadata_kwargs.setdefault("device", str(self.seqused_q.device))
         cu_seqlens_ori_kv = (
             local_query_start_loc
             if has_prefill
@@ -503,16 +499,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_ori_kv=cu_seqlens_ori_kv,
             cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
             seqused_q=self.seqused_q,
-            seqused_kv=local_seq_lens,
-            max_seqlen_q=max_local_query_len,
-            max_seqlen_kv=max_local_seq_lens,
+            seqused_ori_kv=local_seq_lens,
             batch_size=num_reqs,
             cmp_ratio=1,
             ori_mask_mode=4,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv="PA_BBND",
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -819,7 +813,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            metadata_kwargs.setdefault("device", str(self.seqused_q.device))
             kw = dict(
                 **metadata_kwargs,
                 num_heads_q=num_heads,
@@ -829,20 +822,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                 cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                 seqused_q=self.seqused_q,
-                seqused_kv=seq_lens,
-                max_seqlen_q=max_query_len,
-                max_seqlen_kv=max_seq_lens,
+                seqused_ori_kv=seq_lens,
                 batch_size=num_reqs,
                 ori_mask_mode=4,
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv="PA_BBND",
                 has_ori_kv=True,
             )
 
             if self.compressor_ratio > 1:
                 kw["has_cmp_kv"] = True
+                kw["seqused_cmp_kv"] = seq_lens // cmp_ratio
+                kw["cmp_residual_kv"] = seq_lens % cmp_ratio
                 if self.compressor_ratio == 4:
                     kw["cmp_mask_mode"] = 3
                     kw["cmp_topk"] = index_topk
@@ -1444,7 +1437,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         common_attn_kwargs = dict(
             cu_seqlens_q=local_seq_lengths_query,
-            seqused_kv=local_seq_lengths_key,
+            seqused_ori_kv=local_seq_lengths_key,
             sinks=self.attn_sink,
             softmax_scale=self.softmax_scale,
             cmp_ratio=max(self.compress_ratio, 1),
@@ -1452,7 +1445,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             ori_win_left=self.window_size - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv="PA_BBND",
             **extra_attn_kwargs,
         )
 
@@ -1469,6 +1462,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
+            common_attn_kwargs["seqused_cmp_kv"] = local_seq_lengths_key // 4
+            common_attn_kwargs["cmp_residual_kv"] = local_seq_lengths_key % 4
+            common_attn_kwargs["cmp_mask_mode"] = 3
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1477,7 +1473,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 ori_block_table=swa_metadata.req_metadata.block_table,
                 cmp_block_table=compressor_attn_metadata.req_metadata.block_table,
                 metadata=req_metadata.sas_metadata,
-                cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
         else:
@@ -1485,6 +1480,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
+            common_attn_kwargs["seqused_cmp_kv"] = local_seq_lengths_key // 128
+            common_attn_kwargs["cmp_residual_kv"] = local_seq_lengths_key % 128
+            common_attn_kwargs["cmp_mask_mode"] = 3
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1492,7 +1490,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 ori_block_table=swa_metadata.req_metadata.block_table,
                 cmp_block_table=compressor_attn_metadata.req_metadata.block_table,
                 metadata=compressor_attn_metadata.req_metadata.sas_metadata,
-                cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
         return attn_output, o_proj_full_handles
