@@ -552,7 +552,7 @@ class MultiGroupBlockTable:
             TOTAL_CP_WORLD_SIZE=total_cp_world_size,
             TOTAL_CP_RANK=total_cp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=bt0.cp_kv_cache_interleave_size,
-            PAD_ID=-1,
+            PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
         )
 
