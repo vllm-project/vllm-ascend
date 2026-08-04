@@ -65,8 +65,18 @@ class MooncakeBaseConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ) -> None:
+        assert vllm_config.kv_transfer_config is not None
+
         self.vllm_config = vllm_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            self.kv_transfer_config.is_kv_consumer
+            == self.kv_transfer_config.is_kv_producer
+        ):
+            raise ValueError(
+                "Mooncake worker requires exactly one KV transfer role, "
+                f"got {self.kv_transfer_config.kv_role!r}"
+            )
         self.engine_id = engine_id
         self.kv_cache_config = kv_cache_config
         self.block_size = vllm_config.cache_config.block_size
@@ -82,16 +92,20 @@ class MooncakeBaseConnectorWorker:
         self.pp_rank = get_pp_group().rank_in_group
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        if self.dp_rank is None:
+            raise ValueError("Mooncake worker requires a local DP rank")
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        pcp_group = get_pcp_group()
+        self.pcp_rank = pcp_group.rank_in_group
+        self.pcp_size = pcp_group.world_size
+        assert self.pcp_size == 1, (
+            "Mooncake temporarily requires prefill context parallel size 1, "
+            f"got {self.pcp_size}"
+        )
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-        if self.pp_size > 1 and self.pcp_size > 1:
-            raise ValueError("PP and PCP cannot be enabled at the same time")
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
-        self.kv_role = self.kv_transfer_config.kv_role
         self.side_channel_host = get_ip()
         self.side_channel_port = (
             self.kv_transfer_config.kv_port

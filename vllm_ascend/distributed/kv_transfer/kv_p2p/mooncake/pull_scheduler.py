@@ -279,22 +279,21 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
 
-        if self.kv_role == "kv_consumer":
+        if self.kv_transfer_config.is_kv_consumer:
             recving_ready_event = threading.Event()
             self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
             self._recving_thread.start()
             recving_ready_event.wait()
-        elif self.kv_role != "kv_producer":
-            raise ValueError(
-                "Mooncake pull scheduler only supports kv_producer or "
-                f"kv_consumer, got {self.kv_role!r}"
-            )
 
     def set_xfer_handshake_metadata_from_workers(
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
-        if self.kv_role != "kv_producer" or not metadata or self._sending_thread is not None:
+        if (
+            not self.kv_transfer_config.is_kv_producer
+            or not metadata
+            or self._sending_thread is not None
+        ):
             return
 
         ready_event = threading.Event()
