@@ -89,8 +89,8 @@ def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     backend = extra.get("transfer_backend")
     if backend is None:
         raise ValueError(
-            "SFAPDRD2HConnector requires kv_connector_extra_config[\"transfer_backend\"] "
-            "to be set (currently only \"memfabric\" is supported)."
+            'SFAPDRD2HConnector requires kv_connector_extra_config["transfer_backend"] '
+            'to be set (currently only "memfabric" is supported).'
         )
     return backend
 
@@ -270,8 +270,7 @@ class SFAPDRD2HConsumerWorker:
             self._pending_done = still_pending
             if done_recving or self._pending_done:
                 logger.debug(
-                    "MembPull D get_finished: finished_all_tp_ext=%s, "
-                    "done_recving_internal=%s, pending_done_ext=%s",
+                    "MembPull D get_finished: finished_all_tp_ext=%s, done_recving_internal=%s, pending_done_ext=%s",
                     finished_on_all,
                     done_recving,
                     self._pending_done,
