@@ -887,10 +887,9 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        # Only the first rank in each put_step group saves to the
-        # pool.  Other ranks in the same group share the same KV cache
-        # (e.g. MLA latent), so they skip save to avoid redundant writes.
-        if self.tp_rank % self.put_step != 0:
+        # DCP ranks own different KV shards. Without DCP, only the first rank
+        # in each put_step group saves the shared KV cache (e.g. MLA latent).
+        if self.dcp_size <= 1 and self.tp_rank % self.put_step != 0:
             return
         block_size = self._get_effective_group_block_size(group_id)
         request_block_ranges = []
@@ -990,27 +989,34 @@ class KVPoolWorker:
     def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
         """Generate GVA key for layerwise transfer.
 
-        Include the PP rank because each PP worker stores a dense local layer
-        range in its own GVA allocation.
+        Include CP and PP ranks because each worker stores its local cache and
+        dense local layer range in its own GVA allocation.
         """
         if self.num_kv_cache_groups > 1:
-            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}@{self.pp_rank}"
+            return (
+                f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
+                f"@pcp{self.pcp_rank}@dcp{self.dcp_rank}@pp{self.pp_rank}"
+            )
         else:
-            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}@{self.pp_rank}"
+            return (
+                f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+                f"@pcp{self.pcp_rank}@dcp{self.dcp_rank}@pp{self.pp_rank}"
+            )
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
         per-group GVAs. Key format:
-        model@group_id@hash@head_or_tp_rank@pp_rank (multi-group) or
-        model@hash@head_or_tp_rank@pp_rank (single-group).
+        model@group_id@hash@head_or_tp_rank@pcp_rank@dcp_rank@pp_rank
+        (multi-group) or model@hash@head_or_tp_rank@pcp_rank@dcp_rank@pp_rank
+        (single-group).
         """
         if not self.use_gva_layerwise:
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
-        if self.tp_rank % self.put_step != 0:
+        if self.dcp_size <= 1 and self.tp_rank % self.put_step != 0:
             return
         for request in requests:
             if request.can_save is None or not request.can_save:
