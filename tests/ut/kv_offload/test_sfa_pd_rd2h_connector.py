@@ -1280,4 +1280,3 @@ def test_discard_requests_clears_partial_contributor_state():
     thread.discard_requests({"req-0"})
     assert "req-0" not in thread._done_contributors
     assert "req-0" not in thread._expected_ratio
-
