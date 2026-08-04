@@ -760,22 +760,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             keys = [keys[index] for index in missing_indices]
             key_block_ids = [key_block_ids[index] for index in missing_indices]
 
-            logger.debug(
-                "Storing KV cache for %d out of %d blocks for request %s in group %d",
-                len(keys),
-                token_len // group_block_size,
-                req_id,
-                group_id,
-            )
-            logger.debug(
-                "KV pool put request=%s group=%d token_len=%d keys=%d sample_keys=%s",
-                req_id,
-                group_id,
-                token_len,
-                len(keys),
-                keys[:3],
-            )
-
             addrs = []
             sizes = []
             stored_events: list[BlockStored] = []
@@ -826,6 +810,41 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         )
                         stored_events.append(stored_event)
                         logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
+
+            invalid_indices = [
+                index for index, key_sizes in enumerate(sizes) if not key_sizes or any(size <= 0 for size in key_sizes)
+            ]
+            sample_indices = invalid_indices[:3] if invalid_indices else list(range(min(3, len(keys))))
+            key_samples = [
+                {
+                    "key": keys[index],
+                    "start": starts[index],
+                    "end": ends[index],
+                    "block_id": key_block_ids[index],
+                    "size_count": len(sizes[index]),
+                    "min_size": min(sizes[index]) if sizes[index] else None,
+                }
+                for index in sample_indices
+            ]
+            flat_sizes = [size for key_sizes in sizes for size in key_sizes]
+            group_metadata = self.token_database.metadata[group_id]
+            logger.warning(
+                "KVPOOL_PUT request=%s pp=%d tp=%d group=%d token_len=%d "
+                "group_block_size=%d keys=%d size_count=%d min_size=%s "
+                "max_size=%s invalid_keys=%d key_samples=%s",
+                req_id,
+                group_metadata.pp_rank,
+                self.tp_rank,
+                group_id,
+                token_len,
+                group_block_size,
+                len(keys),
+                len(flat_sizes),
+                min(flat_sizes) if flat_sizes else None,
+                max(flat_sizes) if flat_sizes else None,
+                len(invalid_indices),
+                key_samples,
+            )
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self._decode_adaptor_prefill_pp(
