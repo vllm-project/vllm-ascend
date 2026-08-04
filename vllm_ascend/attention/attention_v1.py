@@ -1625,10 +1625,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
                 try:
                     # Build FA3 scheduler metadata for the current batch
-                    # (eager path — fresh each iteration).
-                    scheduler_metadata = self._build_fa3_scheduler_metadata(
-                        attn_metadata, block_size, query,
-                    )
+                    # (eager path — fresh each iteration).  Skip during the
+                    # memory-profile run: get_scheduler_metadata allocates
+                    # buffers sized by max_model_len, shrinking the measured
+                    # free memory and thus the KV cache, which corrupts prefill.
+                    if _EXTRA_CTX.in_profile_run:
+                        scheduler_metadata = None
+                    else:
+                        scheduler_metadata = self._build_fa3_scheduler_metadata(
+                            attn_metadata, block_size, query,
+                        )
                     attn_output = fa3_forward(
                         query, key, value,
                         attn_metadata=attn_metadata,
