@@ -27,6 +27,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
@@ -352,21 +353,22 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
-        #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
-        with_quant = (
-            token_dispatch_input.quant.dispatch_with_quant
-            and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
-        )
+        quant_type = token_dispatch_input.quant.quant_type
+        dynamic_scale = token_dispatch_input.routing.pertoken_scale
+        unquantized_mxfp_dispatch = quant_type in (QuantType.MXFP4, QuantType.W4A8MXFP) and dynamic_scale is None
+        # Without prepare-stage scales, MXFP stays unquantized in dispatch and
+        # is quantized again inside the MLP path.
+        with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP8
+        with_quant = with_quant and not unquantized_mxfp_dispatch
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
-        dynamic_scale = token_dispatch_input.routing.pertoken_scale
-        quant_type = token_dispatch_input.quant.quant_type
         act_quant_type = (
-            token_dispatch_input.quant.mxfp.act_quant_type if token_dispatch_input.quant.mxfp is not None else None
+            token_dispatch_input.quant.mxfp.act_quant_type
+            if token_dispatch_input.quant.mxfp is not None and not unquantized_mxfp_dispatch
+            else None
         )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
@@ -397,10 +399,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
-            hidden_states,
-            topk_ids,
-            scale=dynamic_scale,
+        routing_kwargs = dict(
             active_num=num_tokens * self.top_k,
             expert_num=global_num_experts,
             expert_tokens_num_type=1,
@@ -409,6 +408,59 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             quant_mode=quant_mode,
             act_quant_type=act_quant_type,
         )
+        route_mxfp8_activation = (
+            quant_type == QuantType.W4A8MXFP
+            and dynamic_scale is not None
+            and hidden_states.dtype == torch.float8_e4m3fn
+        )
+        logger.info(
+            "MoE AllGather dispatch routing gate: quant_type=%s, "
+            "dispatch_with_quant=%s, with_quant=%s, is_mxfp=%s, "
+            "quant_mode=%s, act_quant_type=%s, hidden_dtype=%s, "
+            "hidden_shape=%s, dynamic_scale_dtype=%s, dynamic_scale_shape=%s, "
+            "unquantized_mxfp_dispatch=%s, route_mxfp8_activation=%s, "
+            "expert_map=%s, topk_ids_shape=%s",
+            quant_type,
+            token_dispatch_input.quant.dispatch_with_quant,
+            with_quant,
+            is_mxfp,
+            quant_mode,
+            act_quant_type,
+            hidden_states.dtype,
+            tuple(hidden_states.shape),
+            None if dynamic_scale is None else dynamic_scale.dtype,
+            None if dynamic_scale is None else tuple(dynamic_scale.shape),
+            unquantized_mxfp_dispatch,
+            route_mxfp8_activation,
+            expert_map is not None,
+            tuple(topk_ids.shape),
+        )
+        if route_mxfp8_activation:
+            logger.info(
+                "MoE AllGather dispatch routes W4A8 MXFP FP8 activation "
+                "and scale separately."
+            )
+            sorted_hidden_states, expanded_row_idx, expert_tokens, _ = DeviceOperator.npu_moe_init_routing(
+                hidden_states.view(torch.bfloat16),
+                topk_ids,
+                **{**routing_kwargs, "scale": None, "quant_mode": -1, "act_quant_type": None},
+            )
+            sorted_hidden_states = sorted_hidden_states.view(hidden_states.dtype)
+            scale_shape = dynamic_scale.shape[1:]
+            routed_scale, _, _, _ = DeviceOperator.npu_moe_init_routing(
+                dynamic_scale.reshape(dynamic_scale.shape[0], -1).to(torch.bfloat16),
+                topk_ids,
+                **{**routing_kwargs, "scale": None, "quant_mode": -1, "act_quant_type": None},
+            )
+            dynamic_scale = routed_scale.to(dynamic_scale.dtype).view(-1, *scale_shape)
+        else:
+            logger.info("MoE AllGather dispatch uses default init routing path.")
+            sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
+                hidden_states,
+                topk_ids,
+                scale=dynamic_scale,
+                **routing_kwargs,
+            )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
 
