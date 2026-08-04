@@ -990,22 +990,21 @@ class KVPoolWorker:
     def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
         """Generate GVA key for layerwise transfer.
 
-        Single-group models use the PR #11585 format (model@hash@rank) for
-        backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups.
+        Include the PP rank because each PP worker stores a dense local layer
+        range in its own GVA allocation.
         """
         if self.num_kv_cache_groups > 1:
-            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
+            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}@{self.pp_rank}"
         else:
-            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}@{self.pp_rank}"
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
-        per-group GVAs. Key format: model@group_id@hash@head_or_tp_rank
-        (multi-group) or model@hash@head_or_tp_rank (single-group, backward
-        compat with PR #11585).
+        per-group GVAs. Key format:
+        model@group_id@hash@head_or_tp_rank@pp_rank (multi-group) or
+        model@hash@head_or_tp_rank@pp_rank (single-group).
         """
         if not self.use_gva_layerwise:
             return
