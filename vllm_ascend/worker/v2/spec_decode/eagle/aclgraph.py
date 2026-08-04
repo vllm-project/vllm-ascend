@@ -102,16 +102,28 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     if self.dp_size > 1
                     else None
                 )
-                prepare_inputs_to_capture(
-                    num_reqs,
-                    num_tokens,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
-                )
+                if vllm_version_is("0.26.0"):
+                    prepare_inputs_to_capture(
+                        num_reqs,
+                        num_tokens,
+                        model_state,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        skip_attn=(desc.cg_mode != CUDAGraphMode.PIECEWISE),
+                    )
+                else:
+                    prepare_inputs_to_capture(
+                        num_reqs,
+                        num_tokens,
+                        model_state,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
+                    )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 if vllm_version_is("0.26.0"):
                     return lambda cg_mode: forward_fn(

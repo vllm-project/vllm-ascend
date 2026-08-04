@@ -23,10 +23,12 @@ from unittest.mock import patch
 import jsonschema
 import pytest
 import regex as re
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import ModelName
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
@@ -220,8 +222,14 @@ def test_guided_auto_rejects_mixed_structured_output_backends(vllm_runner):
     )
     prompts = [f"Give an example JSON that fits this schema: {guidance_schema}"]
     inputs = vllm_runner.get_inputs(prompts)
-    with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
-        vllm_runner.model.generate(inputs, sampling_params=guidance_params)
+    # main2main compat: on 0.26.0 the upstream validation may raise
+    # ValueError, while the ascend patch on main raises VLLMValidationError.
+    if vllm_version_is("0.26.0"):
+        with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
+            vllm_runner.model.generate(inputs, sampling_params=guidance_params)
+    else:
+        with pytest.raises(VLLMValidationError, match="already using 'xgrammar'.*'guidance'"):
+            vllm_runner.model.generate(inputs, sampling_params=guidance_params)
 
 
 @pytest.mark.timeout(1000)

@@ -142,7 +142,7 @@ jobs:
       quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       # ====================================================================
       
-      should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
