@@ -20,6 +20,12 @@
 # Merges N separate _compute_slot_mapping_kernel launches into a single
 # 2D-grid launch, reducing kernel launch overhead on Ascend NPU (910B).
 #
+# The per-group computation is aligned with the Ascend-optimised single-group
+# kernel in ``ops/triton/compute_slot_mapping.py`` (PR #13048):
+#   - ``pos`` cast to int32 to reduce scalar-arithmetic overhead;
+#   - ``TOTAL_CP_WORLD_SIZE == 1`` dedicated fast path (no CP interleave);
+#   - windowed block-table load + ``tl.gather`` to fix non-contiguous access.
+#
 # Design:
 #   - 2D grid: (num_reqs + 1, num_groups)
 #       axis 0 → req_idx  (including one padding row)
@@ -35,6 +41,8 @@ from typing import Any
 
 import torch
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.compute_slot_mapping import _next_power_of_2
 
 
 @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
@@ -60,7 +68,8 @@ def compute_slot_mapping_fused_kernel(
     TOTAL_CP_RANK: tl.constexpr,
     CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
     PAD_ID: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    TILE_BLOCK_SIZE: tl.constexpr,           # positions tile size (1024)
+    BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,   # window for block-table load
 ):
     """
     2D-grid fused slot-mapping kernel.
@@ -72,10 +81,10 @@ def compute_slot_mapping_fused_kernel(
       2. If ``req_idx`` is the last row → pads ``slot_mapping[group]``.
          Otherwise → computes the standard slot-mapping for that request.
 
-    The logic inside the normal path is byte-for-byte identical to the
-    original single-group ``_compute_slot_mapping_kernel``, with the only
-    difference being that ``kv_cache_block_size`` and ``blocks_per_kv_block``
-    are loaded dynamically instead of being ``tl.constexpr``.
+    The normal-path logic mirrors ``_compute_slot_mapping_kernel`` in
+    ``ops/triton/compute_slot_mapping.py`` (PR #13048), with ``block_size``,
+    ``kv_cache_block_size`` and ``blocks_per_kv_block`` loaded dynamically
+    (per-group) instead of being ``tl.constexpr``.
     """
     # ---- resolve (req, group) from the 2-D grid -----------------------
     req_idx = tl.program_id(axis=0)
@@ -98,8 +107,8 @@ def compute_slot_mapping_fused_kernel(
 
     # ---- padding row --------------------------------------------------
     if req_idx == num_reqs_plus_one - 1:
-        for p in range(num_tokens, max_num_tokens, BLOCK_SIZE):
-            pad_offs = p + tl.arange(0, BLOCK_SIZE)
+        for p in range(num_tokens, max_num_tokens, TILE_BLOCK_SIZE):
+            pad_offs = p + tl.arange(0, TILE_BLOCK_SIZE)
             tl.store(
                 slot_mapping_ptr + pad_offs,
                 PAD_ID,
@@ -111,51 +120,71 @@ def compute_slot_mapping_fused_kernel(
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
 
-    virtual_block_size = kv_cache_block_size * TOTAL_CP_WORLD_SIZE
     row_offset = req_idx * block_table_stride
+    block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
 
-    for i in range(start_idx, end_idx, BLOCK_SIZE):
-        offsets = i + tl.arange(0, BLOCK_SIZE)
+    # Sentinel used to mask out-of-range positions before the min reduction.
+    INT32_MAX = 2147483647
+
+    for i in range(start_idx, end_idx, TILE_BLOCK_SIZE):
+        offsets = i + tl.arange(0, TILE_BLOCK_SIZE)
         mask = offsets < end_idx
-        pos = tl.load(positions_ptr + offsets, mask=mask, other=0)
+        pos = tl.load(positions_ptr + offsets, mask=mask, other=0).to(tl.int32)
 
-        virtual_block_indices = pos // virtual_block_size
-        virtual_block_offsets = (
-            pos - virtual_block_indices * virtual_block_size
-        )
+        # Compute block indices / slot offsets.
+        if TOTAL_CP_WORLD_SIZE == 1:
+            # Fast path: no CP interleave arithmetic.
+            block_indices = pos // block_size
+            slot_offsets = pos - block_indices * block_size
+        else:
+            virtual_block_size = kv_cache_block_size * TOTAL_CP_WORLD_SIZE
+            virtual_block_indices = pos // virtual_block_size
+            virtual_block_offsets = (
+                pos - virtual_block_indices * virtual_block_size
+            )
+            is_local = (
+                virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
+            ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+            local_block_offsets = (
+                virtual_block_offsets
+                // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
+                virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
+            )
+            block_indices = (
+                virtual_block_indices * blocks_per_kv_block
+                + local_block_offsets // block_size
+            )
+            slot_offsets = local_block_offsets % block_size
 
-        is_local = (
-            virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
-        ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
-
-        local_block_offsets = (
-            virtual_block_offsets
-            // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-        ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
-            virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
-        )
-
-        block_indices = (
-            virtual_block_indices * blocks_per_kv_block
-            + local_block_offsets // block_size
-        )
-
-        block_numbers = tl.load(
-            block_table_ptr + row_offset + block_indices,
-            mask=mask & is_local,
+        # Windowed block-table load (fixes non-contiguous access):
+        # load [block_idx_base, block_idx_base + WINDOW) once, then gather.
+        valid_block_indices = tl.where(mask, block_indices, INT32_MAX)
+        block_idx_base = tl.min(valid_block_indices, axis=0)
+        block_table_window_offsets = block_idx_base + block_table_offsets
+        block_table_window = tl.load(
+            block_table_ptr + row_offset + block_table_window_offsets,
+            mask=block_table_window_offsets < block_table_stride,
             other=0,
-        ).to(tl.int64)
+        ).to(tl.float32)
 
-        slot_offsets = local_block_offsets % block_size
+        if TOTAL_CP_WORLD_SIZE == 1:
+            relative_block_indices = tl.where(
+                mask, block_indices - block_idx_base, 0
+            )
+        else:
+            relative_block_indices = tl.where(
+                mask & is_local, block_indices - block_idx_base, 0
+            )
+        block_numbers = tl.gather(
+            block_table_window, relative_block_indices, 0
+        ).to(tl.int32)
+
         slot_ids = block_numbers * block_size + slot_offsets
-        slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+        if TOTAL_CP_WORLD_SIZE != 1:
+            slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        # Store as int32 (Ascend block_table convention).
-        tl.store(
-            slot_mapping_ptr + offsets,
-            slot_ids.to(tl.int32),
-            mask=mask,
-        )
+        tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +248,16 @@ def launch_slot_mapping_fused(
         dtype=torch.int32, device=device,
     )
 
-    # ---- CP parameters ------------------------------------------------
+    # ---- CP parameters & compile-time constants -----------------------
     bt0 = block_tables[0]
     total_cp_world_size = bt0.dcp_world_size
     total_cp_rank = bt0.dcp_rank
+
+    tile_block_size = 1024
+    min_block_size = min(bt.block_size for bt in block_tables)
+    window_size = _next_power_of_2(
+        ((tile_block_size + min_block_size - 1) // min_block_size) + 1
+    )
 
     # ---- launch -------------------------------------------------------
     compute_slot_mapping_fused_kernel[(num_reqs_plus_one, num_groups)](
@@ -240,5 +275,6 @@ def launch_slot_mapping_fused(
         TOTAL_CP_RANK=total_cp_rank,
         CP_KV_CACHE_INTERLEAVE_SIZE=bt0.cp_kv_cache_interleave_size,
         PAD_ID=-1,
-        BLOCK_SIZE=1024,
+        TILE_BLOCK_SIZE=tile_block_size,
+        BLOCK_TABLE_WINDOW_SIZE=window_size,
     )

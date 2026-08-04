@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import logging
+from typing import Any, Callable
+
 import numpy as np
 import torch
-from typing import Any, Callable
 from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.logger import logger
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.ops.triton.compute_slot_mapping import (
@@ -16,9 +17,12 @@ from vllm_ascend.ops.triton.compute_slot_mapping import (
     _next_power_of_2,
 )
 
+logger = logging.getLogger(__name__)
+
 # Lazy-imported reference to the fused Triton kernel.
 # Cached after first successful import; `None` if Triton is unavailable.
 _compute_slot_mapping_fused_fn: "Callable[..., Any] | None" = None
+
 
 class BlockTable:
     def __init__(
@@ -541,6 +545,15 @@ class MultiGroupBlockTable:
         total_cp_world_size = bt0.dcp_world_size
         total_cp_rank = bt0.dcp_rank
 
+        # BLOCK_TABLE_WINDOW_SIZE must be a compile-time constant large
+        # enough for the smallest block_size among all groups, so a single
+        # value covers every group (loads are masked by block_table_stride).
+        tile_block_size = 1024
+        min_block_size = min(bt.block_size for bt in self._non_mamba_tables)
+        window_size = _next_power_of_2(
+            ((tile_block_size + min_block_size - 1) // min_block_size) + 1
+        )
+
         p = self._fused_params
         kernel[(num_reqs_plus_one, num_groups)](
             num_tokens,
@@ -556,8 +569,9 @@ class MultiGroupBlockTable:
             TOTAL_CP_WORLD_SIZE=total_cp_world_size,
             TOTAL_CP_RANK=total_cp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=bt0.cp_kv_cache_interleave_size,
-            PAD_ID=-1,
-            BLOCK_SIZE=1024,
+            PAD_ID=PAD_SLOT_ID,
+            TILE_BLOCK_SIZE=tile_block_size,
+            BLOCK_TABLE_WINDOW_SIZE=window_size,
         )
 
     def _get_stream_pool(self, num_streams: int) -> "list[Any]":
@@ -575,7 +589,8 @@ class MultiGroupBlockTable:
             except AttributeError:
                 stream_cls = torch.cuda.Stream  # type: ignore[attr-defined]
             old_pool = MultiGroupBlockTable._stream_pool or []
-            new_streams = [stream_cls() for _ in range(num_streams - len(old_pool))]
+            new_streams = [stream_cls(device=self._device) for _ in range(num_streams -
+                                                                        len(old_pool))]
             MultiGroupBlockTable._stream_pool = old_pool + new_streams
         return MultiGroupBlockTable._stream_pool[:num_streams]
 
