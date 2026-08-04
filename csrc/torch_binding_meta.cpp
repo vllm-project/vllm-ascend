@@ -1424,6 +1424,150 @@ void npu_scatter_nd_update_v2_meta(
 }
 
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3_meta(
+    const at::Tensor &token_x,
+    const at::Tensor &weight_dq,
+    const at::Tensor &weight_uq_qr,
+    const at::Tensor &weight_uk,
+    const at::Tensor &weight_dkv_kr,
+    const at::Tensor &rmsnorm_gamma_cq,
+    const at::Tensor &rmsnorm_gamma_ckv,
+    const at::Tensor &rope_sin,
+    const at::Tensor &rope_cos,
+    at::Tensor &kv_cache,
+    at::Tensor &kr_cache,
+    const c10::optional<at::Tensor> &cache_index,
+    const c10::optional<at::Tensor> &dequant_scale_x,
+    const c10::optional<at::Tensor> &dequant_scale_w_dq,
+    const c10::optional<at::Tensor> &dequant_scale_w_uq_qr,
+    const c10::optional<at::Tensor> &dequant_scale_w_dkv_kr,
+    const c10::optional<at::Tensor> &quant_scale_ckv,
+    const c10::optional<at::Tensor> &quant_scale_ckr,
+    const c10::optional<at::Tensor> &smooth_scales_cq,
+    const c10::optional<at::Tensor> &actual_seq_len,
+    const c10::optional<at::Tensor> &k_nope_clip_alpha,
+    double rmsnorm_epsilon_cq,
+    double rmsnorm_epsilon_ckv,
+    c10::string_view cache_mode,
+    bool query_norm_flag,
+    int64_t weight_quant_mode,
+    int64_t kv_cache_quant_mode,
+    int64_t query_quant_mode,
+    int64_t ckvkr_repo_mode,
+    int64_t quant_scale_repo_mode,
+    int64_t tile_size,
+    double qc_qr_scale,
+    double kc_scale)
+{
+    constexpr int64_t FP8_E4M3_BLOCK_SIZE = 32;
+    const bool need_dequant_scale_q_nope =
+        (weight_quant_mode == 2 || weight_quant_mode == 3 || weight_quant_mode == 4 ||
+         weight_quant_mode == 5) &&
+        kv_cache_quant_mode == 1;
+
+    // rope_sin/rope_cos are required args; empty tensors mean RoPE off (Dr defaults to 64).
+    // symbolic-meta-ok: empty rope_sin (numel==0) is the concrete RoPE-off runtime sentinel.
+    const bool rope_enabled = rope_sin.defined() && rope_sin.numel() > 0;
+    at::ScalarType query_dtype = rope_enabled ? rope_sin.scalar_type() : at::kBFloat16;
+    if (weight_quant_mode == 3 && kv_cache_quant_mode == 1) {
+        query_dtype = at::kFloat8_e4m3fn;
+    } else if (weight_quant_mode == 2 && kv_cache_quant_mode == 1) {
+        query_dtype = at::kChar;
+    }
+
+    at::ScalarType query_norm_dtype = at::kBFloat16;
+    if (weight_quant_mode == 3 || weight_quant_mode == 4) {
+        query_norm_dtype = at::kFloat8_e4m3fn;
+    } else if (weight_quant_mode != 0) {
+        query_norm_dtype = weight_uq_qr.scalar_type();
+    }
+
+    at::ScalarType dequant_scale_q_norm_dtype =
+        weight_quant_mode == 3 ? at::kFloat8_e8m0fnu : at::kFloat;
+
+    c10::SymDimVector query_shape;
+    c10::SymDimVector query_rope_shape;
+    c10::SymDimVector dequant_scale_q_nope_shape;
+    c10::SymDimVector query_norm_shape;
+    c10::SymDimVector dequant_scale_q_norm_shape;
+
+    if (token_x.dim() == 3) {
+        c10::SymInt rope_dim = rope_enabled ? rope_sin.sym_size(2) : c10::SymInt(64);
+        query_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_uk.sym_size(0),
+                       weight_uk.sym_size(2)};
+        query_rope_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_uk.sym_size(0),
+                            rope_dim};
+        dequant_scale_q_nope_shape = {token_x.sym_size(0) * token_x.sym_size(1),
+                                      weight_uk.sym_size(0), c10::SymInt(1)};
+        query_norm_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_dq.sym_size(1)};
+        dequant_scale_q_norm_shape = {token_x.sym_size(0) * token_x.sym_size(1)};
+        if (weight_quant_mode == 3) {
+            dequant_scale_q_norm_shape.push_back(weight_dq.sym_size(1) / c10::SymInt(FP8_E4M3_BLOCK_SIZE));
+        } else {
+            dequant_scale_q_norm_shape.push_back(c10::SymInt(1));
+        }
+    } else {
+        c10::SymInt rope_dim = rope_enabled ? rope_sin.sym_size(1) : c10::SymInt(64);
+        query_shape = {token_x.sym_size(0), weight_uk.sym_size(0), weight_uk.sym_size(2)};
+        query_rope_shape = {token_x.sym_size(0), weight_uk.sym_size(0), rope_dim};
+        dequant_scale_q_nope_shape = {token_x.sym_size(0), weight_uk.sym_size(0), c10::SymInt(1)};
+        query_norm_shape = {token_x.sym_size(0), weight_dq.sym_size(1)};
+        dequant_scale_q_norm_shape = {token_x.sym_size(0)};
+        if (weight_quant_mode == 3) {
+            dequant_scale_q_norm_shape.push_back(weight_dq.sym_size(1) / c10::SymInt(FP8_E4M3_BLOCK_SIZE));
+        } else {
+            dequant_scale_q_norm_shape.push_back(c10::SymInt(1));
+        }
+    }
+
+    at::Tensor query = at::empty_symint(query_shape, token_x.options().dtype(query_dtype));
+    at::Tensor query_rope = at::empty_symint(query_rope_shape, token_x.options().dtype(at::kBFloat16));
+    at::Tensor dequant_scale_q_nope =
+        need_dequant_scale_q_nope
+            ? at::empty_symint(dequant_scale_q_nope_shape, token_x.options().dtype(at::kFloat))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(at::kFloat));
+    at::Tensor query_norm =
+        query_norm_flag
+            ? at::empty_symint(query_norm_shape, token_x.options().dtype(query_norm_dtype))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(query_norm_dtype));
+    at::Tensor dequant_scale_q_norm =
+        (query_norm_flag && weight_quant_mode != 0)
+            ? at::empty_symint(dequant_scale_q_norm_shape,
+                               token_x.options().dtype(dequant_scale_q_norm_dtype))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(dequant_scale_q_norm_dtype));
+
+    (void)weight_dkv_kr;
+    (void)rmsnorm_gamma_cq;
+    (void)rmsnorm_gamma_ckv;
+    (void)rope_cos;
+    (void)kv_cache;
+    (void)kr_cache;
+    (void)cache_index;
+    (void)dequant_scale_x;
+    (void)dequant_scale_w_dq;
+    (void)dequant_scale_w_uq_qr;
+    (void)dequant_scale_w_dkv_kr;
+    (void)quant_scale_ckv;
+    (void)quant_scale_ckr;
+    (void)smooth_scales_cq;
+    (void)actual_seq_len;
+    (void)k_nope_clip_alpha;
+    (void)rmsnorm_epsilon_cq;
+    (void)rmsnorm_epsilon_ckv;
+    (void)cache_mode;
+    (void)query_quant_mode;
+    (void)ckvkr_repo_mode;
+    (void)quant_scale_repo_mode;
+    (void)tile_size;
+    (void)qc_qr_scale;
+    (void)kc_scale;
+
+    return {query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
     const at::Tensor & k,
     const at::Tensor & w,
@@ -1849,6 +1993,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu
+    ops.impl("npu_mla_prolog_v3", &vllm_ascend::meta::npu_mla_prolog_v3_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
