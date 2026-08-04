@@ -27,7 +27,7 @@ import csv
 import importlib.metadata
 import logging
 import os
-import re
+import regex as re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
