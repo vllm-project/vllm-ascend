@@ -20,6 +20,13 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.26.0"):
+    # Added to vllm.utils.torch_utils in vllm main after 0.26.0 (vLLM #49919)
+    # for explicit torch CPU thread management in workers.
+    from vllm.utils.torch_utils import set_torch_threads_for_runtime  # type: ignore[import-not-found]
+
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -37,8 +44,13 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             f"_parallel_size ({pcp_parallel_size}). "
         )
 
-        # Set multiprocessing envs
-        set_multiprocessing_worker_envs()
+        # Set multiprocessing envs. `local_world_size` was added to
+        # set_multiprocessing_worker_envs in vllm main after 0.26.0 (vLLM
+        # #49919) so the parent sizes each worker's OMP thread pool.
+        if vllm_version_is("0.26.0"):
+            set_multiprocessing_worker_envs()
+        else:
+            set_multiprocessing_worker_envs(self.local_world_size)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -95,6 +107,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             # Wait for all local workers to be ready.
             self.workers = AscendWorkerProc.wait_for_ready(unready_workers)
+
+            # The workers have inherited their thread count (see
+            # set_multiprocessing_worker_envs); this process only schedules, so
+            # it gets no benefit from torch intra-op parallelism, just CPU
+            # contention with them. Mirrors upstream MultiprocExecutor (vLLM
+            # #49919).
+            if not vllm_version_is("0.26.0"):
+                set_torch_threads_for_runtime()  # type: ignore[name-defined]
 
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:

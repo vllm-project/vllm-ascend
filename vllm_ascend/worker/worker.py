@@ -71,12 +71,18 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
+
+if not vllm_version_is("0.26.0"):
+    # Added to vllm.utils.torch_utils in vllm main after 0.26.0 (vLLM #49919)
+    # to drop torch intra-op threads once worker startup (weight loading) ends.
+    from vllm.utils.torch_utils import set_torch_threads_for_runtime  # type: ignore[import-not-found]  # noqa: E402
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
@@ -742,6 +748,12 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+        # Startup is done; steady-state serving gets no benefit from torch
+        # intra-op parallelism. Mirrors upstream GPUWorker (vLLM #49919).
+        if not vllm_version_is("0.26.0"):
+            set_torch_threads_for_runtime()  # type: ignore[name-defined]
+
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
             # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
