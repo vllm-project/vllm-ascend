@@ -5,9 +5,9 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
@@ -64,7 +64,7 @@ class AscendMlaDCPMetadataBuilder(
 
     def __init__(
         self,
-        kv_cache_spec: AscendMLAAttentionSpec,
+        kv_cache_spec: AttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
