@@ -22,7 +22,12 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
+    AscendCompilationConfig,
     AscendConfig,
+    AscendFusionConfig,
+    EplbConfig,
+    ProfilingChunkConfig,
+    RejectionSamplerConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -63,7 +68,10 @@ class TestAscendConfig(TestBase):
     @staticmethod
     def _make_sparse_li_c8_config(quant_description):
         quant_config = SimpleNamespace(quant_description=quant_description)
-        config = AscendConfig.__new__(AscendConfig)
+        # Use object.__new__ to bypass pydantic dataclass validation; this
+        # helper only needs a partial AscendConfig to test sparse-li-c8 layer
+        # filtering, not a fully constructed instance.
+        config = object.__new__(AscendConfig)
         config.enable_sparse_li_c8 = True
         (
             config._sparse_li_c8_layer_ids,
@@ -612,3 +620,47 @@ class TestSchedulerConfig(TestBase):
 
         self.assertTrue(config.enable_balance_scheduling)
         mock_info_once.assert_called_once()
+
+
+class TestSubconfigPydanticTypeValidation(TestBase):
+    """Verify @config migration gives sub-configs lax bool/int coercion and forbid.
+
+    These tests construct sub-configs directly (no vllm_config / init_ascend_config)
+    so they run on CPU-only UT runners.
+    """
+
+    def test_ascend_fusion_config_string_false_disables(self):
+        # bool("false") is True in Python; pydantic lax must resolve to False.
+        self.assertFalse(AscendFusionConfig(fusion_ops_gmmswigluquant="false").fusion_ops_gmmswigluquant)
+        self.assertTrue(AscendFusionConfig(fusion_ops_gmmswigluquant="true").fusion_ops_gmmswigluquant)
+
+    def test_ascend_fusion_config_forbids_unknown_key(self):
+        with self.assertRaises(ValueError):
+            AscendFusionConfig(unknown_key=1)
+
+    def test_ascend_compilation_config_bool_lax_and_forbid(self):
+        cfg = AscendCompilationConfig(enable_npugraph_ex="false")
+        self.assertFalse(cfg.enable_npugraph_ex)
+        with self.assertRaises(ValueError):
+            AscendCompilationConfig(unknown_key=1)
+
+    def test_profiling_chunk_config_int_lax_and_range(self):
+        # int string "2" coerces to 2 (fixes "2"==2 silent failure)
+        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")
+        self.assertEqual(cfg.min_chunk, 4096)
+        # range check preserved
+        with self.assertRaises(ValueError):
+            ProfilingChunkConfig(smooth_factor=1.5)
+
+    def test_short_request_first_config_unknown_key_forbidden(self):
+        # Was hand-written unknown-key check; now extra="forbid".
+        with self.assertRaises(ValueError):
+            ShortRequestFirstConfig(foo=1)
+
+    def test_rejection_sampler_config_range_check_preserved(self):
+        with self.assertRaises(ValueError):
+            RejectionSamplerConfig(posterior_threshold=1.5)
+
+    def test_eplb_config_int_field_lax(self):
+        cfg = EplbConfig(eplb_policy_type="2")
+        self.assertEqual(cfg.eplb_policy_type, 2)
