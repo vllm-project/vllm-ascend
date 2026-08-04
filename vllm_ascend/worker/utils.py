@@ -98,7 +98,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id][0]
-            ratio = spec.block_size // kernel_bs
+            ratio = spec.storage_block_size // kernel_bs
             block_dim = 0
 
             for layer_name in group.layer_names:

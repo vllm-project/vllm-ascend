@@ -9,10 +9,25 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+
+def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
+    """Return the physical token rows represented by one scheduler block."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        storage_block_sizes = {
+            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
+        return storage_block_sizes.pop()
+    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -46,7 +61,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     @property
     def page_size_bytes(self) -> int:
         return (
-            self.block_size
+            self.storage_block_size
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
@@ -101,7 +116,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         # (max_model_len//dcp_world_size) tokens locally.
         if dcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size)
-        return cdiv(max_model_len, self.block_size * self.compress_ratio) * self.page_size_bytes
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -224,7 +239,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
-        manager_class=CompressAttentionManager,
+        manager_class=FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(

@@ -202,7 +202,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             KeyMetadata("llama", 0, 0, 0, 0),
             KeyMetadata("llama", 1, 0, 0, 0),
         ]
-        db = ChunkedTokenDatabase(group_metadata, block_size=[16, 32], partitions=None, hash_block_size=16)
+        db = ChunkedTokenDatabase(group_metadata, block_size=[16, 64], partitions=None, hash_block_size=16)
         db.set_group_buffers(
             {0: [1000], 1: [2000]},
             {0: [160], 1: [320]},
@@ -236,6 +236,53 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+
+    def test_compressed_keys_use_logical_spans_and_values_use_physical_rows(self):
+        db = ChunkedTokenDatabase(
+            [self.meta],
+            block_size=[512],
+            partitions=None,
+            hash_block_size=128,
+        )
+        db.set_group_buffers(
+            {0: [1000]},
+            {0: [1024]},
+            group_cache_families={0: "c4"},
+            group_num_layers={0: 1},
+        )
+        hashes = [bytes([idx]) * 32 for idx in range(8)]
+
+        chunks = list(
+            db.process_tokens(
+                1024,
+                hashes,
+                kv_cache_group_id=0,
+                cache_family="c4",
+            )
+        )
+        self.assertEqual(
+            [(start, end) for start, end, _ in chunks],
+            [(0, 512), (512, 1024)],
+        )
+
+        first_addr, first_size, first_block = db.prepare_value(
+            0,
+            512,
+            [5, 6],
+            kv_cache_group_id=0,
+        )
+        second_addr, second_size, second_block = db.prepare_value(
+            512,
+            1024,
+            [5, 6],
+            kv_cache_group_id=0,
+        )
+        self.assertEqual((first_block, second_block), (5, 6))
+        self.assertEqual(
+            (first_addr, second_addr),
+            ([1000 + 5 * 1024], [1000 + 6 * 1024]),
+        )
+        self.assertEqual((first_size, second_size), ([1024], [1024]))
 
     def test_get_block_hashes_selects_terminal_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
