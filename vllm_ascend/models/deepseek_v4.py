@@ -1103,6 +1103,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # MRV2 does not provide input_ids when constructing the forward
+        # context. DSV4's hash-based expert selector still needs the current
+        # tokens, so publish them while the model owns the authoritative input
+        # tensor.
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+        _EXTRA_CTX.input_ids = input_ids
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1141,12 +1148,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # MTP layers receive the full token set — otherwise only rank 0's
         # partition is valid and the rest of the buffer holds stale data,
         # leading to NaN values and low acceptance rate.
-        from vllm_ascend.ascend_forward_context import get_forward_context
-
-        forward_ctx = get_forward_context()
-        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+        if _EXTRA_CTX.flash_comm_v1_enabled:
             h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-            pad_size = forward_ctx.pad_size
+            pad_size = _EXTRA_CTX.pad_size
             if pad_size > 0:
                 h_states_flat = h_states_flat[:-pad_size]
             num_tokens = h_states_flat.shape[0]

@@ -416,6 +416,7 @@ class _ExtraForwardContextProxy:
         "moe_comm_method",
         "mmrs_fusion",
         "num_tokens",
+        "input_ids",
         "flash_comm_v1_enabled",
         "pad_size",
         "padded_length",

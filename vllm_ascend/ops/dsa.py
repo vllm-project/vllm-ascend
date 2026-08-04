@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -161,7 +162,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
+        need_gather_q_kv = bool(_EXTRA_CTX.flash_comm_v1_enabled)
         output_shape = hidden_states.shape
 
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
