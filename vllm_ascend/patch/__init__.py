@@ -1200,3 +1200,29 @@
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
 #
+# ** 34. File: platform/patch_engine_core_ascend_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.__init__`
+#    Why:
+#       `NPUPlatform.check_and_update_config` (which calls
+#       `init_ascend_config`) only runs in the process that builds
+#       `VllmConfig`. EngineCore subprocesses (spawn mode, or any launcher
+#       that ships a pickled `VllmConfig` to the child) never re-run it, so
+#       the process-global `AscendConfig` singleton is missing there.
+#       Components created during `EngineCore.__init__` — e.g. the
+#       scheduler's score encoder cache manager — rely on
+#       `get_ascend_config()` and would fail with "Ascend config is not
+#       initialized" in those processes.
+#    How:
+#       Wrap `EngineCore.__init__` to call the idempotent
+#       `init_ascend_config(vllm_config)` before delegating to the original
+#       initializer. This module is imported as part of the global platform
+#       patches, which vLLM loads in engine-core subprocesses through the
+#       general plugin entry points before any `EngineCore` is created, so
+#       every DP rank / engine-core process gets the singleton regardless of
+#       the multiprocessing start method.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/48218
+#    Future Plan:
+#       Remove this patch once upstream provides a per-process platform
+#       config initialization hook for engine-core subprocesses.

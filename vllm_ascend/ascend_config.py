@@ -51,6 +51,9 @@ class AscendConfig:
 
         from vllm_ascend import envs as ascend_envs
 
+        score_encoder_cache_config = additional_config.get("score_encoder_cache_config", {})
+        self.score_encoder_cache_config = ScoreEncoderCacheConfig(score_encoder_cache_config, vllm_config)
+
         self.scheduler_config = SchedulerConfig(
             additional_config,
             balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
@@ -772,6 +775,97 @@ class RejectionSamplerConfig:
             raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
 
 
+class ScoreEncoderCacheConfig:
+    """
+    Configuration class for controlling the behavior of the CHIME system.
+
+    This configuration defines a score-based encoder cache management policy,
+    mainly used to control cache entry clock decay, promotion strategy,
+    and cache management thresholds.
+    """
+
+    def __init__(self, score_encoder_cache_config: dict, vllm_config):
+        """
+        Initialize ScoreEncoderCacheConfig.
+
+        Args:
+            score_encoder_cache_config (dict):
+                A dictionary containing configuration parameters
+                for the encoder cache scoring policy.
+        """
+        if not isinstance(score_encoder_cache_config, dict):
+            raise ValueError(
+                f"score_encoder_cache_config must be a dict, got {type(score_encoder_cache_config).__name__}"
+            )
+
+        # Whether to enable the score-based encoder cache management policy
+        self.enabled = score_encoder_cache_config.get("enabled", False)
+
+        # Maximum number of encoder cache slots available on the CPU side
+        self.cpu_cache_slots = score_encoder_cache_config.get("cpu_cache_slots", 100000)
+
+        # Maximum clock value used by the clock mechanism,
+        # representing the highest activity or freshness level of a cache entry
+        self.max_clock = score_encoder_cache_config.get("max_clock", 15)
+
+        # Number of operations between clock decay steps.
+        # Clock decay gradually decreases the score of cache entries
+        # that have not been accessed for a long time.
+        self.clock_decay_every = score_encoder_cache_config.get("clock_decay_every", 64)
+
+        # Target ratio of NPU cache slots to keep free after eviction.
+        # Eviction first ensures that the new embedding fits and, when
+        # possible, continues until free slots reach this ratio. If the target
+        # cannot be reached, only the currently reclaimable entries are evicted.
+        self.watermark = score_encoder_cache_config.get("watermark", 0.2)
+
+        # Promotion percentile threshold.
+        # If the score of a cache entry exceeds this percentile
+        # in the overall score distribution, the entry can be promoted.
+        self.promote_percentile = score_encoder_cache_config.get("promote_percentile", 0.2)
+
+        self._validate()
+
+    def _validate(self):
+        if not isinstance(self.enabled, bool):
+            raise ValueError(f"score_encoder_cache_config.enabled must be a bool, got {type(self.enabled).__name__}")
+        if (
+            isinstance(self.cpu_cache_slots, bool)
+            or not isinstance(self.cpu_cache_slots, int)
+            or self.cpu_cache_slots <= 0
+        ):
+            raise ValueError(
+                f"score_encoder_cache_config.cpu_cache_slots must be a positive integer, got {self.cpu_cache_slots}"
+            )
+        if isinstance(self.max_clock, bool) or not isinstance(self.max_clock, int) or self.max_clock < 0:
+            raise ValueError(
+                f"score_encoder_cache_config.max_clock must be a non-negative integer, got {self.max_clock}"
+            )
+        if (
+            isinstance(self.clock_decay_every, bool)
+            or not isinstance(self.clock_decay_every, int)
+            or self.clock_decay_every <= 0
+        ):
+            raise ValueError(
+                f"score_encoder_cache_config.clock_decay_every must be a positive integer, got {self.clock_decay_every}"
+            )
+        if (
+            isinstance(self.watermark, bool)
+            or not isinstance(self.watermark, (int, float))
+            or not 0 <= self.watermark <= 1
+        ):
+            raise ValueError(f"score_encoder_cache_config.watermark must be a number in [0, 1], got {self.watermark}")
+        if (
+            isinstance(self.promote_percentile, bool)
+            or not isinstance(self.promote_percentile, (int, float))
+            or not 0 <= self.promote_percentile <= 1
+        ):
+            raise ValueError(
+                "score_encoder_cache_config.promote_percentile must be a number in [0, 1], "
+                f"got {self.promote_percentile}"
+            )
+
+
 class EplbConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
@@ -989,3 +1083,9 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+def get_score_encoder_cache_config(vllm_config):
+    additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    cfg = additional_config.get("score_encoder_cache_config", {})
+    return ScoreEncoderCacheConfig(cfg, vllm_config)
