@@ -251,7 +251,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
                     :num_reqs
                 ],
-                prefill_context_parallel_metadata=cp_metadata,
+                context_parallel_metadata=cp_metadata,
             )
 
             attn_metadata_dflash = builder.build_for_graph_capture(
