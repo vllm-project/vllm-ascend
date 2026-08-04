@@ -647,7 +647,7 @@ msgid "Configuration"
 msgstr "配置"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:583
-msgid "#NPUs"
+msgid "NPUs"
 msgstr "NPU数量"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:583

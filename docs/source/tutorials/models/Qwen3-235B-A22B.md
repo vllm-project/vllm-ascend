@@ -747,7 +747,7 @@ After several minutes, you will get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | MTP Speculation Num | FUSED_MC2 | EP Switch | Async Scheduling |
+| Scenario | Configuration | NPUs | TP | DP | MTP Speculation Num | FUSED_MC2 | EP Switch | Async Scheduling |
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |

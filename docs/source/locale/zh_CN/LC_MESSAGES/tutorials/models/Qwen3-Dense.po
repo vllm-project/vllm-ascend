@@ -694,7 +694,7 @@ msgid "Configuration"
 msgstr "配置"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:378
-msgid "#NPUs"
+msgid "NPUs"
 msgstr "NPU数量"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:378

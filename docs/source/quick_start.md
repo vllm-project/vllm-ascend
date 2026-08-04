@@ -63,7 +63,7 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
 
 ## Setup environment using container
 
-Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
+Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
 
 :::::{tab-set}
 ::::{tab-item} Ubuntu
