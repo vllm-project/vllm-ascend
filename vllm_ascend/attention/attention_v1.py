@@ -69,6 +69,9 @@ _ATTN_KEYS_BUFFER = None
 # FA3 captured NPU tensors keyed by num_tokens, updated before each replay
 # with the current batch data (cache_seqlens, cu_seqlens_q).
 _FA3_GRAPH_TENSORS: dict = {}
+# Set when an FA3 decode graph is captured; ACLGraphWrapper checks it after
+# capture to issue a stream sync (flushing FA3's AICPU residue) ONLY for FA3.
+_FA3_GRAPH_CAPTURED: bool = False
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -1420,6 +1423,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         are fixed-size NPU buffers whose addresses are captured and whose data
         is refreshed before each replay by ``update_graph_params``.
         """
+        # Signal ACLGraphWrapper to flush AICPU residue after this FA3 capture.
+        global _FA3_GRAPH_CAPTURED
+        _FA3_GRAPH_CAPTURED = True
+
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
 

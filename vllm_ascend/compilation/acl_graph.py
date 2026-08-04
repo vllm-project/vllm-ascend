@@ -219,6 +219,17 @@ class ACLGraphWrapper:
                         ) from exc
                     raise
 
+            # FA3 CustomOp launches AICPU work during its graph capture that is
+            # not part of the NPUGraph replay.  If an FA3 graph was just captured,
+            # flush that residue so the NEXT graph capture (e.g. the prefill
+            # CANN V1 graph) is not corrupted.  Flag-gated: only FA3 captures
+            # trigger this, other models are unaffected.
+            import vllm_ascend.attention.attention_v1 as _attn_v1
+
+            if _attn_v1._FA3_GRAPH_CAPTURED:
+                torch.npu.synchronize()
+                _attn_v1._FA3_GRAPH_CAPTURED = False
+
             # here we always use weak ref for the workspaces
             # to save memory
             global _graph_params
