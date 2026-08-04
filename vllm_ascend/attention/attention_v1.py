@@ -663,6 +663,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                 block_table_buf[n_bt_r:].zero_()
                 break
 
+        # FA3 decode graph: it is invisible to the CANN task-group mechanism, so
+        # it has NO entries in graph_params.  graph_params[num_tokens] may hold
+        # entries from a prefill CANN V1 graph captured with the SAME num_tokens;
+        # running the CANN task-group update below would use DECODE data to update
+        # those PREFILL handles, corrupting the prefill graph.  Skip it.
+        if fa3_tensors is not None:
+            return
+
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
