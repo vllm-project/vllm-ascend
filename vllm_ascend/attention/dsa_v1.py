@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -148,12 +149,42 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int) -> tuple[int, ...]:
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
         return num_blocks, block_size, scale_size
+
+    @staticmethod
+    def get_kv_cache_format(
+        kv_cache_spec: AttentionSpec,
+        _attn_layer: AttentionLayerBase,
+    ) -> tuple[tuple[int, torch.dtype], ...]:
+        """Describe the physical cache tensors owned by a DSA cache layer.
+
+        DSA stores its SWA, compressor output and compressor state as one
+        combined vector.  The compressed indexer cache is the sole split
+        layout: quantized keys plus their per-token scale.  The MRV2 allocator
+        consumes this backend hook instead of assuming that every attention
+        cache is a conventional K/V pair.
+        """
+        scale_dim = int(getattr(kv_cache_spec, "scale_dim", 0))
+        if scale_dim:
+            scale_dtype = getattr(kv_cache_spec, "scale_dtype", None)
+            if scale_dtype is None:
+                raise ValueError("DSA indexer cache scale dtype is missing.")
+            return (
+                (kv_cache_spec.head_size, kv_cache_spec.dtype),
+                (scale_dim, scale_dtype),
+            )
+        return ((kv_cache_spec.head_size, kv_cache_spec.dtype),)
 
     @staticmethod
     def get_impl_cls() -> type[AttentionImplBase[Any]]:

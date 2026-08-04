@@ -158,8 +158,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
+        block_size = _dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0],
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
