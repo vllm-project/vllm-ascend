@@ -50,6 +50,7 @@ from vllm_ascend.utils import (
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
+    vllm_version_is,
     is_310p,
     enable_sp,
 )
@@ -1060,12 +1061,13 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
-            if getattr(vllm_config.cache_config, "calculate_kv_scales", False):
-                logger.warning(
-                    "Parameter is not supported on Ascend NPU. "
-                    "parameter=calculate_kv_scales, action: resetting to False."
-                )
-                vllm_config.cache_config.calculate_kv_scales = False
+            if vllm_version_is("0.26.0"):
+                if vllm_config.cache_config.calculate_kv_scales:
+                    logger.warning(
+                        "Parameter is not supported on Ascend NPU. "
+                        "parameter=calculate_kv_scales, action: resetting to False."
+                    )
+                    vllm_config.cache_config.calculate_kv_scales = False
 
         # ==================== 3. MultiModal Config ====================
         multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
