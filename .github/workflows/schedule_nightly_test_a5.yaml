@@ -234,43 +234,30 @@ jobs:
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
     runs-on: linux-aarch64-a5-8
+    outputs:
+      multi_node_json: ${{ needs.setup-vars.outputs.multi_node }}
     steps:
-    # 新增：安装gh cli ARM版本
-      - name: Install GitHub CLI
-        run: |
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/githubcli.list > /dev/null
-          sudo apt update
-          sudo apt install gh -y
-      - name: Trigger all multi-node test cases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref }}
-          CASE_JSON: ${{ needs.setup-vars.outputs.multi_node }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import subprocess
-          import os
-          cases = json.loads(os.environ["CASE_JSON"])
-          base_cmd = [
-              "gh", "workflow", "run", ".github/workflows/_e2e_nightly_multi_node.yaml",
-              "--repo", os.environ["REPO"], "--ref", os.environ["REF"]
-          ]
-          for case in cases:
-              args = [
-                  "-f", f"name={case['name']}",
-                  "-f", f"config_file_path={case['config_file_path']}",
-                  "-f", "soc_version=a5",
-                  "-f", "runner=linux-aarch64-a5-8"
-              ]
-              if "size" in case:
-                  args.extend(["-f", f"size={case['size']}"])
-              full_cmd = base_cmd + args
-              print(f"Trigger multi-node case: {case['name']}")
-              subprocess.run(full_cmd, check=False)
-          PY
+      - name: Pass json output
+        run: echo "ok"
+  
+  multi-node-cases:
+    name: multi-node-cases
+    needs: multi-node-runner
+    if: >-
+      always() &&
+      needs['multi-node-runner'].outputs.multi_node_json != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        case: ${{ fromJson(needs.multi-node-runner.outputs.multi_node_json) }}
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a5
+      runner: linux-aarch64-a5-8
+      name: ${{ matrix.case.name }}
+      config_file_path: ${{ matrix.case.config_file_path }}
+      size: ${{ matrix.case.size }}
+    secrets: inherit
   
   single-node-runner:
     name: single-node-runner
@@ -279,42 +266,28 @@ jobs:
       always() &&
       needs['parse-trigger'].outputs.run == 'true'
     runs-on: linux-aarch64-a5-8
+    outputs:
+      single_node_json: ${{ needs.setup-vars.outputs.single_node }}
     steps:
-      - name: Install GitHub CLI
-        run: |
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/githubcli.list > /dev/null
-          sudo apt update
-          sudo apt install gh -y
-      - name: Trigger all single-node test cases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref }}
-          CASE_JSON: ${{ needs.setup-vars.outputs.single_node }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import subprocess
-          import os
-          cases = json.loads(os.environ["CASE_JSON"])
-          base_cmd = [
-              "gh", "workflow", "run", ".github/workflows/_e2e_nightly_single_node.yaml",
-              "--repo", os.environ["REPO"], "--ref", os.environ["REF"]
-          ]
-          for case in cases:
-              args = [
-                  "-f", f"name={case['name']}",
-                  "-f", f"config_file_path={case['config_file_path']}",
-                  "-f", "soc_version=a5",
-                  "-f", "runner=linux-aarch64-a5-8"
-              ]
-              if "size" in case:
-                  args.extend(["-f", f"size={case['size']}"])
-              full_cmd = base_cmd + args
-              print(f"Trigger single-node case: {case['name']}")
-              subprocess.run(full_cmd, check=False)
-          PY
+      - name: Pass json output
+        run: echo "ok"
+  
+  single-node-cases:
+    name: single-node-cases
+    needs: single-node-runner
+    if: >-
+      always() &&
+      needs['single-node-runner'].outputs.single_node_json != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        case: ${{ fromJson(needs.single-node-runner.outputs.single_node_json) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: linux-aarch64-a5-8
+      name: ${{ matrix.case.name }}
+      config_file_path: ${{ matrix.case.config_file_path }}
+    secrets: inherit
   
   double-node-runner:
     name: double-node-runner
