@@ -96,8 +96,13 @@ def _require_single_tensor_for_swiglu_quant(
     return tensor_or_list
 
 
-def _prepare_dequant_swiglu_weight_scale(w1_scale: list[torch.Tensor] | torch.Tensor) -> torch.Tensor:
-    if isinstance(w1_scale, list):
+def _prepare_dequant_swiglu_weight_scale(
+    w1_scale: list[torch.Tensor] | torch.Tensor,
+    is_swigluoai_uninterleave: bool,
+) -> torch.Tensor:
+    if not is_swigluoai_uninterleave:
+        weight_scale = w1_scale[0]
+    elif isinstance(w1_scale, list):
         if len(w1_scale) == 1:
             weight_scale = w1_scale[0]
         else:
@@ -106,7 +111,7 @@ def _prepare_dequant_swiglu_weight_scale(w1_scale: list[torch.Tensor] | torch.Te
         weight_scale = w1_scale
     if weight_scale.dtype != torch.float32:
         weight_scale = weight_scale.to(torch.float32)
-    if weight_scale.dim() == 1:
+    if is_swigluoai_uninterleave and weight_scale.dim() == 1:
         weight_scale = weight_scale.reshape(1, -1)
     return weight_scale
 
@@ -248,8 +253,6 @@ def quant_apply_mlp(
                 hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
             )
         else:
-            if not is_swigluoai_uninterleave and w1_scale[0].dtype != torch.float32:
-                w1_scale[0] = w1_scale[0].to(torch.float32)
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
@@ -265,9 +268,7 @@ def quant_apply_mlp(
             # act_fn: swiglu
             dequant_swiglu_kwargs = {
                 "x": hidden_states,
-                "weight_scale": (
-                    _prepare_dequant_swiglu_weight_scale(w1_scale) if is_swigluoai_uninterleave else w1_scale[0]
-                ),
+                "weight_scale": _prepare_dequant_swiglu_weight_scale(w1_scale, is_swigluoai_uninterleave),
                 "activation_scale": pertoken_scale,
                 "bias": None,
                 "quant_scale": None,
