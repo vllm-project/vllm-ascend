@@ -166,6 +166,7 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1701,8 +1702,13 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
-            if self.routed_experts_initialized:
-                self.routed_experts_capturer.clear_buffer()
+            # main2main compat: upstream removed
+            # RoutedExpertsCapturer.clear_buffer() in vllm main after 0.26.0;
+            # every routed layer now overwrites the current step's token rows,
+            # so clearing is no longer required.
+            # Remove the version guard once 0.26.0 support is dropped.
+            if self.routed_experts_initialized and vllm_version_is("0.26.0"):
+                self.routed_experts_capturer.clear_buffer()  # type: ignore[attr-defined]
 
         if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
@@ -2313,8 +2319,8 @@ class NPUModelRunner(GPUModelRunner):
         # copy stream can D2H later. Both tensors must be private
         # clones because:
         #   - ``routing_data`` source is the shared capturer buffer,
-        #     which is ``clear_buffer()``-ed at the start of the
-        #     next step on the default stream.
+        #     which is cleared (0.26.0) or overwritten (main) at the start
+        #     of the next step on the default stream.
         #   - ``slot_mapping`` source is our own
         #     ``routed_experts_slot_mapping_device``, which the
         #     next ``_prepare_inputs`` overwrites on the default
@@ -3590,6 +3596,24 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    # main2main compat: upstream v2 GPUModelRunner.init_routed_experts_capturer
+    # switched from self._bind_routed_experts_capturer to the module-level
+    # bind_routed_experts_capturer() in vllm main after 0.26.0. The module-level
+    # helper binds upstream router capture hooks, which Ascend never invokes
+    # (routing runs through experts_selector inside
+    # AscendRoutedExperts.forward_impl). Re-bind via the Ascend hook so
+    # routed-experts capture keeps working on main.
+    # Remove the version guard once 0.26.0 support is dropped.
+    if vllm_version_is("0.26.0"):
+
+        def init_routed_experts_capturer(self) -> None:
+            super().init_routed_experts_capturer()
+    else:
+
+        def init_routed_experts_capturer(self) -> None:  # type: ignore[misc]
+            super().init_routed_experts_capturer()
+            self._bind_routed_experts_capturer(self.routed_experts_capturer)
 
     def _bind_routed_experts_capturer(self, capturer=None) -> None:
         # test_qwen3_moe_routing_replay
