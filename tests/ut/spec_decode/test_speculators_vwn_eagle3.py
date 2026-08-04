@@ -21,7 +21,7 @@ Eagle3VwnLlamaForCausalLM using CPU-only execution with mocked VllmConfig.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,6 +37,7 @@ from vllm_ascend.models.llama_eagle3_vwn import (
     VwnLlamaDecoderLayer,
     VwnLlamaModel,
 )
+from vllm_ascend.version import vllm_version_is
 
 _HIDDEN = 2048
 _INTERMEDIATE = 6144
@@ -139,13 +140,18 @@ def _mock_npu_env():
         olora_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
     )
+    maybe_calc_kv_scales_patch = (
+        patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None)
+        if vllm_version_is("0.26.0")
+        else nullcontext()
+    )
     with (
         patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock),
         patch("vllm.distributed.parallel_state.get_tp_group", return_value=_mock),
         patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=_mock),
         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_cfg),
         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
-        patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None),
+        maybe_calc_kv_scales_patch,
         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
         patch("vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather", lambda x, *a, **kw: x),
         patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True),
