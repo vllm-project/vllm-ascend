@@ -1130,7 +1130,7 @@ def test_connector_shutdown_delegates_to_active_components():
 # ---------------------------------------------------------------------------
 
 
-def _make_indexer_only_read_thread(indexer_dest: list[int]) -> MembPullReadThread:
+def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int] | None = None) -> MembPullReadThread:
     thread = MembPullReadThread.__new__(MembPullReadThread)
     thread.tp_rank = 0
     thread._state = ConsumerReadState(
@@ -1143,7 +1143,7 @@ def _make_indexer_only_read_thread(indexer_dest: list[int]) -> MembPullReadThrea
         main_block_lens=[],
         indexer_tensors=[],
         indexer_scale_tensors=[],
-        dest_blocks_by_req={"req-0": ([], indexer_dest)},
+        dest_blocks_by_req={"req-0": (main_dest or [], indexer_dest)},
         get_offload_layer_id=lambda _: 0,
     )
     return thread
@@ -1151,7 +1151,7 @@ def _make_indexer_only_read_thread(indexer_dest: list[int]) -> MembPullReadThrea
 
 def test_member0_pulls_main_and_indexer_slice():
     # ratio=2: member 0 pulls main (replicated, no split) + its indexer half.
-    thread = _make_indexer_only_read_thread([10, 11, 12, 13])
+    thread = _make_indexer_only_read_thread([10, 11, 12, 13], main_dest=[20, 21])
     layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
 
     local, peer, lengths, info = thread._build_req_descriptors(
@@ -1167,8 +1167,11 @@ def test_member0_pulls_main_and_indexer_slice():
     assert info is not None
     assert info["n_main"] == 2  # member 0 pulls the whole main share
     assert info["n_indexer"] == 2  # and the first half of the indexer
-    # indexer half = d blocks [10, 11] -> d_base 8000 + {10,11}*5
-    assert 8050 in local and 8055 in local
+    # indexer half = d blocks [10, 11] -> d_base 8000 + {10,11}*5. Adjacent
+    # indexer blocks coalesce into one transfer, so assert the pulled d-block
+    # ids rather than individual local pointers.
+    assert info["d_indexer_ids"] == [10, 11]
+    assert 8050 in local  # coalesced head of [10, 11]
     assert 8060 not in local and 8065 not in local
 
 
@@ -1191,8 +1194,10 @@ def test_nonzero_member_skips_main_and_pulls_other_indexer_slice():
     assert info["n_indexer"] == 2  # second half of the indexer
     # main K/V destinations absent
     assert 3000 not in local and 4000 not in local
-    # indexer second half = d blocks [12, 13]
-    assert 8060 in local and 8065 in local
+    # indexer second half = d blocks [12, 13]; adjacent blocks coalesce, so
+    # assert the pulled d-block ids rather than individual local pointers.
+    assert info["d_indexer_ids"] == [12, 13]
+    assert 8060 in local  # coalesced head of [12, 13]
     assert 8050 not in local and 8055 not in local
 
 
@@ -1218,7 +1223,7 @@ def test_indexer_slices_are_disjoint_and_cover_full_range():
 
 
 def test_ratio_one_degenerates_to_full_pull():
-    thread = _make_indexer_only_read_thread([10, 11, 12, 13])
+    thread = _make_indexer_only_read_thread([10, 11, 12, 13], main_dest=[20, 21])
     layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
 
     _, _, _, info = thread._build_req_descriptors(
