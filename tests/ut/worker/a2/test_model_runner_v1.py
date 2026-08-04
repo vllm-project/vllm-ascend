@@ -143,6 +143,22 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(first.stride(), (16, 1))
         self.assertEqual(second.stride(), (16, 1))
 
+    def test_adjust_packed_kv_layout_reinterprets_noncontiguous_pages(self):
+        runner = self._build_runner()
+        raw_tensor = torch.arange(64, dtype=torch.int8)
+
+        (tensor,) = runner._adjust_kv_layout(
+            raw_tensor,
+            [(4, 2)],
+            [torch.float16],
+            page_size_bytes=4,
+            packing=(4, 16),
+        )
+
+        expected = raw_tensor.view(4, 16)[:, 4:8].clone().view(torch.float16)
+        torch.testing.assert_close(tensor, expected)
+        self.assertEqual(tensor.stride(), (8, 1))
+
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         kv_cache_spec = FullAttentionSpec(

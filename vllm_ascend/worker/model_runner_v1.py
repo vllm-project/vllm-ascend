@@ -3971,8 +3971,9 @@ class NPUModelRunner(GPUModelRunner):
         reshaped_kv_tensors = []
         if packing is not None:
             offset, block_stride = packing
+            assert raw_tensor.numel() % block_stride == 0
+            num_packed_blocks = raw_tensor.numel() // block_stride
             page_offset_bytes = 0
-            packed_pages = raw_tensor.view(-1, block_stride)
             for idx, (shape, dtype) in enumerate(
                 zip(kv_cache_shape_list, kv_cache_dtype_list)
             ):
@@ -3983,10 +3984,16 @@ class NPUModelRunner(GPUModelRunner):
                 start = offset + page_offset_bytes
                 end = start + page_bytes
                 assert end <= block_stride
-                tensor = (
-                    packed_pages[: shape[0], start:end]
-                    .view(dtype)
-                    .view(shape)
+                assert shape[0] <= num_packed_blocks
+                assert start % dtype_size == 0
+                assert block_stride % dtype_size == 0
+                stride = torch.empty(shape).stride()
+                target_stride = (block_stride // dtype_size, *stride[1:])
+                tensor = torch.as_strided(
+                    raw_tensor.view(dtype),
+                    size=shape,
+                    stride=target_stride,
+                    storage_offset=start // dtype_size,
                 )
                 reshaped_kv_tensors.append(tensor)
                 page_offset_bytes += page_bytes
