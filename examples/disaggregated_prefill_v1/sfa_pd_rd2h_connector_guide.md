@@ -41,7 +41,7 @@ Decode offload is asymmetric by design:
 P and D TP sizes may differ. Constraint (enforced by
 `worker.py:_map_prefill_rank_to_decode_rank`):
 
-```
+```text
 p_tp_size >= d_tp_size  AND  p_tp_size % d_tp_size == 0
 ratio = p_tp_size // d_tp_size          # 16/4 = 4
 ```
@@ -74,7 +74,7 @@ contributors an empty slice and they just ACK.
 P never binds `kv_port`; it learns D's endpoint from the metaserver rendezvous. **Only D
 binds.** Each D TP rank runs a ZMQ ROUTER on:
 
-```
+```text
 D listen port = kv_port + data_parallel_rank(GLOBAL) * tp_size + tp_rank
 ```
 
@@ -96,7 +96,7 @@ For TP4·DP4 with `kv_port = 20000`, D occupies `20000..20015`:
 
 At startup D logs one line you can verify against the formula:
 
-```
+```text
 SFAPDRD2H D DP topology: host=..., kv_port=..., data_parallel_rank=... (local=...), ... TP control-plane ports=[a..b]
 ```
 
