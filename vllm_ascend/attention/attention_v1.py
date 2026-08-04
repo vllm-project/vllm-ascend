@@ -472,7 +472,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # never calls get_scheduler_metadata inside torch.npu.graph() — FA3's
         # get_scheduler_metadata performs an aclrtSynchronizeStream which is
         # illegal on the captured stream.
-        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+        #
+        # IMPORTANT: skip during the memory-profile run.  get_scheduler_metadata
+        # allocates buffers sized by max_model_len; if allocated during the
+        # profile it shrinks the measured free memory and thus the KV cache,
+        # corrupting prefill output.  Defer to the graph-capture warmup which
+        # runs AFTER the KV cache has been sized.
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and not _EXTRA_CTX.in_profile_run
+        ):
             num_tokens = attn_metadata.actual_seq_lengths_q[-1]
             self._get_fa3_graph_params(num_tokens, attn_metadata, block_size, query)
 
