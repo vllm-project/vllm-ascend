@@ -173,7 +173,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         if _is_fused_moe_layer(layer):
             # Delayed import to avoid circular import
-            from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+            from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             layer_name = prefix + ".0.gate_proj"

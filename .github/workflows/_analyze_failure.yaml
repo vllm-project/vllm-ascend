@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'Content of recommendations from upstream job output (priority 1)'
+    secrets:
+      OBS_ACCESS_KEY_FAILURE_ANALYSIS:
+        required: false
+      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS:
+        required: false
 
 defaults:
   run:
@@ -79,7 +84,7 @@ jobs:
         with:
           pattern: ${{ inputs.log_artifact_pattern }}
           path: ./test-logs
-          merge-multiple: true
+          merge-multiple: false
         continue-on-error: true
 
       - name: Show downloaded logs structure

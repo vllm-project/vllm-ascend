@@ -32,7 +32,12 @@ def _run_native(
 
     offset = query_start_loc[1:] - local_query_end
     local_seq_lens = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=query_start_loc.device)
-    local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
+    valid_local_req = (local_query_lens > 0) & (seq_lens > 0)
+    local_seq_lens[:num_reqs] = torch.where(
+        valid_local_req,
+        torch.clamp_min(seq_lens - offset, 0),
+        torch.zeros_like(seq_lens),
+    )
 
     start_pos = None
     if compute_start_pos:
@@ -149,6 +154,69 @@ def test_build_local_metadata_triton(
             )
         else:
             assert trt_sp is None and ref_sp is None
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_build_local_metadata_triton_masks_graph_padding(device: str) -> None:
+    torch.set_default_device(device)
+
+    # TP8, graph size 80 and MTP3 produce 20 four-token request slots. With
+    # nine real requests, rank 6 splits a padded slot at its local boundary.
+    tp_size = 8
+    tp_rank = 6
+    num_input_tokens = 80
+    num_reqs = 20
+    num_actual_reqs = 9
+    tokens_per_rank = num_input_tokens // tp_size
+    local_start = tp_rank * tokens_per_rank
+    local_end = local_start + tokens_per_rank
+
+    query_start_loc = torch.arange(0, num_input_tokens + 1, 4, dtype=torch.int32, device=device)
+    seq_lens = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+    seq_lens[:num_actual_reqs] = torch.arange(
+        128,
+        128 + num_actual_reqs,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    trt_qsl, trt_sl, _ = _run_triton(
+        query_start_loc,
+        seq_lens,
+        local_start,
+        local_end,
+        num_reqs,
+        compute_start_pos=False,
+    )
+    ref_qsl, ref_sl, _ = _run_native(
+        query_start_loc,
+        seq_lens,
+        local_start,
+        local_end,
+        num_reqs,
+        compute_start_pos=False,
+    )
+
+    torch.testing.assert_close(
+        trt_qsl[: num_reqs + 1],
+        ref_qsl[: num_reqs + 1],
+        atol=DEFAULT_ATOL,
+        rtol=DEFAULT_RTOL,
+    )
+    torch.testing.assert_close(
+        trt_sl[:num_reqs],
+        ref_sl[:num_reqs],
+        atol=DEFAULT_ATOL,
+        rtol=DEFAULT_RTOL,
+    )
+    assert ref_sl[17].item() == 0
+    assert torch.all(trt_sl[:num_reqs] >= 0)
 
     gc.collect()
     torch.npu.empty_cache()

@@ -66,8 +66,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const at::Tensor &wuq,
     const c10::optional<at::Tensor> &descale1,
     const at::Tensor &gamma2,
-    const at::Tensor &cos,
-    const at::Tensor &sin,
+    const c10::optional<at::Tensor> &cos,
+    const c10::optional<at::Tensor> &sin,
     const at::Tensor &wuk,
     const at::Tensor &kv_cache,
     const at::Tensor &kv_cache_rope,
@@ -90,6 +90,9 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     at::Tensor &inner_out
     )
 {
+    TORCH_CHECK(
+        cos.has_value() == sin.has_value(),
+        "mla_preprocess requires cos and sin to both be tensors or both be None.");
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
@@ -301,6 +304,28 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     at::Tensor softmax_max = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
     at::Tensor softmax_sum = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
+}
+
+at::Tensor npu_sparse_attention_score_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &select_idx, const at::Tensor &block_table,
+    const c10::optional<at::Tensor> &select_num_idx,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    c10::string_view q_input_layout, c10::string_view kv_input_layout,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise)
+{
+    TORCH_CHECK(std::string(q_input_layout) == "TND",
+                "npu_sparse_attention_score only supports query TND layout");
+    at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
+                                   ? at::kHalf
+                                   : query.scalar_type();
+    return at::empty_symint(query.sym_sizes(),
+                            query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
@@ -1395,24 +1420,6 @@ void npu_scatter_nd_update_v2_meta(
     return;
 }
 
-// N-gram spec decode meta
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec_decode_meta(
-    at::Tensor &token_ids,
-    const at::Tensor &num_tokens_no_spec,
-    const at::Tensor &sampled_token_ids,
-    const at::Tensor &discard_request_mask,
-    int64_t vocab_size,
-    int64_t min_n,
-    int64_t max_n,
-    int64_t k)
-{
-    auto batch_size = token_ids.sym_size(0);
-    at::Tensor next_token_ids = at::empty_symint(c10::SymDimVector{batch_size}, token_ids.options());
-    at::Tensor draft_token_ids = at::empty_symint(
-        c10::SymDimVector{batch_size, c10::SymInt(k)}, token_ids.options());
-    at::Tensor num_valid_draft_tokens = at::empty_symint(c10::SymDimVector{batch_size}, token_ids.options());
-    return std::make_tuple(token_ids, next_token_ids, draft_token_ids, num_valid_draft_tokens);
-}
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
     const at::Tensor & k,
@@ -1570,6 +1577,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
@@ -1614,8 +1622,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-    // N-gram spec decode
-    ops.impl("npu_ngram_spec_decode", &vllm_ascend::meta::npu_ngram_spec_decode_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
