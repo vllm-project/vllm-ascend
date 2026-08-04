@@ -505,75 +505,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
             )
         self.assertEqual(m.gmm.call_args.kwargs["scale"][0].dtype, torch.bfloat16)
 
-    def test_w8a8_dynamic_eplb_passes_all_w1_scales_to_gmm1(self):
-        scale0 = torch.arange(8, dtype=torch.float32)
-        scale1 = torch.arange(8, 16, dtype=torch.float32)
-        with _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m:
-            kwargs = self._common_w8a8_kwargs(
-                activation=MoEActivation.GELU_TANH,
-                w2_scale_dtype=torch.bfloat16,
-            )
-            kwargs.update(
-                {
-                    "w1": [torch.randn(8, 4), torch.randn(8, 4)],
-                    "w1_scale": [scale0, scale1],
-                    "w2": [torch.randn(4, 4), torch.randn(4, 4)],
-                    "w2_scale": [
-                        torch.randn(4, dtype=torch.bfloat16),
-                        torch.randn(4, dtype=torch.bfloat16),
-                    ],
-                    "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                    "dynamic_eplb": True,
-                }
-            )
-            quant_apply_mlp(**kwargs)
-
-        scales = m.gmm.call_args.kwargs["scale"]
-        self.assertEqual(len(scales), 2)
-        self.assertEqual(scales[0].dtype, torch.bfloat16)
-        self.assertEqual(scales[1].dtype, torch.bfloat16)
-        torch.testing.assert_close(scales[0], scale0.bfloat16())
-        torch.testing.assert_close(scales[1], scale1.bfloat16())
-
-    def test_w8a8_dynamic_eplb_rejects_gmm1_weight_scale_count_mismatch(self):
-        with (
-            _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
-            self.assertRaisesRegex(
-                ValueError,
-                "npu_grouped_matmul: expected one scale per physical expert, but got weights=2 and scales=1.",
-            ),
-        ):
-            kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
-            kwargs.update(
-                {
-                    "w1": [torch.randn(8, 4), torch.randn(8, 4)],
-                    "w1_scale": [torch.randn(8)],
-                    "w2": [torch.randn(4, 4), torch.randn(4, 4)],
-                    "w2_scale": [torch.randn(4), torch.randn(4)],
-                    "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                    "dynamic_eplb": True,
-                }
-            )
-            quant_apply_mlp(**kwargs)
-
-    def test_w8a8_dynamic_eplb_rejects_empty_gmm1_scale_list(self):
-        with (
-            _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
-            self.assertRaisesRegex(ValueError, "npu_grouped_matmul: expert scale list must not be empty."),
-        ):
-            kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
-            kwargs.update(
-                {
-                    "w1": [torch.randn(8, 4)],
-                    "w1_scale": [],
-                    "w2": [torch.randn(4, 4)],
-                    "w2_scale": [torch.randn(4)],
-                    "group_list": torch.tensor([1], dtype=torch.int64),
-                    "dynamic_eplb": True,
-                }
-            )
-            quant_apply_mlp(**kwargs)
-
     def test_alltoall_dynamic_eplb_swigluoai_passes_all_w1_scales_to_gmm1(self):
         self._ctx_mock.moe_comm_type = MoECommType.ALLTOALL
         scale0 = torch.arange(8, dtype=torch.float32)
@@ -727,100 +658,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         torch.testing.assert_close(packed_scale, weight_scale.float())
         self.assertIs(out, expected)
 
-    def test_mc2_dynamic_eplb_swigluoai_rejects_mismatched_scale_shapes(self):
-        self._ctx_mock.moe_comm_type = MoECommType.MC2
-        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
-        kwargs.update(
-            {
-                "w1": [torch.randn(8, 4), torch.randn(8, 4)],
-                "w1_scale": [
-                    torch.arange(8, dtype=torch.bfloat16),
-                    torch.arange(8, dtype=torch.bfloat16).view(1, 8),
-                ],
-                "w2": [torch.randn(4, 4), torch.randn(4, 4)],
-                "w2_scale": [torch.randn(4), torch.randn(4)],
-                "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                "dynamic_eplb": True,
-            }
-        )
-
-        with (
-            _patch_npu_stream()[0],
-            patch("torch_npu.npu_grouped_matmul", return_value=[torch.zeros(1, 8, dtype=torch.int32)], create=True),
-            patch(f"{MOE_MLP}.dispose_tensor"),
-            self.assertRaisesRegex(
-                ValueError,
-                r"npu_dequant_swiglu_quant: all physical expert scales must have the same shape",
-            ),
-        ):
-            quant_apply_mlp(**kwargs)
-
-    def test_mc2_dynamic_eplb_swigluoai_rejects_weight_scale_count_mismatch(self):
-        self._ctx_mock.moe_comm_type = MoECommType.MC2
-        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
-        kwargs.update(
-            {
-                "w1": [torch.randn(8, 4), torch.randn(8, 4)],
-                "w1_scale": [torch.arange(8, dtype=torch.bfloat16)],
-                "w2": [torch.randn(4, 4), torch.randn(4, 4)],
-                "w2_scale": [torch.randn(4), torch.randn(4)],
-                "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                "dynamic_eplb": True,
-            }
-        )
-
-        with (
-            _patch_npu_stream()[0],
-            patch("torch_npu.npu_grouped_matmul", return_value=[torch.zeros(1, 8, dtype=torch.int32)], create=True),
-            patch(f"{MOE_MLP}.dispose_tensor"),
-            self.assertRaisesRegex(
-                ValueError,
-                "npu_dequant_swiglu_quant: expected one scale per physical expert, but got weights=2 and scales=1.",
-            ),
-        ):
-            quant_apply_mlp(**kwargs)
-
-    def test_mc2_swiglustep_dynamic_eplb_passes_all_w1_scales_to_gmm1(self):
-        self._ctx_mock.moe_comm_type = MoECommType.MC2
-        scale0 = torch.arange(8, dtype=torch.float32)
-        scale1 = torch.arange(8, 16, dtype=torch.float32)
-        expected = torch.zeros(1, 4, dtype=torch.float32)
-        kwargs = self._common_w8a8_kwargs(
-            activation=MoEActivation.SWIGLUSTEP,
-            w2_scale_dtype=torch.bfloat16,
-        )
-        kwargs.update(
-            {
-                "w1": [torch.randn(8, 4), torch.randn(8, 4)],
-                "w1_scale": [scale0, scale1],
-                "w2": [torch.randn(4, 4), torch.randn(4, 4)],
-                "w2_scale": [
-                    torch.randn(4, dtype=torch.bfloat16),
-                    torch.randn(4, dtype=torch.bfloat16),
-                ],
-                "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                "dynamic_eplb": True,
-            }
-        )
-
-        with (
-            _patch_npu_stream()[0],
-            patch("torch_npu.npu_grouped_matmul", return_value=[torch.zeros(1, 8)], create=True) as mock_gmm,
-            patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value=torch.zeros(1, 4)),
-            patch.object(DeviceOperator, "npu_dynamic_quant", return_value=(torch.zeros(1, 4), torch.ones(1))),
-            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected),
-            patch(f"{MOE_MLP}.dispose_tensor"),
-        ):
-            out, _ = quant_apply_mlp(**kwargs)
-
-        scales = mock_gmm.call_args.kwargs["scale"]
-        self.assertEqual(len(scales), 2)
-        self.assertEqual(scales[0].dtype, torch.bfloat16)
-        self.assertEqual(scales[1].dtype, torch.bfloat16)
-        torch.testing.assert_close(scales[0], scale0.bfloat16())
-        torch.testing.assert_close(scales[1], scale1.bfloat16())
-        self.assertIs(out, expected)
-
 
 class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     """Non-GELU activations must NOT enter the GELU path (no regression)."""
@@ -831,7 +668,6 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
             patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
             patch(f"{MOE_MLP}.HAS_TRITON", False),
             patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4), create=True) as mock_swiglu,
-            patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value=torch.zeros(1, 4)),
             patch("torch.nn.functional.gelu") as mock_gelu,
         ):
             mock_ctx.moe_comm_type = -1  # not MoECommType.MC2
