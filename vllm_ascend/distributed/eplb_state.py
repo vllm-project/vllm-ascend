@@ -7,6 +7,7 @@ from dataclasses import fields
 from typing import Any
 
 import torch
+from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
@@ -72,15 +73,71 @@ def refresh_model_lookups(model_state: Any, layer_idx: int | None = None) -> Non
 class AscendEplbState(_eplb_state.EplbState):
     """Own Ascend lookup refreshes without patching upstream commit helpers."""
 
+    def __init__(self, parallel_config, device: torch.device) -> None:
+        super().__init__(parallel_config, device)
+        self._has_fresh_recorded_load = False
+
+    def step(
+        self,
+        is_dummy: bool = False,
+        is_profile: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        if not is_dummy and not is_profile and self._should_record_current_step(log_stats=log_stats):
+            self._has_fresh_recorded_load = True
+        super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
+
+    def _has_global_fresh_recorded_load(self) -> bool:
+        """Synchronize whether any EP rank recorded load since rearranging."""
+        ep_group = get_ep_group()
+        cpu_group = getattr(ep_group, "cpu_group", None)
+        if cpu_group is not None:
+            if cpu_group.size() <= 1:
+                return self._has_fresh_recorded_load
+            flag = torch.tensor(
+                (self._has_fresh_recorded_load,),
+                dtype=torch.int32,
+                device="cpu",
+            )
+            all_reduce(flag, group=cpu_group)
+            return bool(flag.item())
+
+        device_group = ep_group.device_group
+        if device_group.size() <= 1:
+            return self._has_fresh_recorded_load
+        flag = torch.tensor(
+            (self._has_fresh_recorded_load,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        all_reduce(flag, group=device_group)
+        return bool(flag.item())
+
     def rearrange(
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
+        # Dummy steps keep every rank on the same EPLB clock, but they do not
+        # advance the load window. Avoid repeatedly rearranging from the same
+        # stale window when no rank recorded a fresh sample in this period.
+        # Elastic EP reshuffles are forced lifecycle operations, not scheduled
+        # load-based rearrangements, so they must bypass the freshness gate.
+        should_gate = (
+            hasattr(self, "_has_fresh_recorded_load")
+            and not is_profile
+            and rank_mapping is None
+            and not self.parallel_config.enable_elastic_ep
+        )
+        if should_gate and not self._has_global_fresh_recorded_load():
+            return None
+
         result = super().rearrange(is_profile=is_profile, rank_mapping=rank_mapping)
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_lookups(model_state)
+        if not is_profile:
+            self._has_fresh_recorded_load = False
         return result
 
     @classmethod
