@@ -161,6 +161,7 @@ class InstanceInfo:
     decoder_score: float
     decoder_host: str
     decoder_port: int
+    p_cached_tokens: int = 0
     prefiller_cached_tokens: int | None = None
 
 
@@ -897,6 +898,43 @@ async def stream_service_response_with_retry(
                 raise exc
 
 
+def extract_p_cached_tokens(response_json: dict[str, Any]) -> int:
+    """Extract P node's real cached_tokens from its API response.
+
+    In PD disaggregation, P node's usage.prompt_tokens_details.cached_tokens
+    reflects true prefix cache hits on the prefill node. D node's cached_tokens
+    is inflated (== prompt_tokens) because it counts all KV-transferred tokens
+    as external cache hits, which is incorrect.
+
+    Returns 0 if the field is missing or P node did not report cached_tokens.
+    """
+    try:
+        return response_json.get("usage", {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
+    except (AttributeError, TypeError):
+        return 0
+
+
+def patch_cached_tokens_in_chunk(chunk_json: dict[str, Any], p_cached_tokens: int) -> dict[str, Any]:
+    """Replace D node's inflated cached_tokens with P node's real value.
+
+    D node reports cached_tokens == prompt_tokens because all tokens received
+    via KV transfer are counted as external cache. This is misleading — the
+    real prefix cache hits happened on the P node, not the D node.
+
+    If p_cached_tokens is 0 (P node reported no cache hits, or field missing),
+    we still replace D's value: 0 is more accurate than "all tokens were cached".
+    """
+    usage = chunk_json.get("usage")
+    if not usage or not isinstance(usage, dict):
+        return chunk_json
+    details = usage.get("prompt_tokens_details")
+    if not details or not isinstance(details, dict):
+        return chunk_json
+    if "cached_tokens" in details:
+        details["cached_tokens"] = p_cached_tokens
+    return chunk_json
+
+
 async def _abort_prefill_selection(
     runtime: WorkerRuntime,
     prefiller_key: str,
@@ -956,6 +994,9 @@ async def assign_instances(
         req_data["kv_transfer_params"] = kv_transfer_params
     prefiller_cached_tokens = extract_cached_tokens(response_json)
 
+    # Extract P node's real cached_tokens before its response is discarded
+    p_cached_tokens = extract_p_cached_tokens(response_json)
+
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
     except Exception:
@@ -973,6 +1014,7 @@ async def assign_instances(
         decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
+        p_cached_tokens=p_cached_tokens,
         prefiller_cached_tokens=prefiller_cached_tokens,
     )
 
@@ -1053,6 +1095,9 @@ async def handle_completions_impl(api: str, request: Request):
                         is_sse = chunk_str.startswith("data: ")
                         if is_sse:
                             chunk_str = chunk_str[len("data: ") :]
+                        if chunk_str == "[DONE]":
+                            yield b"data: [DONE]\n\n"
+                            continue
                         try:
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
@@ -1061,6 +1106,13 @@ async def handle_completions_impl(api: str, request: Request):
                             continue
                         choices = chunk_json.get("choices", [])
                         if not choices:
+                            # Non-choice chunks (e.g. usage-only chunks) may also
+                            # carry cached_tokens that needs patching.
+                            patched = patch_cached_tokens_in_chunk(chunk_json, instance_info.p_cached_tokens)
+                            if stream_flag:
+                                yield f"data: {json.dumps(patched, ensure_ascii=False)}\n\n".encode()
+                            else:
+                                yield json.dumps(patched, ensure_ascii=False).encode("utf-8")
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                 chunk = encode_response_chunk(chunk_json, is_sse)
                             yield chunk
@@ -1079,6 +1131,10 @@ async def handle_completions_impl(api: str, request: Request):
                             if stream_flag
                             else (completion_tokens + usage.get("completion_tokens", 0))
                         )
+
+                        # Patch D node's inflated cached_tokens with P node's real value
+                        chunk_json = patch_cached_tokens_in_chunk(chunk_json, instance_info.p_cached_tokens)
+
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
@@ -1096,6 +1152,10 @@ async def handle_completions_impl(api: str, request: Request):
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
+                        if stream_flag:
+                            yield f"data: {json.dumps(chunk_json, ensure_ascii=False)}\n\n".encode()
+                        else:
+                            yield json.dumps(chunk_json, ensure_ascii=False).encode("utf-8")
                             chunk = encode_response_chunk(chunk_json, is_sse)
                         yield chunk
             except asyncio.CancelledError:
