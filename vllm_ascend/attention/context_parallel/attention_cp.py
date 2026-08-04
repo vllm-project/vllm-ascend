@@ -282,10 +282,10 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
                 if speculative_config is not None:
                     input_layout = "BSND"
                     if isinstance(actual_seq_lengths_q, list) and actual_seq_lengths_q:
-                        actual_seq_lengths_q = [actual_seq_lengths_q[0]+ [
+                        actual_seq_lengths_q = [actual_seq_lengths_q[0]]+ [
                             actual_seq_lengths_q[i] - actual_seq_lengths_q[i-1]
                             for i in range(1, len(actual_seq_lengths_q))
-                        ]]
+                        ]
 
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
