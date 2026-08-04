@@ -21,8 +21,7 @@ Eagle3VwnLlamaForCausalLM using CPU-only execution with mocked VllmConfig.
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import Any
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -114,6 +113,15 @@ def _cpu_add_rms_norm_bias(x, residual, weight, bias, eps):
     return out, _, new_residual
 
 
+@contextmanager
+def _patch_legacy_kv_scale_op():
+    if vllm_version_is("0.26.0"):
+        with patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None):
+            yield
+    else:
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _mock_npu_env():
     """Patch TP group, Ascend config, and NPU ops so all tests run on CPU.
@@ -141,18 +149,13 @@ def _mock_npu_env():
         olora_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
     )
-    maybe_calc_kv_scales_patch: AbstractContextManager[Any] = (
-        patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None)
-        if vllm_version_is("0.26.0")
-        else nullcontext()
-    )
     with (
         patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock),
         patch("vllm.distributed.parallel_state.get_tp_group", return_value=_mock),
         patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=_mock),
         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_cfg),
         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
-        maybe_calc_kv_scales_patch,
+        _patch_legacy_kv_scale_op(),
         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
         patch("vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather", lambda x, *a, **kw: x),
         patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True),
