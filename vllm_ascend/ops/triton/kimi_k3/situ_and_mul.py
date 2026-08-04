@@ -84,7 +84,7 @@ def _situ_and_mul_quant_kernel(
 
 
 @triton.autotune(
-    configs=[triton.Config({"BLOCK_H": b, "multibuffer": True}) for b in (1024, 2048, 4096, 8192)],
+    configs=[triton.Config({"BLOCK_H": b}) for b in (1024, 2048, 4096, 8192)],
     key=["HALF_COLS", "HAS_GROUP_LIST"],
 )
 @triton.jit
@@ -297,5 +297,9 @@ def situ_and_mul(
         DO_LINEAR_BETA=do_linear_beta,
         LINEAR_BETA=linear_beta_v,
         INV_LINEAR_BETA=(1.0 / linear_beta_v) if do_linear_beta else 1.0,
+        # CANN Triton's autotune grid wrapper does not preserve compiler
+        # options from ``triton.Config`` in its argument map. Keep this as a
+        # launch option, matching the other Ascend Triton activation kernels.
+        multibuffer=True,
     )
     return out.reshape(*x.shape[:-1], total_cols // 2)
