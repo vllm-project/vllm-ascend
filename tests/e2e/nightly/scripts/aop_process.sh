@@ -30,6 +30,14 @@ BAD_COMMIT="${9:-HEAD}"
 NUM_NODES="${10:-}"
 COORD_DIR="${11:-}"
 NAME="${12:-}"
+BISECT_GOOD_COMMIT="${13:-}"
+BISECT_FAIL_CONFIRM_RETRIES="${14:-}"
+BISECT_TRIAL_TIMEOUT="${15:-}"
+BISECT_BARRIER_TIMEOUT="${16:-}"
+BISECT_NO_VERIFY_GOOD="${17:-}"
+BISECT_NO_VERIFY_BAD="${18:-}"
+BISECT_FORCE_INITIAL_BUILD="${19:-}"
+BISECT_CONFIG_BASE_PATH="${20:-}"
 
 echo "================================================"
 echo " PROCESS - needs attention"
@@ -86,6 +94,16 @@ BISECT_CMD=(
 [ -n "$NAME" ] && BISECT_CMD+=(--name "$NAME")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
 [ -n "$COORD_DIR" ] && BISECT_CMD+=(--coord-dir "$COORD_DIR")
+[ -n "$BISECT_GOOD_COMMIT" ] && BISECT_CMD+=(--good-commit "$BISECT_GOOD_COMMIT")
+[ -n "$BISECT_FAIL_CONFIRM_RETRIES" ] && BISECT_CMD+=(--fail-confirm-retries "$BISECT_FAIL_CONFIRM_RETRIES")
+[ -n "$BISECT_TRIAL_TIMEOUT" ] && BISECT_CMD+=(--trial-timeout-s "$BISECT_TRIAL_TIMEOUT")
+[ -n "$BISECT_BARRIER_TIMEOUT" ] && BISECT_CMD+=(--barrier-timeout-s "$BISECT_BARRIER_TIMEOUT")
+[ "$BISECT_NO_VERIFY_GOOD" = "true" ] && BISECT_CMD+=(--no-verify-good)
+[ "$BISECT_NO_VERIFY_BAD" = "true" ] && BISECT_CMD+=(--no-verify-bad)
+[ "$BISECT_FORCE_INITIAL_BUILD" = "true" ] && BISECT_CMD+=(--force-initial-build)
+# AOP owns the conservative rebuild policy; users cannot override it.
+BISECT_CMD+=(--native-check since-build)
+[ -n "$BISECT_CONFIG_BASE_PATH" ] && BISECT_CMD+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
 
 echo ""
 echo "=== Running auto bisect ==="
