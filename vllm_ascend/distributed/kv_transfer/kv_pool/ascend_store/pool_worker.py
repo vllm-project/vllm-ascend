@@ -69,8 +69,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
-    get_cache_family_granularity,
-    infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
 )
@@ -605,7 +603,7 @@ class KVPoolWorker:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig | None,
     ) -> list[int]:
-        if kv_cache_config is None or not self.use_hybrid:
+        if kv_cache_config is None:
             return [vllm_config.cache_config.block_size]
 
         block_sizes: list[int] = []
@@ -640,8 +638,7 @@ class KVPoolWorker:
         return self.grouped_block_size[group_id]
 
     def _get_effective_group_block_size(self, group_id: int) -> int:
-        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
-        return self._get_group_block_size(group_id) * max(infer_cache_family_ratio(cache_family), 1)
+        return self._get_group_block_size(group_id)
 
     @staticmethod
     def _get_group_family(families: list[str], group_id: int) -> str:
@@ -652,12 +649,7 @@ class KVPoolWorker:
     def _infer_cache_transfer_granularity(self) -> int:
         granularities = [self.lcm_block_size]
         for group_id in range(self.num_kv_cache_groups):
-            granularities.append(
-                get_cache_family_granularity(
-                    self._get_group_block_size(group_id),
-                    self._get_group_family(self.kv_cache_group_families, group_id),
-                )
-            )
+            granularities.append(self._get_group_block_size(group_id))
         return math.lcm(*granularities)
 
     @staticmethod
@@ -1223,9 +1215,7 @@ class KVPoolWorker:
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
-                cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
-                ratio = max(infer_cache_family_ratio(cache_family), 1)
-                effective_block_size = group_block_size * ratio
+                effective_block_size = group_block_size
                 group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
                 alloc_size = sum(group_block_len) if group_block_len else self.page_size_bytes
 
@@ -1389,9 +1379,7 @@ class KVPoolWorker:
             request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
-                cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
-                ratio = max(infer_cache_family_ratio(cache_family), 1)
-                effective_block_size = group_block_size * ratio
+                effective_block_size = group_block_size
 
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
                 load_start_block = (
@@ -2268,26 +2256,22 @@ class KVPoolWorker:
             keys: list[str] = []
             chunk_hashes: list[BlockHash | str] = []
             variant_counts: list[int] = []
-            base_block_size = self.token_database.get_block_size(group_id)
-            cache_family = self.token_database.group_cache_families.get("kv", {}).get(group_id, "default")
-            effective_block_size = get_cache_family_granularity(base_block_size, cache_family)
+            group_block_size = self.token_database.get_block_size(group_id)
             if hbm_hit_tokens:
-                grouped_hashes = get_block_hashes(
-                    block_hashes, effective_block_size, self.token_database.hash_block_size
-                )
+                grouped_hashes = get_block_hashes(block_hashes, group_block_size, self.token_database.hash_block_size)
                 exists.update(
                     (group_id, block_hash_to_bytes(chunk_hash))
-                    for chunk_hash in grouped_hashes[: hbm_hit_tokens // effective_block_size]
+                    for chunk_hash in grouped_hashes[: hbm_hit_tokens // group_block_size]
                 )
-            lookup_start = hbm_hit_tokens // effective_block_size * effective_block_size
+            lookup_start = hbm_hit_tokens // group_block_size * group_block_size
             lookup_mask = lookup_masks[group_id] if lookup_masks is not None and group_id < len(lookup_masks) else None
 
             def chunk_filter(
                 start: int,
-                base_block_size=base_block_size,
+                group_block_size=group_block_size,
                 lookup_mask=lookup_mask,
             ) -> bool:
-                chunk_idx = start // base_block_size
+                chunk_idx = start // group_block_size
                 return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
 
             for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(

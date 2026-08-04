@@ -372,13 +372,19 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, kv_role="kv_producer", enable_kv_event=False):
+    def _make_thread(
+        self,
+        exists_result=None,
+        kv_role="kv_producer",
+        enable_kv_event=False,
+        block_size=16,
+    ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
-        db = FakeTokenDatabase()
+        db = FakeTokenDatabase(block_size=block_size)
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
-            block_size=16,
+            block_size=block_size,
             tp_rank=0,
             dcp_size=1,
             put_step=1,
@@ -551,7 +557,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(keys), 1)
 
     def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
-        t, store = self._make_thread([0, 0])
+        t, store = self._make_thread([0, 0], block_size=64)
         t.token_database.group_cache_families["kv"][0] = "c4"
         req = ReqMeta(
             req_id="r1",
