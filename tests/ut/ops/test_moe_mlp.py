@@ -112,6 +112,42 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertEqual(first_call.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
         self.assertEqual(second_call.kwargs["weight"][0].shape, torch.Size([2, 8, 8]))
 
+    def test_unquant_situ_uses_kimi_situ_activation(self):
+        hidden_states = torch.randn(2, 8)
+        gate_up_out = torch.randn(2, 16)
+        activated = torch.randn(2, 8)
+        expected = torch.randn(2, 8)
+        group_list = torch.tensor([1, 1])
+        activation = SituActivationConfig(beta=4.0, linear_beta=25.0)
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected]],
+                create=True,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.ascend_situ_and_mul",
+                return_value=activated,
+            ) as mock_situ,
+        ):
+            output, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=torch.randn(2, 8, 16),
+                w2=torch.randn(2, 8, 8),
+                group_list=group_list,
+                activation=activation,
+            )
+
+        self.assertIs(output, expected)
+        mock_situ.assert_called_once_with(
+            gate_up_out,
+            beta=4.0,
+            linear_beta=25.0,
+            group_list=group_list,
+            group_list_type=1,
+        )
+
     def test_w4a8_situ_preserves_packed_weight_scale_view_and_bias(self):
         hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
         quantized_input = torch.ones(2, 4, dtype=torch.int8)

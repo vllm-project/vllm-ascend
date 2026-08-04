@@ -20,7 +20,7 @@ from vllm_ascend.models.kimi_k3 import (
     _routed_latent_quant_config,
     get_spec_layer_idx_from_weight_name,
 )
-from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
+from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig, situ_and_mul
 from vllm_ascend.transformers_utils.configs.kimi_k3 import (
     KimiK3Config,
     KimiK3VisionConfig,
@@ -369,6 +369,23 @@ def test_kimi_k3_dense_mlp_uses_callable_situ(monkeypatch):
 
     assert isinstance(mlp.act_fn, AscendSituAndMul)
     assert output.shape == (1, 2)
+
+
+def test_kimi_k3_situ_cpu_fallback_matches_fp32_formula():
+    values = torch.tensor(
+        [[-8.0, -1.5, 0.5, 9.0], [3.0, -4.0, 11.0, -15.0]],
+        dtype=torch.float32,
+    )
+    beta = 4.0
+    linear_beta = 25.0
+
+    expected_gate, expected_up = values.chunk(2, dim=-1)
+    expected_gate = beta * torch.tanh(expected_gate / beta) * torch.sigmoid(expected_gate)
+    expected_up = linear_beta * torch.tanh(expected_up / linear_beta)
+
+    actual = situ_and_mul(values, beta=beta, linear_beta=linear_beta)
+
+    torch.testing.assert_close(actual, expected_gate * expected_up)
 
 
 def test_text_model_captures_materialized_dspark_aux_stream(monkeypatch: pytest.MonkeyPatch):
