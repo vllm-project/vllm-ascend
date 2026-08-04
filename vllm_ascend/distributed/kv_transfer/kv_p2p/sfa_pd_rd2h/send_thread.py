@@ -14,7 +14,6 @@ import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
 
-from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     MF_META,
     READ_DONE,
@@ -242,17 +241,16 @@ class MembPullSendingThread(threading.Thread):
                     )
                 if chunk_done:
                     done_ext_ids.append(ext_id)
-            if envs.VLLM_ASCEND_SFA_DEBUG:
-                logger.info(
-                    "MembPull P add READ_READY_BATCH item: layer=%d (%s), req=%s, "
-                    "main_blocks=%d, indexer_blocks=%d, done=%s",
-                    layer_idx,
-                    layer_name,
-                    ext_id,
-                    len(p_main_block_ids),
-                    len(p_indexer_block_ids),
-                    chunk_done,
-                )
+            logger.debug(
+                "MembPull P add READ_READY_BATCH item: layer=%d (%s), req=%s, "
+                "main_blocks=%d, indexer_blocks=%d, done=%s",
+                layer_idx,
+                layer_name,
+                ext_id,
+                len(p_main_block_ids),
+                len(p_indexer_block_ids),
+                chunk_done,
+            )
 
         if endpoint_payloads:
             self.mark_layer_pending(layer_idx)
@@ -263,16 +261,15 @@ class MembPullSendingThread(threading.Thread):
                 if path not in self._mf_meta_sent_paths:
                     self._send_mf_meta(path, dealer, encoder)
                 dealer.send(encoder.encode((READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_ext_ids)))
-                if envs.VLLM_ASCEND_SFA_DEBUG:
-                    logger.info(
-                        "MembPull P send READ_READY_BATCH: layer=%d (%s), endpoint=%s:%d, reqs=%d, done_reqs=%d",
-                        layer_idx,
-                        layer_name,
-                        remote_host,
-                        remote_port,
-                        len(read_reqs),
-                        len(done_ext_ids),
-                    )
+                logger.debug(
+                    "MembPull P send READ_READY_BATCH: layer=%d (%s), endpoint=%s:%d, reqs=%d, done_reqs=%d",
+                    layer_idx,
+                    layer_name,
+                    remote_host,
+                    remote_port,
+                    len(read_reqs),
+                    len(done_ext_ids),
+                )
         else:
             self._signal_layer_done(layer_idx)
 
@@ -340,8 +337,7 @@ class MembPullSendingThread(threading.Thread):
             self._pending_reads_by_layer.pop(layer_idx, None)
         for slot_id in self._state.layer_storage_slots.get(layer_idx, ()):
             self.storage_send_done_events[slot_id].set()
-        if envs.VLLM_ASCEND_SFA_DEBUG:
-            logger.info("MembPull P layer send complete: layer=%d", layer_idx)
+        logger.debug("MembPull P layer send complete: layer=%d", layer_idx)
 
     def _fail_layer(self, layer_idx: int, error: str) -> None:
         self._pending_reads_by_layer.pop(layer_idx, None)

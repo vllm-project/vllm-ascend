@@ -29,7 +29,6 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     LayerMetadata,
     SendTask,
@@ -83,11 +82,17 @@ def _layer_idx(layer_name: str) -> int:
 def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     """Pick the KV transfer backend.
 
-    ``kv_connector_extra_config["transfer_backend"]`` overrides the
-    ``VLLM_ASCEND_KV_TRANSFER_BACKEND`` env var.
+    Read from ``kv_connector_extra_config["transfer_backend"]``. The SFA PD
+    RD2H connector currently requires ``"memfabric"``.
     """
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
-    return extra.get("transfer_backend") or envs.VLLM_ASCEND_KV_TRANSFER_BACKEND
+    backend = extra.get("transfer_backend")
+    if backend is None:
+        raise ValueError(
+            "SFAPDRD2HConnector requires kv_connector_extra_config[\"transfer_backend\"] "
+            "to be set (currently only \"memfabric\" is supported)."
+        )
+    return backend
 
 
 def _validate_tcp_port(port: int, *, description: str) -> None:
@@ -184,13 +189,6 @@ class SFAPDRD2HConsumerWorker:
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
                 self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
-                if envs.VLLM_ASCEND_SFA_DEBUG:
-                    logger.info(
-                        "MembPull D stored dest blocks req %s: indexer_hbm_ids=%s, main_cpu_ids=%s",
-                        ext_id,
-                        indexer_ids,
-                        main_ids,
-                    )
 
     def save_kv_layer(
         self,
@@ -264,16 +262,14 @@ class SFAPDRD2HConsumerWorker:
                 else:
                     still_pending.add(ext_id)
             self._pending_done = still_pending
-
             if done_recving or self._pending_done:
-                if envs.VLLM_ASCEND_SFA_DEBUG:
-                    logger.info(
-                        "MembPull D get_finished: finished_all_tp_ext=%s, "
-                        "done_recving_internal=%s, pending_done_ext=%s",
-                        finished_on_all,
-                        done_recving,
-                        self._pending_done,
-                    )
+                logger.debug(
+                    "MembPull D get_finished: finished_all_tp_ext=%s, "
+                    "done_recving_internal=%s, pending_done_ext=%s",
+                    finished_on_all,
+                    done_recving,
+                    self._pending_done,
+                )
         # else: read thread not up yet -> nothing finished (done_recving empty).
 
         # Purge scheduler-finished req state AFTER resolving this step's
@@ -525,22 +521,21 @@ class SFAPDRD2HProducerWorker:
                     req_meta.remote_port,
                     description="SFAPD remote D-side TP control-plane port",
                 )
-                if envs.VLLM_ASCEND_SFA_DEBUG:
-                    logger.info(
-                        "MembPull P start_load_kv req %s: remote_host=%s, "
-                        "remote_port=%s->%s, tp_rank=%s, tp_ratio=%s, local_block_ids=%s, "
-                        "chunk_finish=%s, local_computed_tokens=%s, local_transed_tokens=%s",
-                        req_id,
-                        req_meta.remote_host,
-                        old_remote_port,
-                        req_meta.remote_port,
-                        self.tp_rank,
-                        tp_ratio,
-                        req_meta.local_block_ids,
-                        req_meta.chunk_finish,
-                        req_meta.local_computed_tokens,
-                        req_meta.local_transed_tokens,
-                    )
+                logger.debug(
+                    "MembPull P start_load_kv req %s: remote_host=%s, "
+                    "remote_port=%s->%s, tp_rank=%s, tp_ratio=%s, local_block_ids=%s, "
+                    "chunk_finish=%s, local_computed_tokens=%s, local_transed_tokens=%s",
+                    req_id,
+                    req_meta.remote_host,
+                    old_remote_port,
+                    req_meta.remote_port,
+                    self.tp_rank,
+                    tp_ratio,
+                    req_meta.local_block_ids,
+                    req_meta.chunk_finish,
+                    req_meta.local_computed_tokens,
+                    req_meta.local_transed_tokens,
+                )
             return
         raise RuntimeError("SFAPDRD2HConnector P side supports memfabric pull only.")
 
@@ -672,10 +667,6 @@ class SFAPDRD2HProducerWorker:
             error = self.kv_send_layer_thread.startup_error
             self.kv_send_layer_thread.stop()
             raise RuntimeError("SFAPD P-side send thread failed during startup") from error
-        # Stash source tensors on the sending thread for env-gated verify
-        # checksums (VLLM_ASCEND_MF_VERIFY=1): P sums its source blocks so
-        # the user can compare against D's destination sums in the logs.
-        self.kv_send_layer_thread._source_kv_caches = kv_caches
         logger.info(
             "MembPull P registered kv caches: layers=%d, p_session=%s",
             len(self.layer_metadata),
