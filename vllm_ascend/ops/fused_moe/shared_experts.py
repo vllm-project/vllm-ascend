@@ -169,8 +169,6 @@ class AscendSharedExperts:
                     quant_mode=1,
                     swiglu_mode=1,
                     clamp_limit=fused_moe_evts.swiglu_limit,
-                    glu_alpha=fused_moe_evts.swiglu_alpha,
-                    glu_bias=fused_moe_evts.swiglu_beta,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
