@@ -14,7 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.logger import logger
 
-from vllm_ascend.simple_kv_offload.worker import SimpleCPUOffloadNPUWorker
+from vllm_ascend.kv_offload.simple.worker import SimpleCPUOffloadNPUWorker
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig

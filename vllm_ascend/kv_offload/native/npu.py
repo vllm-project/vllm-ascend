@@ -15,7 +15,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
 
-from vllm_ascend.kv_offload.cpu_npu import NPUOffloadingWorker
+from vllm_ascend.kv_offload.native.cpu_npu import NPUOffloadingWorker
 
 
 def _set_cpu_bytes_from_legacy_num_blocks(

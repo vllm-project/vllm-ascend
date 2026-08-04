@@ -11,11 +11,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
     SimpleCPUOffloadConnector,
 )
 
-from vllm_ascend.simple_kv_offload import worker as worker_module
-from vllm_ascend.simple_kv_offload.simple_cpu_offload_connector import (
+from vllm_ascend.kv_offload.simple import worker as worker_module
+from vllm_ascend.kv_offload.simple.simple_cpu_offload_connector import (
     AscendSimpleCPUOffloadConnector,
 )
-from vllm_ascend.simple_kv_offload.worker import (
+from vllm_ascend.kv_offload.simple.worker import (
     SimpleCPUOffloadNPUWorker,
     _flatten_kv_value,
 )

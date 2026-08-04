@@ -11,7 +11,7 @@ from vllm.v1.kv_offload.config import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
-from vllm_ascend.kv_offload.npu import NPUOffloadingSpec
+from vllm_ascend.kv_offload.native.npu import NPUOffloadingSpec
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:

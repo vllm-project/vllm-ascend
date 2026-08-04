@@ -12,7 +12,7 @@ import threading
 
 import torch
 
-from vllm_ascend.simple_kv_offload.npu_mem_ops import (
+from vllm_ascend.kv_offload.simple.npu_mem_ops import (
     DIRECTION_D2H,
     DIRECTION_H2D,
     BatchMemcpyParams,
