@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """HIXLConnector: direct HIXL LLM-DataDist P2P KV connector (no Mooncake).
 
-Phase 1 minimal implementation: TP=1, single FullAttention group, PP=1.
 Forked from MooncakeConnectorV1 with the byte-addressed Mooncake transfer
 (repeated register_memory + batch_transfer_sync_read) replaced by block-indexed
 HIXL transfer (register_blocks_cache + pull_blocks). Control plane (handshake
 / metadata / done-notify) still uses ZMQ, identical to Mooncake.
-
-See docs/vllm-ascend-hixl-connector-design.md for the full design. Phase 2/3
-will add TP>1 staging, HMA multi-group, PP/PCP/DCP and Mamba.
 """
 import contextlib
 import copy
@@ -194,8 +190,6 @@ class ReqMeta:
     remote_ptp_size: int
     num_prompt_blocks: int
     remote_block_size: int
-    # Phase 3 subitem D2: P-side CP geometry forwarded to D for CP shard
-    # derivation (fork Mooncake :121-122). Default 1 (No-CP).
     remote_pcp_size: int = 1
     remote_dcp_size: int = 1
     remote_multi_nodes_meta_mapping: dict[str, Any] | None = None
@@ -206,8 +200,6 @@ class GroupPull:
     group_id: int
     remote_tp_offset: int
     num_group_pulls: int
-    # Phase 3 (PP>1) only; kept for parity with Mooncake's make_group_pulls /
-    # _get_hybrid_remote_rank_group_pulls constructors. Always 0 under PP=1.
     prefill_pp_rank: int = 0
     is_group_transfer_end: bool = False
 
@@ -466,7 +458,6 @@ class KVCacheRecvingThread(threading.Thread):
         self.group_caches = group_caches  # kv_cache_group_id -> Cache
         self.group_model_ids = group_model_ids or {}  # kv_cache_group_id -> model_id
         self.block_size_scale = block_size_scale or []
-        # Phase 2: staging + reformat (TP>1 head reassembly).
         self.staging_tensors = staging_tensors or {}
         self.staging_caches = staging_caches or {}
         self.is_hma_required = is_hma_required
@@ -751,13 +742,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
-        """D-pull KV via HIXL pull_blocks (block-index addressed).
-
-        Phase 2: TP>1 (num_group_pulls>1) pulls each P-rank head shard into a
-        distinct staging Cache block (dst = local_block * tp_n + tp_offset);
-        the last shard for a group stashes a pending reformat that transposes
-        staging -> D real cache once all shards land. TP=1 (num_group_pulls==1)
-        pulls straight into the D real cache (Phase 1 path, no staging)."""
+        """D-pull KV via HIXL pull_blocks (block-index addressed)."""
         remote_request_id = req_meta["remote_request_id"]
         local_block_ids: BlockIds = req_meta["local_block_ids"]
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
@@ -796,11 +781,6 @@ class KVCacheRecvingThread(threading.Thread):
             if not src_blocks or not dst_logical:
                 continue
 
-            # Phase 3 subitem C3: Mamba state is not head-sharded. Its
-            # num_group_pulls is the P-rank count (prefill_tp/decode_tp), not a
-            # head-split count, so it must NOT go through staging/reformat
-            # (which reassembles head shards). State groups land directly in
-            # the real cache (fork Mooncake :841).
             is_state_group = group_spec.get("kv_cache_spec_type") == "MambaSpec"
 
             if is_state_group:
@@ -867,14 +847,6 @@ class KVCacheRecvingThread(threading.Thread):
                 grouped_remote, grouped_local = group_concurrent_contiguous(src_blocks, dst_blocks)
                 reformat_local = grouped_local
 
-            # Phase 3 subitem B: each PP rank's registered cache contains only
-            # that rank's layer segment (vLLM PP isolates per-rank kv tensors),
-            # so pulling the full local range [0, num_layers) transfers exactly
-            # this rank's segment. prefill_pp_rank selects the P rank (Phase 2
-            # PP dimension in _get_remote_ranks_for_req); it does not index a
-            # global layer range here, unlike Mooncake's byte-addressed
-            # predicate filter (Mooncake :820-830). Draft layers are pulled
-            # automatically when they reside in this rank's cache.
             num_layers = dst_cache.cache_desc.num_tensors // 2
             src_layer_range = range(num_layers)
             dst_layer_range = range(num_layers)
@@ -939,8 +911,6 @@ class KVCacheRecvingThread(threading.Thread):
         from vllm.v1.worker.utils import extract_layer_index
 
         def layer_in_group(layer_name: str) -> bool:
-            # Phase 3 subitem A: MTP layers belong to the group whose layer
-            # indices fall in the draft region (>= num_layers).
             if "mtp" in layer_name:
                 return any(layer_idx >= self.num_layers for layer_idx in layer_index_set)
             return extract_layer_index(layer_name, num_attn_module) in layer_index_set
@@ -1331,10 +1301,6 @@ class HIXLConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Scheduler (Phase 1: single FullAttention group; Mamba/SWA/compress paths
-# removed). Forked from MooncakeConnectorScheduler and trimmed.
-# ---------------------------------------------------------------------------
 class HIXLConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self.vllm_config = vllm_config
@@ -1347,14 +1313,6 @@ class HIXLConnectorScheduler:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         logger.info("Initializing HIXL Scheduler %s", engine_id)
 
-        # Phase 3 subitem D1: PCP/DCP geometry must precede side_channel_port
-        # (which scales by pcp_size). Bug 2 fix: Scheduler side_channel_port
-        # must match Worker (both * pcp_size), else PCP>1 D connects to wrong
-        # P port (remote_port base != P listening base).
-        # Read from config (not get_pcp_group()/get_dcp_group()) because the
-        # EngineCore/scheduler process does not initialize the PCP/DCP parallel
-        # state groups; calling get_*_group() here asserts _PCP/_DCP is None.
-        # Mirrors MooncakeConnectorScheduler (:1638).
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.side_channel_port = (
@@ -1370,9 +1328,6 @@ class HIXLConnectorScheduler:
 
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
-        # Phase 3 subitem A/C: per-group transfer info. is_state_group (Mamba)
-        # keeps state blocks intact during MTP extra-block clipping (A4);
-        # need_truncate drives Mamba last-token recompute (subitem C2).
         self.group_transfer_info: list[GroupTransferInfo] = [
             self._get_group_transfer_info(group) for group in self.kv_cache_groups
         ]
@@ -1386,18 +1341,12 @@ class HIXLConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: pull all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
-            # Phase 3 subitem C2: D-side Mamba last-token recompute. The
-            # decoder always recomputes the last token, so it must start from
-            # h(N-1) -> pull N-1 prompt tokens worth of KV (fork Mooncake :1810).
             actual = self._state_prefill_token_count(len(token_ids))
             params["num_computed_tokens"] = num_computed_tokens
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
                 return count, True
 
-        # Phase 3 subitem C2: P-side Mamba last-token truncation. Drop the last
-        # prompt token so the prefiller computes h(N-1); the decoder recomputes
-        # the last token to derive h(N) (fork Mooncake :1816-1817).
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
 
@@ -1486,7 +1435,6 @@ class HIXLConnectorScheduler:
         computed_block_ids = self._get_transfer_block_ids(
             block_ids, len(request.prompt_token_ids)
         )
-        # Phase 1 single group: just take group 0 length.
         computed_block_lens = [len(bid_list) for bid_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
@@ -1597,10 +1545,6 @@ class HIXLConnectorScheduler:
         self.set_xfer_handshake_metadata_from_workers(metadata)
 
 
-# ---------------------------------------------------------------------------
-# Worker (Phase 1: TP=1, single FullAttention group, PP=1).
-# __init__ uses get_datadist; register_kv_caches uses register_blocks_cache.
-# ---------------------------------------------------------------------------
 class HIXLConnectorWorker:
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self.vllm_config = vllm_config
@@ -1615,10 +1559,6 @@ class HIXLConnectorWorker:
         self.side_channel_host = get_ip()
         self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         self.num_key_value_heads = vllm_config.model_config.hf_text_config.num_key_value_heads
-        # Phase 3 subitem A: MTP/Eagle draft-layer KV transfer. Draft layer
-        # indices start from total_layers (layer-index semantics, orthogonal to
-        # block addressing). MTP shares one KV layer (transfer once); Eagle has
-        # independent draft layers (count = draft_model num_hidden_layers).
         self.num_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens
@@ -1639,14 +1579,12 @@ class HIXLConnectorWorker:
                     vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
                 )
 
-        # Phase 3 subitem D1: PCP/DCP parallel geometry (fork Mooncake :1999-2005).
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = (
             get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         )
-        # Phase 3 subitem B: PP and PCP are mutually exclusive (fork Mooncake :2002).
         assert not (self.pp_size > 1 and self.pcp_size > 1), (
             "HIXLConnector: pp and pcp cannot be enabled at the same time."
         )
@@ -1658,12 +1596,7 @@ class HIXLConnectorWorker:
             layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
         }
 
-        # P/D parallel sizes (Phase 2: P and D may use different TP sizes; the
-        # decoder pulls num_group_pulls = prefill_tp // decode_tp P-rank shards
-        # per attention group to reassemble the full head dim).
         self._get_prefill_decode_size(vllm_config)
-        # Phase 3 subitem B: prefill-PP layer segments per rank (fork Mooncake
-        # :529-532). Draft layers extend the last rank's end (subitem A5).
         self.pp_layer_indices = {
             rank: get_prefill_pp_indices(
                 self.num_layers, rank, self._prefill_pp_size, self._prefill_pp_layer_partition
@@ -1680,10 +1613,6 @@ class HIXLConnectorWorker:
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
         )
-        # Phase 3 subitem D1: device_index embeds the PCP rank between PP and
-        # TP so every (pp, pcp, tp) tuple maps to a unique port offset (fork
-        # Mooncake :2035). PP and PCP are mutually exclusive, so the
-        # pp_rank*pcp_size term degenerates when pcp>1 (pp_rank==0).
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
 
@@ -1715,8 +1644,6 @@ class HIXLConnectorWorker:
         # in the same order from the same config, so the assigned ids match.
         self._next_model_id: int = self.model_id
         self._group_model_ids: dict[int, int] = {}  # kv_cache_group_id -> model_id
-        # Phase 3 subitem D: CP geometry state (fork Mooncake). use_sparse is
-        # False (HIXL has no sparse path); use_mla mirrors Mooncake :515.
         self.use_mla = vllm_config.model_config.is_deepseek_mla
         self.use_sparse = False
         self.local_remote_block_port_mapping: dict[str, Any] = {}
@@ -1745,8 +1672,6 @@ class HIXLConnectorWorker:
             "extra_config['hixl']['cluster_id_base'] is required (P/D must use disjoint bases)."
         )
         listen_port_base = extra.get("listen_port_base", self.vllm_config.kv_transfer_config.kv_port + 1000)
-        # Phase 3 subitem D1: device_index embeds PCP rank; offset spans
-        # dp*(tp*pp*pcp) so P/D disjoint cluster_id bases stay collision-free.
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         offset = self.dp_rank * (self.tp_size * self.pp_size * self.pcp_size) + device_index
         return int(cluster_id_base) + offset, self.side_channel_host, int(listen_port_base) + offset
@@ -1787,14 +1712,7 @@ class HIXLConnectorWorker:
                 return repr(value)
 
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
-        # Phase 3 subitem A: longcat_flash has two attn modules per layer
-        # (num_attn_module=2); others are 1. Affects layer-name parsing stride.
         num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
-        # Phase 3 subitem A: draft (MTP/Eagle) layers get indices starting from
-        # total_layers. MTP layers are identified by "mtp" in the name; Eagle3
-        # layer names lack "mtp" but collide with target-model layer ids (upstream
-        # assigns PP-sliced ids), so a colliding/rolled-back id marks an Eagle
-        # layer and is re-assigned from total_layers.
         next_mtp_layer_idx = self.total_layers
         transfer_group_id = 0
         for kv_cache_group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -1833,12 +1751,6 @@ class HIXLConnectorWorker:
             transfer_group_id += 1
         return kv_group2layeridx
 
-    # ------------------------------------------------------------------
-    # Phase 2: block geometry (No-CP branch, forked from MooncakeConnectorV1).
-    # Byte-address arithmetic (kv_caches_base_addr / block_len / block_stride)
-    # is dropped; only block-index geometry is retained. block_size_scale>1
-    # (MLA/compress) and PP/PCP/DCP branches stay Phase 3.
-    # ------------------------------------------------------------------
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         """Prefill/decode parallel sizes from kv_transfer extra_config.
 
@@ -1942,7 +1854,6 @@ class HIXLConnectorWorker:
         use_mla: bool,
     ) -> list[list[int]]:
         tp_sampled_nums: list[list[int]] = []
-        # Phase 2 has no sparse/MLA; use_mla is only true when num_kv_heads==1.
         if prefill_tp_size > num_key_value_heads or use_mla:
             tp_ori_data = tp_ori_data.reshape(-1, num_groups)
             chosen_group = tp_ori_data[:, [rand_group_index]]
@@ -2026,12 +1937,6 @@ class HIXLConnectorWorker:
                 continue
 
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                # Phase 3 subitem C4: Mamba state is not head-sharded; each D
-                # rank pulls num_group_pulls = prefill_tp/decode_tp P-rank
-                # state shards. State transfer goes through pull_blocks in the
-                # real-cache (else) branch of _transfer (subitem C3), NOT
-                # through Mooncake's byte-addressed _append_mamba_transfer_meta
-                # (which has no block-addressed counterpart and is dropped).
                 assert prefill_tp_size % self.tp_size == 0, (
                     f"Hybrid Mamba prefill tp size({prefill_tp_size}) must be divisible by "
                     f"decode tp size({self.tp_size})."
@@ -2162,12 +2067,8 @@ class HIXLConnectorWorker:
         remote_pcp_size: int = 1,
         remote_dcp_size: int = 1,
     ) -> list[list[list[GroupPull]]]:
-        """Per-port group pull descriptors. No-CP (Phase 2) and CP (Phase 3
-        subitem D3) branches. CP branch derives group_pulls from ports (fork
-        Mooncake _get_cp_shard_pulls, address-agnostic)."""
         cp_transfer = remote_pcp_size * remote_dcp_size > 1
         if cp_transfer:
-            # Phase 3 subitem D3: CP group_pulls derived from port.
             return self._get_cp_shard_pulls(
                 remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size
             )
@@ -2224,20 +2125,11 @@ class HIXLConnectorWorker:
         req_id: str,
         meta: ReqMeta,
     ) -> tuple[list[list[int]], list[BlockIds], list[BlockIds]]:
-        """No-CP per-shard ports and block ids (Phase 2).
-
-        Returns (remote_handshake_port_list, local_block_ids_list,
-        remote_block_ids_list). No-CP has a single shard; the inner port list
-        length is the number of P ranks to pull from for this D rank.
-        """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        # Phase 3 subitem D4: CP branch. When any side has CP>1, delegate to the
-        # CP path (fork Mooncake :2694-3058, block-level per design G3).
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size != 1:
             return self._get_kv_split_metadata_cp(req_id, meta, prefill_tp_size)
 
-        # Phase 2: No-CP only.
         if self._is_hma_required:
             chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
         else:
@@ -2263,14 +2155,6 @@ class HIXLConnectorWorker:
         meta: ReqMeta,
         prefill_tp_size: int,
     ) -> tuple[list[list[int]], list[BlockIds], list[BlockIds]]:
-        """Phase 3 subitem D4: CP per-shard ports and block ids (fork Mooncake
-        :2694-3058). Block-level kernel expansion (_expand_block_ids /
-        _local_kernel_ids_for_shard / _get_group_kernel_params) is now wired in
-        for MLA/compress (scale>1); attention blocks are expanded to kernel
-        granularity on both sides. Under scale==1 + r_blk==1 (Bd==Bp, the common
-        case) this matches Mooncake exactly; r_blk>1 needs MLA (use_mla) so
-        kernel_size divides Bp.
-        """
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
             if not (self.use_mla or self.use_sparse):
@@ -2412,9 +2296,8 @@ class HIXLConnectorWorker:
         # now flows through kernel expansion; fail fast otherwise rather than
         # emit a wrong/empty shard.
         assert r_blk == 1 or self.use_mla, (
-            "HIXL Phase 3 supports r_blk==1 (P/D same block_size) only; "
-            "r_blk>1 (Bd>Bp) needs MLA/compress (block_size_scale>1). "
-            "See phase3-plan §6/G4."
+            "HIXL supports r_blk==1 (P/D same block_size) only; "
+            "r_blk>1 (Bd>Bp) needs MLA/compress (block_size_scale>1)."
         )
 
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
@@ -2739,16 +2622,6 @@ class HIXLConnectorWorker:
         return mid
 
     def _init_staging_caches(self) -> None:
-        """Allocate per-group staging Cache for TP>1 head reassembly (D side).
-
-        HIXL pull_blocks can only write whole blocks, not into a block's split
-        sub-range, so each P rank's head shard lands in a distinct staging
-        block (dst = local_block * tp_n + tp_offset). After all shards land, a
-        reformat transposes staging -> D real cache. Staging is a registered
-        Cache (remote_accessible=True, same as the D dst cache) because pull's
-        dst must be a Cache object. The backing tensors are retained on the
-        worker for the torch reformat. No-CP/No-Mamba/No-NZ only (Phase 2).
-        """
         if self.kv_role != "kv_consumer":
             return
         from llm_datadist import CacheDesc, BlocksCacheKey, Placement
@@ -2810,10 +2683,6 @@ class HIXLConnectorWorker:
         self.kv_caches = kv_caches
         self.kv_group2layeridx = self._build_kv_group2layeridx()
 
-        # HMA: any non-FullAttention group (Mamba/compress/...) or attention groups
-        # with differing num_key_value_heads need per-group num_group_pulls. Mamba /
-        # compress / MLA paths are Phase 3; the per-group divergence path is wired
-        # now so multi-attention-group FullAttention works under TP>1.
         self._is_hma_required = self._requires_group_aware_attention_transfer() or any(
             spec["kv_cache_spec_type"] != "FullAttentionSpec"
             for spec, _ in self.kv_group2layeridx.values()
@@ -2994,7 +2863,7 @@ class HIXLConnectorWorker:
             self.kv_send_thread = KVCacheSendingThread(
                 self.vllm_config,
                 self.tp_rank,
-                self.tp_size,  # prefill_tp_size == tp_size (Phase 1)
+                self.tp_size,
                 self.engine_id,
                 self.side_channel_host,
                 self.side_channel_port,
@@ -3060,14 +2929,6 @@ class HIXLConnectorWorker:
         return set()
 
     def start_load_kv(self, metadata: HIXLConnectorMetadata):
-        """Phase 2: per-P-rank add_request via _get_kv_split_metadata +
-        _get_group_pulls_metadata (No-CP).
-
-        One add_request targets one remote P rank. TP>1 means num_group_pulls>1
-        D-side ranks issue N add_request calls for the same request (one per P
-        rank); only the last call sets all_task_done=True so that
-        _handle_request triggers staging->local reformat once all shards land.
-        """
         for req_id in metadata.reqs_in_batch:
             if self.kv_send_thread is not None:
                 self.kv_send_thread.task_tracker.add_req_to_process(req_id)
