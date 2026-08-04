@@ -41,14 +41,13 @@ MIN_AFFECTED_LINES = 1
 # ==================== Configuration ====================
 
 
-def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[str]:
+def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
-    Extract new/modified test files from PR diff and match to test cases.
-    Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
+    Extract new/modified test files from PR diff.
+    Test files must be in tests/ directory and start with test_
 
     Args:
         diff_file: Path to the PR diff file
-        test_case_map: Mapping of test case names to their coverage info
 
     Returns:
         List of test case names that correspond to new/modified test files
@@ -64,8 +63,8 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[st
 
     # Pattern to match test file paths: tests/[subdirs/]test_*.py
     # In diff output: +++ b/tests/ut/core/test_xxx.py
-    # Capture full relative path (without leading +++)
-    test_file_pattern = re.compile(r"^\+\+\+ [ab]/(tests/.+/\w+\.py)", re.MULTILINE)
+    # Test files must be in tests/ directory and start with test_
+    test_file_pattern = re.compile(r"^\+\+\+ [ab]/(tests/.+/test_\w+\.py)", re.MULTILINE)
 
     changed_test_files = set()
     for match in test_file_pattern.finditer(diff_content):
@@ -77,25 +76,10 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[st
 
     print(f"  Found {len(changed_test_files)} changed test file(s): {changed_test_files}")
 
-    # Match changed test files to test cases in test_case_map
-    # Test case names format: tests/e2e/.../test_xxx.py or tests/e2e/.../test_xxx.py::test_func
-    found_in_map = False
-    for test_case_name in test_case_map:
-        for changed_file in changed_test_files:
-            # Match both full file tests and function-level tests
-            if changed_file in test_case_name:
-                if test_case_name not in test_files_found:
-                    test_files_found.append(test_case_name)
-                    found_in_map = True
-                    break
-
-    # If no exact match in test_case_map, add the file path directly as a new test case
-    if not found_in_map:
-        for changed_file in changed_test_files:
-            # Normalize path to test case name format: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
-            test_case_name = changed_file.rsplit(".py", 1)[0]
-            if test_case_name not in test_files_found:
-                test_files_found.append(test_case_name)
+    # Add all changed test files directly to recommended list (no matching with test_case_map)
+    for changed_file in changed_test_files:
+        if changed_file not in test_files_found:
+            test_files_found.append(changed_file)
 
     return test_files_found
 
@@ -164,16 +148,19 @@ class CoverageSelector:
     def normalize_test_name(test_name: str) -> str:
         """
         Convert test case directory name to standard script name format:
-        - tests__e2e__... -> tests/e2e/...
-        - tests__e2e__...--test_foo -> tests/e2e/...::test_foo
+        - tests__e2e__... -> tests/e2e/... (file-level) -> tests/e2e/....py (with .py suffix)
+        - tests__e2e__...--test_foo -> tests/e2e/...::test_foo (function-level, no .py suffix)
         - cpu-ut -> cpu-ut (unchanged)
         """
         if test_name == "cpu-ut":
             return test_name
-        # First convert -- to ::
+        # First convert -- to :: (function-level test marker)
         result = test_name.replace("--", "::")
         # Then convert __ to /
         result = result.replace("__", "/")
+        # If no :: (file-level test), add .py suffix
+        if "::" not in result:
+            result = result + ".py"
         return result
 
     def get_covered_lines_from_file(self, cov_file: str, filename: str) -> set[int]:
@@ -936,7 +923,7 @@ class TestSelector:
         print(f"\n{gran_detail_titles.get(expand_reason, 'Details')}:")
         for test_case, affected_detail, total_lines in selected[:10]:
             print(f"\n  {test_case} ({total_lines} lines):")
-            for filepath, lines in sorted(changed_files.items()):
+            for filepath, lines in sorted(affected_detail.items()):
                 line_str = self._format_line_range(sorted(lines))
                 print(f"    - {filepath}: {line_str}")
 
@@ -1142,7 +1129,7 @@ def main():
     # 4. Add new/modified test files from PR (vllm_ascend/tests/test_*.py)
     test_file_tests = []
     if args.github_pr and diff_file:
-        test_file_tests = _get_test_files_from_pr_diff(diff_file, selector.test_case_map)
+        test_file_tests = _get_test_files_from_pr_diff(diff_file)
         if test_file_tests:
             print("\n=== New/Modified Test Files in PR ===")
             print(f"Adding {len(test_file_tests)} test file(s): {test_file_tests}")

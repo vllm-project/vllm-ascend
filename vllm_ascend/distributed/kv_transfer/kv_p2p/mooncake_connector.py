@@ -57,6 +57,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -68,7 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
+from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer, vllm_version_is
 
 # isort: off
 if TYPE_CHECKING:
@@ -1450,19 +1451,45 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
-        assert vllm_config.kv_transfer_config is not None
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
-        self._connector_metadata = MooncakeConnectorMetadata()
+    # main2main compat: upstream KVConnectorBase_V1.__init__() now sets
+    # _kv_transfer_config (required by requires_kv_delivery property in
+    # Scheduler.__init__() post-0.26.0).
+    # Remove the version gate once 0.26.0 support is dropped.
+    if vllm_version_is("0.26.0"):
 
-        if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
-                vllm_config, str(self.engine_id), kv_cache_config
-            )
-            self.connector_worker: MooncakeConnectorWorker | None = None
-        elif role == KVConnectorRole.WORKER:
-            self.connector_scheduler = None
-            self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        def __init__(
+            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
+        ):
+            assert vllm_config.kv_transfer_config is not None
+            self.engine_id = vllm_config.kv_transfer_config.engine_id
+            self._connector_metadata = MooncakeConnectorMetadata()
+
+            if role == KVConnectorRole.SCHEDULER:
+                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
+                    vllm_config, str(self.engine_id), kv_cache_config
+                )
+                self.connector_worker: MooncakeConnectorWorker | None = None
+            elif role == KVConnectorRole.WORKER:
+                self.connector_scheduler = None
+                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
+        ):
+            assert vllm_config.kv_transfer_config is not None
+            self._kv_transfer_config = vllm_config.kv_transfer_config
+            self.engine_id = vllm_config.kv_transfer_config.engine_id
+            self._connector_metadata = MooncakeConnectorMetadata()
+
+            if role == KVConnectorRole.SCHEDULER:
+                self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(  # type: ignore[no-redef]
+                    vllm_config, str(self.engine_id), kv_cache_config
+                )
+                self.connector_worker: MooncakeConnectorWorker | None = None  # type: ignore[no-redef]
+            elif role == KVConnectorRole.WORKER:
+                self.connector_scheduler = None
+                self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
     ############################################################
     # Scheduler Side Methods
@@ -1609,11 +1636,6 @@ class MooncakeConnectorScheduler:
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
-        self.use_hybrid = (
-            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups)
-            and len(kv_cache_config.kv_cache_groups) > 1
-        )
         self.use_compress = self._model_uses_compress()
         self.group_transfer_info = [self._get_group_transfer_info(group) for group in kv_cache_config.kv_cache_groups]
         self.need_truncate = self.use_compress or any(info.is_state_group for info in self.group_transfer_info)
@@ -1958,13 +1980,23 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.num_blocks: int = kv_cache_config.num_blocks
         self.kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
+        _is_fullattn_group = []
+        for g in self.kv_cache_config.kv_cache_groups:
+            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
+                is_fullattn_spec = []
+                for layer_name in g.layer_names:
+                    layer_spec = g.kv_cache_spec.kv_cache_specs[layer_name]
+                    is_fullattn_spec.append(isinstance(layer_spec, FullAttentionSpec))
+                _is_fullattn_group.append(all(is_fullattn_spec))
+            else:
+                _is_fullattn_group.append(isinstance(g.kv_cache_spec, FullAttentionSpec))
         self.use_hybrid = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in self.kv_cache_config.kv_cache_groups)
+            and not all(_is_fullattn_group)
             and len(self.kv_cache_config.kv_cache_groups) > 1
         )
-        self._is_hma_required = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and any(
-            not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups
+        self._is_hma_required = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and not all(
+            _is_fullattn_group
         )
         self._layer_specs = {
             layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
@@ -2108,6 +2140,8 @@ class MooncakeConnectorWorker:
         )
 
     def _get_spec_total_num_kv_heads(self, spec: Any, layer_idx: int) -> int | None:
+        if isinstance(spec, (MLAAttentionSpec, AscendSlidingWindowMLASpec, AscendSFAIndexerCacheSpec)):
+            return 1
         local_num_kv_heads = self._get_spec_num_key_value_heads(spec)
         if local_num_kv_heads is None or isinstance(spec, MLAAttentionSpec):
             return local_num_kv_heads
@@ -2137,17 +2171,12 @@ class MooncakeConnectorWorker:
             # Here we determine whether the current layer is an eagle layer based on whether the layer id has been
             # assigned to previous layers. If the layer id has been assigned, we treat the current layer as
             # an eagle layer and assign a new layer id starting from total_layers.
-            assigned_indices: set[int] = set()
             for layer_name in group_spec.layer_names:
-                if "mtp" in layer_name:
+                if "mtp" in layer_name or "eagle" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
                     layer_idx = extract_layer_index(layer_name, num_attn_module)
-                    if assigned_indices and layer_idx < min(assigned_indices) or layer_idx in assigned_indices:
-                        layer_idx = next_mtp_layer_idx
-                        next_mtp_layer_idx += 1
-                assigned_indices.add(layer_idx)
                 layer_entries.append((layer_name, layer_idx))
 
             spec_groups: OrderedDict[

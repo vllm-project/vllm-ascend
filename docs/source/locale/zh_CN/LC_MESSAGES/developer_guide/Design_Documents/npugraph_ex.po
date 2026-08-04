@@ -29,7 +29,9 @@ msgid ""
 "acceleration solution for the aclgraph mode."
 msgstr "这是一种基于FX图的优化，可视为aclgraph模式的加速方案。"
 
-msgid "You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)"
+msgid ""
+"You can get its code [torchair source code "
+"repository](https://gitcode.com/Ascend/torchair)"
 msgstr "您可获取其代码：[torchair 源码仓库](https://gitcode.com/Ascend/torchair)"
 
 msgid "## Default FX Graph Optimization"
@@ -75,9 +77,6 @@ msgstr ""
 
 msgid "Below is the declaration of this API and a demo of its usage."
 msgstr "以下是该API的声明及使用示例。"
-
-msgid "Usage Example"
-msgstr "使用示例"
 
 msgid ""
 "The default fusion pass in npugraph_ex is also implemented based on this "
@@ -144,3 +143,17 @@ msgid ""
 msgstr ""
 "|search_fn_pattern|输入|通常无需提供自定义模式对象。其定义遵循原生PyTorch "
 "MultiOutputPattern对象的规则。传入此参数后，search_fn将不再用于匹配算子组合，而是直接使用此参数作为匹配规则|否|"
+
+msgid "!!! note \"Atlas 300I DUO\""
+msgstr "!!! note \"Atlas 300I DUO\""
+
+msgid ""
+"Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set "
+"--additional-config '{\"ascend_compilation_config\": "
+"{\"enable_npugraph_ex\":false}}'."
+msgstr ""
+"Atlas 300I DUO 和 Atlas 200I Pro 不支持 `enable_npugraph_ex`。请设置 --additional-"
+"config '{\"ascend_compilation_config\": {\"enable_npugraph_ex\":false}}'。"
+
+msgid "### Usage Example"
+msgstr "### 使用示例"
