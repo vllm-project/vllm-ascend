@@ -43,7 +43,6 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 
 [default.extend-words]
 mata = "mata"
-tbe = "tbe"
 iy = "iy"
 tendencias = "tendencias"
 PARD = "PARD"

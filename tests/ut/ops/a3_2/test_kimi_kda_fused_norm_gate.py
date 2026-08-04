@@ -31,6 +31,7 @@ def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype: torch.dtype):
         device="npu",
     )
     weight = torch.randn(head_dim, dtype=dtype, device="npu")
+    core_attn_out_before = core_attn_out.clone()
 
     actual = apply_kda_rms_norm_sigmoid_gate(
         core_attn_out,
@@ -39,7 +40,7 @@ def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype: torch.dtype):
         eps,
     )
 
-    x_float = core_attn_out.float()
+    x_float = core_attn_out_before.float()
     variance = x_float.square().mean(dim=-1, keepdim=True)
     expected = x_float * torch.rsqrt(variance + eps)
     expected = expected * weight.float()
@@ -47,3 +48,4 @@ def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype: torch.dtype):
     expected = expected.to(dtype)
 
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(core_attn_out, core_attn_out_before)
