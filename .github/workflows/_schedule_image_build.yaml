@@ -111,7 +111,7 @@ on:
         description: 'CANN version'
         required: false
         type: string
-        default: '2026.07.29'
+        default: '2026.08.03'
       triton_ascend_version:
         description: 'Triton Ascend version'
         required: false
@@ -453,7 +453,7 @@ jobs:
         run: |
           # Get current date in YYYYMMDD format
           DATE=$(date +'%Y%m%d')
-          # Get CANN version and convert to lowercase (e.g., 2026.07.29 -> 2026.07.29)
+          # Get CANN version and convert to lowercase (e.g., 2026.08.03 -> 2026.08.03)
           CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
           # Get the base tag pattern (e.g., main)
           PATTERN="${{ inputs.schedule_tag_pattern }}"
@@ -461,7 +461,7 @@ jobs:
           SUFFIX="${{ inputs.suffix }}"
           
           # Construct the daily tag: nightly-{PATTERN}-{SUFFIX}-cann{VERSION}-{DATE}
-          # Example: nightly-main-310p-openeuler-cann2026.07.29-20260729
+          # Example: nightly-main-310p-openeuler-cann2026.08.03-20260729
           if [ -n "$SUFFIX" ]; then
             DAILY_TAG="nightly-${PATTERN}-${SUFFIX}-cann${CANN_VERSION}-${DATE}"
           else
