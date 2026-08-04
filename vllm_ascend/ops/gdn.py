@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import logging
 import torch
 import torch_npu
 from einops import rearrange
@@ -37,65 +38,119 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
-
-def _chunk_gated_delta_rule_fused(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    initial_state: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
-
-    Drop-in replacement for the Triton ``chunk_gated_delta_rule`` pipeline
-    (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd + ...).
-    The fused CANN operator expects TND layout and does NOT apply q/k L2 norm
-    or the chunk-local cumsum of ``g`` internally, so q/k are normalized here
-    and the raw ``g`` is passed through.
-
-    Args:
-        q, k: ``[1, T, Nk, Dk]``   v: ``[1, T, Nv, Dv]``
-        g, beta: ``[1, T, Nv]``    g is fp32 (<=0), beta is (0, 1).
-        initial_state: ``[N, Nv, Dv, Dk]`` — same layout as ``ssm_state``,
-            no transpose required.
-        cu_seqlens: cumulative prefill query start locations ``[N+1]``.
-        scale: query scaling factor (``Dk ** -0.5``).
-
-    Returns:
-        o: ``[1, T, Nv, Dv]`` and final_state: ``[N, Nv, Dv, Dk]``.
-    """
-    # TND layout: drop the leading batch dim (batch size is always 1 here).
-    q = l2norm_fwd(q).squeeze(0).contiguous()  # [T, Nk, Dk]
-    k = l2norm_fwd(k).squeeze(0).contiguous()  # [T, Nk, Dk]
-    v = v.squeeze(0).contiguous()  # [T, Nv, Dv]
-    g = g.squeeze(0).to(torch.float32).contiguous()  # [T, Nv]
-    beta = beta.squeeze(0).to(v.dtype).contiguous()  # [T, Nv]
-
-    # The fused op only supports a bfloat16 initial_state, while ssm_state may be
-    # float32 (the recurrent path keeps fp32 state). Cast to bf16 here.
-    initial_state = initial_state.to(torch.bfloat16).contiguous()
-
-    # actual_seq_lengths is per-batch sequence length [N] (per the interface doc),
-    # derived from the cumulative query_start_loc.
-    actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
-
-    o, final_state = torch_npu.npu_chunk_gated_delta_rule(
-        q,
-        k,
-        v,
-        beta=beta,
-        initial_state=initial_state,
-        actual_seq_lengths=actual_seq_lengths,
-        scale=scale,
-        g=g,
-    )
-    return o.unsqueeze(0), final_state
-
+logger = logging.getLogger(__name__)
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    _fused_chunk_available: bool | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Probe whether the fused CANN op is usable on this device (the
+        # interface exists and a minimal smoke call succeeds).
+        self.use_fused_chunk_op = self._probe_fused_chunk()
+
+    @classmethod
+    def _probe_fused_chunk(cls) -> bool:
+        """Whether ``torch_npu.npu_chunk_gated_delta_rule`` can actually be used.
+
+        The interface must exist AND a minimal smoke call must succeed (the op is
+        unavailable on some CANN builds / devices). Any failure disables the
+        fused path so we fall back to the Triton pipeline.
+        """
+        if cls._fused_chunk_available is not None:
+            return cls._fused_chunk_available
+
+        if not hasattr(torch_npu, "npu_chunk_gated_delta_rule"):
+            cls._fused_chunk_available = False
+            return False
+
+        try:
+            # Minimal smoke call matching the op constraints (Dk == Dv == 128,
+            # Nv % Nk == 0). B=1, one short sequence.
+            device = torch.npu.current_device()
+            dk = dv = 128
+            nk, nv, seqlen = 1, 1, 64
+            q = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
+            k = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
+            v = torch.zeros((seqlen, nv, dv), dtype=torch.bfloat16, device=device)
+            beta = torch.full((seqlen, nv), 0.5, dtype=torch.bfloat16, device=device)
+            g = torch.full((seqlen, nv), -0.1, dtype=torch.float32, device=device)
+            initial_state = torch.zeros((1, nv, dv, dk), dtype=torch.bfloat16, device=device)
+            actual_seq_lengths = torch.tensor([seqlen], dtype=torch.int32, device=device)
+            torch_npu.npu_chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                beta=beta,
+                initial_state=initial_state,
+                actual_seq_lengths=actual_seq_lengths,
+                scale=dk**-0.5,
+                g=g,
+            )
+            torch.npu.synchronize()
+            logger.info("npu_chunk_gated_delta_rule smoke test passed; using fused chunk path.")
+            cls._fused_chunk_available = True
+        except Exception as e:
+            cls._fused_chunk_available = False
+        return cls._fused_chunk_available
+
+    def _chunk_gated_delta_rule_fused(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
+
+        Drop-in replacement for the Triton ``chunk_gated_delta_rule`` pipeline
+        (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd + ...).
+        The fused CANN operator expects TND layout and does NOT apply q/k L2 norm
+        or the chunk-local cumsum of ``g`` internally, so q/k are normalized here
+        and the raw ``g`` is passed through.
+
+        Args:
+            q, k: ``[1, T, Nk, Dk]``   v: ``[1, T, Nv, Dv]``
+            g, beta: ``[1, T, Nv]``    g is fp32 (<=0), beta is (0, 1).
+            initial_state: ``[N, Nv, Dv, Dk]`` — same layout as ``ssm_state``,
+                no transpose required.
+            cu_seqlens: cumulative prefill query start locations ``[N+1]``.
+            scale: query scaling factor (``Dk ** -0.5``).
+
+        Returns:
+            o: ``[1, T, Nv, Dv]`` and final_state: ``[N, Nv, Dv, Dk]``.
+        """
+        # TND layout: drop the leading batch dim (batch size is always 1 here).
+        q = l2norm_fwd(q).squeeze(0).contiguous()  # [T, Nk, Dk]
+        k = l2norm_fwd(k).squeeze(0).contiguous()  # [T, Nk, Dk]
+        v = v.squeeze(0).contiguous()  # [T, Nv, Dv]
+        g = g.squeeze(0).to(torch.float32).contiguous()  # [T, Nv]
+        beta = beta.squeeze(0).to(v.dtype).contiguous()  # [T, Nv]
+
+        # The fused op only supports a bfloat16 initial_state, while ssm_state may
+        # be float32 (the recurrent path keeps fp32 state). Cast to bf16 here.
+        initial_state = initial_state.to(torch.bfloat16).contiguous()
+
+        # actual_seq_lengths is per-batch sequence length [N] (per the interface
+        # doc), derived from the cumulative query_start_loc.
+        actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
+
+        o, final_state = torch_npu.npu_chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            beta=beta,
+            initial_state=initial_state,
+            actual_seq_lengths=actual_seq_lengths,
+            scale=scale,
+            g=g,
+        )
+        return o.unsqueeze(0), final_state
+
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
             return self.split_ba(ba)
