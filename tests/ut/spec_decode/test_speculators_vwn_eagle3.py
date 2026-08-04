@@ -21,7 +21,8 @@ Eagle3VwnLlamaForCausalLM using CPU-only execution with mocked VllmConfig.
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -140,7 +141,7 @@ def _mock_npu_env():
         olora_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
     )
-    maybe_calc_kv_scales_patch = (
+    maybe_calc_kv_scales_patch: AbstractContextManager[Any] = (
         patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None)
         if vllm_version_is("0.26.0")
         else nullcontext()
