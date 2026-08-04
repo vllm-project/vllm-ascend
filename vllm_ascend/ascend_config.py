@@ -89,8 +89,45 @@ class AscendConfig:
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
-        # Dump / PrecisionDebugger configuration
+        # Dump / PrecisionDebugger / DFX configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
+        self.dfx_config_path = additional_config.get("dfx_config_path") or additional_config.get("dfx-config")
+        if self.dfx_config_path is not None and not isinstance(self.dfx_config_path, str):
+            raise ValueError(
+                f"additional_config.dfx_config_path must be a string, got {type(self.dfx_config_path).__name__}."
+            )
+        raw_reload = additional_config.get("dfx_config_reload_interval", 0)
+        if raw_reload is None:
+            raw_reload = 0
+        try:
+            self.dfx_config_reload_interval = float(raw_reload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "additional_config.dfx_config_reload_interval must be a number of seconds "
+                f"(0 disables hot-reload; default 0), got {raw_reload!r}."
+            ) from exc
+        if self.dfx_config_reload_interval < 0:
+            raise ValueError(
+                f"additional_config.dfx_config_reload_interval must be >= 0, got {self.dfx_config_reload_interval}."
+            )
+        from vllm_ascend.dfx.runtime_config import DfxRuntimeConfig
+
+        # Do not persist here: API / EngineCore / every worker would race the same
+        # JSON. Worker ``DfxProcessor`` calls ``ensure_persisted()`` on the leader.
+        self.dfx_config = DfxRuntimeConfig(
+            self.dfx_config_path,
+            report_dir=additional_config.get("dfx_report_dir"),
+            reload_interval_seconds=self.dfx_config_reload_interval,
+            ensure_file=False,
+        )
+        # Path / hot-reload / persisted flags already logged by DfxRuntimeConfig.
+        # Apply ascend_log immediately (API/EngineCore and workers). Workers also
+        # re-apply from Dumper / refresh_config after sync.
+        self.dfx_config.apply_ascend_log_level()
+        # API / EngineCore: file-poll ascend_log. Workers skip (RANK/LOCAL_RANK/
+        # VLLM_DP_RANK/world) and keep execute_model → sync_for_step → broadcast.
+        # If this runs before Worker env is set, the bg loop self-exits later.
+        self.dfx_config.start_non_worker_background_reload()
 
         # Log configuration
         self.ascend_log_path = additional_config.get(
