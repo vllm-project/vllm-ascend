@@ -54,7 +54,7 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, oproj_tp_enable, shared_expert_dp_enabled
 
 
 @contextmanager
@@ -578,6 +578,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
+        build_dummy_draft_metadata = (
+            (aclgraph_runtime_mode == CUDAGraphMode.FULL or (self.method == "mtp" and oproj_tp_enable()))
+            and len(self.runner.attn_groups) > 0
+        )
+
         # init block table tensor clone is only available after profile run and is only used for graph mode
         if (
             self.pcp_size * self.dcp_size > 1
@@ -595,7 +600,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 pin_memory=self.runner.pin_memory,
             )
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
+        if build_dummy_draft_metadata:
             num_computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
 
             # num_reqs is already the padded version
@@ -658,8 +663,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_index > 0:
-                    assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                    if self.block_table_tensor_clone is not None:
+                        common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                    else:
+                        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
                 if not self.use_compress or draft_index == 0:
                     attn_metadata_eagle = builder.build_for_graph_capture(
                         common_attn_metadata,
