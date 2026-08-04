@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -34,7 +35,11 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
+from vllm.v1.worker.gpu.model_runner import (
+    ExecuteModelState,
+    GPUModelRunner,
+    sort_batch_req_ids,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -46,18 +51,70 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.utils import enable_sp
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
+from vllm_ascend.worker.v2.sp_utils import (
+    _all_gather_hidden_states_and_aux,
+    _flashcomm_enabled,
+)
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
+# TODO: remove this wrapper when vllm-ascend supports sequence parallel on model runner v2.
+@contextmanager
+def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
+    """Pad batches before v2 selects an eager or graph execution shape.
+
+    FlashComm1 reduce-scatter requires the token dimension to be divisible by
+    tensor parallel size. Padding in ``prepare_inputs`` is too late for full
+    graphs because their replay shape has already been selected by then.
+    """
+    if not enable_sp(vllm_config):
+        yield
+        return
+
+    original_dispatch = vllm_model_runner.dispatch_cg_and_sync_dp
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+    def dispatch_with_flashcomm_padding(
+        cudagraph_manager,
+        num_reqs,
+        num_tokens,
+        uniform_token_count,
+        dp_size,
+        dp_rank,
+        need_eager=False,
+        num_active_loras=0,
+    ):
+        num_tokens = (num_tokens + tp_size - 1) // tp_size * tp_size
+        return original_dispatch(
+            cudagraph_manager,
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            dp_size,
+            dp_rank,
+            need_eager=need_eager,
+            num_active_loras=num_active_loras,
+        )
+
+    vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_with_flashcomm_padding
+    try:
+        yield
+    finally:
+        vllm_model_runner.dispatch_cg_and_sync_dp = original_dispatch
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
+
+    execute_model_state: ExecuteModelState | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -142,6 +199,50 @@ class NPUModelRunner(GPUModelRunner):
                 self.req_states,
                 self.block_tables,
             )
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        is_profile: bool = False,
+    ):
+        with flashcomm_dispatch_wrapper(self.vllm_config):
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+            )
+
+        state = self.execute_model_state
+        if (
+            self.is_last_pp_rank
+            and state is not None
+            and _flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
+        ):
+            num_tokens = state.input_batch.num_tokens
+            assert state.hidden_states is not None
+            gathered_output = _all_gather_hidden_states_and_aux(
+                (state.hidden_states, state.aux_hidden_states)
+                if state.aux_hidden_states is not None
+                else state.hidden_states,
+                num_tokens,
+            )
+            if isinstance(gathered_output, tuple):
+                hidden_states, aux_hidden_states = gathered_output
+            else:
+                hidden_states = gathered_output
+                aux_hidden_states = state.aux_hidden_states
+            self.execute_model_state = state._replace(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+            )
+
+        return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:
