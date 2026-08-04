@@ -1,10 +1,11 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 import torch.distributed as dist
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -14,10 +15,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
+    PreprocessType,
     DSACPContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
@@ -25,6 +28,194 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+@dataclass
+class AscendSFACPMetadata(AscendSFAMetadata):
+    """SFA metadata with the full PCP cache-write slot mapping."""
+
+    pcp_slot_mapping: torch.Tensor | None = None
+
+
+class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
+    """Metadata builder for SFA under MRV2 Prefill Context Parallelism.
+
+    Batch partitioning (zigzag), seq_lens_np / attn_state rebuild, and
+    num_decode_tokens propagation are handled by AscendPCPManager at the
+    model_runner level plus the upstream MLACommonMetadataBuilder. This
+    class is intentionally thin: it exists primarily so that
+    AscendSFABackend.get_builder_cls() can route to it when PCP is on.
+    """
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls if metadata_cls is not None else AscendSFACPMetadata,
+            supports_dcp_with_varlen,
+        )
+
+    def _build_with_metadata_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        build_metadata: Callable[[], AscendSFAMetadata],
+    ) -> AscendSFAMetadata:
+        """Keep PCPManager's gathered slots beside the local SFA view."""
+        pcp_slot_mapping = common_attn_metadata.slot_mapping
+        metadata = super()._build_with_metadata_view(
+            common_attn_metadata,
+            build_metadata,
+        )
+        assert isinstance(metadata, AscendSFACPMetadata)
+        metadata.pcp_slot_mapping = pcp_slot_mapping
+        return metadata
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendSFACPMetadata:
+        '''Capture PCP FULL-decode graphs with decode-shaped cache inputs.'''
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        assert isinstance(metadata, AscendSFACPMetadata)
+        metadata.pcp_slot_mapping = common_attn_metadata.slot_mapping
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.num_decodes = common_attn_metadata.num_reqs
+        metadata.num_decode_tokens = common_attn_metadata.num_input_tokens
+        return metadata
+
+
+class AscendSFACPImpl(AscendSFAImpl):
+    """SFA impl for MRV2 Prefill Context Parallelism.
+
+    Reuses every method on AscendSFAImpl unchanged, and only overrides
+    the hooks where PCP needs to step in:
+
+    1. __init__: force the native preprocess path (prolog_v3 / mlapo
+       fused ops bypass the cross-rank KV gather and are incompatible).
+    2. exec_kv: gather latent KV + cos/sin + slot_mapping across PCP
+       ranks before the fused RMSNorm+RoPE+cache-write op, so every
+       rank writes the complete KV into its replicated cache.
+    3. _write_indexer_cache: gather indexer key (+ optional scale) and
+       slot_mapping across PCP ranks before the parent's scatter write,
+       so every rank writes the complete set of indexer keys.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **kwargs,
+        )
+        # PCP requires the native forward branch; fused prolog_v3 / mlapo
+        # paths bypass the cross-rank KV gather and are incompatible.
+        self.preprocess_type = PreprocessType.NATIVE
+        # PCP owns the prefill aggregation in exec_kv/_write_indexer_cache.
+        # The FlashComm SP path would gather hidden states before indexer
+        # RoPE, then PCP would gather those cache inputs a second time while
+        # the metadata remains local.  Keep this implementation on its
+        # native local-token path and perform the single required gather in
+        # the PCP hooks below.
+        self.enable_sp = False
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        # PCP: gather latent KV and positional cos/sin across PCP ranks before
+        # the fused RMSNorm+RoPE+cache-write op. Slots are already gathered by
+        # PCPManager. Decode
+        # tokens are replicated across ranks and stay local; only the
+        # prefill partition is all-gathered. After this every rank sees the
+        # complete set of tokens and writes the full KV into its replicated
+        # cache. cos/sin must be gathered alongside kv_no_split because
+        # they are derived from per-token positions and the gathered half
+        # would otherwise be rotated with the wrong positions.
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+            (kv_no_split, cos, sin), slots, num_decode_tokens
+        )
+        assert slots.numel() == kv_no_split.shape[0], (
+            "SFA PCP cache write requires one slot per gathered token: "
+            f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
+        )
+
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    def _get_sfa_kv_slot_mapping(self, attn_metadata: M) -> torch.Tensor:
+        assert isinstance(attn_metadata, AscendSFACPMetadata)
+        assert attn_metadata.pcp_slot_mapping is not None
+        return attn_metadata.pcp_slot_mapping
+
+    def _write_indexer_cache(
+        self,
+        k_li: torch.Tensor,
+        k_li_scale: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata: M,
+    ) -> None:
+        # PCP: gather indexer key (and optional scale) across PCP ranks before
+        # delegating to the parent's scatter write; PCPManager has already
+        # gathered the slot mapping, so every rank writes the complete set of
+        # indexer keys into its
+        # replicated indexer cache. Same pattern as exec_kv: decode tokens
+        # stay local (replicated), only the prefill partition is gathered.
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
+        tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
+        gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
+            tensors, slot_mapping, num_decode_tokens
+        )
+        k_li = gathered_tensors[0]
+        assert gathered_slot_mapping.numel() == k_li.shape[0], (
+            "SFA PCP indexer cache write requires one slot per gathered token: "
+            f"tokens={k_li.shape[0]}, slots={gathered_slot_mapping.numel()}."
+        )
+        if k_li_scale is not None:
+            k_li_scale = gathered_tensors[1]
+        super()._write_indexer_cache(
+            k_li,
+            k_li_scale,
+            gathered_slot_mapping,
+            kv_cache,
+            attn_metadata,
+        )
 
 
 class DCPGatherContext(NamedTuple):
@@ -124,7 +315,7 @@ class AscendSFADCPMetadataBuilder(
         )
         self.arange_buffer: torch.Tensor = torch.arange(
             max_replicated_block_table_cols,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=device,
         )
         self.slot_mapping_replicated_view_buf: torch.Tensor = torch.empty(
@@ -225,7 +416,7 @@ class AscendSFADCPMetadataBuilder(
             common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
         )
         req_indices = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
+            torch.arange(num_reqs, dtype=torch.int64, device=self.device),
             query_lens.to(device=self.device),
             output_size=num_input_tokens,
         )[:num_actual_tokens]
@@ -236,7 +427,7 @@ class AscendSFADCPMetadataBuilder(
         req_indices = req_indices[:num_actual_tokens]
         positions = common_attn_metadata.positions[:num_actual_tokens].to(
             device=self.device,
-            dtype=torch.int32,
+            dtype=torch.int64,
         )
         logical_block_idx = positions // self.replicated_view_block_size
         block_offsets = positions % self.replicated_view_block_size

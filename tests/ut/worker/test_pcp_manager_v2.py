@@ -22,7 +22,6 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -85,7 +84,7 @@ def _make_local_pcp_batch():
     )
 
 
-def _make_global_pcp_batch():
+def _make_global_pcp_batch(num_computed_tokens: int = 0):
     """Build the global batch that is passed into PCPManager.partition_batch."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -104,19 +103,26 @@ def _make_global_pcp_batch():
     base_batch.num_scheduled_tokens = np.array([18], dtype=np.int32)
     base_batch.query_start_loc_np = np.array([0, 18], dtype=np.int32)
     base_batch.query_start_loc.copy_(torch.tensor([0, 18], dtype=torch.int32))
-    base_batch.num_computed_tokens_np = np.array([0], dtype=np.int32)
-    base_batch.prefill_len_np = np.array([18], dtype=np.int32)
-    base_batch.num_computed_prefill_tokens_np = np.array([0], dtype=np.int32)
+    prefill_len = num_computed_tokens + 18
+    base_batch.num_computed_tokens_np = np.array(
+        [num_computed_tokens], dtype=np.int32
+    )
+    base_batch.prefill_len_np = np.array([prefill_len], dtype=np.int32)
+    base_batch.num_computed_prefill_tokens_np = np.array(
+        [num_computed_tokens], dtype=np.int32
+    )
     base_batch.is_prefilling_np = np.array([True])
-    base_batch.seq_lens.copy_(torch.tensor([18], dtype=torch.int32))
-    base_batch.seq_lens_cpu_upper_bound = torch.tensor([18], dtype=torch.int32)
+    base_batch.seq_lens.copy_(torch.tensor([prefill_len], dtype=torch.int32))
+    base_batch.seq_lens_cpu_upper_bound = torch.tensor(
+        [prefill_len], dtype=torch.int32
+    )
     base_batch.input_ids.copy_(torch.arange(18, dtype=torch.int32))
     base_batch.positions.copy_(torch.arange(18, dtype=torch.int64))
     base_batch.is_padding.fill_(False)
 
     return AscendInputBatch(
         **base_batch.__dict__,
-        seq_lens_np=np.array([18], dtype=np.int32),
+        seq_lens_np=np.array([prefill_len], dtype=np.int32),
         attn_state="global-attn-state",
     )
 
@@ -191,6 +197,60 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
 
 
+def test_partition_batch_preserves_prefix_cache_offset_for_continued_prefill():
+    """A cache hit offsets each PCP-local segment into the existing sequence."""
+    vllm_config = object()
+    global_batch = _make_global_pcp_batch(num_computed_tokens=128)
+    req_states = SimpleNamespace(
+        last_sampled_tokens=torch.zeros(4, dtype=torch.int64),
+        prefill_len=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+        draft_tokens=torch.empty((4, 0), dtype=torch.int64),
+    )
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        vllm_config=vllm_config,
+        req_states=req_states,
+        max_num_reqs=1,
+        max_num_tokens=18,
+    )
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
+            return_value=None,
+        ),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
+            return_value=torch.zeros(2, dtype=torch.int64),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
+        patch.object(pcp_manager_module, "build_attn_state", return_value=MagicMock()),
+    ):
+        result = manager.partition_batch(global_batch)
+
+    # With a non-zero computed-token count neither segment is a pure prefill,
+    # so rank 0 keeps its head chunk followed by its tail chunk. Both local
+    # start positions include the 128-token prefix-cache hit.
+    np.testing.assert_array_equal(
+        result.num_scheduled_tokens, np.array([5, 3], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        result.num_computed_tokens_np, np.array([128, 143], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        result.seq_lens_np, np.array([133, 146], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        result.num_computed_prefill_tokens_np,
+        np.array([128, 143], dtype=np.int32),
+    )
+
+
 def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
@@ -222,7 +282,7 @@ def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
     req_states = MagicMock()
 
     with (
-        patch.object(PCPManager, "validate_config") as validate_config,
+        patch.object(AscendPCPManager, "validate_config") as validate_config,
         patch.object(pcp_manager_module, "get_pcp_group", return_value=pcp_group),
         patch.object(pcp_manager_module, "get_dcp_group", return_value=dcp_group),
     ):

@@ -28,6 +28,7 @@ from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vll
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -38,12 +39,16 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+import vllm.v1.worker.utils as worker_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor
 
@@ -62,6 +67,25 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if isinstance(attn_module, Attention):
             if spec := attn_module.get_kv_cache_spec(vllm_config):
                 kv_cache_spec[layer_name] = spec
+            continue
+        if isinstance(attn_module, DeepseekV32IndexerCache):
+            # SFA keeps the indexer key cache in a distinct cache layer.  It
+            # cannot use the generic MLA spec: that would split it into K/V
+            # buffers, while SFA consumes one indexer-K buffer.  The upstream
+            # cache module's ``head_dim`` includes four serialized FP8 scale
+            # bytes (132 for a 128-dim key).  Native non-C8 SFA instead writes
+            # BF16 indexer keys, so allocate the model's actual index head dim.
+            hf_config = vllm_config.model_config.hf_config
+            index_head_size = getattr(hf_config, "index_head_dim", None)
+            if index_head_size is None:
+                index_head_size = attn_module.head_dim
+            kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
+                block_size=attn_module.cache_config.block_size,
+                num_kv_heads=1,
+                head_size=index_head_size,
+                dtype=vllm_config.model_config.dtype,
+                cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            )
             continue
         if isinstance(attn_module, MLAAttention):
             spec = attn_module.get_kv_cache_spec(vllm_config)
@@ -281,7 +305,7 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
 
     # init kv cache tensors
-    kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
@@ -298,6 +322,14 @@ def _allocate_kv_cache(
         example_layer_name = kv_cache_tensor.shared_by[0]
         example_kv_cache_spec = layer_kv_cache_spec[example_layer_name]
         assert isinstance(example_kv_cache_spec, AttentionSpec)
+
+        if isinstance(example_kv_cache_spec, AscendSFAIndexerCacheSpec):
+            indexer_tensor = torch.zeros(
+                kv_cache_tensor.size, dtype=torch.int8, device=device
+            )
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = indexer_tensor
+            continue
 
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_kv_cache_spec)
         assert k_dim > 0 and v_dim > 0
@@ -335,7 +367,7 @@ def _allocate_kv_cache(
 
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
-    kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    kv_cache_raw_tensors: dict[str, Any],
     attn_backends: dict[str, AttentionBackend],
     cache_dtype: str,
     kernel_block_sizes: list[int] | None = None,
@@ -462,6 +494,25 @@ def _reshape_kv_cache_v2(
                 continue
 
             assert isinstance(kv_cache_spec, AttentionSpec)
+
+            if isinstance(kv_cache_spec, AscendSFAIndexerCacheSpec):
+                raw_indexer_tensor = kv_cache_raw_tensors[layer_name]
+                assert isinstance(raw_indexer_tensor, torch.Tensor)
+                num_blocks = (
+                    raw_indexer_tensor.numel() // kv_cache_spec.page_size_bytes
+                )
+                indexer_shape = group.backend.get_kv_cache_shape(
+                    num_blocks * kv_cache_spec.sfa_dcp_replicated_indexer_size,
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype,
+                )
+                indexer_k_cache = raw_indexer_tensor.view(
+                    kv_cache_spec.dtype
+                ).view(indexer_shape)
+                kv_caches[layer_name] = (indexer_k_cache,)
+                continue
 
             raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_k_tensor is not None

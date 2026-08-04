@@ -53,12 +53,27 @@ class AscendModelState(DefaultModelState):
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        use_padded_input_tokens = (
+            self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+            or cudagraph_mode == CUDAGraphMode.FULL
+        )
+        # PCP pads each rank's local inputs for collective alignment. FULL
+        # graphs likewise replay fixed-size input buffers. Other paths retain
+        # the upstream actual-token semantics.
+        num_input_tokens = (
+            input_batch.num_tokens_after_padding
+            if use_padded_input_tokens
+            else num_tokens
+        )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
+            # SFA derives RoPE inputs from this count. PCP pads every rank
+            # to an equal local token count for collectives.
+            num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
