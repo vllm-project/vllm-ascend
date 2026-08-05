@@ -131,7 +131,7 @@ jobs:
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install . \
-          --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/ \
+          --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/
           pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
