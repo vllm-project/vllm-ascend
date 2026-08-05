@@ -50,6 +50,24 @@ from vllm_ascend.utils import calc_split_factor
 _ATTENTION_MASK_BUILDER = None
 
 
+def _get_non_mla_kv_cache_shapes(
+    kv_cache_shape: tuple[int, ...],
+    kv_cache_spec: AttentionSpec,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return K/V shapes without corrupting backend-specific layouts.
+
+    Some backends encode the head dimension in more than one physical
+    dimension. For example, the 310P NZ layout uses a fixed trailing packing
+    dimension of 16. Replacing that dimension with ``head_size_v`` is only
+    valid when V has a genuinely different logical head size from K.
+    """
+    k_shape = kv_cache_shape[1:]
+    head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
+    if head_size_v == kv_cache_spec.head_size:
+        return k_shape, k_shape
+    return k_shape, (*kv_cache_shape[1:-1], head_size_v)
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -402,11 +420,7 @@ def _reshape_kv_cache(
                     cache_dtype,
                 )
                 if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-                    k_shape = kv_cache_shape[1:]
-                    if hasattr(kv_cache_spec, "head_size_v"):
-                        v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
-                    else:
-                        v_shape = k_shape
+                    k_shape, v_shape = _get_non_mla_kv_cache_shapes(kv_cache_shape, kv_cache_spec)
                 else:
                     # k_cache: nope_cache    v_cache: rope_cache
                     mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
@@ -482,11 +496,7 @@ def _reshape_kv_cache_v2(
             )
 
             if not isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                k_shape = kv_cache_shape[1:]
-                if hasattr(kv_cache_spec, "head_size_v"):
-                    v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
-                else:
-                    v_shape = k_shape
+                k_shape, v_shape = _get_non_mla_kv_cache_shapes(kv_cache_shape, kv_cache_spec)
             else:
                 mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
