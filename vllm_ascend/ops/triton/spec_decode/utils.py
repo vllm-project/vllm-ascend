@@ -81,6 +81,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     # Block table
     block_table_ptr,  # [max_reqs, max_blocks]
     block_table_stride,  # stride of block_table dim 0 (in elements)
+    block_table_num_cols,  # number of valid columns in each block-table row
     # Metadata
     query_start_loc_ptr,  # [num_reqs + 1]
     seq_lens_ptr,  # [num_reqs]
@@ -96,28 +97,52 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
 ):
     for req_idx in range(0, batch_size):
-        ctx_start = tl.load(query_start_loc_ptr + req_idx)
-        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        # A request may have no valid sampled token (for example when the
+        # target runner discards sampling for a partial request).  Keep all
+        # pointer arithmetic inside this step's input range even in that case.
+        ctx_start = tl.minimum(
+            tl.maximum(tl.load(query_start_loc_ptr + req_idx), 0),
+            total_input_tokens,
+        )
+        ctx_end = tl.minimum(
+            tl.maximum(tl.load(query_start_loc_ptr + req_idx + 1), ctx_start),
+            total_input_tokens,
+        )
         num_ctx = ctx_end - ctx_start
+
+        if HAS_NUM_REJECTED:
+            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
+            num_rejected = tl.minimum(tl.maximum(num_rejected, 0), num_ctx)
+        else:
+            num_rejected = 0
+        valid_ctx_end = ctx_end - num_rejected
 
         for j in range(0, num_ctx):
             ctx_pos_idx = ctx_start + j
             pos = tl.load(target_positions_ptr + ctx_pos_idx)
-            tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
-
             slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
 
-        if HAS_NUM_REJECTED:
-            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
-            valid_ctx_end = ctx_end - num_rejected
-        else:
-            num_rejected = 0
-            valid_ctx_end = ctx_end
+            # Rejected target tokens must not populate the draft KV cache.
+            # In particular, a fully discarded row has no valid context slot.
+            is_valid_context = ctx_pos_idx < valid_ctx_end
+            tl.store(
+                out_context_positions_ptr + ctx_pos_idx,
+                tl.where(is_valid_context, pos, -1),
+            )
+            tl.store(
+                out_context_slot_mapping_ptr + ctx_pos_idx,
+                tl.where(is_valid_context, slot, -1),
+            )
 
         seq_len = tl.load(seq_lens_ptr + req_idx)
-        effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        effective_seq_len = tl.maximum(seq_len - num_rejected, 0)
+
+        # ``valid_ctx_end - 1`` points before the input buffer when the first
+        # request has zero valid tokens.  Use the first scheduled position as
+        # the boundary in that case: the last valid position is one before it.
+        last_valid_idx = tl.maximum(valid_ctx_end - 1, ctx_start)
+        last_pos = tl.load(target_positions_ptr + last_valid_idx)
+        last_pos = tl.where(valid_ctx_end > ctx_start, last_pos, last_pos - 1)
 
         for q_idx in range(0, num_query_per_req):
             query_pos = last_pos + 1 + q_idx
@@ -127,8 +152,16 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
 
             query_cache_pos = effective_seq_len + q_idx
             block_num_q = query_cache_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
+            valid_block_num = (block_num_q >= 0) & (block_num_q < block_table_num_cols)
+            safe_block_num = tl.minimum(
+                tl.maximum(block_num_q, 0),
+                block_table_num_cols - 1,
+            )
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + safe_block_num
+            ).to(tl.int64)
             slot_q = block_id_q * block_size + (query_cache_pos % block_size)
+            slot_q = tl.where(valid_block_num & (block_id_q >= 0), slot_q, -1)
             tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
 
             if q_idx == 0:
