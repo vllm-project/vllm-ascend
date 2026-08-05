@@ -6,8 +6,34 @@ import pytest
 import torch
 from vllm.lora.layers.base import BaseLayerWithLoRA
 
-from vllm_ascend.lora.fused_moe import AscendFusedMoEWithLoRA
+from vllm_ascend.lora.fused_moe import (
+    AscendFusedMoE3DWithLoRA,
+    AscendFusedMoEWithLoRA,
+)
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU, _lora_bmm_expand_slice_op
+
+
+def test_ascend_fused_moe_3d_initializes_upstream_weight_state() -> None:
+    moe_config = SimpleNamespace(
+        is_act_and_mul=True,
+        num_local_experts=10,
+        moe_parallel_config=SimpleNamespace(tp_size=4, tp_rank=1),
+    )
+    base_layer = SimpleNamespace(moe_config=moe_config)
+
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value="cpu"),
+        patch.object(BaseLayerWithLoRA, "__init__", return_value=None),
+    ):
+        wrapper = AscendFusedMoE3DWithLoRA(base_layer)
+
+    assert wrapper.enable_moe_shared_loras is False
+    assert wrapper._w13_a_num_experts == moe_config.num_local_experts
+    assert wrapper._lora_stream is None
+    assert wrapper._events is None
+    assert wrapper._w13_slices == 1
+    assert wrapper.n_slices == moe_config.num_local_experts * 2
 
 
 @pytest.mark.parametrize("shared_experts", [None, object()])

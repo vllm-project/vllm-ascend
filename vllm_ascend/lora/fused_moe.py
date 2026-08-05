@@ -344,7 +344,12 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        # We intentionally skip the upstream GPU-only constructor, so keep
+        # the state consumed by its v0.26 weight/context helpers in sync here.
+        self._lora_stream = None
+        self._events = None
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        self.enable_moe_shared_loras = False
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
@@ -377,6 +382,7 @@ class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
         AscendFusedMoEWithLoRA.__init__(self, base_layer)
         # Override: 3D MoE LoRA uses a single w13 slice.
         self._w13_slices = 1
+        self.n_slices = self.local_num_experts * (self._w13_slices + 1)
 
 
 # ----------------------------------------------------------------------
