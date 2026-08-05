@@ -90,7 +90,7 @@ jobs:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
     container:
-      image: quay.nju.edu.cn/canuunac/cann:9.0.1-950-ubuntu22.04-py3.12-arm64
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
