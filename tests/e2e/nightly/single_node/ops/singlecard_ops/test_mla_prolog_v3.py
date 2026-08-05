@@ -252,6 +252,109 @@ def test_mla_prolog_v3_cache_mode(cache_mode: str):
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize("cache_mode", ["PA_BSND", "PA_NZ"])
+@torch.inference_mode()
+def test_mla_prolog_v3_noncontiguous_cache_dim0(cache_mode: str):
+    """KV/KR cache views may have padding between physical blocks."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    token_num = 2
+    head_num = 96
+    he = 7168
+    hcq = 1536
+    hckv = 512
+    d = 128
+    dr = 64
+    block_num = 4
+    block_size = 128
+    dtype = torch.bfloat16
+
+    token_x = torch.randn((token_num, he), dtype=dtype).npu()
+    weight_dq = torch_npu.npu_format_cast(torch.randn((he, hcq), dtype=dtype).npu().contiguous(), 29)
+    weight_uq_qr = torch_npu.npu_format_cast(
+        torch.randn((hcq, head_num * (d + dr)), dtype=dtype).npu().contiguous(), 29
+    )
+    weight_uk = torch.randn((head_num, d, hckv), dtype=dtype).npu()
+    weight_dkv_kr = torch_npu.npu_format_cast(torch.randn((he, hckv + dr), dtype=dtype).npu().contiguous(), 29)
+    rmsnorm_gamma_cq = torch.ones((hcq,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.ones((hckv,), dtype=dtype).npu()
+    rope_sin = torch.randn((token_num, dr), dtype=dtype).npu()
+    rope_cos = torch.randn((token_num, dr), dtype=dtype).npu()
+    cache_index = torch.tensor([block_size + 1, 2 * block_size + 3], dtype=torch.int64).npu()
+
+    kv_contiguous = torch.zeros((block_num, block_size, 1, hckv), dtype=dtype).npu()
+    kr_contiguous = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
+    query_ref, query_rope_ref, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_contiguous,
+        kr_contiguous,
+        cache_index=cache_index,
+        cache_mode=cache_mode,
+    )
+
+    # Keep one physical padding block between adjacent logical KV blocks and
+    # two physical padding blocks between adjacent logical KR blocks.
+    kv_storage = torch.full((block_num * 2, block_size, 1, hckv), 7.0, dtype=dtype).npu()
+    kr_storage = torch.full((block_num * 3, block_size, 1, dr), -5.0, dtype=dtype).npu()
+    kv_cache = kv_storage[::2]
+    kr_cache = kr_storage[::3]
+    kv_cache.zero_()
+    kr_cache.zero_()
+
+    assert not kv_cache.is_contiguous()
+    assert not kr_cache.is_contiguous()
+    assert kv_cache.stride(0) == 2 * block_size * hckv
+    assert kr_cache.stride(0) == 3 * block_size * dr
+
+    kv_before = kv_cache.clone()
+    kr_before = kr_cache.clone()
+    kv_padding_before = kv_storage[1::2].clone()
+    kr_padding_1_before = kr_storage[1::3].clone()
+    kr_padding_2_before = kr_storage[2::3].clone()
+
+    # Both tokens target non-zero logical blocks, so an implementation that
+    # ignores dim0 stride would overwrite physical padding blocks.
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_cache,
+        kr_cache,
+        cache_index=cache_index,
+        cache_mode=cache_mode,
+    )
+
+    assert query.shape == (token_num, head_num, hckv)
+    assert query_rope.shape == (token_num, head_num, dr)
+    assert not torch.equal(kv_cache, kv_before)
+    assert not torch.equal(kr_cache, kr_before)
+    torch.testing.assert_close(query, query_ref, rtol=0, atol=0)
+    torch.testing.assert_close(query_rope, query_rope_ref, rtol=0, atol=0)
+    assert torch.equal(kv_cache, kv_contiguous)
+    assert torch.equal(kr_cache, kr_contiguous)
+    assert torch.equal(kv_storage[1::2], kv_padding_before)
+    assert torch.equal(kr_storage[1::3], kr_padding_1_before)
+    assert torch.equal(kr_storage[2::3], kr_padding_2_before)
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
 @torch.inference_mode()
 def test_mla_prolog_v3_cache_mode_bsnd():
     _skip_if_mla_prolog_v3_unavailable()

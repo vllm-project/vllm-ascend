@@ -41,6 +41,8 @@ struct MlaPrologBaseParams {
     uint32_t dimHeadRope;        // dim size per rope head 64（单个带RoPE头的维度）
     uint32_t blockNum;           // pa block num（PA格式的块数量）
     uint32_t blockSize;          // pa block size 128（PA格式的块大小）
+    uint64_t kvCacheStride0;     // kv cache first-axis stride in elements
+    uint64_t krCacheStride0;     // kr cache first-axis stride in elements
     uint32_t mm1BlockNum;        // 24  Cq（矩阵乘1的块数量，对应Cq计算）
     uint32_t mm2BlockNum;        // 9   Ckv（矩阵乘2的块数量，对应Ckv计算）
     uint32_t mm3BlockNum;        // 24  QcQr（矩阵乘3的块数量，对应QcQr计算）

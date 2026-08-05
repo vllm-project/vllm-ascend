@@ -82,6 +82,8 @@
 
 RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
 
+`kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；除首轴外的其余轴必须连续。
+
 #### 量化模式合法组合（`weight_quant_mode` × `kv_cache_quant_mode`）
 
 | wq | 含义 | 合法 kvq |
