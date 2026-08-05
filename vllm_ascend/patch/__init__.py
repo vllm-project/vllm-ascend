@@ -1431,3 +1431,17 @@
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
 #
+# ** 34. File: platform/patch_recompute_chat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.online_renderer.OnlineRenderer.render_chat`
+#    Why:
+#       P/D recompute retries must resume from exact token IDs. Rebuilding chat
+#       messages changes role placement and applies the chat template again.
+#    How:
+#       Replace the rendered engine input only when the proxy supplies its
+#       internal recompute token prefix through KV transfer parameters.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/issues/13466
+#    Future Plan:
+#       Remove this patch when upstream vLLM exposes a token-native internal
+#       resume input for chat-completion P/D proxies.
