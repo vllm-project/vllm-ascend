@@ -1186,8 +1186,12 @@
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#       apply_penalties also fails on large input shape because of the triton kernel limitation.
 #    How：
 #       override triton ops in vLLM with ascend implementation
+#       re-write apply_penalties kernel with minimum change to support large input shape.
+#    Test:
+#       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
 #    Related PR (if no, explain why):
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
