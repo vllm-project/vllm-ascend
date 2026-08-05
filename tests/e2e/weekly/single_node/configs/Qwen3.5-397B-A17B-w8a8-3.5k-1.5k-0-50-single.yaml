@@ -55,7 +55,7 @@ test_cases:
         max_out_len: 1500
         batch_size: 160
         request_rate: 5
-        baseline: 40.9
+        baseline: 2663.3728
         threshold: 0.97
       perf_20:
         case_type: performance
@@ -66,5 +66,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 32
         request_rate: 0
-        baseline: 20.8
+        baseline: 1421.89
         threshold: 0.97
