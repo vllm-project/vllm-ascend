@@ -25,7 +25,6 @@ verbatim.
 from typing import TYPE_CHECKING
 
 import torch
-from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -59,6 +58,10 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
     The inherited ``gpu_kv_caches`` field holds NPU caches on this
     platform — kept as-is for parent-class compatibility.
     """
+
+    # CI skips analysis of vLLM imports. The NPU event implements the same
+    # record/query/synchronize API as torch.Event.
+    _store_compute_done: torch.Event | None
 
     def __init__(
         self,
@@ -158,7 +161,6 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
             self.store_stream,
         )
 
-    @override
     def get_finished(
         self,
         finished_req_ids: set[str],
@@ -180,16 +182,18 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
                     events_list=self._load_events,
                 )
             if metadata.store_gpu_blocks:
-                if self._store_compute_done is None:
-                    self._store_compute_done = torch.npu.Event()
-                self._store_compute_done.record(torch.npu.current_stream())
+                store_compute_done = self._store_compute_done
+                if store_compute_done is None:
+                    store_compute_done = torch.npu.Event()
+                    self._store_compute_done = store_compute_done
+                store_compute_done.record(torch.npu.current_stream())
                 self._backend.launch_copy(
                     metadata.store_gpu_blocks,
                     metadata.store_cpu_blocks,
                     is_store=True,
                     event_idx=metadata.store_event,
                     events_list=self._store_events,
-                    wait_event=self._store_compute_done,
+                    wait_event=store_compute_done,
                 )
 
         finished_recving: set[str] = set()

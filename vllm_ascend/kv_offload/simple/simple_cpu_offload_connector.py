@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
     SimpleCPUOffloadConnector,
 )
 from vllm.logger import logger
+from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
 from vllm_ascend.kv_offload.simple.worker import SimpleCPUOffloadNPUWorker
 
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
 
 class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
     """Reuse vLLM's connector while replacing its CUDA worker on NPU."""
+
+    # vLLM imports are skipped by the project mypy command. Mirror the
+    # upstream declaration without changing its runtime initialization.
+    worker_handler: SimpleCPUOffloadWorker | None
 
     def __init__(
         self,
@@ -37,8 +42,9 @@ class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
 
         # When prefix caching is disabled, upstream intentionally leaves the
         # worker unset and the connector behaves as a no-op.
-        if role == KVConnectorRole.WORKER and self.worker_handler is not None:
-            cpu_capacity = self.worker_handler.cpu_capacity_bytes
+        worker_handler = self.worker_handler
+        if role == KVConnectorRole.WORKER and worker_handler is not None:
+            cpu_capacity = worker_handler.cpu_capacity_bytes
             self.worker_handler = SimpleCPUOffloadNPUWorker(vllm_config, kv_cache_config, cpu_capacity)
             logger.info(
                 "AscendSimpleCPUOffloadConnector: using NPU worker (per_rank=%.2f GB)",

@@ -317,6 +317,11 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 class AscendOffloadingConnector(OffloadingConnector):
     """vLLM OffloadingConnector with an Ascend layout adapter."""
 
+    # vLLM is skipped by the Ascend mypy invocation, so inherited attributes
+    # are not visible to the type checker. Keep this aligned with upstream;
+    # ``super().__init__`` still owns initialization and role handling.
+    connector_worker: OffloadingConnectorWorker | None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -324,8 +329,9 @@ class AscendOffloadingConnector(OffloadingConnector):
         kv_cache_config: KVCacheConfig,
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
-        if self.connector_worker is not None:
+        connector_worker = self.connector_worker
+        if connector_worker is not None:
             self.connector_worker = AscendOffloadingConnectorWorker(
-                self.connector_worker.spec,
+                connector_worker.spec,
                 kv_cache_config,
             )

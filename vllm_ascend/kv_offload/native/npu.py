@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from typing_extensions import override
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -57,6 +56,10 @@ def _normalize_legacy_num_blocks(
 class NPUOffloadingSpec(_CPUOffloadingSpec):
     """Use vLLM's CPU manager with an Ascend-specific transfer worker."""
 
+    # vLLM is skipped by the Ascend mypy invocation, so redeclare the
+    # inherited worker cache without taking over its runtime initialization.
+    _worker: NPUOffloadingWorker | None
+
     def __init__(self, config: OffloadingConfig):
         normalized_config, legacy_num_blocks = _normalize_legacy_num_blocks(
             config,
@@ -66,7 +69,6 @@ class NPUOffloadingSpec(_CPUOffloadingSpec):
         if legacy_num_blocks is not None and config.worker_kv_bytes_per_block <= 0:
             self.num_blocks = legacy_num_blocks
 
-    @override
     def create_worker(
         self,
         kv_caches: CanonicalKVCaches,
@@ -77,7 +79,6 @@ class NPUOffloadingSpec(_CPUOffloadingSpec):
             num_cpu_blocks=self.num_blocks,
         )
 
-    @override
     def get_worker(
         self,
         kv_caches: CanonicalKVCaches,
