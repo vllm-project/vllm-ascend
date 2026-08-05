@@ -772,27 +772,22 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -850,29 +845,23 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -929,31 +918,23 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
-
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
         export TASK_QUEUE_ENABLE=1
-
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1010,30 +991,23 @@ Before you start, please
          local_ip="xxxx" # change to your own ip
 
          export HCCL_OP_EXPANSION_MODE="AIV"
-
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
          export TASK_QUEUE_ENABLE=1
-
          export ASCEND_RT_VISIBLE_DEVICES=$1
-
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1090,30 +1064,23 @@ Before you start, please
          local_ip="xxxx" # change to your own ip
 
          export HCCL_OP_EXPANSION_MODE="AIV"
-
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
          export TASK_QUEUE_ENABLE=1
-
          export ASCEND_RT_VISIBLE_DEVICES=$1
-
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1170,30 +1137,23 @@ Before you start, please
          local_ip="xxxx" # change to your own ip
 
          export HCCL_OP_EXPANSION_MODE="AIV"
-
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
          export TASK_QUEUE_ENABLE=1
-
          export ASCEND_RT_VISIBLE_DEVICES=$1
-
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1419,30 +1379,28 @@ The tables below provide recommended parameter configurations for different depl
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput|Single-Node Mixed (A3)|16 (A3)|w4a8 / w8a8|dp1 tp16, enable chunked-prefill and prefix-caching, increase max-num-seqs|
-|High Throughput|Multi-Node (2 nodes, A3)|32 (A3)|w8a8|dp2 tp16, balanced latency and throughput for concurrent multi-user workloads|
-|High Throughput|2P4D deployment (A3)|96 (A3)|w8a8|P: dp2 tp16, D: dp16 tp4 — dedicated P/D nodes for optimal throughput at scale|
-|Low Latency|Single-Node Mixed (A3)|16 (A3)|w4a8|dp1 tp16, MTP num_speculative_tokens=3, reduce max-num-seqs and max-num-batched-tokens|
-|Low Latency|Multi-Node (2 nodes, A3)|32 (A3)|w8a8|dp2 tp16, MTP num_speculative_tokens=3, lower max-num-batched-tokens for faster TTFT|
-|Long Context<br>(200K)|Single-Node Mixed (A3)|16 (A3)|w8a8|dp1 tp16, max-model-len 200000, enable chunked-prefill, controlled max-num-seqs|
-|Long Context<br>(200K)|Multi-Node (2 nodes, A3)|32 (A3)|w8a8|dp2 tp16, max-model-len 200000, distributed KV cache across nodes|
-|Low Latency|Single-Node Mixed (A2)|8 (A2)|w4a8|dp1 tp8, MTP num_speculative_tokens=3, compact single-node deployment|
-|Long Context<br>(128K)|Multi-Node (2 nodes, A2)|16 (A2)|w4a8|dp2 tp8, max-model-len 131072, enable chunked-prefill|
+|Low Latency<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Long Context<br>(198K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
 
 #### Table 2: Detailed Node Configuration
 
+> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a prefill node hosting 2 DP ranks of TP8 uses 16 NPUs; a decode node hosting 4 DP ranks of TP4 uses 16 NPUs).
+
 |Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
 |--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
-|High Throughput (A3)|Server / Single Machine|16|16|1|16|4096|200000|3|
-|High Throughput (A3)|Multi-Node (per node)|16|16|1|16|4096|200000|3|
-|High Throughput (A3)|2P4D — Server-P Node|16|16|1|64|4096|131072|1|
-|High Throughput (A3)|2P4D — Server-D Node|16|4|4|8|32|200000|3|
-|Low Latency (A3)|Server / Single Machine|16|16|1|8|4096|40960|3|
-|Low Latency (A3)|Multi-Node (per node)|16|16|1|8|4096|40960|3|
-|Long Context 200K (A3)|Server / Single Machine|16|16|1|8|4096|200000|3|
-|Long Context 200K (A3)|Multi-Node (per node)|16|16|1|16|4096|200000|3|
-|Low Latency (A2)|Server / Single Machine|8|8|1|4|4096|32768|3|
-|Long Context 128K (A2)|Multi-Node (per node)|8|8|1|2|4096|131072|3|
+|Low Latency 64K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|Low Latency 64K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|Low Latency 128K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|Low Latency 128K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|High Throughput 64K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|High Throughput 64K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|High Throughput 128K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|High Throughput 128K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|Long Context 198K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|Long Context 198K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
 
 > For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Online Service Deployment](#online-service-deployment).
 
