@@ -59,6 +59,4 @@ jobs:
             MOONCAKE_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
             SOC_VERSION=${{ steps.vars.outputs.soc_version }}
             COMPILE_CUSTOM_KERNELS=0
-          cache-from: type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-cache:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }},ignore-error=true
-          cache-to: type=registry,ref=swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-cache:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }},mode=max
           provenance: false
