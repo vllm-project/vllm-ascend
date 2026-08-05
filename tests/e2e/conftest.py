@@ -33,8 +33,10 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any, TypeVar
+from unittest.mock import patch
 
 import huggingface_hub
 import numpy as np
@@ -2001,3 +2003,12 @@ def pytest_collection_modifyitems(config, items):
             "  Values must come from tests/e2e/coverage_taxonomy.py "
             "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
         )
+
+
+@pytest.fixture(params=[False, True], ids=["v1", "v2"])
+def model_runner_env(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Run a test with both the v1 and v2 model runners."""
+    use_v2_model_runner = request.param
+
+    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
+        yield

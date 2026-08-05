@@ -7,7 +7,7 @@ import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -126,6 +126,7 @@ def generate_and_test(llm, llama32_lora_files, tensorizer_config_dict: dict | No
 
 
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_llama_lora(llama32_lora_files):
     vllm_model = VllmRunner(
         MODEL_PATH,
