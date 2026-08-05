@@ -1728,7 +1728,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 fused_kv_no_split, kv_ag_handle = all_gather_async(
                     fused_kv_input,
                     get_tp_group(),
-                    async_op=async_op,
+                    async_op=False,
                 )
                 if kv_ag_handle is not None:
                     kv_ag_handles.append(kv_ag_handle)
