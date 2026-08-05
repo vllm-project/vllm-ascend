@@ -1701,6 +1701,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.weight.data = torch.randn(128, 128)
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32
+        self.impl._mlapo_quant_type = object
 
         self.impl._process_weights_for_fused_mlapo_a5(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_dq"))
@@ -1708,6 +1709,66 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
         self.assertTrue(hasattr(self.impl, "weight_dq_scale"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr_scale"))
+        self.assertEqual(self.impl.mlapo_weight_quant_mode, 3)
+
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, _: weight)
+    def test_process_weights_for_fused_mlapo_a5_native_bf16(self, mock_format_cast):
+        hidden_size = 128
+        q_lora_rank = 32
+        kv_lora_rank = 24
+        rope_dim = 8
+        num_heads = 12
+        num_heads_padded = 16
+        q_head_dim = 16
+
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(
+            q_lora_rank + kv_lora_rank + rope_dim,
+            hidden_size,
+            dtype=torch.bfloat16,
+        )
+        self.impl.q_proj = MagicMock()
+        self.impl.q_proj.weight.data = torch.randn(
+            num_heads * q_head_dim,
+            q_lora_rank,
+            dtype=torch.bfloat16,
+        )
+        self.impl.q_lora_rank = q_lora_rank
+        self.impl.qk_head_dim = q_head_dim
+        self.impl.qk_rope_head_dim = rope_dim
+        self.impl.num_heads = num_heads
+        self.impl.num_heads_padded = num_heads_padded
+        self.impl.head_padding = num_heads_padded - num_heads
+        self.impl.W_UK_T = torch.randn(num_heads, 10, kv_lora_rank, dtype=torch.bfloat16)
+        self.impl.use_mla_rope = False
+        self.impl._mlapo_quant_type = None
+
+        self.impl._process_weights_for_fused_mlapo_a5(torch.bfloat16)
+
+        self.assertEqual(self.impl.weight_dq.shape, (hidden_size, q_lora_rank))
+        self.assertEqual(self.impl.weight_dkv_kr.shape, (hidden_size, kv_lora_rank + rope_dim))
+        self.assertEqual(self.impl.weight_uq_qr.shape, (q_lora_rank, num_heads_padded * q_head_dim))
+        self.assertEqual(self.impl.mlapo_W_UK_T.shape, (num_heads_padded, 10, kv_lora_rank))
+        self.assertEqual(self.impl.mlapo_num_heads, num_heads_padded)
+        self.assertEqual(self.impl.mlapo_rope_empty.shape, (0, rope_dim))
+        self.assertEqual(self.impl.mlapo_weight_quant_mode, 0)
+        self.assertFalse(hasattr(self.impl, "weight_dq_scale"))
+        self.assertFalse(hasattr(self.impl, "weight_dkv_kr_scale"))
+        self.assertFalse(hasattr(self.impl, "weight_uq_qr_scale"))
+        self.assertEqual(mock_format_cast.call_count, 3)
+
+    def test_reorg_decode_q_removes_prolog_head_padding(self):
+        self.impl.num_heads = 12
+        self.impl.mlapo_num_heads = 16
+        q_nope = torch.randn(2, 16, 32)
+        q_pe = torch.randn(2, 16, 8)
+
+        q_nope_reorg, q_pe_reorg = self.impl.reorg_decode_q(q_nope, q_pe)
+
+        self.assertEqual(q_nope_reorg.shape, (2, 12, 32))
+        self.assertEqual(q_pe_reorg.shape, (2, 12, 8))
+        torch.testing.assert_close(q_nope_reorg, q_nope[:, :12])
+        torch.testing.assert_close(q_pe_reorg, q_pe[:, :12])
 
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
     @patch("torch_npu.npu_fused_infer_attention_score")
@@ -1916,6 +1977,34 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_native_mlapo_on_a5(
+        self, mock_format_cast, mock_get_ascend_device_type
+    ):
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size_per_partition = 10
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
+        layer.weight = torch.randn(shape_0, self.impl.kv_lora_rank)
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+
+        self.impl.enable_mlapo = True
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+
+        from vllm_ascend.attention.mla_v1 import AscendDeviceType
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
+        self.impl._process_weights_for_fused_mlapo_a5 = MagicMock()
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertTrue(self.impl.enable_mlapo)
+        self.assertIsNone(self.impl._mlapo_quant_type)
+        self.impl._process_weights_for_fused_mlapo_a5.assert_called_once_with(torch.bfloat16)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
     @patch("torch_npu.npu_format_cast")
