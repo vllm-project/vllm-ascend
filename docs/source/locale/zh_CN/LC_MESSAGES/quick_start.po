@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-04 01:39+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -153,12 +153,12 @@ msgid "== 9.0.1"
 msgstr "== 9.0.1"
 
 #: ../../source/quick_start.md:32 ../../source/quick_start.md:52
-msgid "Required for vllm-ascend and torch-npu"
-msgstr "vllm-ascend 和 torch-npu 所需"
+msgid "Required for vllm-ascend and TorchNPU"
+msgstr "vllm-ascend 和 TorchNPU 所需"
 
 #: ../../source/quick_start.md:32 ../../source/quick_start.md:52
-msgid "torch-npu"
-msgstr "torch-npu"
+msgid "TorchNPU"
+msgstr "TorchNPU"
 
 #: ../../source/quick_start.md:32 ../../source/quick_start.md:52
 msgid "== 2.10.0"
@@ -176,9 +176,9 @@ msgstr "torch"
 
 #: ../../source/quick_start.md:32 ../../source/quick_start.md:52
 msgid ""
-"Required for torch-npu and vllm, No need to install manually, it will be "
-"auto installed in below steps"
-msgstr "torch-npu 和 vllm 所需，无需手动安装，将在以下步骤中自动安装"
+"Required for TorchNPU and vllm, No need to install manually, it will be auto"
+" installed in below steps"
+msgstr "TorchNPU 和 vllm 所需，无需手动安装，将在以下步骤中自动安装"
 
 #: ../../source/quick_start.md:32 ../../source/quick_start.md:52
 msgid "NNAL"
@@ -251,10 +251,11 @@ msgstr "使用容器搭建环境"
 msgid ""
 "Before using containers, make sure Docker is installed on your system. If "
 "Docker is not installed, please refer to the [Docker installation "
-"guide](https://docs.docker.com/get-docker/) for installation instructions."
+"guide](https://docs.docker.com/get-started/get-docker/) for installation "
+"instructions."
 msgstr ""
-"在使用容器之前，请确保系统已安装Docker。如果未安装Docker，请参考[Docker安装指南](https://docs.docker.com/get-"
-"docker/)进行安装。"
+"在使用容器之前，请确保您的系统已安装 Docker。如果尚未安装 Docker，请参阅 [Docker "
+"安装指南](https://docs.docker.com/get-started/get-docker/) 获取安装说明。"
 
 #: ../../source/quick_start.md
 msgid "Ubuntu"

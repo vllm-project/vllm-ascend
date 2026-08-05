@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-04 01:39+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -854,9 +854,9 @@ msgstr "使用 vLLM 基准测试"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1250
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
-msgstr "更多详情请参考 [vllm 基准测试](https://docs.vllm.ai/en/latest/contributing/)。"
+msgstr "更多详细信息，请参阅 [vllm 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1252
 msgid "9 Performance Tuning"

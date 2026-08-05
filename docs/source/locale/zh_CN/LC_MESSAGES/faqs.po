@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -139,12 +139,12 @@ msgstr "Ascend 910、Ascend 910 Pro B（Ascend-cann-kernels-910）尚未规划"
 
 #: ../../source/faqs.md:30
 msgid ""
-"From a technical view, vllm-ascend supports devices if torch-npu is "
+"From a technical view, vllm-ascend supports devices if TorchNPU is "
 "supported. Otherwise, we have to implement it by using custom ops. We also "
 "welcome you to join us to improve together."
 msgstr ""
-"从技术角度看，只要 torch-npu 支持，vllm-ascend "
-"就支持相应设备。否则，我们需要通过自定义算子来实现。我们也欢迎您加入我们，共同改进。"
+"从技术角度来看，如果 TorchNPU 受支持，vllm-ascend "
+"即可支持相应设备。否则，我们需要通过自定义算子来实现。我们也欢迎您加入我们，共同改进。"
 
 #: ../../source/faqs.md:32
 msgid "2. How to get our docker containers?"
@@ -606,12 +606,12 @@ msgstr "18.如何安装自定义版本的 torch_npu？"
 
 #: ../../source/faqs.md:232
 msgid ""
-"torch-npu will be overridden when installing vllm-ascend. If you need to "
-"install a specific version of torch-npu, you can manually install the "
-"specified version of torch-npu after vllm-ascend is installed."
+"TorchNPU will be overridden  when installing vllm-ascend. If you need to "
+"install a specific version of TorchNPU, you can manually install the "
+"specified version of TorchNPU after vllm-ascend is installed."
 msgstr ""
-"安装vllm-ascend时，torch-npu将被覆盖。如果您需要安装特定版本的torch-npu，可以在安装vllm-"
-"ascend后手动安装指定版本的torch-npu。"
+"安装 vllm-ascend 时，TorchNPU 将被覆盖。如果您需要安装特定版本的 TorchNPU，可以在安装 vllm-ascend "
+"后手动安装指定版本的 TorchNPU。"
 
 #: ../../source/faqs.md:234
 msgid ""

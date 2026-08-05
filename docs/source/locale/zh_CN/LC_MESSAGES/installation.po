@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-04 01:39+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -93,12 +93,12 @@ msgid "== 9.0.1"
 msgstr "== 9.0.1"
 
 #: ../../source/installation.md:17 ../../source/installation.md:32
-msgid "Required for vllm-ascend and torch-npu"
-msgstr "vllm-ascend 和 torch-npu 所需"
+msgid "Required for vllm-ascend and TorchNPU"
+msgstr "vllm-ascend 和 TorchNPU 所必需"
 
 #: ../../source/installation.md:17 ../../source/installation.md:32
-msgid "torch-npu"
-msgstr "torch-npu"
+msgid "TorchNPU"
+msgstr "TorchNPU"
 
 #: ../../source/installation.md:17 ../../source/installation.md:32
 msgid "== 2.10.0"
@@ -116,9 +116,9 @@ msgstr "torch"
 
 #: ../../source/installation.md:17 ../../source/installation.md:32
 msgid ""
-"Required for torch-npu and vllm, No need to install manually, it will be "
-"auto installed in below steps"
-msgstr "torch-npu 和 vllm 所需，无需手动安装，将在以下步骤中自动安装"
+"Required for TorchNPU and vllm, No need to install manually, it will be auto"
+" installed in below steps"
+msgstr "TorchNPU 和 vllm 所必需，无需手动安装，将在以下步骤中自动安装"
 
 #: ../../source/installation.md:17 ../../source/installation.md:32
 msgid "NNAL"
@@ -273,8 +273,8 @@ msgstr "首先，安装系统依赖并配置 pip 镜像源："
 #: ../../source/installation.md:156
 msgid ""
 "**[Optional]** Then configure the extra-index of `pip` if you are working on"
-" an x86 machine or using torch-npu dev version:"
-msgstr "**[可选]** 如果您在 x86 机器上工作或使用 torch-npu 开发版本，请配置 `pip` 的 extra-index："
+" an x86 machine or using TorchNPU dev version:"
+msgstr "**[可选]** 如果您在 x86 机器上工作或使用 TorchNPU 开发版本，请配置 `pip` 的 extra-index："
 
 #: ../../source/installation.md:163
 msgid ""
@@ -353,17 +353,17 @@ msgstr ""
 #: ../../source/installation.md:264
 msgid ""
 "To build custom operators, gcc/g++ higher than 8 and C++17 or higher are "
-"required. If you are using `pip install -e .` and encounter a torch-npu "
+"required. If you are using `pip install -e .` and encounter a TorchNPU "
 "version conflict, please install with `pip install --no-build-isolation -e "
 ".` to build on system env. If you encounter other problems during compiling,"
 " it is probably because an unexpected compiler is being used, you may export"
 " `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and "
 "gcc locations before compiling."
 msgstr ""
-"要构建自定义算子，需要 gcc/g++ 高于 8 且支持 C++17 或更高版本。如果使用 `pip install -e .` 时遇到 torch-"
-"npu 版本冲突，请使用 `pip install --no-build-isolation -e .` "
-"在系统环境中构建。如果在编译过程中遇到其他问题，可能是因为使用了非预期的编译器，您可以在编译前在环境中导出 `CXX_COMPILER` 和 "
-"`C_COMPILER` 来指定 g++ 和 gcc 的位置。"
+"要构建自定义算子，需要 gcc/g++ 高于 8 以及 C++17 或更高版本。如果您使用 `pip install -e .` 时遇到 "
+"TorchNPU 版本冲突，请使用 `pip install --no-build-isolation -e .` "
+"在系统环境中构建。如果在编译过程中遇到其他问题，可能是因为使用了意外的编译器，您可以在编译前在环境中导出 `CXX_COMPILER` 和 "
+"`C_COMPILER` 来指定您的 g++ 和 gcc 位置。"
 
 #: ../../source/installation.md:267
 msgid ""
@@ -605,9 +605,9 @@ msgstr "物理层要求"
 
 #: ../../source/installation.md:496
 msgid ""
-"The physical machines must be located on the same WLAN, with network "
+"The physical machines must be located on the same LAN, with network "
 "connectivity."
-msgstr "物理机必须位于同一 WLAN 内，并具有网络连接。"
+msgstr "物理机器必须位于同一局域网内，并具有网络连通性。"
 
 #: ../../source/installation.md:497
 msgid ""

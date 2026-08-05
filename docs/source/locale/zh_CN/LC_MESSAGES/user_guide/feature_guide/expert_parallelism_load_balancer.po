@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -70,9 +70,11 @@ msgstr "vLLM-Ascend 支持所有 MoE 模型。但我们仅在 deepseek-v3.1/r1 �
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:19
 msgid ""
-"[!IMPORTANT] Ascend A5 does not support using EPLB with quant type "
-"\"W4A8MXFP4\", \"W4A16\", \"W4A16MXFP4\"."
-msgstr "[!IMPORTANT] Ascend A5不支持将EPLB与量化类型\"W4A8MXFP4\"、\"W4A16\"、\"W4A16MXFP4\"配合使用。"
+"[!IMPORTANT] Ascend 950 Products does not support using EPLB with quant type"
+" \"W4A8MXFP4\", \"W4A16\", \"W4A16MXFP4\"."
+msgstr ""
+"[!IMPORTANT] Ascend 950 产品不支持将 EPLB 与量化类型 "
+"\"W4A8MXFP4\"、\"W4A16\"、\"W4A16MXFP4\" 一起使用。"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:22
 msgid "MOE QuantType"
