@@ -36,6 +36,13 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
+def _npu_mla_prolog_v3_no_rope(**kwargs):
+    """Call the AscendC MLA prolog that supports no-RoPE inputs."""
+    import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+    return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
+
+
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
@@ -1425,16 +1432,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cos_shape = attn_metadata.decode.cos.shape
             cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
             sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+            prolog_op = torch_npu.npu_mla_prolog_v3
         else:
             cos = None
             sin = None
+            prolog_op = _npu_mla_prolog_v3_no_rope
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
         if token_x.dim() == 3:
             cache_index = cache_index.view(bsz, -1)
         else:
             cache_index = cache_index.view(-1)
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = prolog_op(
             token_x=token_x,
             weight_dq=atten_obj.weight_dq,
             weight_uq_qr=atten_obj.weight_uq_qr,

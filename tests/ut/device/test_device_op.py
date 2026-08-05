@@ -54,7 +54,11 @@ def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
             return_value=(query_nope, query_rope, None, None, None),
-        ) as mock_prolog,
+        ) as mock_rope_prolog,
+        mock.patch(
+            "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
+            return_value=(query_nope, query_rope, None, None, None),
+        ) as mock_no_rope_prolog,
     ):
         A5DeviceAdaptor.mla_preprocess_only_decode(
             atten_obj,
@@ -64,6 +68,7 @@ def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
             use_mla_rope=use_mla_rope,
         )
 
+    mock_prolog = mock_rope_prolog if use_mla_rope else mock_no_rope_prolog
     call_kwargs = mock_prolog.call_args.kwargs
     if use_mla_rope:
         torch.testing.assert_close(call_kwargs["rope_cos"], cos.view(num_tokens, 1, rope_dim))
@@ -109,7 +114,7 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
     with (
         mock.patch("vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant") as mock_quant,
         mock.patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
+            "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
             return_value=(query_nope, query_rope, None, None, None),
         ) as mock_prolog,
     ):
