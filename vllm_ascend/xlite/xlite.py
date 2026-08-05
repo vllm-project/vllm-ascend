@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from typing import Any, TypeAlias, cast
@@ -27,7 +28,7 @@ import torch.nn as nn
 import torch_npu
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size, get_world_group
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
@@ -300,7 +301,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.softmax_scale = xlite_config.head_dim**-0.5
         xlite_config.n_dense_layers = hf_config.num_hidden_layers
         xlite_config.intermediate_size = hf_config.intermediate_size
-        xlite_config.def_tp_size = get_tensor_model_parallel_world_size()
+        xlite_config.def_tp_size = tp_size = get_tensor_model_parallel_world_size()
         xlite_config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         try:
             ep_word_size = get_ep_group().world_size
@@ -314,7 +315,7 @@ class StandardXliteModel(XliteModelBase):
         xlite_config.scoring_func = ScoringFuncSoftmax
         xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
         xlite_config.max_m = (
-            vllm_config.scheduler_config.max_num_batched_tokens
+            math.ceil(vllm_config.scheduler_config.max_num_batched_tokens / tp_size) * tp_size
             if get_ascend_config().xlite_graph_config.full_mode
             else vllm_config.scheduler_config.max_num_seqs
         )
@@ -515,6 +516,7 @@ class MiniMaxM2XliteModel(StandardXliteModel):
         xlite_config.norm_topk_prob = True
         xlite_config.qk_norm_full = True
         xlite_config.scoring_func = ScoringFuncSigmoid
+        xlite_config.gate_captured = False
 
 
 def get_adapter_xlite_model(runnable: nn.Module, vllm_config: VllmConfig) -> XliteModelBase:
@@ -553,19 +555,16 @@ class XliteWrapper:
         """
         self.runnable = runnable
         self.device = device
-        self.full_mode = get_ascend_config().xlite_graph_config.full_mode
+        self.full_mode: bool = get_ascend_config().xlite_graph_config.full_mode
 
-        rank = torch.distributed.get_rank()
-        local_rank = get_world_group().local_rank
         self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
-
         self.adapter_xlite_model = get_adapter_xlite_model(runnable, vllm_config)
         (self.xlite_model, self.freq_cis, hidden_size, dtype) = self.adapter_xlite_model.initialize()
         xlite_config = self.adapter_xlite_model.xlite_config
         self.xlite_rt = Runtime(
-            devid=local_rank,
+            devid=device.index,
             size=0,
-            rank=rank,
+            rank=torch.distributed.get_rank(),
             tp_size=xlite_config.def_tp_size,
             dp_size=xlite_config.def_dp_size,
             moe_tp_size=xlite_config.moe_tp_size,
@@ -573,7 +572,7 @@ class XliteWrapper:
         )
 
         rt_pool_size = self.xlite_model.get_tensor_pool_size()
-        if rank == 0:
+        if torch.distributed.get_rank() == 0:
             logger.info("xlite runtime pool size: %s MB", rt_pool_size)
         if self.xlite_rt.init_tensor_pool(rt_pool_size) != 0:
             raise ValueError(f"xlite wrapper init failed! runtime pool size: {rt_pool_size} MB")
@@ -678,12 +677,13 @@ class XliteWrapper:
 
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         seq_lens = attn_metadata_router.seq_lens
-        cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :].to(device=seq_lens.device)
+        cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :]
         query_lens = torch.diff(cum_query_lens, prepend=seq_lens.new_zeros(1))
         cached_lens = torch.clamp(seq_lens - query_lens, min=0)
 
-        num_tokens = forward_context.batch_descriptor.num_tokens
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_actual_tokens = attn_metadata_router.num_actual_tokens
+        num_tokens = forward_context.max_tokens_across_dp
+
         xlite_attn_metadata = AttnMeta()
         xlite_attn_metadata.lens = query_lens.tolist()
         xlite_attn_metadata.cached_lens = cached_lens.tolist()
@@ -694,7 +694,7 @@ class XliteWrapper:
         else:
             xlite_attn_metadata.positions = positions
 
-        # Compatibility between DP and Non-DP scenarios
+        # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
         h = self.hidden_states[:num_tokens]
         stream = torch.npu.current_stream().npu_stream
         if inputs_embeds is None:
