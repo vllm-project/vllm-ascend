@@ -117,7 +117,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "hc_pre"
         "hc_post"
         "inplace_partial_rotary_mul"
-        "rms_norm_dynamic_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"

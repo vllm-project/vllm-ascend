@@ -1740,9 +1740,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
         elif is_w8a8:
-            qr, qr_pertoken_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
-                wq_a_result, self.q_norm.weight, epsilon=self.eps
-            )
+            qr, qr_pertoken_scale = DeviceOperator.rms_norm_dynamic_quant(wq_a_result, self.q_norm.weight, self.eps)
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
         else:
             qr = self.q_norm(wq_a_result)
@@ -1853,9 +1851,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
-                qr, qr_pertoken_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
-                    q_a, self.q_norm.weight, epsilon=self.eps
-                )
+                qr, qr_pertoken_scale = DeviceOperator.rms_norm_dynamic_quant(q_a, self.q_norm.weight, self.eps)
                 q = torch_npu.npu_quant_matmul(
                     qr,
                     self.wq_b.weight,
@@ -2167,9 +2163,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     )
                 else:
                     q_a = self.wq_a(hidden_states)
-                qr, qr_pertoken_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
-                    q_a, self.q_norm.weight, epsilon=self.eps
-                )
+                qr, qr_pertoken_scale = DeviceOperator.rms_norm_dynamic_quant(q_a, self.q_norm.weight, self.eps)
                 q = torch_npu.npu_quant_matmul(
                     qr,
                     self.wq_b.weight,

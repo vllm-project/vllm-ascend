@@ -1295,9 +1295,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
         ):
             q_a = self.wq_a(hidden_states_local)
-            qr_local, qr_pertoken_scale_local = torch.ops.custom.npu_rms_norm_dynamic_quant(
-                q_a, self.q_norm.weight, epsilon=self.eps
-            )
+            qr_local, qr_pertoken_scale_local = DeviceOperator.rms_norm_dynamic_quant(q_a, self.q_norm.weight, self.eps)
             if getattr(self.wq_b, "_chunk_size", 0):
                 bias = self.wq_b.bias
                 chunk_size = self.wq_b._chunk_size

@@ -627,14 +627,14 @@ class AscendFusedMoE(FusedMoE):
                 hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale, _ = torch.ops.custom.npu_swiglu_group_quant(
+                quantized_x, swiglu_out_scale, _ = torch.ops.cann_ops_nn.swiglu_group_quant(
                     hidden_states,
                     weight=None,
                     group_index=None,
-                    dst_type=torch.float8_e4m3fn,
+                    dst_type=24,
                     quant_mode=1,
                     round_scale=True,
-                    clamp_limit=fused_moe_evts.swiglu_limit,
+                    clamp_limit=fused_moe_evts.swiglu_limit if fused_moe_evts.swiglu_limit is not None else -1.0,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
