@@ -61,6 +61,9 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_host_device_memory_usage_ratio,
+)
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -512,6 +515,7 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(kv_cache_memory_bytes)
             return kv_cache_memory_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -555,8 +559,45 @@ class NPUWorker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
+        self.available_kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(
+            self.available_kv_cache_memory_bytes,
+        )
 
         return int(self.available_kv_cache_memory_bytes)
+
+    def update_available_memory_for_sparse_kv_offload(self, available_memory):
+        """
+        A simple patch for Sparse KV offload: add additional available_memory according to the
+        ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
+        using all original available device memory without modify original kv_spec or vllm code.
+        For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
+        or reuse hisparse's host pool logic after it's merged to vllm.
+        """
+        GiB = lambda b: b / GiB_bytes
+        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
+        if not sparse_kv_offload_config.enabled:
+            return available_memory
+        keep_device_kv_cache = sparse_kv_offload_config.keep_device_kv_cache
+        if keep_device_kv_cache:
+            needed_dram_size_bytes = available_memory
+        else:
+            kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+            host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
+            needed_dram_size_bytes = host_device_memory_usage_ratio * available_memory
+        if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30):
+            raise ValueError(
+                f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
+                f"user specified dram size ({sparse_kv_offload_config.dram_size_per_dp_GB} GB). "
+                "Please increase sparse_kv_offload_config.dram_size_per_dp_GB if available on your device."
+            )
+        if not keep_device_kv_cache:
+            available_memory += needed_dram_size_bytes
+            logger.info_once(
+                "Sparse KV offload is enabled, enlarge total available memory to %.2f GiB",
+                GiB(available_memory),
+                scope="local",
+            )
+        return int(available_memory)
 
     def execute_model(
         self,
@@ -847,7 +888,11 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            # reserve kv_cache_spec for sparse kv offload memory profile usage.
+            self.kv_cache_spec = kv_cache_spec
+        return kv_cache_spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
