@@ -403,6 +403,18 @@ jobs:
               --current-root all-coverage \
               --previous-root previous-coverage
 
+        - name: Debug - List downloaded coverage files
+          run: |
+            echo "=== all-coverage top level ==="
+            find all-coverage -maxdepth 1 2>/dev/null | head -20 || echo "all-coverage directory not exist"
+            echo ""
+            echo "=== all-coverage total file count ==="
+            find all-coverage -type f 2>/dev/null | wc -l
+            echo "=== sample covdata dirs ==="
+            find all-coverage -type d -name covdata 2>/dev/null | head -10
+            echo "=== sample files ==="
+            find all-coverage -path '*/covdata/*' -type f 2>/dev/null | head -10
+
         - name: Assemble and compress coverage files
           run: |
             set -euo pipefail
