@@ -76,4 +76,3 @@ def test_qwen36_27b_mtp_acceptance_tp4(model_name):
     match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden} (num_drafts={num_drafts})"
     cleanup_dist_env_and_memory()
-
