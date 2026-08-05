@@ -61,10 +61,12 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         print(f"  Warning: Failed to read diff file for test file detection: {e}")
         return test_files_found
 
-    # Pattern to match test file paths: tests/[subdirs/]test_*.py
+    # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
     # In diff output: +++ b/tests/ut/core/test_xxx.py
-    # Test files must be in tests/ directory and start with test_
-    test_file_pattern = re.compile(r"^\+\+\+ [ab]/(tests/.+/test_\w+\.py)", re.MULTILINE)
+    # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
+    test_file_pattern = re.compile(
+        r"^\+\+\+ [ab]/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py)", re.MULTILINE
+    )
 
     changed_test_files = set()
     for match in test_file_pattern.finditer(diff_content):
@@ -689,18 +691,28 @@ class TestSelector:
                             if covered_in_func:
                                 # Get intersection of test covered lines and actual changed lines (for display)
                                 covered_changed_lines = covered_lines & display_changed_lines
-                                func_to_tests[func_name].append((test_case, covered_changed_lines))
+                                func_to_tests[func_name].append((test_case, covered_in_func, covered_changed_lines))
 
                 # Select tests that cover other lines of changed functions (deduplication)
                 for changed_file, func_to_lines in changed_functions.items():
                     for func_name in func_to_lines:
                         if func_name in func_to_tests:
-                            for test_case, covered_changed_lines in func_to_tests[func_name]:
+                            for test_case, covered_in_func, covered_changed_lines in func_to_tests[func_name]:
                                 existing = [s[0] for s in func_results]
-                                if test_case not in existing and covered_changed_lines:
-                                    # Display actual changed line coverage, not full function coverage
+                                if test_case not in existing and covered_in_func:
+                                    # Display changed lines coverage if available, otherwise function coverage
                                     display_lines = covered_changed_lines if covered_changed_lines else set()
-                                    func_results.append((test_case, {changed_file: display_lines}, len(display_lines)))
+                                    func_results.append(
+                                        (
+                                            test_case,
+                                            {changed_file: display_lines},
+                                            len(display_lines) or len(covered_in_func),
+                                        )
+                                    )
+                                    print(
+                                        f"  [Function match] {test_case} covers function '{func_name}' in"
+                                        f" {changed_file}"
+                                    )
 
                 func_results.sort(key=lambda x: x[2], reverse=True)
 
@@ -723,6 +735,10 @@ class TestSelector:
             selected.sort(key=lambda x: x[2], reverse=True)
 
             if selected:
+                print(
+                    f"  Line match: {len(line_results)} tests, Function match: {len(func_results)} tests, "
+                    f"Total: {len(selected)} tests"
+                )
                 return selected, "line+function"
 
             # ===== Stage 3: Function-level matching (only when first two levels are empty) =====
@@ -1108,6 +1124,15 @@ def main():
         change_detector.scan_source_files()
         changed_files_with_lines = change_detector.detect_changes_by_comparison()
         print(f"Detected {len(changed_files_with_lines)} changed files")
+
+    if not changed_files_with_lines:
+        print("\n=== No product source code changes found in PR ===")
+        print("skipping test recommendation.")
+        # Write empty result file
+        with open("recommended_pytest_paths.txt", "w", encoding="utf-8") as f:
+            pass
+        print("\nResults saved to: recommended_pytest_paths.txt")
+        return
 
     # 3. Select test cases
     print("\n=== Selecting Affected Test Cases ===")
