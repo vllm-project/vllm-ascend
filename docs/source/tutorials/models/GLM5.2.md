@@ -305,7 +305,6 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
-
 **Notice:**
 This scenario enables `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
