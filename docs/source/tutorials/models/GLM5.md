@@ -296,7 +296,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     node0_ip="xxxx"
 
     export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -340,7 +339,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     node0_ip="xxxx"
 
     export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -390,7 +388,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     node0_ip="xxx"
 
     export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -436,7 +433,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     node0_ip="xxx"
 
     export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
@@ -875,10 +871,6 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
@@ -949,10 +941,6 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 200000 \
@@ -1022,10 +1010,6 @@ Before you start, please
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
              --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
              --seed 1024 \
              --served-model-name glm-5 \
              --max-model-len 200000 \
@@ -1095,10 +1079,6 @@ Before you start, please
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
              --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
              --seed 1024 \
              --served-model-name glm-5 \
              --max-model-len 200000 \
@@ -1168,10 +1148,6 @@ Before you start, please
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
              --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
              --seed 1024 \
              --served-model-name glm-5 \
              --max-model-len 200000 \
