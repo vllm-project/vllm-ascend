@@ -4048,6 +4048,19 @@ class NPUModelRunner(GPUModelRunner):
         not cleared here: they are paged state owned by the cache manager and
         may contain valid restored prefix data.
         """
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        attn_backend = getattr(self, "attn_backend", None)
+        if not isinstance(attn_backend, type) or not issubclass(
+            attn_backend, AscendSFABackend
+        ):
+            logger.info(
+                "[restore model] SFA runtime buffer reset skipped: backend=%s",
+                getattr(attn_backend, "__name__", type(attn_backend).__name__),
+            )
+            return
+
         reset_topk = 0
         reset_group_tensors = 0
         failed: list[str] = []
