@@ -678,6 +678,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
@@ -742,6 +743,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
@@ -847,6 +849,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()

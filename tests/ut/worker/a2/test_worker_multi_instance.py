@@ -47,6 +47,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
 
+        worker.vllm_config = SimpleNamespace(kv_transfer_config=None)
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
 
