@@ -64,8 +64,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a16_mxfp4._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.select_experts")
-    def test_apply_full_params(self, mock_select, mock_ctx, mock_npu):
+    def test_apply_full_params(self, mock_ctx, mock_npu):
         tokens = 4
         layer = nn.Module()
         layer.swiglu_limit = 0.0
@@ -78,10 +77,11 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
             torch.randint(0, 255, (8, 128, 64, 2), dtype=torch.uint8), requires_grad=False
         )
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
-        router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
-        mock_select.return_value = (topk_weights, topk_ids)
+        layer.activation = "silu"
+        layer._ascend_pertoken_scale = torch.randn(tokens)
+        layer.apply_router_weight_on_input = True
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
         mock_ctx.moe_comm_method = mock_comm
@@ -89,12 +89,9 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         self.scheme.apply(
             layer,
             x,
-            router_logits,
-            top_k=2,
-            renormalize=True,
-            num_experts=self.num_experts,
-            activation="silu",
-            pertoken_scale=torch.randn(tokens),
-            apply_router_weight_on_input=True,
+            topk_weights,
+            topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()

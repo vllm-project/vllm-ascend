@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -24,7 +23,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe import RoutedExperts, SharedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
@@ -33,7 +32,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
@@ -102,83 +101,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: torch.Tensor | None = None,
-        mc2_mask: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-        input_ids = getattr(get_forward_context(), "input_ids", None)
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
-        num_logical_experts = get_moe_num_logical_experts(
-            layer,
-            num_experts,
-            global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
-        )
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_logical_experts,
-            tid2eid=self.tid2eid,
-            input_ids=input_ids,
-        )
-        try:
-            _vllm_config = get_current_vllm_config()
-        except AssertionError:
-            _vllm_config = None
-        model_config = None if _vllm_config is None else _vllm_config.model_config
-        if model_config is not None and model_config.enable_return_routed_experts:
-            capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
-            if capturer is not None:
-                capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
-
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=num_logical_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=x,
-            )
-
-        topk_weights = topk_weights.to(x.dtype)
-        # This is a naive implementation for experts load balance so as to
-        # avoid accumulating too much tokens on a single rank. It is only
-        # activated when doing profile runs.
-        if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
-
+        activation = getattr(layer, "activation", "silu")
         if getattr(layer, "swigluoai_uninterleave", False):
             activation = "swigluoai_uninterleave"
 
@@ -217,12 +147,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
+                expert_map=getattr(layer, "ascend_expert_map", None),
+                global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
+                mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
+                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
+                log2phy=getattr(layer, "log2phy", None),
+                pertoken_scale=getattr(layer, "_ascend_pertoken_scale", None),
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
@@ -234,8 +164,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            final_hidden_states.routed_out += zero_expert_result
         return final_hidden_states
 
 
@@ -262,7 +190,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     moe_counter = -1
 
-    def __init__(self, *args, tid2eid=None, n_shared_experts: int = 0, **kwargs):
+    def __init__(
+        self,
+        *args,
+        router=None,
+        tid2eid=None,
+        n_shared_experts: int = 0,
+        **kwargs,
+    ):
         object.__setattr__(self, "tid2eid", tid2eid)
         super().__init__(*args, **kwargs)
         if self.quant_config is None:
@@ -274,6 +209,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     tid2eid=self.tid2eid,
                 )
             )
+        self.router = router
         ascend_config = get_ascend_config()
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -417,6 +353,91 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             quant_type = getattr(method, "quant_type", QuantType.NONE)
         return quant_type
 
+    def _select_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        enable_force_load_balance: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.router is None:
+            raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+
+        forward_context = get_forward_context()
+        topk_weights, topk_ids = self.router._select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=getattr(forward_context, "input_ids", None),
+        )
+
+        try:
+            _vllm_config = get_current_vllm_config()
+        except AssertionError:
+            _vllm_config = None
+        model_config = None if _vllm_config is None else _vllm_config.model_config
+        if model_config is not None and model_config.enable_return_routed_experts:
+            capturer = getattr(self, "_ascend_routed_experts_capturer", None)
+            if capturer is not None:
+                capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
+
+        num_shared_experts = self.n_shared_experts
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            self,
+            self.moe_config.num_experts,
+            global_redundant_expert_num=self.global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
+        )
+
+        zero_expert_result = None
+        zero_expert_num = getattr(self, "zero_expert_num", 0)
+        zero_expert_type = getattr(self, "zero_expert_type", None)
+        if zero_expert_num == 0 or zero_expert_type is None:
+            assert router_logits.shape[1] == num_logical_experts, (
+                "Number of global experts mismatch (excluding redundancy): "
+                f"router_logits.shape[1]={router_logits.shape[1]}, "
+                f"num_logical_experts={num_logical_experts}"
+            )
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=num_logical_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=hidden_states,
+            )
+
+        if getattr(self, "mix_placement", False):
+            batch_size = topk_ids.shape[0]
+            shared_expert_ids = torch.arange(
+                num_logical_experts,
+                num_logical_experts + num_shared_experts,
+                dtype=topk_ids.dtype,
+                device=topk_ids.device,
+            ).repeat(batch_size, 1)
+            shared_expert_weights = torch.ones(
+                topk_weights.shape[0],
+                num_shared_experts,
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            )
+            topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
+            topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
+
+        topk_weights = topk_weights.to(hidden_states.dtype)
+        # This is a naive implementation for experts load balance so as to
+        # avoid accumulating too much tokens on a single rank. It is only
+        # activated when doing profile runs.
+        if enable_force_load_balance:
+            random_matrix = torch.rand(
+                topk_ids.size(0),
+                num_logical_experts,
+                device=topk_ids.device,
+            )
+            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
+
+        return topk_weights, topk_ids, zero_expert_result
+
     def forward_impl(
         self,
         *,
@@ -450,29 +471,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
 
-        fused_experts_results: FusedExpertsResult = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
+        topk_weights, topk_ids, zero_expert_result = self._select_experts(
+            hidden_states=hidden_states,
             router_logits=router_logits,
-            pertoken_scale=pertoken_scale,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            num_experts=self.moe_config.num_experts,
-            expert_map=self.ascend_expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
             enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num,
-            mc2_mask=mc2_mask,
         )
+        self._ascend_pertoken_scale = pertoken_scale
+        self._ascend_mc2_mask = mc2_mask
+        try:
+            fused_experts_results: FusedExpertsResult = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_experts=None,
+                shared_experts_input=None,
+            )
+        finally:
+            self._ascend_pertoken_scale = None
+            self._ascend_mc2_mask = None
+        if zero_expert_result is not None:
+            fused_experts_results.routed_out += zero_expert_result
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
