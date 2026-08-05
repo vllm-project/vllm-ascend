@@ -118,6 +118,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         wdqkv,
         wuk,
         gamma1,
+        kv_cache,
         kv_cache_rope,
         cache_mode,
         quant_mode,

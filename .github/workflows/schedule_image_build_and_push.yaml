@@ -86,7 +86,7 @@ on:
       cann:
         description: 'CANN Quay URL and version (JSON array: ["url", "version"])'
         required: false
-        default: '["quay.io/atlas_inference/cann", "2026.07.29"]'
+        default: '["quay.io/atlas_inference/cann", "2026.08.03"]'
         type: string
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
@@ -142,12 +142,12 @@ jobs:
       quay_temp_username: ${{ inputs.build_type == 'daily' && vars.QUAY_DAILY_TEMP_USERNAME || vars.QUAY_TEMP_USERNAME }}
       # ====================================================================
       
-      should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       workflow_dispatch_tag: ${{ inputs.tag != 'none' && inputs.tag || '' }}
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1] }}
+      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1] }}
       
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
@@ -158,8 +158,8 @@ jobs:
         MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
         TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
         TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
-        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[0]) || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1]) || '' }}
         TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
         TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
       
@@ -214,7 +214,7 @@ jobs:
       workflow_dispatch_tag: ''
       branch_ref: ''
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1] }}
+      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1] }}
 
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
@@ -225,8 +225,8 @@ jobs:
         MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
         TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
         TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
-        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[0]) || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1]) || '' }}
         TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
         TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
 

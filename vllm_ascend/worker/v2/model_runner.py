@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -34,7 +35,11 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
+from vllm.v1.worker.gpu.model_runner import (
+    ExecuteModelState,
+    GPUModelRunner,
+    sort_batch_req_ids,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -46,18 +51,70 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.utils import enable_sp
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
+from vllm_ascend.worker.v2.sp_utils import (
+    _all_gather_hidden_states_and_aux,
+    _flashcomm_enabled,
+)
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
+# TODO: remove this wrapper when vllm-ascend supports sequence parallel on model runner v2.
+@contextmanager
+def flashcomm_dispatch_wrapper(vllm_config: VllmConfig):
+    """Pad batches before v2 selects an eager or graph execution shape.
+
+    FlashComm1 reduce-scatter requires the token dimension to be divisible by
+    tensor parallel size. Padding in ``prepare_inputs`` is too late for full
+    graphs because their replay shape has already been selected by then.
+    """
+    if not enable_sp(vllm_config):
+        yield
+        return
+
+    original_dispatch = vllm_model_runner.dispatch_cg_and_sync_dp
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+    def dispatch_with_flashcomm_padding(
+        cudagraph_manager,
+        num_reqs,
+        num_tokens,
+        uniform_token_count,
+        dp_size,
+        dp_rank,
+        need_eager=False,
+        num_active_loras=0,
+    ):
+        num_tokens = (num_tokens + tp_size - 1) // tp_size * tp_size
+        return original_dispatch(
+            cudagraph_manager,
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            dp_size,
+            dp_rank,
+            need_eager=need_eager,
+            num_active_loras=num_active_loras,
+        )
+
+    vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_with_flashcomm_padding
+    try:
+        yield
+    finally:
+        vllm_model_runner.dispatch_cg_and_sync_dp = original_dispatch
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
+
+    execute_model_state: ExecuteModelState | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -120,7 +177,7 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # NOTE: In GPUModelRunner, decode_query_len is initialized in execute_model(),
+        # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
         self.decode_query_len = self.num_speculative_steps + 1
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
@@ -142,6 +199,50 @@ class NPUModelRunner(GPUModelRunner):
                 self.req_states,
                 self.block_tables,
             )
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        is_profile: bool = False,
+    ):
+        with flashcomm_dispatch_wrapper(self.vllm_config):
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+            )
+
+        state = self.execute_model_state
+        if (
+            self.is_last_pp_rank
+            and state is not None
+            and _flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
+        ):
+            num_tokens = state.input_batch.num_tokens
+            assert state.hidden_states is not None
+            gathered_output = _all_gather_hidden_states_and_aux(
+                (state.hidden_states, state.aux_hidden_states)
+                if state.aux_hidden_states is not None
+                else state.hidden_states,
+                num_tokens,
+            )
+            if isinstance(gathered_output, tuple):
+                hidden_states, aux_hidden_states = gathered_output
+            else:
+                hidden_states = gathered_output
+                aux_hidden_states = state.aux_hidden_states
+            self.execute_model_state = state._replace(
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+            )
+
+        return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -369,26 +470,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return input_batch
 
-    def postprocess(
-        self,
-        input_batch,
-        sampled_tokens,
-        num_sampled,
-        num_rejected,
-    ):
-        """Override GPUModelRunner.postprocess for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
-        super().postprocess(
-            input_batch,
-            sampled_tokens,
-            num_sampled,
-            num_rejected,
-        )
-
-        self._copy_num_computed_tokens_to_cpu()
-
     def postprocess_sampled(
         self,
         idx_mapping,
@@ -397,7 +478,10 @@ class NPUModelRunner(GPUModelRunner):
         num_rejected,
         query_start_loc=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs."""
+        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
+        npu attention backends need seq_lens_cpu to work.
+        so we need to copy num_computed_tokens back to cpu here.
+        """
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,
@@ -406,7 +490,10 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        self._copy_num_computed_tokens_to_cpu()
+        # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
+        # from num_computed_tokens_np in _update_seq_lens_cpu instead.
+        if self.speculator is not None:
+            self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
@@ -428,13 +515,18 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        # wait for num_computed_tokens copy to cpu stream to finish.
-        self.num_computed_tokens_event.synchronize()
-        for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-            req_index = self.req_states.req_id_to_index[req_id]
-            # num_computed_tokens_cpu has reverted by num_rejected_tokens already.
-            # in super postprocess method.
-            self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+
+        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
+        # Without MTP, num_computed_tokens_np is already correct from update_requests.
+        if self.speculator is not None:
+            self.num_computed_tokens_event.synchronize()
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+        else:
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.req_states.num_computed_tokens_np[req_index]
 
         # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):  # type: ignore

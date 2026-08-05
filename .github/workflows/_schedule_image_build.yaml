@@ -111,7 +111,7 @@ on:
         description: 'CANN version'
         required: false
         type: string
-        default: '2026.07.29'
+        default: '2026.08.03'
       triton_ascend_version:
         description: 'Triton Ascend version'
         required: false
@@ -142,7 +142,8 @@ defaults:
 env:
   QUAY_REPO: ${{ inputs.quay_repo }}
   QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
-  CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
+  # Use this repo's own GHCR namespace so forks (e.g. du-ping1-merge) can write build cache.
+  CACHE_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   build-push-digest:
@@ -452,7 +453,7 @@ jobs:
         run: |
           # Get current date in YYYYMMDD format
           DATE=$(date +'%Y%m%d')
-          # Get CANN version and convert to lowercase (e.g., 2026.07.29 -> 2026.07.29)
+          # Get CANN version and convert to lowercase (e.g., 2026.08.03 -> 2026.08.03)
           CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
           # Get the base tag pattern (e.g., main)
           PATTERN="${{ inputs.schedule_tag_pattern }}"
@@ -460,7 +461,7 @@ jobs:
           SUFFIX="${{ inputs.suffix }}"
           
           # Construct the daily tag: nightly-{PATTERN}-{SUFFIX}-cann{VERSION}-{DATE}
-          # Example: nightly-main-310p-openeuler-cann2026.07.29-20260729
+          # Example: nightly-main-310p-openeuler-cann2026.08.03-20260729
           if [ -n "$SUFFIX" ]; then
             DAILY_TAG="nightly-${PATTERN}-${SUFFIX}-cann${CANN_VERSION}-${DATE}"
           else
@@ -495,9 +496,13 @@ jobs:
           #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
           #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
           tags: |
-            type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
-            type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
-            type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }},suffix=${{ env.SUFFIX }}
+            # In daily mode, only the CANN-versioned daily tag is published; the pep440,
+            # schedule and workflow_dispatch_tag rules would emit bare/plain tags
+            # (e.g. main-310p, nightly-main-310p) without date info, so they are disabled
+            # for daily builds only.
+            type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
+            type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
+            type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' && inputs.build_type != 'daily' }},suffix=${{ env.SUFFIX }}
             type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             
             # ===== New: Daily scenario specific tags =====
