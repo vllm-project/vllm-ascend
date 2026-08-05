@@ -42,13 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    # Cached fused-op availability probe result, shared across all layers so the
+    # smoke call runs at most once per process. None = not probed yet.
     _fused_chunk_available: bool | None = None
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Probe whether the fused CANN op is usable on this device (the
-        # interface exists and a minimal smoke call succeeds).
-        self.use_fused_chunk_op = self._probe_fused_chunk()
 
     @classmethod
     def _probe_fused_chunk(cls) -> bool:
@@ -56,12 +52,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         The interface must exist AND a minimal smoke call must succeed (the op is
         unavailable on some CANN builds / devices). Any failure disables the
-        fused path so we fall back to the Triton pipeline.
+        fused path so we fall back to the Triton pipeline. The result is cached
+        on the class, so only the first layer runs the smoke call.
         """
         if cls._fused_chunk_available is not None:
             return cls._fused_chunk_available
 
         if not hasattr(torch_npu, "npu_chunk_gated_delta_rule"):
+            logger.warning("torch_npu.npu_chunk_gated_delta_rule not found; using Triton chunk path.")
             cls._fused_chunk_available = False
             return False
 
@@ -91,12 +89,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             torch.npu.synchronize()
             logger.info("npu_chunk_gated_delta_rule smoke test passed; using fused chunk path.")
             cls._fused_chunk_available = True
-        except Exception:
+        except Exception as e:
+            logger.warning("npu_chunk_gated_delta_rule smoke test failed (%s); using Triton chunk path.", e)
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
+    @staticmethod
     def _chunk_gated_delta_rule_fused(
-        self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -514,16 +513,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            # Use the fused CANN operator when available. The fused op only
-            # supports the non-PCP case; keep the Triton pipeline as default.
-            use_fused_chunk = self.use_fused_chunk_op and get_pcp_group().world_size == 1
+            # Use the fused CANN operator when available (probed once, cached on
+            # the class) and applicable. It only supports the non-PCP case; fall
+            # back to the Triton pipeline under PCP or if the op is unavailable.
+            use_fused_chunk = (
+                AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1
+            )
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
                 # returns a copy, safe to clear in place.
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
-                (core_attn_out_non_spec, last_recurrent_state) = self._chunk_gated_delta_rule_fused(
+                core_attn_out_non_spec, last_recurrent_state = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
