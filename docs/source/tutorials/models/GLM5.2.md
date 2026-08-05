@@ -430,7 +430,6 @@ The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
 
-
 #### Prefill-Decode Disaggregation(A3)
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
@@ -1591,7 +1590,7 @@ The tables below provide recommended parameter configurations for different depl
 |Long Context 1M (A3)|PD — Server-D Node, [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|16|8|2|32|128|1040000|3|
 
 > On PD decode nodes, `--max-num-batched-tokens` is configured as `(MTP Spec Num + 1) × Max Num Seqs` — each sequence generates one target token plus the speculated MTP tokens per decode step.
-
+>
 > For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Deployment](#deployment).
 
 #### Table 3: Performance-Related Parameter Tuning Guide
