@@ -25,10 +25,6 @@ from vllm.distributed import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    ensure_mxfp4_moe_available,
-)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendMoEScheme, QuantType
@@ -57,7 +53,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W4A16MXFP
 
     def __init__(self) -> None:
-        ensure_mxfp4_moe_available("W4A16_MXFP4 MoE quantization")
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -138,7 +133,7 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 activation=getattr(layer, "activation", "silu"),
                 mxfp_act_quant_type=None,
                 mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
-                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=None,
                 mxfp_use_bf16=(x.dtype == torch.bfloat16),
                 w1_scale=layer.w13_weight_scale,

@@ -38,7 +38,6 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
     OFFLOAD_KV_CACHE_TUPLE_LEN,
@@ -1469,8 +1468,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if q_c_scale.dim() == 2:
                     q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
                 quant_matmul_kwargs.update(
-                    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                    pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                    scale_dtype=torch_npu.float8_e8m0fnu,
+                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
                     group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
                 )
             elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
