@@ -107,7 +107,8 @@ def build_attn_metadata(
     positions: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
-    num_input_tokens: int = 0,
+    num_actual_tokens: int | None = None,
+    num_input_tokens: int | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -123,9 +124,13 @@ def build_attn_metadata(
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
-    # MRV2 does not pass this Ascend-specific field; num_tokens already includes
-    # any execution padding.
-    if num_input_tokens <= 0:
+    # Keep the MRv1 distinction between the tokens scheduled by the scheduler
+    # and the (possibly padded) model input. Upstream speculative-decoding
+    # callers do not provide these Ascend-specific fields, where both values
+    # correctly fall back to ``num_tokens``.
+    if num_actual_tokens is None:
+        num_actual_tokens = num_tokens
+    if num_input_tokens is None:
         num_input_tokens = num_tokens
 
     attn_metadata: dict[str, Any] = {}
@@ -155,7 +160,7 @@ def build_attn_metadata(
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
-            num_actual_tokens=num_tokens,
+            num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
