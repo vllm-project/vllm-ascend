@@ -17,9 +17,10 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
+from vllm.model_executor.triton_dispatcher import pluggable_kernel
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.block_table import BlockTables, _load_ptr
+from vllm.v1.worker.gpu.block_table import BlockTables
 
 
 class AscendBlockTables(BlockTables):
@@ -71,39 +72,38 @@ class AscendBlockTables(BlockTables):
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
-        num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
-        _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            slot_mappings.shape[1],
-            idx_mapping,
-            query_start_loc,
-            positions,
-            self.block_table_ptrs,
-            self.block_table_strides,
-            self.block_sizes_tensor,
-            slot_mappings,
-            slot_mappings.stride(0),
-            self.cp_rank,
-            CP_SIZE=self.cp_size,
-            CP_INTERLEAVE=self.cp_interleave,
-            PAD_ID=PAD_SLOT_ID,
-            TRITON_BLOCK_SIZE=1024,  # type: ignore
-            TOTAL_BLOCK_SIZE=4096,
-        )
+        for group_id, block_table in enumerate(self.block_tables):
+            _compute_slot_mappings_kernel[(num_reqs + 1,)](
+                slot_mappings.shape[1],
+                idx_mapping,
+                query_start_loc,
+                positions,
+                block_table.gpu,
+                block_table.gpu.stride(0),
+                self.kernel_block_sizes[group_id],
+                slot_mappings[group_id],
+                self.cp_rank,
+                CP_SIZE=self.cp_size,
+                CP_INTERLEAVE=self.cp_interleave,
+                PAD_ID=PAD_SLOT_ID,
+                TRITON_BLOCK_SIZE=1024,  # type: ignore
+                TOTAL_BLOCK_SIZE=4096,
+            )
         return slot_mappings[:, :num_tokens_padded]
 
 
+@pluggable_kernel
 @triton.jit
 def _compute_slot_mappings_kernel(
     max_num_tokens,
     idx_mapping,  # [num_reqs]
     query_start_loc,  # [num_reqs + 1]
     pos,  # [num_tokens]
-    block_table_ptrs,  # [num_kv_cache_groups]
-    block_table_strides,  # [num_kv_cache_groups]
-    block_sizes,  # [num_kv_cache_groups]
-    slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
-    slot_mappings_stride,
+    block_table_ptr,  # [max_num_reqs, max_num_blocks]
+    block_table_stride,
+    block_size,
+    slot_mapping_ptr,  # [max_num_tokens]
     cp_rank,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
@@ -111,21 +111,14 @@ def _compute_slot_mappings_kernel(
     TRITON_BLOCK_SIZE: tl.constexpr,
     TOTAL_BLOCK_SIZE: tl.constexpr,
 ):
-    # kv cache group id
-    group_id = tl.program_id(0)
-    batch_idx = tl.program_id(1)
-    slot_mapping_ptr = slot_mappings_ptr + group_id * slot_mappings_stride
+    batch_idx = tl.program_id(0)
 
-    if batch_idx == tl.num_programs(1) - 1:
+    if batch_idx == tl.num_programs(0) - 1:
         actual_num_tokens = tl.load(query_start_loc + batch_idx)
         for i in range(actual_num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
             offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
             tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
         return
-
-    block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
-    block_table_stride = tl.load(block_table_strides + group_id)
-    block_size = tl.load(block_sizes + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)

@@ -16,13 +16,22 @@ def get_test_prompts():
 
 
 def run_vl_model_test(
-    model_name: str, tensor_parallel_size: int, max_tokens: int, dtype: str = "float16", enforce_eager: bool = True
+    model_name: str,
+    tensor_parallel_size: int,
+    max_tokens: int,
+    dtype: str = "float16",
+    enforce_eager: bool = True,
+    **runner_kwargs,
 ):
     image = get_test_image()
     images = [image]
     prompts = get_test_prompts()
 
     with VllmRunner(
-        model_name, tensor_parallel_size=tensor_parallel_size, enforce_eager=enforce_eager, dtype=dtype
+        model_name,
+        tensor_parallel_size=tensor_parallel_size,
+        enforce_eager=enforce_eager,
+        dtype=dtype,
+        **runner_kwargs,
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens, images=images)
