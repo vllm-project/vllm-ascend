@@ -1506,7 +1506,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
-        record_attention_compute_start()
         return DeviceOperator.indexer_select_post_process(
             self,
             q_li,
@@ -2023,6 +2022,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
         else:
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+
+        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so recording this
+        # inside indexer_select_post_process would leave their gate closed.
+        record_attention_compute_start()
+
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
