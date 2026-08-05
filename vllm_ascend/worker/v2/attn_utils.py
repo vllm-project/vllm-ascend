@@ -202,9 +202,9 @@ def build_attn_metadata(
                 if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
-                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata
-                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata
-                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata
+                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
+                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
+                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
@@ -275,14 +275,10 @@ def _get_attention_kv_cache_dims(
     kv_cache_spec: AttentionSpec,
 ) -> tuple[int, int]:
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-        attn_layers = get_layers_from_vllm_config(
-            get_current_vllm_config(), AttentionLayerBase, [layer_name]
-        )
+        attn_layers = get_layers_from_vllm_config(get_current_vllm_config(), AttentionLayerBase, [layer_name])
         attn_layer = attn_layers[layer_name]
         if not isinstance(attn_layer, MLAAttention):
-            raise TypeError(
-                f"Expected an MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
-            )
+            raise TypeError(f"Expected an MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}.")
         return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
 
     head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
@@ -331,9 +327,7 @@ def _view_dsv4_cache(
         raise ValueError("DSA cache allocation is not a whole number of physical pages.")
     num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
     if num_blocks != kv_cache_config.num_blocks:
-        raise ValueError(
-            f"DSA cache has {num_blocks} blocks, expected {kv_cache_config.num_blocks}."
-        )
+        raise ValueError(f"DSA cache has {num_blocks} blocks, expected {kv_cache_config.num_blocks}.")
 
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
@@ -420,9 +414,7 @@ def _allocate_kv_cache(
         assert isinstance(example_spec, AttentionSpec)
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
         if enable_fa_quant(vllm_config, example_layer_name):
-            k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(
-                example_layer_name, [k_dim, v_dim]
-            )
+            k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(example_layer_name, [k_dim, v_dim])
         else:
             k_factor, v_factor = calc_split_factor([k_dim, v_dim])
         k_size = int(kv_cache_tensor.size // k_factor)
@@ -432,24 +424,21 @@ def _allocate_kv_cache(
             k_tensor = torch.zeros(k_size, dtype=torch.int8, device=device)
             v_tensor = torch.zeros(v_size, dtype=torch.int8, device=device)
         else:
-            k_tensor = _align_memory(
-                torch.zeros(k_size + alignment, dtype=torch.int8, device=device), alignment
-            )[:k_size]
-            v_tensor = _align_memory(
-                torch.zeros(v_size + alignment, dtype=torch.int8, device=device), alignment
-            )[:v_size]
+            k_tensor = _align_memory(torch.zeros(k_size + alignment, dtype=torch.int8, device=device), alignment)[
+                :k_size
+            ]
+            v_tensor = _align_memory(torch.zeros(v_size + alignment, dtype=torch.int8, device=device), alignment)[
+                :v_size
+            ]
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
-    layer_names = {
-        layer_name
-        for group in kv_cache_config.kv_cache_groups
-        for layer_name in group.layer_names
-    }
+    layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
+
 
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],

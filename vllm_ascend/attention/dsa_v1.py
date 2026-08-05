@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,

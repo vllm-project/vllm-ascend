@@ -11,7 +11,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
@@ -25,7 +24,7 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS, AscendMLABackend
+from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
