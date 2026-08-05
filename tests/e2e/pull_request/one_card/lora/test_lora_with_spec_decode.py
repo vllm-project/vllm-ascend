@@ -11,6 +11,8 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
+from tests.e2e.conftest import wait_until_npu_memory_free
+
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
 LORA_TEST_PROMPT_MAP["vllm-ascend/qwen-linear-algebra-coder"] = """
@@ -45,6 +47,7 @@ SEED = 42
         )
     ],
 )
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_batch_inference_correctness(
     model_setup: tuple[str, str, str, str, int],
 ):

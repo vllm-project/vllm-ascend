@@ -2,6 +2,8 @@ from pathlib import Path
 
 from vllm import LLM
 
+from tests.e2e.conftest import wait_until_npu_memory_free
+
 model_name = "Qwen/Qwen3-Reranker-0.6B"
 
 
@@ -39,6 +41,7 @@ def get_llm() -> LLM:
     )
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_reranker_models_lora():
     # Load the Jinja template for formatting query-document pairs
     # The template ensures proper formatting for the reranker model

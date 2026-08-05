@@ -1,10 +1,11 @@
 import pytest
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.lora.test_ilama_lora import EXPECTED_LORA_OUTPUT, MODEL_PATH, do_sample
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["mp"])
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_ilama_lora_tp2(distributed_executor_backend, ilama_lora_files):
     with VllmRunner(
         MODEL_PATH,

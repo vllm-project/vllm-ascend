@@ -2,7 +2,7 @@
 import vllm
 from vllm.lora.request import LoRARequest
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 MODEL_PATH = "vllm-ascend/ilama-3.2-1B"
 
@@ -39,6 +39,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_ilama_lora(ilama_lora_files):
     with VllmRunner(
         MODEL_PATH,

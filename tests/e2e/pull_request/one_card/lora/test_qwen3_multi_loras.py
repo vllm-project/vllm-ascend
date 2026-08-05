@@ -6,7 +6,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -45,6 +45,7 @@ def format_chatml_messages(prompt: str):
     graph_mode="eager",
 )
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_multi_loras_with_tp_sync():
     lora_name_id_map = {}
     increase_lora_id = 0

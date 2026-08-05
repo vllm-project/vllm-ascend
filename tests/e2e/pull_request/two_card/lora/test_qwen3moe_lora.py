@@ -1,6 +1,8 @@
 import vllm
 from vllm.lora.request import LoRARequest
 
+from tests.e2e.conftest import wait_until_npu_memory_free
+
 MODEL_PATH = "Qwen/Qwen3-30B-A3B"
 
 PROMPT_TEMPLATE = """<|im_start|>user
@@ -53,6 +55,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_tp(qwen3moe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -68,6 +71,7 @@ def test_qwen3moe_lora_tp(qwen3moe_lora_files):
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_ep(qwen3moe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -84,6 +88,7 @@ def test_qwen3moe_lora_ep(qwen3moe_lora_files):
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
     """Test multiple different LoRA IDs (-1, 1, 2) in a single batch on EP path.
 

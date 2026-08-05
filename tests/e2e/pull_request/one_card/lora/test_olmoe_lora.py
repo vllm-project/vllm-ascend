@@ -3,6 +3,8 @@ from collections.abc import Sequence
 import vllm
 from vllm.lora.request import LoRARequest
 
+from tests.e2e.conftest import wait_until_npu_memory_free
+
 MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
 
 PROMPT_TEMPLATE = """I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me. Do not return any additional explanation. Below is an instruction that describes a task, Write a response that appropriately completes the request.
@@ -90,6 +92,7 @@ def generate_and_test(
         )
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_olmoe_lora(olmoe_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
