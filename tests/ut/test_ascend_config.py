@@ -664,3 +664,85 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
+
+
+class TestTopLevelSwitchTypeValidation(TestBase):
+    """Verify @config migration gives top-level AscendConfig switches type validation.
+
+    These tests exercise the full ``init_ascend_config`` path (vllm_config +
+    factory + before/after validators), so they require a constructible
+    VllmConfig. Run on NPU/Linux UT runners (Windows lacks torch_npu).
+    """
+
+    @staticmethod
+    def _clean_up(func):
+        def wrapper(*args, **kwargs):
+            clear_ascend_config()
+            clear_enable_sp()
+            try:
+                func(*args, **kwargs)
+            finally:
+                clear_ascend_config()
+                clear_enable_sp()
+
+        return wrapper
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_cpu_binding_string_false_disables(self, mock_fix):
+        # Core regression: bool("false") is True in Python, so
+        # {"enable_cpu_binding": "false"} previously left CPU binding enabled.
+        # Pydantic lax coercion must resolve "false" to False.
+        vc = VllmConfig()
+        vc.additional_config = {"enable_cpu_binding": "false"}
+        self.assertFalse(init_ascend_config(vc).enable_cpu_binding)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_prefill_mc2_string_false_disables(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_prefill_mc2": "false"}
+        self.assertFalse(init_ascend_config(vc).enable_prefill_mc2)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_mlapo_env_false_no_longer_crashes(self, mock_fix):
+        # Regression: `export VLLM_ASCEND_ENABLE_MLAPO=false` used to crash
+        # startup with ValueError (int("false")). The before-validator reads
+        # os.getenv directly and resolves "false" to False.
+        vc = VllmConfig()
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "false"}):
+            self.assertFalse(init_ascend_config(vc).enable_mlapo)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_cpu_binding_rejects_invalid_int(self, mock_fix):
+        # JSON booleans should be true/false; an int 2 is neither 0 nor 1 and
+        # must fail fast rather than being coerced into unexpected truthiness.
+        vc = VllmConfig()
+        vc.additional_config = {"enable_cpu_binding": 2}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mega_moe_max_tokens_int_lax(self, mock_fix):
+        # int string "131072" coerces to 131072 (fixes str-vs-int silent failure).
+        vc = VllmConfig()
+        vc.additional_config = {"mega_moe_max_tokens": "131072"}
+        self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_bypass_key_not_stripped_silently_when_unknown(self, mock_fix):
+        # A typo'd top-level key (not a declared field, not a known bypass key)
+        # is stripped by the factory __pydantic_fields__ filter, so extra=forbid
+        # does NOT catch it. This documents the Phase-1 limitation: top-level
+        # typo detection requires the future "Did you mean?" registry (PR-3),
+        # not forbid alone. The test asserts the current (lenient) behavior so
+        # the future tightening is a conscious change.
+        vc = VllmConfig()
+        vc.additional_config = {"enable_cpu_bindng": True}  # typo: bindng
+        # No raise: factory strips the unknown key; AscendConfig never sees it.
+        cfg = init_ascend_config(vc)
+        self.assertTrue(cfg.enable_cpu_binding)  # default True, typo ignored
