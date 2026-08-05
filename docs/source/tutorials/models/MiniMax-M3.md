@@ -6,25 +6,20 @@ MiniMax-M3 is a multimodal large language model that supports text, image, and v
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
+This document is written based on the latest vLLM-Ascend version.
+
 ## 2 Supported Features
 
 Refer to [supported models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
-| Model | Supported Hardware | BF16 | W8A8 | MXFP8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | FullDecodeOnly AclGraph | Thinking | Tool Call | ViT DP | Image | Video | Max Model Len |
-|-------|--------------------|------|------|-------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|----------|-----------|--------|-------|-------|---------------|
-| MiniMax-M3 | A2/A3 | ✅ | ✅ | ❌ | ✅ | ✅ | - | Eagle3 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 1M |
-
-- The model supports a maximum context length of 1M tokens. Testing reached 42K tokens with BF16 weights on a single A3 node and 128K tokens with W8A8 weights on a single A3 node.
-- `ViT DP` means that data parallelism for the multimodal encoder/ViT can be enabled with `--mm-encoder-tp-mode data`.
-
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-The `MiniMax-M3` BF16 model requires one Ascend 910C server with 16 × 64 GB NPU chips. [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
-We also provide `W8A8` quant model requires 1 Ascend 910C (with 8 x 64G NPUs). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626)
+The `MiniMax-M3` BF16 model requires 16 × 64 GB NPU chips. [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
+We also provide `W8A8` quant model requires at least 8 x 64G NPU chips. [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626)
 It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
@@ -34,6 +29,8 @@ For multi-node deployment, verify the communication environment by following [Ve
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
 
 - Step 1: Download the latest Docker image
   ```bash
@@ -91,13 +88,33 @@ For multi-node deployment, verify the communication environment by following [Ve
   ./build_rust.sh
   ```
 
+- Step 4: Installation Verification:
+
+  After starting the container, run the following command to verify the installation:
+
+  ```bash
+  docker ps | grep vllm-ascend-env
+  ```
+
+  Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+  ```bash
+  pip show vllm-ascend
+  ```
+
+  Expected result: The version information is displayed, matching the pulled image version.
+
 ## 5 Online Service Deployment
 
 Start the online serving service with the following command:
 
+For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
+
 ### 5.1 Single-Node Deployment
 
-#### 5.1.1 BF16 Deployment
+Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat and quantized model can be deployed on 1 Atlas 800 A3 (128GB × 8).
+
+=== "BF16 Deployment"
 
 ```bash
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
@@ -130,7 +147,7 @@ vllm serve ${WEIGHT_PATH} \
   --port 11223 > ${LOG_PATH} 2>&1 &
 ```
 
-#### 5.1.2 W8A8 Deployment
+=== "W8A8 Deployment"
 
   ```bash
   export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
@@ -172,7 +189,191 @@ vllm serve ${WEIGHT_PATH} \
 
 For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2}'` for two-image requests, and use `--limit-mm-per-prompt '{"video":1}'` for one-video requests.
 
-### 5.2 Multimodal and ViT DP
+### 5.2 Multi-Node Deployment
+
+Deploying the float model on Ascend A2 servers requires at least two nodes. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+
+=== "BF16 Deployment"
+
+  Run the following command on node 0:
+
+  ```bash
+  local_ip="${NODE0_IP}"
+  node0_ip="${NODE0_IP}"
+
+  export HCCL_IF_IP=$local_ip
+  export IFNAME="${NETWORK_INTERFACE}"
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_SOCKET_IFNAME="$IFNAME"
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600
+  export HCCL_CONNECT_TIMEOUT=7200
+  export ASCEND_CONNECT_TIMEOUT=10000
+  export ASCEND_TRANSFER_TIMEOUT=10000
+  export VLLM_RPC_TIMEOUT=1800000
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export TASK_QUEUE_ENABLE=1
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --max-model-len 40960 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-num-seqs 8 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 0 \
+    --data-parallel-address $node0_ip \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.94 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+  Run the following command on node 1:
+
+  ```bash
+  local_ip="${NODE1_IP}"
+  node0_ip="${NODE0_IP}"
+
+  export HCCL_IF_IP=$local_ip
+  export IFNAME="${NETWORK_INTERFACE}"
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_SOCKET_IFNAME="$IFNAME"
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600
+  export HCCL_CONNECT_TIMEOUT=7200
+  export ASCEND_CONNECT_TIMEOUT=10000
+  export ASCEND_TRANSFER_TIMEOUT=10000
+  export VLLM_RPC_TIMEOUT=1800000
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export TASK_QUEUE_ENABLE=1
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --headless \
+    --max-model-len 40960 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-num-seqs 8 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.94 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+=== "W8A8 Deployment"
+
+  Run the following command on node 0:
+
+  ```bash
+  local_ip="${NODE0_IP}"
+  node0_ip="${NODE0_IP}"
+
+  export HCCL_IF_IP=$local_ip
+  export IFNAME="${NETWORK_INTERFACE}"
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_SOCKET_IFNAME="$IFNAME"
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600
+  export HCCL_CONNECT_TIMEOUT=7200
+  export ASCEND_CONNECT_TIMEOUT=10000
+  export ASCEND_TRANSFER_TIMEOUT=10000
+  export VLLM_RPC_TIMEOUT=1800000
+  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --max-model-len 131072 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-num-seqs 8 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 0 \
+    --data-parallel-address $node0_ip \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.92 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+  Run the following command on node 1:
+
+  ```bash
+  local_ip="${NODE1_IP}"
+  node0_ip="${NODE0_IP}"
+
+  export HCCL_IF_IP=$local_ip
+  export IFNAME="${NETWORK_INTERFACE}"
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_SOCKET_IFNAME="$IFNAME"
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600
+  export HCCL_CONNECT_TIMEOUT=7200
+  export ASCEND_CONNECT_TIMEOUT=10000
+  export ASCEND_TRANSFER_TIMEOUT=10000
+  export VLLM_RPC_TIMEOUT=1800000
+  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --headless \
+    --max-model-len 131072 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-num-seqs 8 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.92 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+### 5.3 Multimodal and ViT DP (Optional)
 
 MiniMax-M3 supports image and video inputs on Ascend. The deployment examples above keep `--limit-mm-per-prompt '{"image":1}'` as the default multimodal capacity assumption because the other serving parameters are tuned for the single-image path.
 
@@ -213,190 +414,6 @@ FLASHCOMM1 and language-model-only mode should not be enabled at the same time f
 ```
 
 `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
-
-### 5.3 Multi-Node Deployment
-
-The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
-
-#### 5.3.1 BF16 Deployment on Two A2 Nodes
-
-  Run the following command on node 0:
-
-  ```bash
-  local_ip="${NODE0_IP}"
-  node0_ip="${NODE0_IP}"
-
-  export HCCL_IF_IP=$local_ip
-  export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
-  export HCCL_SOCKET_IFNAME="$IFNAME"
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export TASK_QUEUE_ENABLE=1
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-  vllm serve ${WEIGHT_PATH} \
-    --host 0.0.0.0 \
-    --served-model-name minimax-m3 \
-    --trust-remote-code \
-    --max-model-len 40960 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --max-num-seqs 8 \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-start-rank 0 \
-    --data-parallel-address $node0_ip \
-    --distributed_executor_backend "mp" \
-    --gpu-memory-utilization 0.94 \
-    --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
-    --port 11223 > ${LOG_PATH} 2>&1 &
-  ```
-
-  Run the following command on node 1:
-
-  ```bash
-  local_ip="${NODE1_IP}"
-  node0_ip="${NODE0_IP}"
-
-  export HCCL_IF_IP=$local_ip
-  export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
-  export HCCL_SOCKET_IFNAME="$IFNAME"
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export TASK_QUEUE_ENABLE=1
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-  vllm serve ${WEIGHT_PATH} \
-    --host 0.0.0.0 \
-    --served-model-name minimax-m3 \
-    --trust-remote-code \
-    --headless \
-    --max-model-len 40960 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --max-num-seqs 8 \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-start-rank 1 \
-    --data-parallel-address $node0_ip \
-    --distributed_executor_backend "mp" \
-    --gpu-memory-utilization 0.94 \
-    --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
-    --port 11223 > ${LOG_PATH} 2>&1 &
-  ```
-
-#### 5.3.2 W8A8 Deployment on Two A2 Nodes
-
-  Run the following command on node 0:
-
-  ```bash
-  local_ip="${NODE0_IP}"
-  node0_ip="${NODE0_IP}"
-
-  export HCCL_IF_IP=$local_ip
-  export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
-  export HCCL_SOCKET_IFNAME="$IFNAME"
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-  vllm serve ${WEIGHT_PATH} \
-    --host 0.0.0.0 \
-    --served-model-name minimax-m3 \
-    --trust-remote-code \
-    --max-model-len 131072 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --max-num-seqs 8 \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-start-rank 0 \
-    --data-parallel-address $node0_ip \
-    --distributed_executor_backend "mp" \
-    --gpu-memory-utilization 0.92 \
-    --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
-    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
-    --port 11223 > ${LOG_PATH} 2>&1 &
-  ```
-
-  Run the following command on node 1:
-
-  ```bash
-  local_ip="${NODE1_IP}"
-  node0_ip="${NODE0_IP}"
-
-  export HCCL_IF_IP=$local_ip
-  export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
-  export HCCL_SOCKET_IFNAME="$IFNAME"
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-  vllm serve ${WEIGHT_PATH} \
-    --host 0.0.0.0 \
-    --served-model-name minimax-m3 \
-    --trust-remote-code \
-    --headless \
-    --max-model-len 131072 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --max-num-seqs 8 \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-start-rank 1 \
-    --data-parallel-address $node0_ip \
-    --distributed_executor_backend "mp" \
-    --gpu-memory-utilization 0.92 \
-    --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
-    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
-    --port 11223 > ${LOG_PATH} 2>&1 &
-  ```
 
 ## 6 Thinking and Parser Configuration
 
@@ -712,7 +729,23 @@ ais_bench \
 | Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
 | Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
 
-## 9 FAQ
+## 9 Performance Tuning
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+### 9.1 Recommended Configurations
+
+The recommended configurations are the same as those specified in Chapter 5, “Online Service Deployment.”
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+## 10 FAQ
 
 - **Q: How can I reinstall vLLM Ascend?**
 
