@@ -280,7 +280,7 @@ class NPUModelRunner(GPUModelRunner):
         self._has_sinks = False
         if self._has_gdn:
             self.gdn_query_start_loc = self._make_buffer(
-                self.max_num_reqs + 1,  # type: ignore[has-type]
+                self.max_num_reqs + 2,  # type: ignore[has-type]
                 dtype=torch.int32,
             )
 
@@ -615,6 +615,31 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _ensure_gdn_query_start_loc(self) -> None:
+        if hasattr(self, "gdn_query_start_loc"):
+            return
+        self._has_gdn = True
+        self.gdn_query_start_loc = self._make_buffer(
+            self.max_num_reqs + 2,  # type: ignore[has-type]
+            dtype=torch.int32,
+        )
+
+    def _set_gdn_query_start_loc(
+        self,
+        cu_num_tokens: np.ndarray,
+        num_reqs: int,
+        num_reqs_padded: int | None = None,
+    ) -> None:
+        self._ensure_gdn_query_start_loc()
+        last_loc = int(cu_num_tokens[num_reqs - 1]) if num_reqs > 0 else 0
+        self.gdn_query_start_loc.np[0] = 0
+        self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens[:num_reqs]
+        pad_end = self.gdn_query_start_loc.np.shape[0]
+        if num_reqs_padded is not None:
+            pad_end = min(num_reqs_padded + 1, pad_end)
+        self.gdn_query_start_loc.np[num_reqs + 1 : pad_end].fill(last_loc)
+        self.gdn_query_start_loc.copy_to_gpu()
+
     def _pad_query_start_loc_for_fia(
         self,
         num_tokens_padded: int,
@@ -847,10 +872,7 @@ class NPUModelRunner(GPUModelRunner):
         # gdn_query_start_loc is an unpadded version of query_start_loc.
         # TODO delete it if fia's check is removed.
         if self._has_gdn:
-            self.gdn_query_start_loc.np[0] = 0
-            self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-            self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            self.gdn_query_start_loc.copy_to_gpu()
+            self._set_gdn_query_start_loc(cu_num_tokens, num_reqs)
 
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
@@ -2907,8 +2929,10 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
-                assert ubid is None, "UBatching not supported with GDN yet"
+            if use_spec_decode and isinstance(
+                builder, (GDNAttentionMetadataBuilder,)
+            ):
+                assert ubid is None, "UBatching not supported with spec decode metadata yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
@@ -2981,17 +3005,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded,
             )
 
-            # Now, query_start_loc is padded.
-            # But gdn needs an unpadded one.
-            # gdn_query_start_loc is an unpadded version of query_start_loc.
-            # TODO delete it if fia's check is removed.
-            if self._has_gdn:
-                attn_group = self.attn_groups[kv_cache_gid][0]
-                builder = attn_group.get_metadata_builder(0)
-                if isinstance(builder, GDNAttentionMetadataBuilder):
-                    cm.query_start_loc_cpu = self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
-                    cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
-
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid, total_num_scheduled_tokens_compressed_list)  # type: ignore[arg-type]
@@ -3005,8 +3018,26 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
+                cm_for_attn_group = cm
+                builder = self.attn_groups[kv_cache_gid][attn_gid].get_metadata_builder(0)
+                if isinstance(builder, GDNAttentionMetadataBuilder):
+                    # query_start_loc may be padded for FULL graph/FIA, but
+                    # GDN uses request query lengths to split spec/non-spec
+                    # tokens. Keep padded requests as zero-length dummy rows.
+                    self._set_gdn_query_start_loc(
+                        self.query_start_loc.np[1 : num_reqs + 1],
+                        num_reqs,
+                        num_reqs_padded,
+                    )
+                    cm_for_attn_group = copy(cm)
+                    cm_for_attn_group.query_start_loc_cpu = (
+                        self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
+                    )
+                    cm_for_attn_group.query_start_loc = (
+                        self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
+                    )
                 _build_attn_group_metadata(
-                    kv_cache_gid, attn_gid, cm, num_reqs_actual,
+                    kv_cache_gid, attn_gid, cm_for_attn_group, num_reqs_actual,
                     prefill_ratio_to_sas_metadata, decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata)
         if self.is_mm_prefix_lm:
@@ -3195,8 +3226,9 @@ class NPUModelRunner(GPUModelRunner):
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
             if self._has_gdn:
-                self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-                self.gdn_query_start_loc.copy_to_gpu()
+                self._set_gdn_query_start_loc(
+                    cum_num_tokens, num_reqs, num_reqs_padded
+                )
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(
@@ -3467,8 +3499,8 @@ class NPUModelRunner(GPUModelRunner):
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
-        self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+        self.need_accepted_tokens = (
+            self._requires_accepted_tokens_for_spec_decode()
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -4203,26 +4235,37 @@ class NPUModelRunner(GPUModelRunner):
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
+    def _requires_accepted_tokens_for_spec_decode(self) -> bool:
+        if self.speculative_config is None:
+            return False
+
+        # Hybrid models need accepted-token counts to shift recurrent/linear
+        # attention state after speculative tokens are accepted or rejected.
+        if self.model_config.is_hybrid:
+            return True
+
+        return any(
+            isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+            for attn_group in self.attn_groups
+        )
+
     def calculate_reorder_batch_threshold(self) -> None:
         """
-        Check that if any backends reorder batches; that the reordering
-        is compatible (e.g., decode threshold is the same)
+        Choose the minimum reorder batch threshold from all attention groups.
+        Backends can support lower thresholds than they request, with a
+        possible performance penalty from treating some decode-shaped requests
+        as prefills.
         """
         for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.get_metadata_builder()
             if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):  # noqa
-                # check that if any backends reorder batches; that the reordering
-                # is compatible (e.g., decode threshold is the same)
                 reorder_batch_threshold_i = attn_metadata_builder_i.reorder_batch_threshold
                 if reorder_batch_threshold_i is not None:  # noqa
                     if self.reorder_batch_threshold is not None:
-                        if reorder_batch_threshold_i != self.reorder_batch_threshold:
-                            raise ValueError(
-                                f"Attention backend reorders decodes with "
-                                f"threshold {reorder_batch_threshold_i} but other "
-                                f"backend uses threshold "
-                                f"{self.reorder_batch_threshold}"
-                            )
+                        self.reorder_batch_threshold = min(
+                            self.reorder_batch_threshold,
+                            reorder_batch_threshold_i,
+                        )
                     else:
                         self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
 
@@ -4295,6 +4338,7 @@ class NPUModelRunner(GPUModelRunner):
                         head_size=head_size,
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
+                        page_size_padded=self.vllm_config.cache_config.mamba_page_size_padded,
                     )
                     attn_layer_names.add(layer_name)
 

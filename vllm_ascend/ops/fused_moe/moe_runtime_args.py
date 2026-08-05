@@ -129,6 +129,7 @@ def build_fused_experts_input(
     log2phy: torch.Tensor | None = None,
     pertoken_scale: torch.Tensor | None = None,
     activation: str = "silu",
+    gemm1_clamp_limit: float | None = None,
     need_trans: bool = False,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
@@ -172,6 +173,7 @@ def build_fused_experts_input(
             pertoken_scale=pertoken_scale,
         ),
         activation=activation,
+        gemm1_clamp_limit=gemm1_clamp_limit,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
         quant=MoEQuantParams(
@@ -224,6 +226,7 @@ def build_mlp_compute_input(
         quant=fused_experts_input.quant,
         fusion=fused_experts_input.quant.quant_type in (QuantType.W8A8, QuantType.MXFP8) and use_fusion_ops,
         activation=fused_experts_input.activation,
+        gemm1_clamp_limit=fused_experts_input.gemm1_clamp_limit,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
         swiglu_limit=fused_experts_input.swiglu_limit,

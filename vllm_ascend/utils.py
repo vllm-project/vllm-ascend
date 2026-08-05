@@ -719,6 +719,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    from vllm_ascend.ops.bailing_moe_v3_kda import AscendBailingMoeV3KimiDeltaAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -772,6 +773,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
+        "BailingMoeV3KimiDeltaAttention": AscendBailingMoeV3KimiDeltaAttention,
     }
 
     if vllm_config is None:
@@ -1440,8 +1442,8 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
 
 def check_gdn_layer(vllm_config) -> bool:
     """
-    gdn layer is marked with `linear_attention`.
-    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    GDN layers may be marked as either `linear_attention` in HF layer_types
+    or `gdn_attention` by the layer implementation.
     """
     if not hasattr(vllm_config, "model_config"):
         return False
@@ -1452,15 +1454,17 @@ def check_gdn_layer(vllm_config) -> bool:
 
     hf_config = model_config.hf_config
 
+    gdn_layer_types = {"linear_attention", "gdn_attention"}
+
     # Use `or []` to prevent errors when layer_types is None
     layer_types = getattr(hf_config, "layer_types", None) or []
-    if "linear_attention" in layer_types:
+    if any(layer_type in gdn_layer_types for layer_type in layer_types):
         return True
 
     text_config = getattr(hf_config, "text_config", None)
     if text_config:
         text_layer_types = getattr(text_config, "layer_types", None) or []
-        if "linear_attention" in text_layer_types:
+        if any(layer_type in gdn_layer_types for layer_type in text_layer_types):
             return True
 
     return False

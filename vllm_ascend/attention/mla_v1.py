@@ -734,6 +734,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
+        self.skip_o_proj = not hasattr(self.o_proj, "weight")
+
+        self.g_proj = kwargs.get("g_proj")
+        self.gated_attention_proj_granularity_type = kwargs.get(
+            "gated_attention_proj_granularity_type"
+        )
+
         self.vllm_config = get_current_vllm_config()
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1745,6 +1752,24 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
+
+        if self.g_proj is not None:
+            gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
+                hidden_states.dtype
+            )
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                gated_input = o_proj_input.view(-1, self.num_heads, self.v_head_dim)
+                gated_input[: gate.shape[0]] *= gate.unsqueeze(-1)
+            elif self.gated_attention_proj_granularity_type == "element_wise":
+                o_proj_input[: gate.shape[0]] *= gate
+
+        if self.skip_o_proj:
+            output[...] = o_proj_input[: output.shape[0], : output.shape[1]]
+            del o_proj_input
+            if self.is_kv_producer and not self.is_kv_both:
+                maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output_padded
+
         # O proj
         weight_prefetch_method = get_weight_prefetch_method()
         weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(

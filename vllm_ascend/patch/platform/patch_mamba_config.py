@@ -7,6 +7,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 @classmethod
@@ -47,12 +48,6 @@ def verify_and_update_config(cls, vllm_config) -> None:
         mamba_sizes.append(math.prod(shape) * get_dtype_size(dtype))
     ssm_block_page_size, conv_block_page_size = max(mamba_sizes), min(mamba_sizes)
 
-    # Pure linear attention models (e.g. bailing 2.5) have only SSM state,
-    # no conv block. Detected by a single 3-D mamba shape (ssm only, no conv).
-    # Example shape: MambaSpec(shapes=((8, 128, 128),), mamba_type='linear_attention')
-    if len(mamba_shapes) == 1 and len(mamba_shapes[0]) == 3:
-        conv_block_page_size = 0
-
     # NOTE(zxr): because of the limit of Ascend Hardware, we need to keep
     # all cache tensors contiguous, so we align the page size of ssm_block
     # and single attn_block
@@ -63,6 +58,29 @@ def verify_and_update_config(cls, vllm_config) -> None:
         attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_token_page_size = attn_single_token_k_page_size + attn_rope_token_page_size
+        # Pure linear attention models (e.g. bailing 2.5) have only SSM state
+        # mamba_shapes=((8, 128, 128))
+        #          |CONV     |SSM      |PADDING
+        # MAMBA    |0        |524288   |65536
+        #          |PADDING  |NOPE     |ROPE
+        # MLA      |0        |524288   |65536
+        # mamba_pagesize_padded = 0 + nope + rope
+
+        # Kda models (e.g. bailing3.0) have 3 CONV state and 1 SSM state
+        # mamba_shapes=((3, 1024), (3, 1024), (3, 1024), (8, 128, 128))
+        #          |CONV*3   |SSM      |PADDING
+        # MAMBA    |36864    |524288   |65536
+        #          |PADDING  |NOPE     |ROPE
+        # MLA      |36864    |524288   |65536
+        # mamba_pagesize_padded = covn*3 + nope + rope
+
+        mamba_page_size = MambaSpec(
+            shapes=mamba_shapes,
+            dtypes=mamba_dtypes,
+            block_size=-1,
+        ).page_size_bytes
+
+        conv_block_page_size = mamba_page_size - ssm_block_page_size
     else:
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         attn_head_size = model_config.get_head_size()
