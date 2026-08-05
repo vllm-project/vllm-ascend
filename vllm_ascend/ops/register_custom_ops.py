@@ -10,10 +10,12 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import enable_sp_by_pass, is_vl_model
@@ -167,9 +169,117 @@ def _quantize_impl(
 
 
 def _quantize_impl_fake(
-    in_tensor: torch.Tensor, input_scale: torch.Tensor, input_scale_reciprocal: torch.Tensor, input_offset: torch.Tensor
+    in_tensor: torch.Tensor,
+    input_scale: torch.Tensor,
+    input_scale_reciprocal: torch.Tensor,
+    input_offset: torch.Tensor,
 ) -> torch.Tensor:
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal, input_offset, torch.qint8, -1, False)
+
+
+def _dynamic_quant_matmul(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(input_, dst_type=torch.int8)
+    need_unsqueeze = False
+    if pertoken_scale.dim() == 2:
+        need_unsqueeze = True
+        quantized_x = quantized_x.squeeze(dim=1)
+        pertoken_scale = pertoken_scale.squeeze(dim=1)
+
+    output = torch_npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        weight_scale,
+        pertoken_scale=pertoken_scale,
+        bias=None,
+        output_dtype=input_.dtype,
+    )
+    if need_unsqueeze:
+        output = output.unsqueeze(dim=1)
+    return output
+
+
+def _all_gather_then_dynamic_quant_matmul(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    gathered = tensor_model_parallel_all_gather(input_, 0)
+    pad_size = _EXTRA_CTX.pad_size
+    if pad_size > 0:
+        gathered = gathered[:-pad_size]
+    return _dynamic_quant_matmul(gathered, weight, weight_scale)
+
+
+def _all_gather_dynamic_quant_matmul_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    try:
+        get_forward_context()
+    except AssertionError:
+        return _dynamic_quant_matmul(input_, weight, weight_scale)
+
+    if input_.dim() != 2:
+        return _all_gather_then_dynamic_quant_matmul(input_, weight, weight_scale)
+
+    tp_group = get_tp_group()
+    world_size = tp_group.world_size
+    if world_size == 1:
+        return _dynamic_quant_matmul(input_, weight, weight_scale)
+
+    hcom_name = tp_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(
+        tp_group.rank_in_group,
+    )
+    quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(input_, dst_type=torch.int8)
+    x1_scale = pertoken_scale.reshape(-1, 1).contiguous()
+    x2_scale = weight_scale.reshape(1, -1).to(torch.float32).contiguous()
+
+    output, _ = DeviceOperator.npu_all_gather_base_mm(
+        quantized_x,
+        weight,
+        hcom_name,
+        world_size,
+        bias=None,
+        x1_scale=x1_scale,
+        x2_scale=x2_scale,
+        gather_index=0,
+        gather_output=True,
+        comm_turn=0,
+        output_dtype=input_.dtype,
+        comm_mode="aiv",
+    )
+
+    pad_size = _EXTRA_CTX.pad_size
+    if pad_size > 0:
+        output = output[:-pad_size]
+    return output
+
+
+def _all_gather_dynamic_quant_matmul_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    try:
+        world_size = get_tensor_model_parallel_world_size()
+        pad_size = _EXTRA_CTX.pad_size
+    except Exception:
+        world_size = 1
+        pad_size = 0
+
+    output_tokens = input_.shape[0] * world_size
+    if pad_size > 0:
+        output_tokens -= pad_size
+    return torch.empty(
+        (*input_.shape[:-2], output_tokens, weight.shape[-1]),
+        device=input_.device,
+        dtype=input_.dtype,
+    )
 
 
 def _rope_forward_oot_impl_fake(
@@ -236,6 +346,14 @@ direct_register_custom_op(
     op_name="quantize",
     op_func=_quantize_impl,
     fake_impl=_quantize_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="all_gather_dynamic_quant_matmul",
+    op_func=_all_gather_dynamic_quant_matmul_impl,
+    fake_impl=_all_gather_dynamic_quant_matmul_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

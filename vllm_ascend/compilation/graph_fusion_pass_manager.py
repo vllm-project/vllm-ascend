@@ -66,6 +66,11 @@ class GraphFusionPassManager:
 
             self.passes.append(MulsAddFusionPass(config))
 
+        if self.ascend_compilation_config.get("fuse_all_gather_matmul", True) and not is_310p():
+            from .passes.all_gather_matmul_pass import AllGatherMatmulFusionPass
+
+            self.passes.append(AllGatherMatmulFusionPass(config))
+
         if config.compilation_config.pass_config.enable_sp:
             from .passes.sequence_parallelism import SequenceParallelismPass
             from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
