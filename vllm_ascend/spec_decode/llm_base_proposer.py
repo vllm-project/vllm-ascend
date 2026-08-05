@@ -65,6 +65,7 @@ from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shar
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
+_GRAPH_PADDING_REQUEST_KV_LEN = 1
 
 
 # split hidden states along dimension of sequence
@@ -737,6 +738,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def get_graph_num_input_tokens(self, batch_descriptor: BatchDescriptor) -> int:
+        """Return the token count used by the draft model graph.
+
+        Most speculative methods use the same padded token count as the
+        target model. Methods whose draft and verification geometries differ
+        can override this while retaining the target descriptor as the graph
+        dispatch key.
+        """
+        return batch_descriptor.num_tokens
+
     def _propose(
         self,
         # [num_tokens]
@@ -806,7 +817,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
-            num_input_tokens = batch_descriptor.num_tokens
+            num_input_tokens = self.get_graph_num_input_tokens(batch_descriptor)
         else:
             num_input_tokens = num_tokens
 
@@ -820,7 +831,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
-            num_input_tokens = batch_descriptor.num_tokens
+            num_input_tokens = self.get_graph_num_input_tokens(batch_descriptor)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
@@ -834,14 +845,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
-            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                self.query_start_loc,
-                num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
-                common_attn_metadata.num_reqs,
-                aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
-            )
+            if self.method == "dspark":
+                # The native DSpark graph uses N tokens per request. It cannot
+                # use _pad_query_start_loc_for_fia because that helper assumes
+                # the target model's 1+N uniform-decode width. Usually no tail
+                # remains; preserve a fallback virtual request for a larger
+                # non-uniform or DP-padded draft bucket.
+                num_reqs_padded = common_attn_metadata.num_reqs
+                if self.query_start_loc.np[num_reqs_padded] < num_input_tokens:
+                    self.query_start_loc.np[num_reqs_padded + 1] = num_input_tokens
+                    num_reqs_padded += 1
+                self.query_start_loc.copy_to_gpu()
+            else:
+                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    batch_descriptor.num_reqs
+                    if batch_descriptor.num_reqs is not None
+                    else common_attn_metadata.num_reqs,
+                    common_attn_metadata.num_reqs,
+                    aclgraph_runtime_mode,
+                    batch_descriptor.num_reqs,
+                )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
@@ -849,8 +874,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+            if self.method in ("dflash", "dspark"):
+                common_attn_metadata.seq_lens = self._adjust_parallel_draft_seq_lens_for_graph(
+                    common_attn_metadata.seq_lens, num_reqs_padded
+                )
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
@@ -2022,12 +2049,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_attn_metadatas=draft_attn_metadatas,
         )
 
+    def _adjust_parallel_draft_seq_lens_for_graph(self, seq_lens, desired_size):
+        # A padded DSpark request must have a positive KV length for FIA. DFlash
+        # keeps the existing zero-padding behavior. DSpark's native draft graph
+        # removes the per-request N versus N+1 token gap, but whole-request
+        # padding can still occur when dispatching to a larger batch bucket.
+        padding_value = _GRAPH_PADDING_REQUEST_KV_LEN if self.method == "dspark" else 0
+        return self._adjust_tensor(seq_lens, desired_size, padding_value=padding_value)
+
     # adjusting tensor into desired size
-    def _adjust_tensor(self, tensor, desired_size):
+    def _adjust_tensor(self, tensor, desired_size, padding_value=0):
         pad_size = desired_size - tensor.shape[0]
         if pad_size > 0:
             pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
-            tensor = F.pad(tensor, pad, mode="constant", value=0)
+            tensor = F.pad(tensor, pad, mode="constant", value=padding_value)
         else:
             tensor = tensor[:desired_size]
         return tensor
@@ -2147,6 +2182,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                # query_start_loc is already padded by _pad_query_start_loc_for_fia
+                # in the FULL graph path of _propose, so qsl[num_reqs] already
+                # equals num_input_tokens.  No tail-absorb or device-scalar
+                # check is needed here.
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )

@@ -4791,11 +4791,12 @@ class NPUModelRunner(GPUModelRunner):
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.use_dspark()
             )
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer | AscendDSparkProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
@@ -4811,7 +4812,21 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                draft_capture_sizes = capture_sizes
+                if self.drafter is not None:
+                    get_draft_graph_num_tokens = getattr(
+                        self.drafter,
+                        "get_graph_num_input_tokens",
+                        lambda desc: desc.num_tokens,
+                    )
+                    draft_capture_sizes = sorted(
+                        {
+                            get_draft_graph_num_tokens(desc)
+                            for _, descs in capture_descs
+                            for desc in descs
+                        }
+                    )
+                set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
