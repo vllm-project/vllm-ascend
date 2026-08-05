@@ -41,7 +41,6 @@ SCORE_BLOCK_STRIDE_ALIGNMENT = 16
 
 # Index-score kernel configuration.
 PREFILL_SCORE_QUERY_TILE_SIZE = 96
-PREFILL_SCALAR_SCORE_BLOCK_TILE_SIZE = 32
 
 # Decode score launch policy. The detected device AIC count is used whenever
 # available; 32 is only a fallback when device-property discovery is unavailable.
@@ -312,6 +311,7 @@ def _prefill_index_score_kernel(
             block_score,
             mask=query_mask,
         )
+
 
 # ---------------------------------------------------------------------------
 # Decode index-score kernel. Decode batches are flattened request-major, with a
@@ -973,7 +973,6 @@ def _gqa_sparse_decode_kernel(
     topk_valid_blk = (topk_idx >= 0) & (topk_idx < num_valid_blocks) & (topk_idx < max_blocks)
     valid_topk = (off_t < max_topk) & topk_valid_blk
     # Keep all positions up to the last valid selected block. This skips only
-    # a trailing invalid suffix; the hot loop still has PR33 per-block guards,
     # so interleaved invalid entries remain precision-safe.
     real_topk = tl.max(tl.where(valid_topk, off_t + 1, 0), axis=0)
     chunk_size_topk = tl.maximum(
