@@ -184,6 +184,7 @@ Parameter descriptions:
 |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node.|
 
 #### 3.2.2 Run the Prefill and Decode Nodes
+
 1. Prefill node
 
 ```shell
@@ -350,8 +351,6 @@ python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 16 --dp-rank
 4. Deploy the P-D disaggregation proxy.
 
 Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
-
-
 
 ### 3.3 Key Deployment Parameters
 
