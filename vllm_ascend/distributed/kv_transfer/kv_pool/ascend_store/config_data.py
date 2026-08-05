@@ -21,6 +21,42 @@ _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 GroupedBlockHashCache = dict[int, Sequence[BlockHash | str]]
 
 
+def extract_physical_layer_index(
+    layer_name: str, num_hidden_layers: int, fallback: int
+) -> int:
+    """Extract the physical layer index from a registered KV cache layer name.
+
+    MTP draft layers are mapped after the main model layers so they sort
+    behind the standard attention layers:
+
+    * DeepSeek-style MTP reuses the ``layers.{N}`` naming with
+      ``N >= num_hidden_layers`` (e.g. ``model.layers.61.self_attn.attn``).
+    * Other models use an ``mtp.{N}`` prefix (e.g. ``model.mtp.0.self_attn``)
+      which is mapped to ``num_hidden_layers + N``.
+
+    Shared by ``KVPoolWorker`` and ``KVPoolScheduler`` so both sides derive an
+    identical layer layout (including MTP) from the registered layer names.
+
+    Args:
+        layer_name: registered KV cache layer name.
+        num_hidden_layers: main model hidden layer count, used to offset MTP
+            layers that use the ``mtp.{N}`` prefix.
+        fallback: value used when an ``mtp.{N}`` prefix is matched but no main
+            layer count is available.
+    """
+    import re
+
+    m = re.search(r"layers\.(\d+)", layer_name)
+    if m:
+        return int(m.group(1))
+    if ".mtp." in f".{layer_name}.":
+        m = re.search(r"mtp\.(\d+)", layer_name)
+        if m:
+            return num_hidden_layers + int(m.group(1))
+    m = re.search(r"(\d+)", layer_name)
+    return int(m.group(1)) if m else 0
+
+
 # Parameters related to the key
 @dataclass
 class KeyMetadata:

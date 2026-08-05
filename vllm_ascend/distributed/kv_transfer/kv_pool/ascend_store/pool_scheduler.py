@@ -36,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     block_hash_to_str,
+    extract_physical_layer_index,
     get_block_hashes,
     get_cache_family_granularity,
     infer_cache_family_ratio,
@@ -173,7 +174,7 @@ class KVPoolScheduler:
             self.put_step = self.tp_size // self.num_kv_head
         else:
             self.put_step = 1
-        self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.num_layers = self._compute_registered_num_layers(vllm_config, kv_cache_config)
         self.model_name = model_config.model.split("/")[-1]
 
         # Keep this in sync with pool_worker.py because it affects GVA allocation size.
@@ -182,6 +183,45 @@ class KVPoolScheduler:
         self.keys_per_block_hash = keys_per_block_hash
 
         self.client: LookupKeyClient | None = None
+
+    def _compute_registered_num_layers(
+        self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig | None
+    ) -> int:
+        """Derive the layer count from the registered KV cache layer names.
+
+        ``model_config.get_num_layers()`` only reports the local PP target
+        layers and does not include registered MTP draft layers. Build the
+        count from ``kv_cache_config.kv_cache_groups[*].layer_names`` - the
+        same authoritative source used by ``KVPoolWorker`` - so MTP layers
+        are included and the scheduler's per-layer key generation and GVA
+        allocation sizing stay in sync with the worker.
+
+        For pipeline parallelism the scheduler receives ``kv_cache_configs[0]``
+        (PP rank 0), whose ``layer_names`` only cover PP rank 0. Since the
+        scheduler only emits per-layer keys for ``[self.pp_rank]`` this stays
+        consistent: PP rank 0 has no MTP layers (they live on the last rank),
+        so its count matches the main layers alone.
+        """
+        fallback = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        if kv_cache_config is None:
+            return fallback
+        num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", fallback)
+        physical_layers: set[int] = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                physical_layers.add(
+                    extract_physical_layer_index(layer_name, num_hidden_layers, fallback)
+                )
+        if not physical_layers:
+            return fallback
+        registered_num_layers = len(physical_layers)
+        if registered_num_layers != fallback:
+            logger.info(
+                "KVPoolScheduler: configured %d registered layers (was %d).",
+                registered_num_layers,
+                fallback,
+            )
+        return registered_num_layers
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
