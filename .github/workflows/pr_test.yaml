@@ -537,18 +537,32 @@ jobs:
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${TESTS_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
-              exit 1
+            if [ "${HAS_READY_LABEL}" = "true" ]; then
+              if [ "${TESTS_RESULT}" != "success" ]; then
+                echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+                exit 1
+              fi
+            else
+              if [ "${TESTS_RESULT}" != "success" ] && [ "${TESTS_RESULT}" != "skipped" ]; then
+                echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+                exit 1
+              fi
             fi
           fi
 
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
-              exit 1
+            if [ "${HAS_READY_A5_LABEL}" = "true" ]; then
+              if [ "${TESTS_A5_RESULT}" != "success" ]; then
+                echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
+                exit 1
+              fi
+            else
+              if [ "${TESTS_A5_RESULT}" != "success" ] && [ "${TESTS_A5_RESULT}" != "skipped" ]; then
+                echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
+                exit 1
+              fi
             fi
           fi
           echo "=== CI Gate: PASSED ==="
