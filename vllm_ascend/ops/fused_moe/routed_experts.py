@@ -392,8 +392,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         """Return an expert parameter from the refactored weight owner."""
         return getattr(self, name)
 
-    def update_expert_map(self, new_expert_map: torch.Tensor) -> None:
-        """Update both the runner and routed-expert map references."""
+    @property
+    def ascend_expert_map(self) -> torch.Tensor | None:
+        """Return the global-to-local map used by Ascend MoE execution."""
+        if getattr(self, "_use_v2_model_runner", False):
+            return self.expert_map
+        return getattr(self, "_ascend_expert_map", None)
+
+    @ascend_expert_map.setter
+    def ascend_expert_map(self, expert_map: torch.Tensor | None) -> None:
+        object.__setattr__(self, "_ascend_expert_map", expert_map)
+
+    def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
+        """Update the upstream map or preserve the legacy Ascend update API."""
+        if new_expert_map is None:
+            super().update_expert_map()
+            return
         self.ascend_expert_map = new_expert_map
         self.expert_map_manager._expert_map = new_expert_map
 
