@@ -137,7 +137,7 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
 ) -> None:
     class FakeBackend:
         def __init__(self) -> None:
-            self.init_args = None
+            self.init_args: tuple[object, ...] | None = None
 
         def init(self, *args) -> None:
             self.init_args = args

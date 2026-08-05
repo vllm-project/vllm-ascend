@@ -7,6 +7,7 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_offload.base import CanonicalKVCaches
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
@@ -209,7 +210,7 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors() -> None:
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
-    captured = []
+    captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
 
     worker.register_kv_caches(
@@ -249,7 +250,7 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states() -> None:
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
-    captured = []
+    captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
 
     raw = torch.empty(1 + 4 * 2 + 4 * 3, dtype=torch.int8)
