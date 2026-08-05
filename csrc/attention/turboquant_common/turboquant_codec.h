@@ -46,6 +46,15 @@
  *   - packed plane is stored in an fp16-typed FRACTAL_NZ cache (an int8-typed
  *     cache silently writes nothing on this SoC), so pack() emits bytes that the
  *     caller reinterprets as half.
+ *
+ * TESTING NOTE -- do not use structured signals as test input.
+ *   The codebook covers +-3.5 sigma of a Gaussian. TurboQuant's distortion
+ *   guarantee assumes the rotation makes coordinates near-Gaussian, which holds
+ *   for real activations but NOT for inputs the Hadamard transform happens to
+ *   sparsify. A pure sinusoid x[i] = sin(0.11*i) rotates to a 5.5-sigma peak
+ *   with 13/256 coords clipping, giving relL2 0.4665 instead of 0.1926 -- which
+ *   looks exactly like a broken quantizer. Random input reproduces the expected
+ *   0.197. Verified in CPU simulation on Ascend310P3.
  */
 #ifndef TURBOQUANT_CODEC_H
 #define TURBOQUANT_CODEC_H
