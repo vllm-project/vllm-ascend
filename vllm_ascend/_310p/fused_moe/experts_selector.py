@@ -17,9 +17,8 @@
 from collections.abc import Callable
 
 import torch
-import torch_npu
 
-from vllm_ascend.ops.fused_moe.experts_selector import _native_select_experts, _renormalize_topk_weights
+from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 
 
 def select_experts(
@@ -57,33 +56,23 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
-    if scoring_func == "softmax" and not use_grouped_topk and custom_routing_function is None:
-        # 310P returns invalid routing results when this op receives more than 1024 tokens.
-        if router_logits.shape[0] > 1024:
-            topk_results = [
-                torch_npu.npu_moe_gating_top_k_softmax(router_logits_chunk, k=top_k)
-                for router_logits_chunk in router_logits.split(1024, dim=0)
-            ]
-            topk_weights = torch.cat([result[0] for result in topk_results], dim=0)
-            topk_ids = torch.cat([result[1] for result in topk_results], dim=0)
-        else:
-            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(router_logits, k=top_k)
-        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
-    else:
-        topk_weights, topk_ids = _native_select_experts(
+    if custom_routing_function is not None:
+        return custom_routing_function(
             hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
+            gating_output=router_logits,
+            topk=top_k,
             renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
         )
-    # Apply routed scaling factor to weights
-    if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
 
-    return topk_weights, topk_ids
+    router = AscendGroupedTopKRouter310(
+        top_k=top_k,
+        global_num_experts=global_num_experts,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        use_grouped_topk=use_grouped_topk,
+        renormalize=renormalize,
+        scoring_func=scoring_func,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias,
+    )
+    return router._select_experts(hidden_states=hidden_states, router_logits=router_logits)
