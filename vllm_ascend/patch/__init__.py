@@ -1193,6 +1193,24 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
+#   2. `vllm.v1.worker.gpu.metrics.logits.libdevice`
+#    Why:
+#       The upstream `get_num_nans` Triton kernel imports its libdevice
+#       functions from the default CUDA-oriented module. On Ascend, this makes
+#       Triton resolve CUDA libdevice symbols instead of the CANN equivalents,
+#       causing the kernel compilation to fail.
+#    How:
+#       Rebind `metrics.logits.libdevice` to
+#       `triton.language.extra.cann.libdevice`. Existing references to
+#       `get_num_nans` in the sampler and rejection sampler then use the CANN
+#       libdevice when the kernel is compiled.
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend backend compatibility patch for the
+#       upstream module-level libdevice import.
+#    Future Plan:
+#       Remove this patch once vLLM selects the Triton libdevice through a
+#       backend-dispatch mechanism.
+#
 # ** 32. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
