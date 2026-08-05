@@ -39,18 +39,13 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
 
-        # we need to update full graph params in run_fullgraph,
-        # so create a stream to update full graph params.
-        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
+        self.query_cudagraph_manager.update_stream = self.update_stream
 
     def set_attn(
         self,
