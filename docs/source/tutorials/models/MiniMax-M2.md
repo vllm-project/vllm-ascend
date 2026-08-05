@@ -146,7 +146,7 @@ To verify the source installation:
 python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 !!! note
 

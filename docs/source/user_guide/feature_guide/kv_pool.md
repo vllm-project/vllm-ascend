@@ -61,7 +61,7 @@ export PYTHONHASHSEED=0
         cat /etc/hccn.conf
         ```
 
-        For A5 series, additionally mount:
+        For Ascend 950 Products, additionally mount:
         * devices: `/dev/ummu`, `/dev/uburma`
         * commands: `/usr/bin/urma_admin`
         * configurations: `/lib/route.conf`, `/etc/hccl_rootinfo.json`
@@ -85,7 +85,7 @@ export PYTHONHASHSEED=0
 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A5 series | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
+| Ascend 950 Products | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
 | 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
 | 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
@@ -157,9 +157,9 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-#A5 UBOE
+#Ascend 950 Products UBOE
 #export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-#A5 UB
+#Ascend 950 Products UB
 #export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
 #Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
@@ -240,9 +240,9 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-#A5 UBOE
+#Ascend 950 Products UBOE
 #export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-#A5 UB
+#Ascend 950 Products UB
 #export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
@@ -361,9 +361,9 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-#A5 UBOE
+#Ascend 950 Products UBOE
 #export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-#A5 UB
+#Ascend 950 Products UB
 #export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000

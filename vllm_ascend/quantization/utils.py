@@ -18,6 +18,7 @@
 import json
 from pathlib import Path
 
+import torch_npu  # noqa: F401
 from vllm import envs
 from vllm.logger import logger
 
@@ -28,6 +29,12 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
 )
+
+# TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
+# specified for some operators like GMM in Ascend950, while float8_e4m3fn does not. Remove these
+# filterations when operators allow to pass data with these three dtypes directly.
+QUANT_DTYPES = (torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8)
+SCALE_DTYPES = (torch_npu.float8_e8m0fnu,)
 
 
 def get_model_file(

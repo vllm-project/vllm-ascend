@@ -47,6 +47,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    prepare_sparse_kv_offload_mtp_dummy_metadata,
+)
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
@@ -583,6 +586,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
+                req_ids_tensor, token_to_req = prepare_sparse_kv_offload_mtp_dummy_metadata(
+                    num_tokens,
+                    num_reqs,
+                    self.query_start_loc.cpu,
+                    self.runner._offload_req_ids_tensor,
+                    self.runner._offload_token_to_req,
+                )
 
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -611,6 +621,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_len=self.runner.group_len.gpu[:num_reqs],
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                    req_ids_tensor=req_ids_tensor,
+                    token_to_req=token_to_req,
                 )
                 if dcp_manager is not None:
                     # update long_seq related params and flatten block_table
@@ -1542,6 +1554,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
+            if getattr(self.runner, "sparse_kv_offload_enabled", False):
+                # Draft steps run exactly one token per request, while the
+                # inherited token_to_req still describes the verify-step
+                # layout (num_spec + 1 tokens per request). Rebuild it to the
+                # one-token-per-request layout so the Sparse KV offload path
+                # routes every decode row to its own request's CPU-pool
+                # blocks/seq_len; otherwise rows of requests >= 1 are mapped
+                # onto request 0 and attend another request's KV.
+                num_draft_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+                common_attn_metadata.token_to_req = self.arange[:num_draft_reqs]
+
         # The loop part
         used_update_positions += 1
 
@@ -1845,6 +1868,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.slot_mapping[token_indices]
         )
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
+        token_to_req = (
+            common_attn_metadata.token_to_req[token_indices] if common_attn_metadata.token_to_req is not None else None
+        )
 
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
@@ -1879,6 +1905,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=token_to_req,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -1974,6 +2002,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=common_attn_metadata.token_to_req,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu

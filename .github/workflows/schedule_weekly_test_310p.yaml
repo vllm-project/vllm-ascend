@@ -58,6 +58,19 @@ on:
         required: false
         default: false
         type: boolean
+      build_type:
+        description: 'Build type: daily or release.'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      cann_version:
+        description: 'CANN version for base image tag'
+        required: false
+        default: '2026.08.03'
+        type: string
 
 permissions:
   contents: read
@@ -172,10 +185,16 @@ jobs:
     with:
       target: 310p
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
+      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      cann_version: ${{ inputs.cann_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
+      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   single-node-tests:
     name: single-node
