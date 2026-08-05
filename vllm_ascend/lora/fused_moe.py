@@ -335,6 +335,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.base_layer = base_layer
         _assert_ascend_moe_lora_supported(base_layer)
         self.moe_config = base_layer.moe_config
+        self._shared_experts = base_layer._shared_experts
         # Match upstream FusedMoEWithLoRA: EP collapses the MoE TP dimension
         # to one and shards experts across the original TP group.  Using the
         # global TP rank/size here would incorrectly TP-slice every local

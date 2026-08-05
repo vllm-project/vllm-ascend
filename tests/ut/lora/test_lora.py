@@ -19,7 +19,11 @@ def test_ascend_fused_moe_3d_initializes_upstream_weight_state() -> None:
         num_local_experts=10,
         moe_parallel_config=SimpleNamespace(tp_size=4, tp_rank=1),
     )
-    base_layer = SimpleNamespace(moe_config=moe_config)
+    shared_experts = object()
+    base_layer = SimpleNamespace(
+        moe_config=moe_config,
+        _shared_experts=shared_experts,
+    )
 
     with (
         patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
@@ -29,6 +33,7 @@ def test_ascend_fused_moe_3d_initializes_upstream_weight_state() -> None:
         wrapper = AscendFusedMoE3DWithLoRA(base_layer)
 
     assert wrapper.enable_moe_shared_loras is False
+    assert wrapper._shared_experts is shared_experts
     assert wrapper._w13_a_num_experts == moe_config.num_local_experts
     assert wrapper._lora_stream is None
     assert wrapper._events is None
