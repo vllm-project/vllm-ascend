@@ -47,9 +47,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: |
-            swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/test-buildkit:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
-            swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/buildkit-cache:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}
+          tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/test-buildkit:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
           build-args: |
             PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
             PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
