@@ -69,6 +69,11 @@ on:
         type: boolean
         default: false
         description: enable AOP hooks (capture / classify / skip-or-process)
+      filter_expr:
+        # required: true
+        type: string
+        default: "all"
+        description: test case filter string, "all" or comma-separated case names
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false
@@ -92,7 +97,12 @@ jobs:
   e2e-nightly:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
-    if: ${{ inputs.should_run }}
+    if: >-
+      always() &&
+      inputs.should_run == true && (
+        inputs.filter_expr == 'all' ||
+        contains(inputs.filter_expr, format(',{0},', inputs.name))
+      )
     timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}

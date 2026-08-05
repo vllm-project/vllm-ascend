@@ -43,8 +43,6 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
               - name: AOP_MULTI_ENABLED
                 value: "{{ aop_multi_enabled }}"
               - name: GOOD_TABLE
@@ -56,20 +54,23 @@ spec:
                 bash /root/.cache/tests/run.sh
             resources:
               limits:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 ephemeral-storage: 100Gi
                 cpu: 125
             ports:
               - containerPort: 8080
-            # readinessProbe:
-            #   tcpSocket:
-            #     port: 8080
-            #   initialDelaySeconds: 15
-            #   periodSeconds: 10
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
@@ -77,6 +78,10 @@ spec:
                 name: driver-tools
               - mountPath: /dev/shm
                 name: dshm
+              {{- if nfs_name }}
+              - mountPath: /mnt/share/modelscope
+                name: modelscope-nfs
+              {{- end }}
         volumes:
         - name: dshm
           emptyDir:
@@ -88,6 +93,11 @@ spec:
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
+        {{- if nfs_name }}
+        - name: modelscope-nfs
+          persistentVolumeClaim:
+            claimName: {{ nfs_name }}
+        {{- end }}
     workerTemplate:
       spec:
         tolerations:
@@ -131,11 +141,19 @@ spec:
                 bash /root/.cache/tests/run.sh
             resources:
               limits:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
+                {% if 'a5' in runner %}
+                huawei.com/ascend-93: {{ npu_per_node | default("8") }}
+                {% else %}
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
+                {% endif %}
                 ephemeral-storage: 100Gi
                 cpu: 125
             volumeMounts:
@@ -145,6 +163,10 @@ spec:
                 name: driver-tools
               - mountPath: /dev/shm
                 name: dshm
+              {{- if nfs_name }}
+              - mountPath: /mnt/share/modelscope
+                name: modelscope-nfs
+              {{- end }}
         volumes:
         - name: dshm
           emptyDir:
@@ -156,6 +178,11 @@ spec:
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
+        {{- if nfs_name }}
+        - name: modelscope-nfs
+          persistentVolumeClaim:
+            claimName: {{ nfs_name }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

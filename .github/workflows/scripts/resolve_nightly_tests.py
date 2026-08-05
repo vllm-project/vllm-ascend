@@ -123,7 +123,9 @@ def cmd_matrix(_args):
         for name, path in spec.items():
             node = _walk(matrix, path)
             cfg = node if isinstance(node, list) else []
-            f.write(f"{name}={json.dumps(cfg)}\n")
+            json_str = json.dumps(cfg, separators=(",", ":"))
+            # GitHub Actions official multiline syntax
+            f.write(f"{name}<<EOF\n{json_str}\nEOF\n")
 
 
 _MODES = {

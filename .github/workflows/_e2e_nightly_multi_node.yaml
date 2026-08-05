@@ -6,7 +6,7 @@ on:
       soc_version:
         required: true
         type: string
-        description: use a2 or a3
+        description: use a2 or a3 or a5
       runner:
         required: false
         type: string
@@ -78,6 +78,11 @@ on:
         type: boolean
         default: false
         description: enable Pod AOP pipeline on failure
+      filter_expr:
+        # required: true
+        type: string
+        default: "all"
+        description: test case filter string, "all" or comma-separated case names
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -105,7 +110,12 @@ jobs:
     timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
-    if: ${{ inputs.should_run }}
+    if: >-
+      always() &&
+      inputs.should_run == true && (
+        inputs.filter_expr == 'all' ||
+        contains(inputs.filter_expr, format(',{0},', inputs.name))
+      )
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:
