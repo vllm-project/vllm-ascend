@@ -17,15 +17,17 @@
 
 # Patch vllm's FusedMoE factory to use AscendMoERunner by default.
 #
-# vllm's FusedMoE is a factory function (not a class). deepseek_v2 and other
-# models do `from vllm.model_executor.layers.fused_moe import FusedMoE` and
-# call it directly, so we must patch the binding in the package __init__ as
-# well as the layer module before any model is imported.
+# vllm's FusedMoE is a factory function (not a class), renamed to
+# FusedMoEFactory in vllm main after 0.26.0. deepseek_v2 and other models do
+# `from vllm.model_executor.layers.fused_moe import FusedMoE` (0.26.0) or
+# `... import FusedMoEFactory` (main) and call it directly, so we must patch
+# the binding in the package __init__ as well as the layer module before any
+# model is imported.
 #
 # Import order in worker.__init__:
-#   1. adapt_patch()  ->  this file runs  ->  FusedMoE patched
+#   1. adapt_patch()  ->  this file runs  ->  FusedMoE/FusedMoEFactory patched
 #   2. from vllm_ascend import ops
-#   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
+#   3. model loading  ->  deepseek_v2 imported  ->  gets patched factory  ✓
 
 from collections.abc import Callable
 from typing import Any
@@ -37,10 +39,13 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMo
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 # Capture the real original before fused_moe.py's module-level code runs.
-_original_FusedMoE = _fused_moe_layer.FusedMoE
+if vllm_version_is("0.26.0"):
+    _original_FusedMoE = _fused_moe_layer.FusedMoE  # type: ignore[attr-defined]
+else:
+    _original_FusedMoE = _fused_moe_layer.FusedMoEFactory
 _DefaultAscendMoERunner: Any
 _DefaultAscendRoutedExperts: Any
 _IS_310P = is_310p()
@@ -151,5 +156,9 @@ def _ascend_FusedMoE(
     )
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+if vllm_version_is("0.26.0"):
+    _fused_moe_layer.FusedMoE = _ascend_FusedMoE  # type: ignore[attr-defined]
+    _fused_moe_pkg.FusedMoE = _ascend_FusedMoE  # type: ignore[attr-defined]
+else:
+    _fused_moe_layer.FusedMoEFactory = _ascend_FusedMoE
+    _fused_moe_pkg.FusedMoEFactory = _ascend_FusedMoE

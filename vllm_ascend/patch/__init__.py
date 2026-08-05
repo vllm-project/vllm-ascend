@@ -86,17 +86,19 @@
 #
 # ** 5. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoE` / `...FusedMoEFactory`
 #    Why:
-#       vllm's FusedMoE is a factory function (not a class). deepseek_v2 and
-#       other models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
-#       and call it directly, so on Ascend we must redirect it to AscendMoERunner
-#       before any model is imported.
+#       vllm's FusedMoE is a factory function (not a class), renamed to
+#       FusedMoEFactory in vllm main after 0.26.0. deepseek_v2 and other
+#       models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
+#       (0.26.0) / `... import FusedMoEFactory` (main) and call it directly, so
+#       on Ascend we must redirect it to AscendMoERunner before any model is
+#       imported.
 #    How：
-#       Patch the FusedMoE binding in both the package `__init__` and the layer
-#       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
-#       reuses this platform patch to avoid double-wrapping the factory during
-#       worker initialization.
+#       Patch the FusedMoE/FusedMoEFactory binding (per version) in both the
+#       package `__init__` and the layer module so model imports pick up the
+#       Ascend runner. `worker/patch_fused_moe.py` reuses this platform patch
+#       to avoid double-wrapping the factory during worker initialization.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
@@ -709,11 +711,12 @@
 #
 # ** 8. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoE` / `...FusedMoEFactory`
 #    Why:
-#       The worker process re-imports the FusedMoE factory after the platform
-#       patch has already redirected it to AscendMoERunner. Re-applying the
-#       monkey-patch directly would wrap an already-patched factory.
+#       The worker process re-imports the FusedMoE/FusedMoEFactory factory after
+#       the platform patch has already redirected it to AscendMoERunner.
+#       Re-applying the monkey-patch directly would wrap an already-patched
+#       factory.
 #    How：
 #       Reuse the platform patch (`platform/patch_fused_moe.py`) so the monkey
 #       patch lives in a single module and is applied idempotently during worker
