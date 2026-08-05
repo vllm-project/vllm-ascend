@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HIXLConnector: direct HIXL LLM-DataDist P2P KV connector (no Mooncake).
+"""HIXLConnector: direct HIXL LLM-DataDist P2P KV connector.
 
-Forked from MooncakeConnectorV1 with the byte-addressed Mooncake transfer
-(repeated register_memory + batch_transfer_sync_read) replaced by block-indexed
-HIXL transfer (register_blocks_cache + pull_blocks). Control plane (handshake
-/ metadata / done-notify) still uses ZMQ, identical to Mooncake.
+Block-indexed HIXL transfer (register_blocks_cache + pull_blocks). Control
+plane (handshake / metadata / done-notify) uses ZMQ.
 """
 import contextlib
 import copy
@@ -98,7 +96,7 @@ def _torch_dtype_to_llm_dtype(dtype: torch.dtype):
 
 
 # ---------------------------------------------------------------------------
-# Prefill-PP layer segment helper (forked from Mooncake :3752).
+# Prefill-PP layer segment helper.
 # ---------------------------------------------------------------------------
 def get_prefill_pp_indices(
     num_hidden_layers: int, pp_rank: int, pp_size: int, partition_list_str: str | None = None
@@ -119,7 +117,7 @@ def get_prefill_pp_indices(
 
 
 # ---------------------------------------------------------------------------
-# Metadata & dataclasses (engine-agnostic, forked from Mooncake)
+# Metadata & dataclasses (engine-agnostic)
 # ---------------------------------------------------------------------------
 class RemotePortInfo(TypedDict):
     num: int
@@ -127,11 +125,10 @@ class RemotePortInfo(TypedDict):
 
 
 class HixlAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
-    """Replaces MooncakeAgentMetadata.
+    """HIXL agent metadata.
 
-    Drops byte-addressed fields (te_rpc_port / kv_caches_base_addr /
-    block_lens / block_strides); HIXL routes by cluster_id and addresses by
-    block index, so no raw byte arithmetic is carried.
+    No byte-address fields (te_rpc_port / kv_caches_base_addr / block_lens /
+    block_strides); HIXL routes by cluster_id and addresses by block index.
     """
 
     engine_id: str
@@ -157,8 +154,7 @@ class MambaCacheBundle:
     conv+ssm are as_strided views of the same raw_tensor (model_runner_v1.py),
     so they share one block table -> one block id. Pull reuses the same
     src/dst block ids for both sub-caches with tensor_num_per_layer=1 (each
-    layer contributes exactly 1 conv / 1 ssm tensor). Forks Mooncake's per-
-    layer (conv_addr, ssm_addr) byte geometry under block addressing.
+    layer contributes exactly 1 conv / 1 ssm tensor).
     """
     conv: Any
     ssm: Any
@@ -206,9 +202,9 @@ class GroupPull:
 
 @dataclass
 class GroupTransferInfo:
-    """Per-group transfer metadata (forked from Mooncake, byte-address fields
-    dropped). State groups (Mamba) are not context-block aligned with attention
-    KV, so they are kept intact during MTP extra-block clipping."""
+    """Per-group transfer metadata. State groups (Mamba) are not context-block
+    aligned with attention KV, so they are kept intact during MTP extra-block
+    clipping."""
 
     tokens_per_block: int = 0
     is_state_group: bool = False
@@ -235,7 +231,7 @@ class SizedDict(OrderedDict):
 
 
 class KVCacheTaskTracker:
-    """Tracks finished / delayed-free requests. Forked unchanged from Mooncake."""
+    """Tracks finished / delayed-free requests."""
 
     def __init__(self):
         super().__init__()
@@ -300,8 +296,7 @@ class KVCacheTaskTracker:
 
 
 # ---------------------------------------------------------------------------
-# KVCacheSendingThread (P side, only answers ZMQ handshake). Forked; only the
-# metadata type changes (MooncakeAgentMetadata -> HixlAgentMetadata).
+# KVCacheSendingThread (P side, only answers ZMQ handshake).
 # ---------------------------------------------------------------------------
 class KVCacheSendingThread(threading.Thread):
     def __init__(
@@ -411,9 +406,9 @@ class KVCacheSendingThread(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
-# KVCacheRecvingThread (D side). _get_remote_metadata and
-# _transfer_kv_cache_all_groups are rewritten for HIXL; the request-queue /
-# peer-fairness / done-signal / socket-pool skeleton is forked from Mooncake.
+# KVCacheRecvingThread (D side): _get_remote_metadata and
+# _transfer_kv_cache_all_groups over HIXL; request-queue / peer-fairness /
+# done-signal / socket-pool skeleton.
 # ---------------------------------------------------------------------------
 class KVCacheRecvingThread(threading.Thread):
     def __init__(
@@ -512,9 +507,9 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.block_size = self.vllm_config.cache_config.block_size
-        # G3: NZ layout (MLA D-node only, AscendConfig.enable_kv_nz). D cache is
+        # NZ layout (MLA D-node only, AscendConfig.enable_kv_nz). D cache is
         # physically NZ-ordered; pull_blocks writes ND into it, so a ND->NZ
-        # reformat is needed after pull (fork Mooncake reformat_kv_cache:1244-1317).
+        # reformat is needed after pull.
         self.enable_kv_nz = bool(getattr(get_ascend_config(), "enable_kv_nz", False))
 
         self.proc_not_transfer_request: dict[str, bool] = {}
@@ -694,9 +689,6 @@ class KVCacheRecvingThread(threading.Thread):
                     self.proc_not_transfer_request.pop(remote_request_id, None)
                 self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
-            # Bug 4 fix: free P ports with num==0 (mapped but not pulled by
-            # this D rank) so P-side delayed_free doesn't wait for timeout
-            # (fork Mooncake :751).
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_port_send_num)
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak.
@@ -705,9 +697,8 @@ class KVCacheRecvingThread(threading.Thread):
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Fetch HixlAgentMetadata over ZMQ and link the remote P cluster.
 
-        Replaces Mooncake's byte-address bookkeeping: instead of caching
-        kv_caches_base_addr / te_rpc_port, we cache the remote cluster_id and
-        immediately ensure_linked to it (D3)."""
+        Caches the remote cluster_id and immediately ensures_linked to it
+        before any pull_blocks."""
         sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
@@ -723,7 +714,7 @@ class KVCacheRecvingThread(threading.Thread):
                     "Remote kv_group2layeridx inconsistent. remote=%s local=%s",
                     agent_meta.kv_group2layeridx, self.kv_group2layeridx,
                 )
-            # D3: link the remote P cluster before any pull_blocks to it.
+            # Link the remote P cluster before any pull_blocks to it.
             self.hixl.ensure_linked(
                 remote_cluster_id=agent_meta.cluster_id,
                 remote_ip=agent_meta.listen_ip,
@@ -784,11 +775,9 @@ class KVCacheRecvingThread(threading.Thread):
             is_state_group = group_spec.get("kv_cache_spec_type") == "MambaSpec"
 
             if is_state_group:
-                # G2: mamba conv/ssm registered as two sub-caches (MambaCacheBundle).
+                # Mamba conv/ssm registered as two sub-caches (MambaCacheBundle).
                 # conv+ssm share one block table -> reuse one src/dst block id for
                 # both, with tensor_num_per_layer=1 (1 conv / 1 ssm per layer).
-                # Forks Mooncake per-layer (conv_addr, ssm_addr) byte geometry
-                # (MC:1142-1154) under block addressing.
                 bundle = self.group_caches.get(kv_cache_group_id)
                 if not isinstance(bundle, MambaCacheBundle):
                     logger.error(
@@ -834,7 +823,7 @@ class KVCacheRecvingThread(threading.Thread):
                 # Each P-rank shard lands in staging block b*tp_n + tp_offset.
                 dst_blocks = [b * tp_n + tp_offset for b in dst_logical]
                 # staging blocks are non-contiguous across the shard set, so
-                # pull one block at a time (mirrors Mooncake tp>1 path).
+                # pull one block at a time.
                 grouped_remote = [[b] for b in src_blocks]
                 grouped_local = [[b] for b in dst_blocks]
                 reformat_local = [[b] for b in dst_logical]  # D real block ids
@@ -869,13 +858,12 @@ class KVCacheRecvingThread(threading.Thread):
                         remote_request_id, group_idx, e,
                     )
                     raise
-            # G3: NZ reformat. enable_kv_nz (MLA D-node only) stores D cache in
+            # NZ reformat. enable_kv_nz (MLA D-node only) stores D cache in
             # NZ physical layout; pull_blocks just wrote ND into it, so reformat
-            # ND -> NZ via npu_paged_cache_load + npu_scatter_pa_kv_cache (fork
-            # Mooncake reformat_kv_cache:1244-1317). TP=1 only: MLA NZ has
-            # num_kv_heads==1 -> tp_n==1; TP>1+NZ needs a staging NZ scatter
-            # branch (unsupported). Mamba groups (is_state_group) already
-            # `continue`d above and are not NZ-ordered.
+            # ND -> NZ via npu_paged_cache_load + npu_scatter_pa_kv_cache.
+            # TP=1 only: MLA NZ has num_kv_heads==1 -> tp_n==1; TP>1+NZ needs a
+            # staging NZ scatter branch (unsupported). Mamba groups
+            # (is_state_group) already `continue`d above and are not NZ-ordered.
             if self.enable_kv_nz and tp_n == 1 and not is_state_group:
                 group_kv = self._get_group_kv_caches(group_idx, layer_indices)
                 self._reformat_kv_cache_nz(group_kv, dst_logical)
@@ -895,8 +883,6 @@ class KVCacheRecvingThread(threading.Thread):
             if is_end
         ]
         if ready:
-            # Bug 3 fix: stash per shard_idx (CP shards reformat independently),
-            # not hardcoded 0 (which overwrote earlier shards' reformat meta).
             self._stash_pending_reformat(request_id, req_meta["shard_idx"], ready)
 
     def _get_group_kv_caches(self, group_idx: int, layer_indices: list[int] | None = None) -> dict[str, Any]:
@@ -942,8 +928,7 @@ class KVCacheRecvingThread(threading.Thread):
     ) -> None:
         """Transpose staging -> D real cache for groups with num_group_pulls>1.
 
-        HIXL adaptation of Mooncake's in-place reformat_kv_cache_hybrid_linear_torch:
-        the source is the staging Cache backing tensor (not the D cache itself,
+        Source is the staging Cache backing tensor (not the D cache itself,
         since pull_blocks writes whole staging blocks, not split sub-ranges).
         """
         if not ready_attention_group_reformat_block_ids:
@@ -1017,13 +1002,12 @@ class KVCacheRecvingThread(threading.Thread):
         group_kv: dict[str, Any],
         block_ids: list[int],
     ) -> None:
-        """G3: ND -> NZ reformat of D real cache after pull (fork Mooncake
-        reformat_kv_cache:1244-1317, NZ branch only).
+        """ND -> NZ reformat of D real cache after pull (NZ branch only).
 
         pull_blocks writes ND into the D cache; under enable_kv_nz the D cache
-        is physically NZ-ordered (attention writes via npu_scatter_pa_kv_cache,
-        mla_v1.py:1413). Load each layer's ND block range out of the D cache,
-        then scatter it back into the D cache's NZ view. TP=1 only: MLA NZ has
+        is physically NZ-ordered (attention writes via npu_scatter_pa_kv_cache).
+        Load each layer's ND block range out of the D cache, then scatter it
+        back into the D cache's NZ view. TP=1 only: MLA NZ has
         num_kv_heads==1 -> tp_n==1; TP>1+NZ needs a staging NZ scatter branch
         (left unsupported).
         """
@@ -1046,7 +1030,7 @@ class KVCacheRecvingThread(threading.Thread):
         block_table = block_ids_tensor.view(1, -1)
         block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
         seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
-        # slot_mapping = intra-block offset + block_id * block_size (MC:1273-1276).
+        # slot_mapping = intra-block offset + block_id * block_size.
         block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
         slot_mapping = (
             block_offsets.reshape((1, self.block_size))
@@ -1054,7 +1038,6 @@ class KVCacheRecvingThread(threading.Thread):
         ).flatten()
         k_buffer = torch.empty((num_tokens, num_kv_heads, k_head_dim), dtype=dtype, device=device)
         v_buffer = torch.empty((num_tokens, num_kv_heads, v_head_dim), dtype=dtype, device=device)
-        # FIXME: skipping sync crashes in GQA (MC:1278-1281); root cause unknown.
         torch.npu.synchronize()
         for d_cache in group_kv.values():
             if isinstance(d_cache, (list, tuple)):
@@ -1092,8 +1075,7 @@ class KVCacheRecvingThread(threading.Thread):
         k_head_dim: int,
         v_head_dim: int,
     ):
-        # fork Mooncake :1347-1365. nz_fmt_last_dim=16 (MLA NZ, aligns
-        # attention/mla_v1.py:1413; Mooncake uses 16 too).
+        # nz_fmt_last_dim=16 (MLA NZ layout).
         nz_fmt_last_dim = 16
         k_cache_layer = k_cache_layer.view(
             -1, k_head_dim * num_kv_heads // nz_fmt_last_dim,
@@ -1110,11 +1092,11 @@ class KVCacheRecvingThread(threading.Thread):
     def _send_done_signal_to_free_remote_port(
         self, request_id: str, remote_port_send_num: dict[int, RemotePortInfo]
     ):
-        """Bug 4 fix (fork Mooncake :757-772): free P ports with num==0
-        (mapped into remote_port_send_num but not pulled by this D rank) so
-        P-side delayed_free does not wait for timeout. Only device_index==0
-        (side_channel_port == local_handshake_port) sends to dedup across
-        D ranks that share the same P port set."""
+        """Free P ports with num==0 (mapped into remote_port_send_num but not
+        pulled by this D rank) so P-side delayed_free does not wait for
+        timeout. Only device_index==0 (side_channel_port ==
+        local_handshake_port) sends to dedup across D ranks that share the
+        same P port set."""
         if self.side_channel_port != self.local_handshake_port or not remote_port_send_num:
             return
         with self.proc_not_transfer_request_lock:
@@ -1181,7 +1163,7 @@ class KVCacheRecvingThread(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
-# ConnectorMetadata + dispatcher (forked; class rename only)
+# ConnectorMetadata + dispatcher
 # ---------------------------------------------------------------------------
 class HIXLConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
@@ -1491,7 +1473,7 @@ class HIXLConnectorScheduler:
         State groups (Mamba) are not context-block aligned with attention KV,
         so keep them unchanged; only clip attention-like groups. Block-level
         clipping is native to HIXL's block addressing (no byte sub-range
-        needed), so this forks Mooncake's _get_transfer_block_ids verbatim.
+        needed).
         """
         if len(block_ids) == 0:
             return block_ids
@@ -1619,7 +1601,7 @@ class HIXLConnectorWorker:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.block_size = vllm_config.cache_config.block_size
 
-        # HIXL engine handle (replaces Mooncake global_te).
+        # HIXL engine handle.
         cluster_id, listen_ip, listen_port = self._compute_identity()
         extra = self._extra_options()
         self.hixl = get_datadist(
@@ -1981,7 +1963,7 @@ class HIXLConnectorWorker:
         return list(rank_group_pulls), dict(rank_group_pulls)
 
     def _get_local_remote_cp_params(self, meta: ReqMeta):
-        """Resolve CP geometry (fork Mooncake :2635-2660, address-agnostic).
+        """Resolve CP geometry (address-agnostic).
 
         Returns (remote_block_size, local_cp_rank, local_cp_size,
         remote_cp_size, r_blk) where r_blk = Bd/Bp (>=1) is the D/P
@@ -2007,9 +1989,9 @@ class HIXLConnectorWorker:
         return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
 
     def _get_cp_shard_pulls(self, remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size):
-        """CP case: group_pulls derived from port (fork Mooncake :3060-3109,
-        address-agnostic). The port already encodes the random TP choice, so
-        no table lookup is needed."""
+        """CP case: group_pulls derived from port (address-agnostic). The
+        port already encodes the random TP choice, so no table lookup is
+        needed."""
         mamba_num = prefill_tp_size // self.tp_size
         attn_num = self._get_tp_num_need_pulls(prefill_tp_size)
         attn_gids = [
@@ -2290,9 +2272,9 @@ class HIXLConnectorWorker:
         # under scale==1 this degenerates to the original logical-slice geometry.
         group_kernel_params = self._get_group_kernel_params(remote_block_size)
         # r_blk>1 (Bd>Bp) requires MLA/compress (block_size_scale>1) so that
-        # kernel_size = Bd/scale divides Bp; under scale==1 (no MLA) Mooncake's
-        # _local_kernel_ids_for_shard yields kernels_per_p_block = Bp//Bd == 0
-        # (no transfer). r_blk>1 is unsupported without MLA. scale>1 (use_mla)
+        # kernel_size = Bd/scale divides Bp; under scale==1 (no MLA)
+        # kernels_per_p_block = Bp//Bd == 0 (no transfer). r_blk>1 is
+        # unsupported without MLA. scale>1 (use_mla)
         # now flows through kernel expansion; fail fast otherwise rather than
         # emit a wrong/empty shard.
         assert r_blk == 1 or self.use_mla, (
@@ -2395,11 +2377,11 @@ class HIXLConnectorWorker:
             for group_idx, (group_spec, _) in kv_group_items:
                 if group_spec["kv_cache_spec_type"] == "MambaSpec":
                     # Mamba state is not context-block sharded; transfer from
-                    # the final PCP/DCP shard only (fork Mooncake :3010-3015).
+                    # the final PCP/DCP shard only.
                     group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
                     group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
                     continue
-                # Attention: expand to kernel blocks (fork Mooncake :3016-3042).
+                # Attention: expand to kernel blocks.
                 # Remote is sliced from remote_first (skips this rank's
                 # prefix-cached blocks) then expanded; local kernels are located
                 # directly from CP rank + block index via _local_kernel_ids_for_shard.
@@ -2487,7 +2469,7 @@ class HIXLConnectorWorker:
         """No-CP per-group block ids at kernel granularity: (local, remote).
 
         HIXL adaptation: block_size_scale is indexed [group_idx][0] (one
-        transfer group shares one shape, hixl:2546-2550, so group-internal
+        transfer group shares one shape, so group-internal
         scale is uniform). scale>1 (MLA/compress) expands each logical block
         into `scale` kernel blocks via _expand_block_ids. Mamba logical ids
         pass through unchanged.
@@ -2496,10 +2478,10 @@ class HIXLConnectorWorker:
         if group_spec["kv_cache_spec_type"] == "MambaSpec":
             # align mode: the block table is position-indexed over max_len but
             # only 2+num_speculative_blocks state blocks are resident; earlier
-            # blocks are nulled (MambaSpec :731-737). Pull just the final
-            # resident state block — remote picks the live SSM block at
-            # len - num_speculative_tokens - 1, local picks the freshly
-            # allocated block 0 (fork Mooncake :867-869). all mode would pull
+            # blocks are nulled. Pull just the final resident state block —
+            # remote picks the live SSM block at len - num_speculative_tokens
+            # - 1, local picks the freshly allocated block 0. all mode would
+            # pull
             # every block, but align is the Qwen3.6 default.
             remote_blocks = list(meta.remote_block_ids[kv_cache_group_id])
             local_blocks = list(meta.local_block_ids[kv_cache_group_id])
@@ -2531,7 +2513,6 @@ class HIXLConnectorWorker:
         # Per attention group kernel-expansion params: (local_scale, remote_scale, kernel_size).
         # The kernel size is shared by both sides, so remote_scale is derived locally from it
         # (no remote handshake scale needed). Mamba groups are not block-sharded and skipped.
-        # fork Mooncake :2618-2633; block_size_scale indexed per-group (hixl) vs per-layer (MC).
         group_kernel_params: dict[int, tuple[int, int, int]] = {}
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
@@ -2561,12 +2542,12 @@ class HIXLConnectorWorker:
     ):
         """Map this shard's pulled P-blocks straight to D-side kernel block ids.
 
-        fork Mooncake :2505-2567 (block-level,寻址无关可直接 fork). The shard
-        (CP rank ``shard_cp_rank``) pulls ``num_blocks_to_pull`` P-blocks starting
-        at this rank's local index ``shard_first_p_block``. The destination
-        kernel position is derived directly from the CP rank and the block
-        index. Under r_blk==1 + scale==1 this degenerates to the original
-        logical-slice behavior (kernels_per_d_block==1 -> kernel id == d_block).
+        The shard (CP rank ``shard_cp_rank``) pulls ``num_blocks_to_pull``
+        P-blocks starting at this rank's local index ``shard_first_p_block``.
+        The destination kernel position is derived directly from the CP rank
+        and the block index. Under r_blk==1 + scale==1 this degenerates to the
+        original logical-slice behavior (kernels_per_d_block==1 -> kernel id
+        == d_block).
         """
         # Number of kernel blocks contained in one D-block (Bd/kernel) and one P-block (Bp/kernel).
         kernels_per_d_block = self.block_size // kernel_size
@@ -2672,12 +2653,11 @@ class HIXLConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV via HIXL register_blocks_cache (one Cache per group).
 
-        Replaces Mooncake's collect_storage_merged_register_regions +
-        global_te.register_buffer. Both P and D register with
-        remote_accessible=True: P so the decoder can find/resolve the src
-        cache, D because llm_datadist's PullCacheByGet path (force-enabled by
-        EnableRemoteCacheAccessible=1) requires the local dst cache to be
-        remote_accessible too, else pull_blocks returns LLM_PARAM_INVALID."""
+        Both P and D register with remote_accessible=True: P so the decoder
+        can find/resolve the src cache, D because llm_datadist's
+        PullCacheByGet path (force-enabled by EnableRemoteCacheAccessible=1)
+        requires the local dst cache to be remote_accessible too, else
+        pull_blocks returns LLM_PARAM_INVALID."""
         from llm_datadist import CacheDesc, BlocksCacheKey, Placement
 
         self.kv_caches = kv_caches
@@ -2708,13 +2688,11 @@ class HIXLConnectorWorker:
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_id)
             layer_names = group_spec["layer_names"]
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                # G2: conv/ssm registered as two independent Caches. CacheDesc's
+                # conv/ssm registered as two independent Caches. CacheDesc's
                 # single-shape constraint cannot hold heterogeneous state tensors
-                # (conv 2D vs ssm 3D), and the old uniform-shape / *2 asserts
-                # (:2648/:2655 below) only hold for attention K+V. conv+ssm share
-                # one block table (same raw_tensor), so pull reuses one block id
-                # for both sub-caches with tensor_num_per_layer=1. Forks Mooncake
-                # per-layer (conv_addr, ssm_addr) byte geometry (MC:1131-1154).
+                # (conv 2D vs ssm 3D). conv+ssm share one block table (same
+                # raw_tensor), so pull reuses one block id for both sub-caches
+                # with tensor_num_per_layer=1.
                 conv_addrs: list[int] = []
                 ssm_addrs: list[int] = []
                 conv_shape = ssm_shape = None
@@ -2806,7 +2784,7 @@ class HIXLConnectorWorker:
             # scale>=1: scale==1 is standard FullAttention; scale>1 is MLA/compress
             # (DeepseekV4), where one logical block spans `scale` kernel (tensor)
             # blocks. Kernel-block expansion (_get_kernel_block_ids /
-            # _local_kernel_ids_for_shard) handles scale>1 (fork Mooncake).
+            # _local_kernel_ids_for_shard) handles scale>1.
             scale = ref_shape[0] // self.num_blocks
             assert scale >= 1, (
                 f"block_size_scale must be >= 1 (MLA/compress scale); got {scale}."
@@ -2949,8 +2927,6 @@ class HIXLConnectorWorker:
                 remote_dcp_size=meta.remote_dcp_size,
             )
             assert self.kv_recv_thread is not None
-            # Bug 1 fix: forward remote_port_send_num for CP multi-port so P-side
-            # done counting waits for all D ranks pulling the same P port.
             cp_active = meta.remote_pcp_size * meta.remote_dcp_size > 1
             remote_port_send_num = (
                 self.remote_port_send_num.get(meta.remote_engine_id)
@@ -2980,7 +2956,6 @@ class HIXLConnectorWorker:
                             pcp_dcp_rank == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1
                         ),
-                        # Bug 3 fix: per-shard reformat stash (CP shards).
                         shard_idx=pcp_dcp_rank,
                     )
 
@@ -2996,7 +2971,7 @@ class HIXLConnectorWorker:
 
 
 # ---------------------------------------------------------------------------
-# ZMQ helpers (forked from Mooncake, engine-agnostic)
+# ZMQ helpers (engine-agnostic)
 # ---------------------------------------------------------------------------
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
