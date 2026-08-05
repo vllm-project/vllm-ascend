@@ -938,7 +938,8 @@ class BaseDeviceAdaptor:
         indices: torch.Tensor,
         value: int,
     ) -> torch.Tensor:
-        tensor.index_fill_(dim, indices, value)
+        if indices.numel() > 0:
+            tensor.index_fill_(dim, indices, value)
         return tensor
 
 
