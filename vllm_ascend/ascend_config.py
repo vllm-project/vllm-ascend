@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 
 
 @config
-@dataclasses.dataclass
 class AscendCompilationConfig:
     """Configuration for controlling the behavior of Ascend graph optimization.
 
@@ -65,7 +64,6 @@ class AscendCompilationConfig:
 
 
 @config
-@dataclasses.dataclass
 class AscendFusionConfig:
     """Configuration for controlling whether to use a fused operator gmmswigluquant.
 
@@ -78,7 +76,6 @@ class AscendFusionConfig:
 
 
 @config
-@dataclasses.dataclass
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
 
@@ -134,7 +131,6 @@ class EplbConfig:
 
 
 @config
-@dataclasses.dataclass
 class RejectionSamplerConfig:
     """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
 
@@ -160,7 +156,6 @@ class RejectionSamplerConfig:
 
 
 @config
-@dataclasses.dataclass
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -651,7 +646,6 @@ class XliteGraphConfig:
 
 
 @config
-@dataclasses.dataclass
 class ProfilingChunkConfig:
     """Configuration for profiling-based dynamic chunk sizing.
 
@@ -682,7 +676,6 @@ class ProfilingChunkConfig:
 
 
 @config
-@dataclasses.dataclass
 class BatchJobSchedConfig:
     """Configuration for batch-job-aware scheduler.
 
@@ -723,7 +716,6 @@ class BatchJobSchedConfig:
 
 
 @config
-@dataclasses.dataclass
 class ShortRequestFirstConfig:
     """Configuration object for ``additional_config["scheduler_config"]["short_request_first_config"]``.
 
