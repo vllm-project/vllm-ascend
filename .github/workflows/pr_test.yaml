@@ -551,7 +551,6 @@ jobs:
               exit 1
             fi
           fi
-
           echo "=== CI Gate: PASSED ==="
 
   # this job collects failure from uploaded logs
