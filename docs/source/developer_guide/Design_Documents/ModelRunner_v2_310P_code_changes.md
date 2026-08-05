@@ -290,6 +290,23 @@
 
 ## 12. 公共 Model Runner V2 扩展点
 
+### `vllm_ascend/patch/platform/patch_use_v2_model_runner.py`
+
+改动内容：
+
+- 保留通过 `VLLM_USE_V2_MODEL_RUNNER` 显式选择 V2 runner 的属性补丁。
+- 新增 `_validate_v2_model_runner()` 平台补丁。
+- 310P 跳过上游全局 `HAS_TRITON` 硬门禁。
+- 310P 继续执行上游 `_get_v2_model_runner_unsupported_features()` 校验。
+- 非 310P 完整调用上游原始 `_validate_v2_model_runner()`。
+
+改动原因：
+
+- 上游 `VllmConfig` 在 Worker 创建前要求 `HAS_TRITON=True`，导致 310P 即使已经注册
+  非 Triton kernel 实现也无法完成配置创建。
+- dispatcher 不会自动移除该配置校验，因此必须由 Ascend 平台只针对 310P 接管。
+- 只跳过 Triton 条件而不跳过其他 feature gate，避免放开上游尚未支持的 V2 配置。
+
 ### `vllm_ascend/worker/v2/model_runner.py`
 
 改动内容：
@@ -308,4 +325,3 @@
   dispatcher 替换。
 - 310P 需要使用 scheduler CPU mirror 准备输入，不能从 device Tensor 反向 D2H。
 - 非 310P 默认实现仍调用原来的上游函数，保持原有调用语义。
-

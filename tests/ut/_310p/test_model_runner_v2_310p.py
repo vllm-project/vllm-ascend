@@ -13,12 +13,60 @@ from vllm.sampling_params import SamplingParams
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
+from vllm_ascend.patch.platform import patch_use_v2_model_runner
 
 
 def test_310p_slot_mapping_kernel_is_registered() -> None:
     kernel_name = "vllm_ascend.worker.v2.block_table._compute_slot_mappings_kernel"
 
     assert _get_kernel_impl(kernel_name) is not None
+
+
+def test_310p_v2_config_validation_skips_upstream_triton_gate() -> None:
+    config = SimpleNamespace(
+        _get_v2_model_runner_unsupported_features=lambda: [],
+        reasoning_config=None,
+    )
+
+    with (
+        patch.object(patch_use_v2_model_runner, "is_310p", return_value=True),
+        patch.object(
+            patch_use_v2_model_runner,
+            "_ORIGINAL_VALIDATE_V2_MODEL_RUNNER",
+            side_effect=AssertionError("upstream Triton validation must not run"),
+        ),
+    ):
+        patch_use_v2_model_runner._patched_validate_v2_model_runner(config)
+
+
+def test_310p_v2_config_validation_keeps_unsupported_feature_gate() -> None:
+    config = SimpleNamespace(
+        _get_v2_model_runner_unsupported_features=lambda: ["unsupported feature"],
+        reasoning_config=None,
+    )
+
+    with (
+        patch.object(patch_use_v2_model_runner, "is_310p", return_value=True),
+        pytest.raises(ValueError, match="unsupported feature"),
+    ):
+        patch_use_v2_model_runner._patched_validate_v2_model_runner(config)
+
+
+def test_non_310p_v2_config_validation_uses_upstream_gate() -> None:
+    config = MagicMock()
+    original_validate = MagicMock()
+
+    with (
+        patch.object(patch_use_v2_model_runner, "is_310p", return_value=False),
+        patch.object(
+            patch_use_v2_model_runner,
+            "_ORIGINAL_VALIDATE_V2_MODEL_RUNNER",
+            original_validate,
+        ),
+    ):
+        patch_use_v2_model_runner._patched_validate_v2_model_runner(config)
+
+    original_validate.assert_called_once_with(config)
 
 
 def _make_vllm_config(**parallel_overrides):
