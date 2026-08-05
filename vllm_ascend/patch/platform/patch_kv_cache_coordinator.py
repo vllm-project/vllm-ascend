@@ -31,7 +31,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.core.single_type_kv_cache_manager import (
+    CompressAttentionManager,
+    get_manager_for_kv_cache_spec,
+)
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -365,12 +368,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
                 if vllm_version_is("0.25.1"):
                     hit_blocks = hit_result
-                    # hit_blocks[0] holds physical blocks; effective_block_size
-                    # includes compress_ratio and over-counts for compressed specs.
+                    # Preserve the v0.25.1 DCP block span, then convert
+                    # compressed physical blocks to logical scheduler tokens.
                     block_size = spec.block_size
                     if self.dcp_world_size > 1:
                         block_size *= self.dcp_world_size
-                    _new_hit_length = len(hit_blocks[0]) * block_size
+                    compress_ratio = (
+                        max(getattr(spec, "compress_ratio", 1) or 1, 1)
+                        if issubclass(manager_cls, CompressAttentionManager)
+                        else 1
+                    )
+                    _new_hit_length = len(hit_blocks[0]) * block_size * compress_ratio
                 else:
                     hit_blocks, _new_hit_length = hit_result
                 if use_eagle:
@@ -449,12 +457,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             if vllm_version_is("0.25.1"):
                 hit_blocks = hit_result
-                # hit_blocks[0] holds physical blocks; _get_effective_block_size
-                # includes compress_ratio and over-counts for compressed specs.
                 block_size = spec.block_size
                 if self.dcp_world_size > 1:
                     block_size *= self.dcp_world_size
-                group_hit_length = len(hit_blocks[0]) * block_size
+                compress_ratio = (
+                    max(getattr(spec, "compress_ratio", 1) or 1, 1)
+                    if issubclass(manager_cls, CompressAttentionManager)
+                    else 1
+                )
+                group_hit_length = len(hit_blocks[0]) * block_size * compress_ratio
             else:
                 hit_blocks, group_hit_length = hit_result
             for group_id, blocks in zip(group_ids, hit_blocks, strict=True):
