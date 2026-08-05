@@ -10,7 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 
 
 def _is_device_sdma() -> bool:
