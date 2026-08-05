@@ -86,6 +86,33 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     return test_files_found
 
 
+def _has_csrc_changes(diff_file: str) -> bool:
+    """
+    Check if diff file contains changes to csrc directory.
+    If csrc changes detected, full test suite should be run.
+
+    Args:
+        diff_file: Path to the PR diff file
+
+    Returns:
+        True if csrc directory changes detected, False otherwise
+    """
+    try:
+        with open(diff_file, encoding="utf-8") as f:
+            diff_content = f.read()
+    except Exception as e:
+        print(f"  Warning: Failed to read diff file for csrc detection: {e}")
+        return False
+
+    # Pattern to match csrc directory in diff paths (csrc as root directory)
+    # Match lines like: +++ b/csrc/xxx.cpp or --- a/csrc/xxx.cpp
+    csrc_pattern = re.compile(r"^\+{3} [ab]/csrc/|^\-{3} a/csrc/", re.MULTILINE)
+    if csrc_pattern.search(diff_content):
+        print("  CSRC directory changes detected in PR diff")
+        return True
+    return False
+
+
 def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract deleted test files from PR diff.
@@ -1119,6 +1146,39 @@ def main():
         print(f"  PR diff saved to: {diff_file}")
         changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
         print(f"Parsed {len(changed_files_with_lines)} changed files")
+
+        # Check if csrc directory changes detected - if so, run full test suite
+        # NOTE: csrc files are not .py, so they don't appear in changed_files_with_lines
+        # We must check before the "if not changed_files_with_lines" return
+        if _has_csrc_changes(diff_file):
+            print("\n=== CSRC Directory Changes Detected - Running Full Test Suite ===")
+            # Use all tests from test_case_map (full coverage)
+            selected = [(test_name, {}, 0) for test_name in selector.test_case_map]
+
+            # Add new/modified test files from PR
+            test_file_tests = _get_test_files_from_pr_diff(diff_file)
+            existing_test_names = set(s[0] for s in selected)
+            for test_name in test_file_tests:
+                if test_name not in existing_test_names:
+                    selected.append((test_name, {}, 0))
+
+            # Remove deleted test files from PR
+            deleted_tests = _get_deleted_test_files_from_pr(diff_file, selector.test_case_map)
+            if deleted_tests:
+                print("\n=== Deleted Test Files in PR (Full Suite Mode) ===")
+                print(f"Removing {len(deleted_tests)} deleted test file(s): {deleted_tests}")
+                deleted_set = set(deleted_tests)
+                selected = [(name, detail, count) for name, detail, count in selected if name not in deleted_set]
+
+            # Skip select_tests, go directly to output
+            test_names = [s[0] for s in selected]
+            print(f"\n=== Recommended Test Cases ({len(test_names)} tests - Full Suite) ===")
+            print(test_names)
+            with open("recommended_pytest_paths.txt", "w", encoding="utf-8") as f:
+                for test_name in test_names:
+                    f.write(test_name + "\n")
+            print("\nResults saved to: recommended_pytest_paths.txt")
+            return
     else:
         # Get from file comparison (default)
         change_detector.scan_source_files()
