@@ -866,7 +866,7 @@ def main():
 
         _dedup_groups(all_groups)
 
-      if args.runner_override:
+    if args.runner_override:
         override_key = _parse_runner_key(args.runner_override)
         overridden: dict[RunnerKey, list[str]] = {}
         for (num_npus, npu_type), tests in all_groups.items():
