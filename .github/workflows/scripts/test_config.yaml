@@ -44,7 +44,6 @@
 - name: a5
   optional: true
   tests:
-    # - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
 
 # Default CPU UT module - always runs all CPU UTs in every PR
