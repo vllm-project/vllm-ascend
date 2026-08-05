@@ -476,14 +476,14 @@ def _decode_index_score_kernel(
 # Forced init/local blocks are already encoded in the scores.
 # ---------------------------------------------------------------------------
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
-@triton.jit(do_not_specialize=["decode_query_len", "block_offset", "topk"])
+@triton.jit(do_not_specialize=["decode_query_len", "block_offset"])
 def _mask_decode_topk_indices_kernel(
     ti_ptr,  # [num_idx_heads, total_q, topk] int32 in/out
     seq_lens,  # local sequence lengths inside this block shard, [num_reqs]
     global_seq_lens,  # full sequence lengths, [num_reqs]
     block_size: tl.constexpr,  # sparse block size (128)
     block_offset,
-    topk,
+    topk: tl.constexpr,
     decode_query_len,
     stride_ti_h,
     stride_ti_b,
@@ -646,7 +646,6 @@ def _prepare_prefill_topk_scores_kernel(
 
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
 @triton.jit(
-    do_not_specialize=["topk"],
     do_not_specialize_on_alignment=["prefix_lengths_ptr"],
 )
 def _mask_prefill_topk_indices_kernel(
@@ -655,7 +654,7 @@ def _mask_prefill_topk_indices_kernel(
     prefix_lengths_ptr,
     index_head_count: tl.constexpr,
     sparse_block_size: tl.constexpr,
-    topk,
+    topk: tl.constexpr,
     index_head_stride,
     index_token_stride,
     index_topk_stride,
