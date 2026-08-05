@@ -133,9 +133,6 @@ msgstr ""
 "要使用 tool_calls 功能，请确保您的 transformers 版本为 4.57.6 或更低。如果 vllm-ascend 已升级到 "
 "v0.21 或更高版本，则此要求不再适用。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -598,3 +595,6 @@ msgstr ""
 "|Long Context<br>(128k, with prefix cache)|Single-Node Mixed|16 "
 "(A3)|kimi-k2.6-w4a8|dp2 tp8 to optimize memory bandwidth and improve cache "
 "utilization|"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

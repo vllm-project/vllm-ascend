@@ -111,9 +111,6 @@ msgid ""
 "[installation](../../installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -429,3 +426,6 @@ msgid ""
 msgstr ""
 "答：您可能需要卸载`triton-ascend`和`triton`以避免依赖冲突。有关详细信息，请参阅[第4.2节](#42-source-code-"
 "installation)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

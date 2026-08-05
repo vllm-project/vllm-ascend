@@ -95,9 +95,6 @@ msgid ""
 "[installation](../../installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -209,3 +206,6 @@ msgid ""
 "- Common Issues Tip: If you encounter issues, refer to "
 "[FAQs](../../faqs.md)."
 msgstr "- 常见问题提示：如果遇到问题，请参考 [常见问题](../../faqs.md)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

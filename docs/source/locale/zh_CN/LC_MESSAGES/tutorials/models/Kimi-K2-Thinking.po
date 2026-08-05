@@ -269,9 +269,6 @@ msgstr ""
 "- 命令成功退出。\n"
 "- 打印 `vllm and vllm_ascend import ok`。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -617,3 +614,6 @@ msgstr ""
 "| 高吞吐量 | 单节点 | 16 (A3) | bfloat16 | 逐步增加 `--max-num-"
 "seqs`，并使用接近实际工作负载的请求速率进行基准测试。在第 8 章的 1K/1K 并发扫描中，并发 8 "
 "提供了最佳输出吞吐量；在生产环境中使用更高并发之前，请验证尾延迟。 |"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

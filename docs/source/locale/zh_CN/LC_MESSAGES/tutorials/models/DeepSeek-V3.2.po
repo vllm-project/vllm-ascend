@@ -256,9 +256,6 @@ msgstr "在每个节点上启动Docker镜像。"
 msgid "### 4.2 Source Code Installation"
 msgstr "### 4.2 源码安装"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-node Deployment"
 msgstr "### 5.1 单节点部署"
 
@@ -424,3 +421,6 @@ msgid ""
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
 msgstr ""
 "有关常见的环境、安装和一般参数问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
