@@ -218,6 +218,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        lora_context = getattr(layer, "_ascend_moe_lora_context", None)
         assert topk_ids is not None
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
@@ -277,6 +278,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
                 swiglu_alpha=layer.swiglu_alpha,
                 swiglu_beta=layer.swiglu_beta,
+                lora_context=lora_context,
             )
         )
         return final_hidden_states

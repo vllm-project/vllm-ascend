@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -198,6 +199,8 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
         layer.w2_weight_scale = torch.ones(self.num_experts, hidden_size, dtype=torch.float32)
         layer.swiglu_limit = 1000000
+        lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+        layer._ascend_moe_lora_context = lora_context
 
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
@@ -236,6 +239,25 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
+        self.assertIs(fused_experts_input.lora_context, lora_context)
+
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    def test_apply_rejects_unsupported_lora_communication(self, mock_extra_ctx):
+        layer = torch.nn.Module()
+        layer._ascend_moe_lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+
+        for comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2):
+            with self.subTest(comm_type=comm_type):
+                mock_extra_ctx.moe_comm_type = comm_type
+                with self.assertRaisesRegex(NotImplementedError, "AllGather TP"):
+                    self.quant_method.apply(
+                        layer=layer,
+                        x=torch.randn(2, self.hidden_size),
+                        topk_weights=torch.ones(2, 1),
+                        topk_ids=torch.zeros(2, 1, dtype=torch.int64),
+                        shared_experts=None,
+                        shared_experts_input=None,
+                    )
 
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
