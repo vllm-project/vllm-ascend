@@ -9,20 +9,19 @@ from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
 class AscendGroupedTopKRouter(BaseRouter):
-
     def __init__(
-            self,
-            top_k: int,
-            global_num_experts: int,
-            num_expert_group: int | None,
-            topk_group: int | None,
-            use_grouped_topk: bool = False,
-            renormalize: bool = True,
-            scoring_func: str = "softmax",
-            routed_scaling_factor: float = 1.0,
-            e_score_correction_bias: torch.Tensor | None = None,
-            num_fused_shared_experts: int = 0,
-            eplb_state: EplbLayerState | None = None,
+        self,
+        top_k: int,
+        global_num_experts: int,
+        num_expert_group: int | None,
+        topk_group: int | None,
+        use_grouped_topk: bool = False,
+        renormalize: bool = True,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: torch.Tensor | None = None,
+        num_fused_shared_experts: int = 0,
+        eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -50,16 +49,16 @@ class AscendGroupedTopKRouter(BaseRouter):
         )
 
     def _renormalize_topk_weights(
-            self,
-            topk_weights: torch.Tensor,
+        self,
+        topk_weights: torch.Tensor,
     ):
         if self.renormalize:
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
         return topk_weights
 
     def _native_grouped_topk(
-            self,
-            topk_weights: torch.Tensor,
+        self,
+        topk_weights: torch.Tensor,
     ):
         topk_group = 0 if self.topk_group is None else self.topk_group
         num_expert_group = 0 if self.num_expert_group is None else self.num_expert_group
@@ -79,12 +78,12 @@ class AscendGroupedTopKRouter(BaseRouter):
         return topk_weights
 
     def _compute_routing(
-            self,
-            hidden_states: torch.Tensor,
-            router_logits: torch.Tensor,
-            indices_type: torch.dtype | None,
-            *,
-            input_ids: torch.Tensor | None = None,
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.scoring_func == "softmax":
             topk_weights = router_logits.softmax(dim=-1)
