@@ -16,11 +16,9 @@ from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.ensure_mxfp8_linear_available")
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config")
-    def setUp(self, mock_vllm, mock_ensure):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ensure.return_value = None
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
 
     def test_get_weight_various_input_sizes(self):
@@ -64,8 +62,6 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
-        from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
-
         dynamic_scale = torch.randint(0, 255, (32, 8), dtype=torch.uint8)
         mock_torch_npu.npu_dynamic_mx_quant.return_value = (
             torch.randint(0, 255, (32, 256), dtype=torch.uint8),
@@ -82,7 +78,6 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         call_kwargs = mock_torch_npu.npu_quant_matmul.call_args.kwargs
         self.assertEqual(call_kwargs["bias"].dtype, torch.float32)
         self.assertEqual(call_kwargs["group_sizes"], [1, 1, self.scheme.group_size])
-        self.assertEqual(call_kwargs["scale_dtype"], FLOAT8_E8M0FNU_DTYPE)
         self.assertEqual(call_kwargs["output_dtype"], torch.float16)
 
 
@@ -91,13 +86,11 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     hidden_size = 128
     intermediate_size = 256
 
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.ensure_mxfp8_moe_available")
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ensure):
+    def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
-        mock_ensure.return_value = None
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
 
     def test_get_weight_various_expert_counts(self):
