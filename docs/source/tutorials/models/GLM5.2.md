@@ -1,42 +1,41 @@
 # GLM-5.2
 
-## 1 Introduction
+## Introduction
 
 [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## 2 Supported Features
+## Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Prerequisites
+## Prerequisites
 
-### 3.1 Model Weight
+### Model Weight
 
 - `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
 - `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node(If the KV Cache is sufficient, there is no need to enable sfac8 and lic8("enable_sparse_sfa_c8" : true, "enable_sparse_li_c8": true), and Do not enable the two configurations sfac8 and lic8 for other weights.).[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
-- `GLM-5.2-w4a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8).
+- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-## 4 Installation
+### Verify Multi-node Communication (Optional)
 
-### 4.1 Docker Image Installation
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+## Installation
 
-:::::{tab-set}
-:sync-group: install
+### Docker Image Installation
 
-::::{tab-item} A3 series
-:sync: A3
+- You can use our official docker image to run GLM-5.2 directly.
 
-Start the docker image on each node.
+=== "A3 series"
+
+    Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -76,11 +75,9 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+=== "A2 series"
 
-Start the docker image on each node.
+    Start the docker image on each of your nodes.
 
 ```{code-block} bash
    :substitutions:
@@ -112,24 +109,23 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-::::
-:::::
+If you want to deploy multi-node environment, you need to set up environment on each node.
 
-After a successful docker run, you can verify the running container service by executing the `docker ps` command.
-
-### 4.2 Source Code Installation
+### Source Code Installation
 
 If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-If you want to deploy a multi-node environment, you need to set up the environment on each node.
+## Deployment
 
-## 5 Online Service Deployment
+The deployment scenarios validated for this release are organized by context window size (below 1M / 1M), hardware (Atlas 800 A3 / A2), and deployment mode (single-node, multi-node co-located, Prefill-Decode disaggregation). All startup scripts below are the verified reference commands; key parameters are explained after each scenario.
 
-- [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/en/v0.23.0/user_guide/feature_guide/kv_pool.html)
+### Context Below 1M
 
-### 5.1 Single-node Deployment
+#### Atlas 800 A3
+
+##### Single-Node Deployment
 
 - Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
@@ -170,28 +166,33 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 
 ```
 
-**Notice:**
-The parameters are explained as follows:
+Key Parameter Descriptions:
 
-- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
-- For short sequences, DCP does not need to be enabled;For long sequences, DCP needs to be enabled.
-- There are two cases:
-    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
-    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
+Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
-### 5.2 Multi-node Deployment
+**Model-specific parameters:**
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.2.
+- `--quantization ascend`: Enables Ascend quantization for the w4a8c8 quantized weights.
+- `--data-parallel-size 2` / `--tensor-parallel-size 8`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w4a8c8 weights. For low-latency scenarios, use `dp1tp16` instead and turn off expert parallel, at the cost of lower throughput.
+- `--tool-call-parser glm47` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable function calling for GLM-5.2.
+- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.2. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.2 does not support graph-mode speculative decoding.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2=0`: Disables the fused `dispatch_ffn_combine`/`mega_moe` operators in this scenario because they conflict with `multistream_overlap_shared_expert`; turn them on in multi-node scenarios where they are beneficial.
 
-:::::{tab-set}
-:sync-group: install
+**`--additional-config` fields (Ascend-specific optimizations):**
 
-::::{tab-item} A3 series
-:sync: A3
+- `"enable_dsa_cp": true`: Enables DSA context parallelism to accelerate long-context prefill. Since v0.21.0, DSA-CP is decoupled from FlashComm1 and must be enabled explicitly. With DSA-CP enabled, `layer_sharding` cannot include `o_proj`.
+- `"enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; If the GPU memory is insufficient due to a long sequence length, you are advised to enable `enable_sparse_sfa_c8`.
+- `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. It replaces the deprecated environment variable `VLLM_ASCEND_BALANCE_SCHEDULING`; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
+- `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream, improving decode efficiency.
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+##### Multi-Node Co-Located Deployment
 
-    Run the following scripts on two nodes respectively.
+- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+
+Run the following scripts on two nodes respectively.
+
 **node 0**
 
 ```{code-block} bash
@@ -294,11 +295,26 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
-::::
-::::{tab-item} A2 series
-:sync: A2
+Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node-deployment)):
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 8).
+**Multi-node network and data parallel configuration:**
+
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
+- `--data-parallel-size 4`: Total number of data parallel ranks across all nodes (2 ranks per node in this scenario).
+- `--data-parallel-size-local 2`: Number of data parallel ranks on the current node.
+- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `2`.
+- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
+- `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
+
+**Notice:**
+This scenario enables `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
+
+#### Atlas 800 A2
+
+##### Multi-Node Co-Located Deployment (A2)
+
+- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 8). A single Atlas 800 A2 node (8 × 64GB) cannot fit the w4a8c8 weights, so the 2-node deployment is the minimum configuration for the A2 series.
 
 **node 0**
 
@@ -413,14 +429,28 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
-::::
-:::::
+Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node-deployment) and [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)):
 
-### 5.3 Prefill-Decode Disaggregation
+The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP are not used here.
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+**A2-specific environment variables:**
 
-Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 8).
+- `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
+- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
+- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
+
+#### Prefill-Decode Disaggregation(A3)
+
+We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
+
+Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64GB × 16).
+
+**Deployment topology:**
+
+|Node group|Nodes|Parallelism|Engine ports|
+|----------|-----|-----------|------------|
+|Prefill|2 (node 0/1)|`DP4 TP8` (2 ranks per node)|9081/9082 per node|
+|Decode|2 (node 0/1)|`DP32 TP1` (16 ranks per node)|9900-9915 per node|
 
 Before you start, please
 
@@ -820,15 +850,6 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
-**Notice:**
-The parameters are explained as follows:
-
-- Like a single node,For short sequences, DCP does not need to be enabled; For long sequences, DCP needs to be enabled.
-- If the video memory is sufficient, there is no need to enable sfac8.
-- There are two cases:
-    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
-    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
-
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ```shell
@@ -884,9 +905,51 @@ python load_balance_proxy_server_example.py \
       9900 9901 9902 9903 9904 9905 9906 9907 9908 9909 9910 9911 9912 9913 9914 9915
 ```
 
-### 5.4 Deployment on 8 Atlas 800 A2
+Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node-deployment) and [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)):
 
-On Atlas 800 A2, where each node exposes 8 cards, the same global P/D topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode nodes hosting 2 DP ranks each (4 cards per rank). The `launch_online_dp.py` above is reused as-is. The prefill side enables FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP (`num_speculative_tokens=3`). All IPs, NIC names, ports and weight paths below are placeholders.
+**`launch_online_dp.py` parameters:**
+
+|Parameter|Type|Required|Default|Description|
+|---------|----|--------|-------|-----------|
+|`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
+|`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+|`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
+|`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
+|`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
+|`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
+|`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
+
+**Prefill node-specific configurations:**
+
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication and computation overhead on prefill nodes. With FlashComm enabled, `layer_sharding` cannot include `o_proj` as an element.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables the `dispatch_ffn_combine`/`mega_moe` fused operators. Note: fused MC2 conflicts with `multistream_overlap_shared_expert`.
+- `ACL_OP_INIT_MODE=1` / `ASCEND_A3_ENABLE=1`: A3-specific optimizations for operator initialization and communication aggregation.
+- `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
+
+**Decode node-specific configurations:**
+
+- `--max-num-batched-tokens 164`: Small batch token limit on decode nodes — decode processes one token per sequence per step, so batch tokens should be close to `max-num-seqs`.
+- `--speculative-config '{"num_speculative_tokens": 5, ...}'`: Higher MTP speculation count on decode nodes to maximize decode throughput.
+- `--additional-config '{"recompute_scheduler_enable": true}'`: Enables the recomputation scheduler. When the decode node KV cache is insufficient, requests are sent back to the prefill node to recompute the KV cache. Recommended on both prefill and decode nodes in PD scenarios.
+
+**Mooncake KV transfer configuration (`--kv-transfer-config`):**
+
+- `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
+- `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
+- `"kv_port"`: Port for Mooncake KV transfer communication. Use different port ranges for prefill (`30000`) and decode (`30100`) node groups.
+- `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache, reducing latency.
+- `"prefill"` / `"decode"` sections: Specify the `dp_size` and `tp_size` of the prefill and decode node groups respectively. These must match the actual deployment topology (`prefill: dp4 tp8`, `decode: dp32 tp1`).
+
+**Request forwarding (proxy):**
+
+- The proxy command maps every prefill engine endpoint (4 prefiller hosts × 2 ports per node) and every decode engine endpoint (32 decoder hosts/ports) to a single entry point on port `8000`.
+- The proxy program can be found in [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+
+Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
+
+#### Prefill-Decode Disaggregation (A2)
+
+On Atlas 800 A2, where each node exposes 8 cards, the same global P/D topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode nodes hosting 2 DP ranks each (4 cards per rank). The `launch_online_dp.py` above is reused as-is. The prefill side enables FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP (`num_speculative_tokens=1` on prefill, `3` on decode). All IPs, NIC names, ports and weight paths below are placeholders.
 
 `run_dp_template.sh` for the prefill nodes:
 
@@ -1099,15 +1162,6 @@ Once the preparation is done, start the server with the following commands:
 
 For request forwarding on this 8-node A2 layout, use 4 prefiller hosts (1 endpoint each) and 4 decoder hosts (2 endpoints each) in the Request Forwarding command below.
 
-**Notice:**
-The parameters are explained as follows:
-
-- Like a single node,For short sequences, DCP does not need to be enabled; For long sequences, DCP needs to be enabled.
-- If the video memory is sufficient, there is no need to enable sfac8.
-- There are two cases:
-    1. If the GPU memory is insufficient for the sequence length, enable the DCP configuration. However, enabling the DCP configuration will affect the TPOT performance.
-    2. If the GPU memory is sufficient, you are advised not to enable the DCP configuration.
-
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ```shell
@@ -1139,16 +1193,41 @@ python load_balance_proxy_server_example.py \
       9900 9901 9900 9901
 ```
 
-**Notice:**
+Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)):
 
-Some configurations for optimization are shown below:
+This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank, `DP4 TP8`) and 4 decode nodes hosting 2 DP ranks each (4 cards per rank, `DP8 TP4`). The `launch_online_dp.py` script is the same as in [Prefill-Decode Disaggregation](#prefill-decode-disaggregation).
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine fused operator.
+**Prefill node-specific configurations (A2):**
 
-Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
+- `--additional-config '{"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, ...}'`: Both SFA C8 optimizations are enabled in this scenario (vs. `enable_sparse_sfa_c8: false` in the A3 co-located scenarios).
 
-### 5.5 1M Context Configuration
+**Decode node-specific configurations (A2):**
+
+- `VLLM_ASCEND_ENABLE_MLAPO=1`: MLAPO fusion on decode nodes for memory-bandwidth-bound token generation.
+- `--max-num-batched-tokens 256`: Small batch token limit on decode nodes.
+
+**Multi-connector KV transfer configuration (`--kv-transfer-config`):**
+
+- `"kv_connector": "MultiConnector"`: Combines multiple KV transfer connectors.
+- `MooncakeConnectorV1`: Mooncake KV cache transfer between prefill and decode nodes (same role as in [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)).
+- `AscendStoreConnector`: The KV Cache Pool (Ascend Store) connector, available since v0.23.0 — see the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html).
+- `"kv_load_failure_policy": "recompute"`: When a KV block fails to load from the KV pool, the request falls back to recomputation instead of failing.
+- `"load_async": true` (decode side): Asynchronously loads KV cache from the pool on decode nodes.
+- `"backend": "mooncake"`: The Ascend Store backend used by the connector.
+
+**Environment variables for the A2 PD scenario:**
+
+- `VLLM_USE_V1=1`: Forces the v1 scheduler.
+- `ASCEND_AGGREGATE_ENABLE=1` / `ASCEND_TRANSPORT_PRINT=1`: Communication aggregation and transport debug printing.
+- `PYTHONHASHSEED=0`: Fixed hash seed for reproducible distributed scheduling.
+- `MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"`: Path to the Mooncake configuration file (must exist on each node).
+- `HCCL_INTRA_ROCE_ENABLE=1`: Enables HCCL intra-node communication over RoCE.
+- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode.
+- `VLLM_HOST_IP=$local_ip`: Host IP advertised by the decode engine for cross-node communication.
+
+Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
+
+### 1M Context Deployment
 
 Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64GB x 16) and quantized GLM-5.2(W4A8C8) weights:
 
@@ -1158,7 +1237,11 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 | Dual-node co-located | 2 Atlas 800 A3 (64GB x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 | 1P1D PD disaggregation | 1 prefiller with 2 A3 nodes + 1 decoder with 2 A3 nodes | Prefill `DP4 PP1 TP8 PCP1 DCP8`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
 
-#### 5.5.1 Single-Node 1M Deployment
+The 1M context scenarios are validated on Atlas 800 A3 only; the A2 series is not validated for 1M context.
+
+#### Atlas 800 A3
+
+##### Single-Node 1M Deployment
 
 Recommended command:
 
@@ -1196,7 +1279,20 @@ vllm serve <MODEL_PATH> \
   --safetensors-load-strategy prefetch
 ```
 
-#### 5.5.2 Dual-Node Co-Located 1M Deployment
+Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node-deployment)):
+
+**1M-specific environment variables:**
+
+- `VLLM_ASCEND_ENABLE_NZ=1`: Enables NZ format memory layout for the C8 quantized tensors, required for the 1M context deployment.
+- `VLLM_WORKER_MULTIPROC_METHOD=spawn`: Uses the spawn start method for multi-process workers (required in this scenario).
+
+**1M-specific vllm serve parameters:**
+
+- `--data-parallel-size 1` / `--pipeline-parallel-size 1` / `--tensor-parallel-size 16`: Single-node parallelism layout `DP1 PP1 TP16`.
+- `--prefill-context-parallel-size 1` / `--decode-context-parallel-size 16`: Decode context parallelism (DCP) of 16 for the decode phase; prefill uses PCP 1.
+- `--cp-kv-cache-interleave-size 128`: KV cache interleave size for context parallelism.
+
+##### Dual-Node Co-Located 1M Deployment
 
 Recommended command for both co-located nodes:
 
@@ -1250,7 +1346,15 @@ vllm serve <MODEL_PATH> \
   --safetensors-load-strategy prefetch
 ```
 
-#### 5.5.3 PD Disaggregation 1M Deployment
+Key Parameter Descriptions (in addition to [Single-Node 1M Deployment](#single-node-1m-deployment)):
+
+**Multi-node configuration:**
+
+- `--data-parallel-size 4` / `--data-parallel-size-local 2` / `--data-parallel-start-rank`: Node 0 uses `data_parallel_start_rank=0` with `server_role_args="--api-server-count 1"`; node 1 uses `data_parallel_start_rank=2` with `server_role_args="--headless"`.
+- `--data-parallel-address $node_0_ip` / `--data-parallel-rpc-port 16591`: Data parallel master node IP and RPC port, identical on both nodes.
+- `--tensor-parallel-size 8` / `--decode-context-parallel-size 8`: `DP4 TP8 DCP8` layout — each node hosts 2 DP ranks × TP8.
+
+##### PD Disaggregation 1M Deployment
 
 Recommended command for both prefiller nodes:
 
@@ -1407,7 +1511,19 @@ python load_balance_proxy_server_example.py \
   --decoder-ports 9900
 ```
 
-## 6 Functional Verification
+Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#prefill-decode-disaggregation) and [Single-Node 1M Deployment](#single-node-1m-deployment)):
+
+**Prefill nodes (1M):**
+
+- `--additional-config '{"recompute_scheduler_enable": true, ...}'`: The recompute scheduler is enabled on both prefill and decode nodes in this scenario.
+- `--kv-transfer-config`: Mooncake connector as `kv_producer` with `prefill: dp4 tp8` / `decode: dp4 tp8` (matching the 1M P/D topology, in contrast to `dp32 tp1` decode in the sub-1M PD scenario).
+
+**Decode nodes (1M):**
+
+- `--max-num-batched-tokens 128`: Decode nodes store the large 1M KV cache received from prefill nodes.
+- `--kv-transfer-config`: Mooncake connector as `kv_consumer` (`kv_port: 30100`).
+
+## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -1422,51 +1538,106 @@ curl http://<node0_ip>:<port>/v1/completions \
     }'
 ```
 
-## 7 Accuracy Evaluation
+## Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
-### 7.1 Using AISBench
+### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result.
 
-## 8 Performance
+### Using Language Model Evaluation Harness
 
-### 8.1 Using AISBench
+Not tested yet.
+
+## Performance Evaluation
+
+### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### 8.2 Using vLLM Benchmark
+### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-**Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **Deployment** chapter.
+## Performance Tuning
 
-## 9 Performance Tuning
+### Recommended Configurations
 
-### 9.1 Recommended Configurations
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Tuning Guidelines](#tuning-guidelines) for tuning based on actual conditions.
 
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+The tables below provide recommended parameter configurations for different deployment scenarios. All scenarios are categorized by use case (Low Latency, High Throughput, Long Context) and correspond to the deployment modes documented in [Deployment](#deployment).
 
 #### Table 1: Scenario Overview
 
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|---------------|-------------------|
-|High Throughput|1P1D deployment|32 (A3)|GLM-5.2-w4a8c8|dp4 tp8 on P nodes and dp32 tp1 on D nodes to balanced latency and throughput|
-|Low Latency|1P1D deployment|32 (A3)|GLM-5.2-w4a8c8|dp2 tp16 on both P and D nodes to reduce latency|
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs) or 1 Atlas 800 A2 server (64G × 8 NPUs).
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes.
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|Low Latency<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, FlashComm1, DSA CP|
+|Low Latency<br>(128K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, FlashComm1, DSA CP|
+|High Throughput<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp4 tp8, fused MC2, MTP3, max-num-seqs 16, max-model-len 66000, FlashComm1, DSA CP|
+|High Throughput|PD Disaggregation (A3), [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w4a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192, MTP1); D: dp32 tp1 (max-num-seqs 32, max-num-batched-tokens 164, MTP5), max-model-len 133120, dedicated P/D nodes, Mooncake KV transfer|
+|Long Context<br>(1M)|PD Disaggregation (A3), [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|4 nodes (A3)|w4a8c8|P/D: dp4 tp8, DCP8, max-model-len 1040000, Mooncake KV transfer|
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|------------|----------------------|--------------|--------------------|
-|High Throughput (A3)|1P1D deployment|32|P:8 D:1|P:4 D:32|P:64 D:32|P:8192 D:164|P:133120 D:133120|5|
+> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a node hosting 2 DP ranks of TP8, or 1 DP rank of TP16, uses 16 NPUs).
 
-## 10 FAQ
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+
+|Scenario|Configuration|NPUs (per node)|TP|DP (per node)|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
+|--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
+|Low Latency 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
+|Low Latency 128K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
+|High Throughput 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|16|8|2|16|8192|66000|3|
+|High Throughput (A3)|PD — Server-P Node, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|16|8|2|64|8192|133120|1|
+|High Throughput (A3)|PD — Server-D Node, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|16|1|16|32|164|133120|5|
+|Long Context 1M (A3)|PD — Server-P Node, [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|16|8|2|8|16384|1040000|1|
+|Long Context 1M (A3)|PD — Server-D Node, [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|16|8|2|32|128|1040000|3|
+
+> On PD decode nodes, `--max-num-batched-tokens` is configured as `(MTP Spec Num + 1) × Max Num Seqs` — each sequence generates one target token plus the speculated MTP tokens per decode step.
+>
+> For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Deployment](#deployment).
+
+#### Table 3: Performance-Related Parameter Tuning Guide
+
+|Parameter|Low Latency|High Throughput|Long Context|Description|
+|---------|-----------|---------------|-------------|-----------|
+|`--max-num-batched-tokens`|Lower (4096–8192)|Higher for prefill (8192)|Higher for prefill (16384)|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
+|`--gpu-memory-utilization`|0.92–0.95|0.90–0.95|0.75–0.93|NPU memory fraction. 1M scenarios must reserve memory for the huge KV cache, so use lower values (0.75–0.80 on prefill/co-located).|
+|`num_speculative_tokens` (MTP)|3–5|3–5|1 (prefill) / 3 (decode)|MTP speculation count. Higher values improve decode throughput at the cost of memory for the draft model KV cache. Use `1` on prefill nodes in PD mode.|
+|`enable_dsa_cp`|Optional|Enable (prefill nodes)|Enable (prefill nodes)|DSA context parallelism accelerates long-context prefill. Decoupled from FlashComm1 since v0.21.0.|
+|`enable_sparse_sfa_c8` / `enable_sparse_li_c8`|`false` / `true`|`true` / `true` (PD, 1M)|`true` / `true`|SFA optimizations for the C8 quantized model. `enable_sparse_li_c8` is always recommended; `enable_sparse_sfa_c8` (SFA DCP, since v0.23.0) benefits long-context prefill.|
+|`enable_balance_scheduling`|Enable (single-node)|Enable|Disable in PD mode|Improves output throughput and reduces TPOT in the v1 scheduler. TTFT may degrade in some scenarios; not recommended when Prefill-Decode is separated.|
+|`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1 (prefill nodes)|1 (prefill nodes)|Communication optimization. Conflicts with `layer_sharding` containing `o_proj`.|
+|`VLLM_ASCEND_ENABLE_MLAPO`|—|1 (A2 P/D nodes)|—|Fusion operator that significantly improves performance but consumes more NPU memory. On A3 used on decode nodes only.|
+|`cudagraph_mode`|FULL_DECODE_ONLY|FULL_DECODE_ONLY (decode)|FULL_DECODE_ONLY (decode)|Graph capture for the decode phase only. Prefill nodes in PD mode use `--enforce-eager` instead.|
+
+#### Common Parameters
+
+Common parameters used across all deployment scenarios are described here once:
+
+- `--enable-chunked-prefill` / `--enable-prefix-caching`: Recommended for long-context and multi-user scenarios — chunked prefill splits long prompts to improve TTFT; prefix caching reuses KV cache for shared prefixes and reduces KV transfer volume in PD scenarios.
+- `--enforce-eager`: Disables graph capture. Required on prefill nodes in PD scenarios (PD separation with MTP requires eager mode on the prefill path).
+- `HCCL_BUFFSIZE`: HCCL communication buffer size. Larger values improve communication throughput at the cost of additional memory: `200` (single-node), `400` (multi-node A3), `256`–`2560` (A2), `768` (1M context).
+- `OMP_NUM_THREADS` / `OMP_PROC_BIND`: CPU thread settings to avoid thread oversubscription — `1` by default, `10` on A2, `20` for the 1M context workload.
+- `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`: Reduces NPU memory fragmentation.
+- `TASK_QUEUE_ENABLE=1`: Enables the task queue for more efficient batch scheduling (used on decode nodes, A2, and 1M scenarios).
+- `--api-server-count 1` / `--safetensors-load-strategy 'prefetch'` / `--seed 1024` / `--trust-remote-code`: Number of OpenAI-compatible API server instances, weight prefetching for faster startup, fixed seed, and remote code loading.
+
+### Tuning Guidelines
+
+For general performance tuning methods, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+
+For detailed feature descriptions and configuration options, refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md).
+
+For environment variable descriptions and constraints, refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
+
+## FAQ
 
 - **Q: How to enable function calling for GLM-5.2?**
 
