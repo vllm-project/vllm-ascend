@@ -291,6 +291,20 @@ class AscendConfig:
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
+        self.sparse_kv_offload_config = SparseKVOffloadConfig(
+            self.vllm_config,
+            additional_config.get("sparse_kv_offload_config", {}),
+        )
+        self._validate_sparse_c8_kv_offload_compatibility()
+
+    def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
+        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
+            raise NotImplementedError(
+                "Sparse KV offload does not support the sparse SFA C8 main "
+                "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
+                "supported because the indexer cache remains device-resident."
+            )
+
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
         if config_key in additional_config:
@@ -939,6 +953,56 @@ class SchedulerConfig:
                 env_key,
             )
         return default
+
+
+class SparseKVOffloadConfig:
+    """
+    Configuration for the Sparse KV cache offloading.
+    """
+
+    def __init__(self, vllm_config: "VllmConfig", user_config: dict[str, Any]):
+        self.enabled = bool(user_config.get("enabled", False))
+        if not self.enabled:
+            return
+
+        self.topk_buffer_size = int(user_config.get("topk_buffer_size", 4096))
+        self.dram_size_per_dp_GB = int(user_config.get("dram_size_per_dp_GB", 128))
+        self.keep_device_kv_cache = bool(user_config.get("keep_device_kv_cache", False))
+
+        if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
+            raise ValueError("Sparse KV offload don't support compress now.")
+        if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):
+            raise ValueError("Sparse KV offload only support sparse attention model.")
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size > 1:
+            raise ValueError("Sparse KV offload don't support context parallel now.")
+        if parallel_config.pipeline_parallel_size > 1:
+            raise ValueError("Sparse KV offload don't support pipeline parallel now.")
+        if self.keep_device_kv_cache:
+            logger.warning_once(
+                "Init sparse KV offload with keep_device_kv_cache enabled, "
+                "in this case we will still allocate device kv cache "
+                "and can not improve sequence length or batch_size. "
+                "You should only use it for debugging in PD colocate scenario."
+            )
+        else:
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "Sparse KV offload is only supported in PD disaggregate scenario "
+                    "and can only be used in D node. For debugging in PD colocate scenario, "
+                    "you can enable keep_device_kv_cache."
+                )
+        if vllm_config.use_v2_model_runner:
+            raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
+
+        self.topk = vllm_config.model_config.hf_text_config.index_topk
+        if self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.topk_buffer_size < self.topk:
+            raise ValueError(
+                "sparse_kv_offload_config.topk_buffer_size must be >= topk, "
+                f"got topk_buffer_size={self.topk_buffer_size}, topk={self.topk}"
+            )
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

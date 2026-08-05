@@ -31,20 +31,57 @@ def _build_weight_layer():
     )
 
 
-def test_routed_experts_310_owns_specialized_unquantized_method(monkeypatch):
+def test_routed_experts_310_uses_parent_unquantized_method_during_init(monkeypatch):
     routed_experts = AscendRoutedExperts310.__new__(AscendRoutedExperts310)
-    routed_experts.tid2eid = object()
     moe_config = MagicMock()
+    parent_method = object()
+    parent_get_quant_method = MagicMock(return_value=parent_method)
     monkeypatch.setattr(
-        AscendUnquantizedFusedMoEMethod310,
-        "dispatch_forward",
-        lambda self, compile_native=False: self.forward_native,
+        fused_moe_310_module.AscendRoutedExperts,
+        "_get_quant_method",
+        parent_get_quant_method,
     )
 
     method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
 
-    assert isinstance(method, AscendUnquantizedFusedMoEMethod310)
-    assert method.moe is moe_config
+    assert method is parent_method
+    parent_get_quant_method.assert_called_once_with("model.layers.0.mlp", None, moe_config)
+
+
+@pytest.mark.parametrize("quant_config", [None, object()])
+def test_routed_experts_310_replaces_only_unquantized_method_after_parent_init(monkeypatch, quant_config):
+    moe_config = MagicMock()
+    parent_method = object()
+    specialized_method = object()
+    init_kwargs = {}
+
+    def parent_init(layer, *args, **kwargs):
+        nn.Module.__init__(layer)
+        init_kwargs.update(kwargs)
+        layer.quant_config = quant_config
+        layer.moe_config = moe_config
+        layer.quant_method = parent_method
+        layer.custom_routing_function = None
+        layer.e_score_correction_bias = None
+
+    specialized_method_factory = MagicMock(return_value=specialized_method)
+    monkeypatch.setattr(fused_moe_310_module.AscendRoutedExperts, "__init__", parent_init)
+    monkeypatch.setattr(
+        fused_moe_310_module,
+        "AscendUnquantizedFusedMoEMethod310",
+        specialized_method_factory,
+    )
+
+    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
+
+    assert init_kwargs["tid2eid"] == "tid2eid"
+    assert init_kwargs["n_shared_experts"] == 3
+    if quant_config is None:
+        assert routed_experts.quant_method is specialized_method
+        specialized_method_factory.assert_called_once_with(moe_config)
+    else:
+        assert routed_experts.quant_method is parent_method
+        specialized_method_factory.assert_not_called()
 
 
 def test_runner_310_installs_specialized_comm():

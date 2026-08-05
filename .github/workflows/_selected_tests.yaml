@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         description: 'Whether to run tests with coverage enabled.'
+      timeout-minutes:
+        type: number
+        required: false
+        default: 120
+        description: 'Selected tests job timeout in minutes.'
     secrets:
       OBS_ACCESS_KEY_PRECISION:
         required: false
@@ -78,7 +83,7 @@ permissions:
 jobs:
   selected-tests:
     name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       fail-fast: false
       matrix:

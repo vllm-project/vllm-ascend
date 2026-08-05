@@ -123,10 +123,16 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
 
 class AscendRoutedExperts310(AscendRoutedExperts):
-    def _get_quant_method(self, prefix, quant_config, moe_config):
-        if quant_config is None:
-            return AscendUnquantizedFusedMoEMethod310(moe_config)
-        return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+    def __init__(self, *args, tid2eid=None, n_shared_experts: int = 0, **kwargs):
+        super().__init__(*args, tid2eid=tid2eid, n_shared_experts=n_shared_experts, **kwargs)
+        if self.quant_config is None:
+            # Preserve the pre-refactor BF16 lifecycle: let upstream create
+            # weights first, then install the Ascend execution method.
+            self._replace_quant_method(
+                AscendUnquantizedFusedMoEMethod310(
+                    self.moe_config,
+                )
+            )
 
 
 class AscendMoERunner310(AscendMoERunner):
