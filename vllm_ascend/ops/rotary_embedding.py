@@ -175,42 +175,20 @@ def rope_forward_oot(
             is_neox_style=is_neox_style,
         )
     else:
-        if rotary_dim < head_size:
-            num_tokens = query.shape[0]
-            query = query.view(num_tokens, -1, head_size)
-            key = key.view(num_tokens, -1, head_size)
-            q_rot = query[..., :rotary_dim]
-            q_pass = query[..., rotary_dim:]
-            k_rot = key[..., :rotary_dim]
-            k_pass = key[..., rotary_dim:]
-            q_rot = q_rot.contiguous().view(num_tokens, -1)
-            k_rot = k_rot.contiguous().view(num_tokens, -1)
-            # only the rotary part is processed here,
-            # the dimension should be rotary_dim
-            torch_npu._npu_rotary_embedding(
-                positions,
-                q_rot,
-                k_rot,
-                rotary_dim,
-                cos_sin_cache,
-                is_neox_style,
-            )
-            q_rot = q_rot.view(num_tokens, -1, rotary_dim)
-            k_rot = k_rot.view(num_tokens, -1, rotary_dim)
-            query = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
-            key = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-        else:
-            # TODO: Remove the contiguous in the future.
-            query = query.contiguous().view(query.shape[0], -1)
-            key = key.contiguous().view(key.shape[0], -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                query,
-                key,
-                head_size,
-                cos_sin_cache,
-                is_neox_style,
-            )
+        # npu_mrope handles both full and partial rotary internally:
+        # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
+        # where rotary_dim is inferred from cos_sin_cache.shape[-1].
+        rotary_mode = "half" if is_neox_style else "interleaved"
+        query, key = torch_npu.npu_mrope(
+            positions,
+            query.contiguous().view(query.shape[0], -1),
+            key.contiguous().view(key.shape[0], -1),
+            cos_sin_cache,
+            head_size,
+            mrope_section=[0, 0, 0],
+            rotary_mode=rotary_mode,
+            cache_mode="default",
+        )
     return query.view(query_shape), key.view(key_shape)
 
 
