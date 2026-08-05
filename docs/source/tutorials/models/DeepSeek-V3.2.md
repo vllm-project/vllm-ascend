@@ -707,13 +707,13 @@ Parameter descriptions:
 
 3. Run the `proxy.sh` script on the prefill master node
 
-    Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
+    Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
     ```shell
     unset http_proxy
     unset https_proxy
 
-    python load_balance_proxy_layerwise_server_example.py \
+    python load_balance_proxy_server_example.py \
         --port 8000 \
         --host 141.61.39.105 \
         --prefiller-hosts \
