@@ -39,9 +39,13 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 You can use our official docker image to run GLM-5/5.1 directly.
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
 
-    Start the docker image on each node.
+::::{tab-item} A3 series
+:sync: A3
+
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -84,9 +88,11 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-=== "A2 series"
+::::
+::::{tab-item} A2 series
+:sync: A2
 
-    Start the docker image on each node.
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -121,6 +127,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 To verify the successful installation of the environment, please refer to [installation](../../installation.md).
 
+::::
+:::::
+
 ### Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
@@ -133,13 +142,17 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-Node Online Deployment
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
 
-    - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+::::{tab-item} A3 series
+:sync: A3
 
-    Run the following script to execute online inference.
+- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+Run the following script to execute online inference.
+
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 ```{code-block} bash
    :substitutions:
@@ -176,9 +189,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
-    - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
-    Run the following script to execute online inference.
+Run the following script to execute online inference.
 
 ```{code-block} bash
    :substitutions:
@@ -213,13 +226,15 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
-=== "A2 series"
+::::
+::::{tab-item} A2 series
+:sync: A2
 
-    - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
+- Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
 
-    Run the following script to execute online inference.
+Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 ```{code-block} bash
    :substitutions:
@@ -280,19 +295,26 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - For long-context scenarios (e.g., 200K), use w8a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
 - If you encounter OOM, reduce `--gpu-memory-utilization`, `--max-num-seqs`, or `--max-model-len`. Disabling `VLLM_ASCEND_ENABLE_MLAPO` can also reduce memory usage (at the cost of performance).
 
+::::
+:::::
+
 ### Multi-node Deployment
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
 Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
 
-    - `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
+::::{tab-item} A3 series
+:sync: A3
 
-    Run the following scripts on two nodes respectively.
+- `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
 
-    **node 0**
+Run the following scripts on two nodes respectively.
+
+**node 0**
 
 ```{code-block} bash
    :substitutions:
@@ -338,7 +360,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
-    **node 1**
+**node 1**
 
 ```{code-block} bash
    :substitutions:
@@ -386,11 +408,13 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
-=== "A2 series"
+::::
+::::{tab-item} A2 series
+:sync: A2
 
-    Run the following scripts on two nodes respectively.
+Run the following scripts on two nodes respectively.
 
-    **node 0**
+**node 0**
 
 ```{code-block} bash
    :substitutions:
@@ -438,7 +462,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
-    **node 1**
+**node 1**
 
 ```{code-block} bash
    :substitutions:
@@ -673,6 +697,9 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 - For low-latency multi-node scenarios, keep `--data-parallel-size-local 1` to minimize cross-node communication.
 - `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For w8a8 on A3 multi-node, `16` is recommended. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
 - All nodes in a multi-node deployment must use identical `--tensor-parallel-size`, `--enable-expert-parallel`, and model weight path configurations.
+
+::::
+:::::
 
 ### Prefill-Decode Disaggregation
 

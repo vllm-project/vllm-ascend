@@ -33,9 +33,13 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 - You can use our official docker image to run GLM-5.2 directly.
 
-=== "A3 series"
+:::::{tab-set}
+:sync-group: install
 
-    Start the docker image on each node.
+::::{tab-item} A3 series
+:sync: A3
+
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -75,9 +79,11 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-=== "A2 series"
+::::
+::::{tab-item} A2 series
+:sync: A2
 
-    Start the docker image on each of your nodes.
+Start the docker image on each of your nodes.
 
 ```{code-block} bash
    :substitutions:
@@ -110,6 +116,9 @@ docker run --rm \
 ```
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
+
+::::
+:::::
 
 ### Source Code Installation
 
