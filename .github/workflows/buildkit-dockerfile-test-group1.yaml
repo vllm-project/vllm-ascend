@@ -59,7 +59,7 @@ jobs:
             PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
             PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
             ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
-            GIT_PROXY=https://git-cdn.test.osinfra.cn/
+            GIT_PROXY=https://gh-proxy.test.osinfra.cn/
             VLLM_ASCEND_IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend-ci
             SOC_VERSION=${{ steps.vars.outputs.soc_version }}
             COMPILE_CUSTOM_KERNELS=0
