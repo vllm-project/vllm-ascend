@@ -364,7 +364,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         from vllm_ascend.quantization.method_adapters import AscendLinearMethod
-        from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
@@ -408,6 +408,36 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 output_dtype=output_dtype,
             )
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
+        # For dynamic w8a8 quant
+        elif mmrs_fusion and (
+            isinstance(self.layer.quant_method, AscendLinearMethod)
+            and isinstance(self.layer.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+            and hasattr(self.layer, "weight")
+            and hasattr(self.layer, "weight_scale")
+        ):
+            quant_method = self.layer.quant_method.quant_method
+            x_quant, pertoken_scale = DeviceOperator.npu_dynamic_quant(x, act_quant_type=quant_method.act_quant_type)
+            need_unsqueeze = False
+            if pertoken_scale.dim() == 2:
+                need_unsqueeze = True
+                x_quant = x_quant.squeeze(dim=1)
+                pertoken_scale = pertoken_scale.squeeze(dim=1)
+            output = DeviceOperator.npu_mm_reduce_scatter_base(
+                x_quant,
+                self.layer.weight,
+                hcom_name,
+                world_size,
+                reduce_op="sum",
+                bias=bias_ if quant_method.act_quant_type == torch.int8 else None,
+                comm_turn=0,
+                x1_scale=pertoken_scale,
+                x2_scale=self.layer.weight_scale,
+                output_dtype=x.dtype,
+            )
+            if need_unsqueeze:
+                output = output.unsqueeze(dim=1)
+            if bias_ is not None and quant_method.act_quant_type != torch.int8:
+                output = (output + bias_).to(x.dtype)
         else:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
             output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
