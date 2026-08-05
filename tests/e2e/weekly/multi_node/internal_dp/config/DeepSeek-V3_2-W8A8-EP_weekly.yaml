@@ -31,7 +31,7 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
           --port $SERVER_PORT
-          --data-parallel-size 2
+          --data-parallel-size 1
           --data-parallel-start-rank 0
           --data-parallel-size-local 1
           --data-parallel-address $LOCAL_IP
@@ -55,12 +55,12 @@ deployment:
           "kv_port": "30000",
           "kv_connector_extra_config": {
                     "prefill": {
-                            "dp_size": 2,
+                            "dp_size": 1,
                             "tp_size": 16
                     },
                     "decode": {
                             "dp_size": 8,
-                            "tp_size": 4
+                            "tp_size": 2
                     }
               }
           }'
@@ -87,12 +87,12 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
           --port $SERVER_PORT
-          --data-parallel-size 2
+          --data-parallel-size 8
           --data-parallel-size-local 1
           --data-parallel-start-rank 1
           --data-parallel-address $LOCAL_IP
           --data-parallel-rpc-port 13389
-          --tensor-parallel-size 16
+          --tensor-parallel-size 2
           --enable-expert-parallel
           --seed 1024
           --max-model-len 133000 
@@ -113,12 +113,12 @@ deployment:
           "kv_port": "30200",
           "kv_connector_extra_config": {
                       "prefill": {
-                              "dp_size": 2,
+                              "dp_size": 1,
                               "tp_size": 16
                       },
                       "decode": {
                               "dp_size": 8,
-                              "tp_size": 4
+                              "tp_size": 2
                       }
               }
           }'
