@@ -73,10 +73,10 @@ For dense models, `wake_up()` simply restores the model weights to NPU memory; t
 
 For **unquantized MoE models** (`quant_config is None`), the fused expert weights are stored in a transposed layout for NPU matmul efficiency. This layout is produced once at model load time by `process_weights_after_loading()`: after the weights are loaded, the method transposes the second and third dimensions (`transpose(1, 2)`) of `w13_weight` and `w2_weight` to convert the standard checkpoint layout into the format required by the `torch_npu.npu_grouped_matmul` operator.
 
-After the sleep-mode allocator restores the original (untransposed) memory, `wake_up()` re-applies the same transpose to the affected expert weights when the `"weights"` tag is being restored:
+The sleep-mode allocator restores the same tensor layout that was saved before sleep. For the normal sleep/wake path, the expert weights are already in the runtime layout and `wake_up()` leaves them unchanged. If an external weight reload leaves unquantized MoE expert weights in the checkpoint layout, `wake_up()` transposes the affected weights when the `"weights"` tag is being restored:
 
-- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;
-- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`.
+- `w13_weight` (gate/up projection): transposed to the runtime layout when its third dimension matches `hidden_size`;
+- `w2_weight` (down projection): transposed to the runtime layout when its second dimension matches `hidden_size`.
 
 This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
 

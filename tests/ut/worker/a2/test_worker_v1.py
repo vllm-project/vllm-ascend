@@ -249,6 +249,66 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    def _make_wake_up_worker(self, model, hidden_size):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = model
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.quant_config = None
+            worker.vllm_config.model_config.hf_text_config.hidden_size = hidden_size
+            worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
+            return worker
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_keeps_unquantized_moe_runtime_layout(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = False
+        mock_get_config.return_value = mock_config
+        mock_allocator_class.get_instance.return_value = MagicMock()
+
+        hidden_size = 4
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w2_weight = torch.nn.Parameter(torch.randn(2, 3, hidden_size), requires_grad=False)
+        model.experts.w13_weight = torch.nn.Parameter(torch.randn(2, hidden_size, 6), requires_grad=False)
+        original_w2 = model.experts.w2_weight.detach().clone()
+        original_w13 = model.experts.w13_weight.detach().clone()
+
+        worker = self._make_wake_up_worker(model, hidden_size)
+        worker.wake_up(tags=["weights"])
+
+        torch.testing.assert_close(model.experts.w2_weight, original_w2)
+        torch.testing.assert_close(model.experts.w13_weight, original_w13)
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_transposes_unquantized_moe_checkpoint_layout(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = False
+        mock_get_config.return_value = mock_config
+        mock_allocator_class.get_instance.return_value = MagicMock()
+
+        hidden_size = 4
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w2_weight = torch.nn.Parameter(torch.randn(2, hidden_size, 3), requires_grad=False)
+        model.experts.w13_weight = torch.nn.Parameter(torch.randn(2, 6, hidden_size), requires_grad=False)
+        original_w2 = model.experts.w2_weight.detach().clone()
+        original_w13 = model.experts.w13_weight.detach().clone()
+
+        worker = self._make_wake_up_worker(model, hidden_size)
+        worker.wake_up(tags=["weights"])
+
+        torch.testing.assert_close(model.experts.w2_weight, original_w2.transpose(1, 2))
+        torch.testing.assert_close(model.experts.w13_weight, original_w13.transpose(1, 2))
+
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
