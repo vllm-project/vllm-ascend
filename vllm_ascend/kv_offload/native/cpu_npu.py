@@ -280,7 +280,19 @@ class NPUOffloadingWorker(CPUOffloadingWorker):
         cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
             npu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            npu_tensor = kv_cache_tensor.tensor.view(torch.int8).view((-1, npu_page_size_bytes))
+            npu_tensor = kv_cache_tensor.tensor
+            if npu_tensor.dtype != torch.int8 or npu_tensor.ndim != 2:
+                raise ValueError(
+                    "Canonical NPU KV cache tensors must be two-dimensional "
+                    f"int8 views, got shape={tuple(npu_tensor.shape)}, "
+                    f"dtype={npu_tensor.dtype}"
+                )
+            if npu_tensor.shape[1] != npu_page_size_bytes:
+                raise ValueError(
+                    "Canonical NPU KV cache page size mismatch: "
+                    f"shape[1]={npu_tensor.shape[1]}, "
+                    f"page_size_bytes={npu_page_size_bytes}"
+                )
             cpu_page_size_bytes = npu_page_size_bytes * blocks_per_chunk
 
             start_time = time.monotonic()
