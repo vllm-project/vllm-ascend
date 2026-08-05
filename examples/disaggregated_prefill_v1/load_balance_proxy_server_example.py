@@ -1256,8 +1256,9 @@ async def reassign_instances(
     previous_instance: InstanceInfo,
 ) -> InstanceInfo:
     runtime = get_runtime()
+    new_instance = await assign_instances(api, req_data, routing_key, is_initial_request=False)
     await runtime.schedule("release_decoder", previous_instance.decoder_key)
-    return await assign_instances(api, req_data, routing_key, is_initial_request=False)
+    return new_instance
 
 
 async def handle_completions_impl(api: str, request: Request):

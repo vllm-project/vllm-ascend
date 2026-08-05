@@ -222,3 +222,35 @@ async def test_missing_kv_twice_returns_502_without_selecting_decode(monkeypatch
     assert set(health["prefill_loads"].values()) == {0}
     assert set(health["decode_loads"].values()) == {0}
     assert health["request_num"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reassign_failure_keeps_previous_decoder_reserved(monkeypatch):
+    scheduler = make_scheduler()
+    previous_decoder = scheduler.pick_decoder()
+    previous_instance = proxy.InstanceInfo(
+        request_id="request-id",
+        prefiller_key=proxy.server_key(*PREFILLERS[0]),
+        decoder_key=previous_decoder["key"],
+        decoder_host=previous_decoder["host"],
+        decoder_port=previous_decoder["port"],
+    )
+    fake_runtime = FakeRuntime(scheduler, prefill_client=None)
+    monkeypatch.setattr(proxy, "runtime", fake_runtime)
+
+    async def fail_assignment(*args, **kwargs):
+        raise HTTPException(status_code=502, detail="prefill failed")
+
+    monkeypatch.setattr(proxy, "assign_instances", fail_assignment)
+
+    with pytest.raises(HTTPException, match="prefill failed"):
+        await proxy.reassign_instances(
+            "/chat/completions",
+            {"model": "model-a"},
+            "session:test",
+            previous_instance,
+        )
+
+    assert scheduler.decoders[previous_instance.decoder_key].inflight_requests == 1
+    scheduler.finish_request(previous_instance.decoder_key)
+    assert scheduler.decoders[previous_instance.decoder_key].inflight_requests == 0
