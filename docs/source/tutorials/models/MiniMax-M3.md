@@ -6,7 +6,7 @@ MiniMax-M3 is a multimodal large language model that supports text, image, and v
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
-This document is written based on the latest vLLM-Ascend version.
+This document is written based on the latest vLLM-Ascend version. This model is supported on the main branch.
 
 ## 2 Supported Features
 
@@ -112,40 +112,40 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat and quantized model can be deployed on 1 Atlas 800 A3 (128GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat and quantized model can be deployed on 1 Atlas 800 A3 (64GB × 16). Quantized model can be deployed on 1 Atlas 800 A2 (64GB × 8).
 
 === "BF16 Deployment"
 
-```bash
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export HCCL_OP_EXPANSION_MODE="AIV"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  ```bash
+  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-vllm serve ${WEIGHT_PATH} \
-  --served-model-name minimax-m3 \
-  --trust-remote-code \
-  --max-model-len 43008 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --max-num-seqs 16 \
-  --distributed_executor_backend "mp" \
-  --gpu-memory-utilization 0.92 \
-  --reasoning-parser minimax_m3 \
-  --limit-mm-per-prompt '{"image":1}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{
-      "enable_cpu_binding": true,
-      "ascend_compilation_config": {
-      "enable_static_kernel": true,
-      "fuse_norm_quant": false
-      },
-      "multistream_overlap_shared_expert": true,
-      "weight_nz_mode": 2,
-      "enable_flashcomm1": true,
-      "enable_reduce_sample": true
-  }' \
-  --port 11223 > ${LOG_PATH} 2>&1 &
-```
+  vllm serve ${WEIGHT_PATH} \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --max-model-len 43008 \
+    --tensor-parallel-size 16 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.92 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+        "enable_static_kernel": true,
+        "fuse_norm_quant": false
+        },
+        "multistream_overlap_shared_expert": true,
+        "weight_nz_mode": 2,
+        "enable_flashcomm1": true,
+        "enable_reduce_sample": true
+    }' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
 
 === "W8A8 Deployment"
 
@@ -191,7 +191,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the float model on Ascend A2 servers requires at least two nodes. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
+Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `IFNAME` based on the actual environment.
 
 === "BF16 Deployment"
 
