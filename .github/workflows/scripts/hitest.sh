@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 set -euo pipefail
-
+# Test cases
 MIN_FREE_GB=3 
 
 get_free_gb() {
