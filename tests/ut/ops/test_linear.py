@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -247,6 +248,57 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self._patches[-1].start()
         self.assertIsNone(self._op("model.multi_modal_projector.down_proj"))
         self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
+
+
+class TestSequenceRowParallelMatmulAndReduce(unittest.TestCase):
+    def test_dynamic_w8a8_uses_mm_reduce_scatter_fusion(self):
+        from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+        from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+        quant_method = AscendW8A8DynamicLinearMethod()
+        layer = MagicMock()
+        layer.quant_method = AscendLinearMethod(quant_method)
+        layer.weight = torch.randint(-8, 8, (8, 16), dtype=torch.int8)
+        layer.weight_scale = torch.randn(16, dtype=torch.float32)
+        layer.tp_size = 2
+        layer.tp_rank = 0
+
+        op = SequenceRowParallelOp(layer)
+        op.quant_method = layer.quant_method
+        x = torch.randn(4, 8, dtype=torch.bfloat16)
+        x_quant = torch.randint(-8, 8, (4, 8), dtype=torch.int8)
+        pertoken_scale = torch.randn(4, dtype=torch.float32)
+        fused_output = torch.randn(2, 16, dtype=torch.bfloat16)
+
+        tp_group = MagicMock()
+        tp_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_comm"
+
+        with (
+            patch(
+                "vllm_ascend.ops.linear_op._EXTRA_CTX",
+                SimpleNamespace(flash_comm_v1_enabled=True, mmrs_fusion=True, pad_size=0),
+            ),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=tp_group),
+            patch(
+                "vllm_ascend.ops.linear_op.DeviceOperator.npu_dynamic_quant",
+                return_value=(x_quant, pertoken_scale),
+            ) as mock_dynamic_quant,
+            patch(
+                "vllm_ascend.ops.linear_op.DeviceOperator.npu_mm_reduce_scatter_base",
+                return_value=fused_output,
+            ) as mock_mmrs,
+        ):
+            output = op.matmul_and_reduce(x, bias_=None)
+
+        self.assertIs(output, fused_output)
+        mock_dynamic_quant.assert_called_once_with(x, act_quant_type=quant_method.act_quant_type)
+        mock_mmrs.assert_called_once()
+        _, kwargs = mock_mmrs.call_args
+        self.assertIs(kwargs["x1_scale"], pertoken_scale)
+        self.assertIs(kwargs["x2_scale"], layer.weight_scale)
+        self.assertEqual(kwargs["output_dtype"], x.dtype)
 
 
 class TestGetParallelOpShareExpert(unittest.TestCase):

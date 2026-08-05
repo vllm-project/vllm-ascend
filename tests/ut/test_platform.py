@@ -394,6 +394,7 @@ class TestNPUPlatform(TestBase):
             )
 
         self.assertFalse(kwargs["in_profile_run"])
+        self.assertTrue(kwargs["mmrs_fusion"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
 
