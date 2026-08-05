@@ -97,28 +97,6 @@ class AscendMLABackend(AttentionBackend):
         return num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
-    def get_kv_cache_format(
-        kv_cache_spec: AttentionSpec,
-        attn_layer: AttentionLayerBase,
-    ) -> tuple[tuple[int, torch.dtype], ...]:
-        """Describe Ascend MLA's separate NoPE and RoPE cache tensors."""
-        if not isinstance(attn_layer, MLAAttention):
-            raise TypeError(f"Expected MLAAttention, got {type(attn_layer).__name__}.")
-
-        nope_dtype = rope_dtype = kv_cache_spec.dtype
-        vllm_config = get_current_vllm_config()
-        if enable_fa_quant(vllm_config, attn_layer.layer_name):
-            nope_dtype, rope_dtype = vllm_config.quant_config.get_kv_quant_dtype(
-                attn_layer.layer_name,
-                kv_cache_spec.dtype,
-                vllm_config.model_config,
-            )
-        return (
-            (attn_layer.kv_lora_rank, nope_dtype),
-            (attn_layer.qk_rope_head_dim, rope_dtype),
-        )
-
-    @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
         if enable_dcp():
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl

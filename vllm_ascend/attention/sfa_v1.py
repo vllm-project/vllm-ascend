@@ -143,14 +143,6 @@ class AscendSFABackend(AttentionBackend):
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_kv_cache_format(
-        kv_cache_spec: AttentionSpec,
-        attn_layer: AttentionLayerBase,
-    ) -> tuple[tuple[int, torch.dtype], ...]:
-        """Use the MLA main-cache layout."""
-        return AscendMLABackend.get_kv_cache_format(kv_cache_spec, attn_layer)
-
-    @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
