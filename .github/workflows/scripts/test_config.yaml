@@ -475,6 +475,7 @@
     - tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py
     - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
+    - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen36_27b.py
     - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
 - name: spec_decode_dspark
@@ -798,6 +799,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 2040
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 450
+  tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen36_27b.py: 450
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
