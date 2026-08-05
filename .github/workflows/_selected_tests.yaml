@@ -129,8 +129,6 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          UV_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/ \
-          UV_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu" \
           VLLM_TARGET_DEVICE=empty uv pip install . \
             --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/ \
             --extra-index-url https://download.pytorch.org/whl/cpu
