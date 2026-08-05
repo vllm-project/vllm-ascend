@@ -621,14 +621,27 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
 #    Why:
-#       GLM-5.2 checkpoints omit `Indexer` weights on shared-indexer layers,
-#       while GLM-5.1 IndexCache overrides only skip top-k computation and keep
-#       per-layer `Indexer` weights. Treating both layouts alike breaks GLM-5.1
-#       weight loading.
+#       (a) GLM-5.2 checkpoints omit `Indexer` weights on shared-indexer layers,
+#           while GLM-5.1 IndexCache overrides only skip top-k computation and
+#           keep per-layer `Indexer` weights. Treating both layouts alike breaks
+#           GLM-5.1 weight loading.
+#       (b) GLM-5.1 with `use_index_cache=True` can skip `Indexer` module
+#           creation entirely for layers that reuse top-k indices from a previous
+#           layer. Without this patch, upstream vllm always creates an `Indexer`
+#           for every layer (only toggling `skip_topk` at runtime), wasting
+#           memory on unused k_cache, weight buffers, and computation paths.
+#           Enabling `use_index_cache` reduces per-layer overhead by omitting the
+#           unused `Indexer` module — critical for GLM-5.1 models where only a
+#           fraction of layers actually compute top-k indices.
 #    How:
-#       Skip `Indexer` construction only when the layer both skips top-k and is
-#       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
+#       Skip `Indexer` construction when the layer both skips top-k (determined
+#       by `index_topk_freq` / `index_topk_pattern`) AND `use_index_cache` is
+#       enabled in the model config. For GLM-5.2 shared-indexer layers (marked
+#       `"shared"` in `indexer_types`), skip unconditionally. MTP layers always
+#       retain a complete `Indexer`. During weight loading, Indexer weights
+#       belonging to skip layers are filtered out so the `AutoWeightsLoader`
+#       never sees them — this is necessary because GLM-5.1 checkpoints carry
+#       Indexer weights for every layer even when the module is not created.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
