@@ -10,6 +10,7 @@ self-hosted-runner:
     - linux-aarch64-a3-4
     - linux-aarch64-a3-8
     - linux-aarch64-a3-0
+    - linux-aarch64-a3-0-cn12-001
     - linux-amd64-cpu-2-hk
     - linux-amd64-cpu-4-hk
     - linux-amd64-cpu-8-hk
@@ -20,3 +21,4 @@ self-hosted-runner:
     - linux-aarch64-a2b3-2
     - linux-aarch64-a2b3-4
     - linux-aarch64-a2b3-8
+    - linux-aarch64-a2b1-8

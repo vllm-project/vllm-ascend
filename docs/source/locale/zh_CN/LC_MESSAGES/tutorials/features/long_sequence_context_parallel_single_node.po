@@ -147,15 +147,6 @@ msgid ""
 "`Qwen3-235B-A22B-w8a8` for reference only."
 msgstr "2. 执行后可获取结果，以下为`Qwen3-235B-A22B-w8a8`的结果，仅供参考。"
 
-msgid ""
-"| dataset  | version | metric | mode | vllm-api-general-chat |\n"
-"|----------| ----- | ----- | ----- |-----------------------|\n"
-"| aime2024 | - | accuracy | gen | 83.33 |"
-msgstr ""
-"| dataset  | version | metric | mode | vllm-api-general-chat |\n"
-"|----------| ----- | ----- | ----- |-----------------------|\n"
-"| aime2024 | - | accuracy | gen | 83.33 |"
-
 msgid "## Performance"
 msgstr "## 性能"
 
@@ -197,17 +188,17 @@ msgid ""
 "After about several minutes, you can get the performance evaluation result."
 msgstr "大约几分钟后，即可获取性能评估结果。"
 
-msgid ""
-"| dataset | version | metric      | mode | ttft   |\n"
-"|---------| ----- |-------------|------|--------|\n"
-"| random  | - | performance | perf | 17.36s |"
-msgstr ""
-"| dataset | version | metric      | mode | ttft   |\n"
-"|---------| ----- |-------------|------|--------|\n"
-"| random  | - | performance | perf | 17.36s |"
-
 msgid "**Notice:**"
 msgstr "**注意：**"
 
 msgid "### Using AISBench"
 msgstr "### 使用AISBench"
+
+msgid "| dataset  | version | metric | mode | vllm-api-general-chat |"
+msgstr "| 数据集  | 版本 | 指标 | 模式 | vllm-api-general-chat |"
+
+msgid "| dataset | version | metric      | mode | ttft   |"
+msgstr "| 数据集 | 版本 | 指标      | 模式 | ttft   |"
+
+msgid "| random  | - | performance | perf | 17.36s |"
+msgstr "| random  | - | performance | perf | 17.36s |"

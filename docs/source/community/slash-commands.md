@@ -70,7 +70,7 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 /nightly qwen3-vl-32b-instruct-w8a8
 
 # Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.23.0
+/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.24.0
 
 # Run all tests on a specific branch
 /nightly all --branch my-feature-branch
@@ -88,7 +88,7 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 /nightly all --aop_enabled
 
 # Run specific test with AOP on a release branch
-/nightly test_custom_op --branch releases/v0.23.0 --aop_enabled
+/nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
@@ -107,7 +107,7 @@ Cherry-pick a PR's commits onto a specified target branch and create a new PR. T
 
 ```text
 # Cherry-pick to a release branch
-/cherry-pick releases/v0.23.0
+/cherry-pick releases/v0.24.0
 
 # Cherry-pick to main
 /cherry-pick main

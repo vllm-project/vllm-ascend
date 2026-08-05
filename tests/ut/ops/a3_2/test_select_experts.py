@@ -81,12 +81,17 @@ def setup_vllm_config_mock(mocker: MockerFixture):
     mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
     mock_vllm_config.model_config.max_model_len = 2048
 
-    mocker.patch("vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config", return_value=mock_vllm_config)
+    mocker.patch("vllm_ascend.ops.fused_moe.routed_experts.get_current_vllm_config", return_value=mock_vllm_config)
 
 
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     mock_moe_comm_method = MagicMock()
+    mock_eplb_config = MagicMock(dynamic_eplb=False, expert_map_path=None)
+    mock_ascend_config = MagicMock(
+        enable_multistream_moe=False,
+        eplb_config=mock_eplb_config,
+    )
 
     def mock_prepare(hidden_states, router_logits, **kwargs):
         return MoEPrepareOutput(
@@ -107,7 +112,6 @@ def mock_dist_env(mocker: MockerFixture):
 
     mock_moe_comm_method.finalize.side_effect = mock_finalize
     dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
-    mock_weight_prefetch_method = MagicMock()
     mock_forward_context_obj = MagicMock(
         moe_comm_method=mock_moe_comm_method,
         moe_comm_type=MoECommType.MC2,
@@ -130,23 +134,23 @@ def mock_dist_env(mocker: MockerFixture):
         patch("vllm.model_executor.layers.fused_moe.layer.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
         patch("vllm.model_executor.layers.fused_moe.config.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
         patch(
-            "vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config",
-            return_value=MagicMock(enable_multistream_moe=False, expert_map_path=None),
+            "vllm_ascend.patch.platform.patch_fused_moe.get_ascend_config",
+            return_value=mock_ascend_config,
         ),
         patch(
-            "vllm_ascend.ops.fused_moe.fused_moe.init_eplb_config",
+            "vllm_ascend.ops.fused_moe.routed_experts.get_ascend_config",
+            return_value=mock_ascend_config,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.routed_experts.init_eplb_config",
             return_value=(torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]), None, 0),
         ),
-        patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=mock_forward_context_obj),
+        patch("vllm_ascend.ops.fused_moe.routed_experts.get_forward_context", return_value=mock_forward_context_obj),
         patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=mock_forward_context_obj),
         patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher", return_value=None),
-        patch(
-            "vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
-            return_value=mock_weight_prefetch_method,
-        ),
     ):
         yield {
             "mock_forward_context_obj": mock_forward_context_obj,
@@ -160,13 +164,14 @@ def mock_moe_env(mocker: MockerFixture):
         patch(
             "torch_npu.npu_moe_init_routing",
             return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), torch.tensor([0, 1, 2, 4, 6, 2, 7, 1])),
+            create=True,
         ),
-        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2))),
-        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)])),
-        patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_moe_finalize_routing", return_value=(torch.randn(16, 2))),
+        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2)), create=True),
+        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2)), create=True),
+        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2)), create=True),
+        patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)]), create=True),
+        patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2)), create=True),
+        patch("torch_npu.npu_moe_finalize_routing", return_value=(torch.randn(16, 2)), create=True),
     ):
         if hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             with (
@@ -399,14 +404,10 @@ class TestExpertsSelector:
         assert (topk_ids >= 0).all()
         assert (topk_ids < num_experts).all()
 
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method")
     @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=False)
-    def test_select_experts_native_softmax_matches_expected(self, _, mock_get_weight_prefetch_method):
+    def test_select_experts_native_softmax_matches_expected(self, _):
         hidden_states = torch.tensor([[1.0, 0.0, -1.0, 2.0], [0.5, 1.5, -0.5, 1.0]], dtype=torch.float32)
         router_logits = torch.tensor([[3.0, 1.0, 0.0, 2.0], [0.0, 4.0, 1.0, 2.0]], dtype=torch.float32)
-
-        prefetch_method = MagicMock()
-        mock_get_weight_prefetch_method.return_value = prefetch_method
 
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
@@ -426,7 +427,6 @@ class TestExpertsSelector:
         expected_weights, expected_ids = expected_probs.topk(2, dim=-1)
         expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
 
-        prefetch_method.maybe_prefetch_moe_weight_preprocess.assert_called_once_with(hidden_states, "gate_up")
         torch.testing.assert_close(topk_weights, expected_weights.to(hidden_states.dtype))
         assert torch.equal(topk_ids, expected_ids.to(torch.int32))
 
@@ -459,9 +459,8 @@ class TestExpertsSelector:
         assert torch.equal(actual_ids, expected_ids)
         torch.testing.assert_close(actual_weights, expected_weights)
 
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
     @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=False)
-    def test_select_experts_invalid_scoring_func_raises(self, _, __):
+    def test_select_experts_invalid_scoring_func_raises(self, _):
         hidden_states = torch.randn(2, 4)
         router_logits = torch.randn(2, 4)
 

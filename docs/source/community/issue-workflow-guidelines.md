@@ -1,6 +1,6 @@
 # Issue Workflow Guidelines
 
-This document defines the standard lifecycle for Issues in the vLLM Ascend project — from creation through triage, active handling, and final closure. It establishes consistent label usage, owner assignment, and communication expectations to ensure smooth collaboration between contributors and maintainers.
+This document defines the standard lifecycle for [Issues](https://github.com/vllm-project/vllm-ascend/issues) in the vLLM Ascend project — from creation through triage, active handling, and final closure. It establishes consistent label usage, owner assignment, and communication expectations to ensure smooth collaboration between contributors and maintainers.
 
 ## 1. Label Categories
 
@@ -58,8 +58,8 @@ These labels describe the nature of the issue.
 
 When an issue is first picked up by the on-call maintainer:
 
-- Apply `triaged` to signal that the issue can be classified and Add the relevant module label so the issue can be routed to the appropriate module maintainer for detailed triage.
-- Apply `triage review` to signal that the issue requires more review and specitfic analysis before classification.
+- Apply `triaged` to signal that the issue can be classified and add the relevant module label so the issue can be routed to the appropriate module maintainer for detailed triage.
+- Apply `triage review` to signal that the issue requires more review and specific analysis before classification.
 
 ### Phase 2 — Triage and Analysis
 

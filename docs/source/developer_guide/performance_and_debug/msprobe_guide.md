@@ -31,8 +31,9 @@ If you need to dump cudagraph graphs, you need to install from source code:
    ```bash
    git clone https://gitcode.com/Ascend/msprobe.git
    cd msprobe
-   python3 setup.py bdist_wheel --include-mod=aclgraph_dump --no-check
-   pip install dist/*.whl
+   pip install uv
+   python3 build.py -e include-mod=aclgraph_dump -e no-check=true
+   pip install artifacts/mindstudio_probe*.whl
    ```
 
 ## 2. Collecting Data with `msprobe`
@@ -228,7 +229,7 @@ Graph mode:
            └── dump.json
    ```
 
-   - `dump.json`: Statistics for the forward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode="md5"`. See [dump.json file description](#dumpjson-file-description) for details.
+   - `dump.json`: See [dump.json file description](#dumpjson-file-description) for details.
 
 ## 5. Analyze the results
 

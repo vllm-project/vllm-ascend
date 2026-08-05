@@ -21,6 +21,3 @@ msgstr ""
 
 msgid "# Accuracy"
 msgstr "# 精度"
-
-#~ msgid "Accuracy"
-#~ msgstr "准确性"

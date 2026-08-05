@@ -1,0 +1,123 @@
+### 📚 The doc PR
+
+**本 PR 的内容及必要性**
+本 PR 提交 Qwen2.5-Omni-7B 在单卡 Ascend 910B3 上的部署与性能测试交付报告，交付人雷成仙（@leicx_dc），包括：
+
+测试环境与软件栈版本记录（vLLM 0.21.0 / vLLM-Ascend 0.21.0rc1/ npu-smi 25.2.0）
+本次测试单curl和vLLM Benchmark的配置和命令
+
+**是否引入面向用户的变更？**
+否。本 PR 仅新增社区测试交付文档，不修改任何程序接口或运行行为。
+
+**如何测试？**
+在单张 Ascend 910B3上完成验证：
+步骤：
+1、部署服务所用的模型和权重类别
+2、分别执行curl和vLLM Benchmark命令，并观察执行结果
+
+- 模型选择
+   Qwen2.5-Omni-7B
+
+- 部署脚本
+```
+export MODEL_PATH="shared_assets/QuenchingAction/Toolchain/Model/Qwen2.5-Omni-7B"
+export LOCAL_MEDIA_PATH=$HOME/.cache/vllm/assets/vllm_public_assets/
+
+
+vllm serve "${MODEL_PATH}" \
+--host 0.0.0.0 \
+--port 8000 \
+--served-model-name Qwen-Omni \
+--allowed-local-media-path ${LOCAL_MEDIA_PATH} \
+--trust-remote-code \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--no-enable-prefix-caching
+``` 
+
+- 测试配置脚本或命令
+curl测试命令
+```
+curl http://localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -H "Authorization: Bearer EMPTY"   -d '{
+    "model": "Qwen-Omni",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What is the text in the illustration?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"
+            }
+          }
+        ]
+      }
+    ],
+    "max_completion_tokens": 100,
+    "temperature": 0.7
+  }'
+``` 
+
+vLLM Benchmark的配置和命令
+```
+vllm bench serve \
+  --backend vllm \
+    --model shared_assets/QuenchingAction/Toolchain/Model/Qwen2.5-Omni-7B \
+  --served-model-name Qwen-Omni \
+  --port 8000 \
+  --dataset-name random \
+  --random-input 3500 \
+  --random-output 1500 \
+  --max-concurrency 20 \
+  --num-prompts 80 \
+  --save-result \
+  --result-dir ./benchmark_results/
+``` 
+
+- 测试结果
+curl测试命令结果
+```
+{"id":"chatcmpl-90b2ac26123ca70d","object":"chat.completion","created":1785904014,"prompt_routed_experts":null,"model":"Qwen-Omni","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is \"TONGYI Qwen\".","refusal":null,"annotations":null,"audio":null,"function_call":null,"reasoning":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null,"routed_experts":null}],"service_tier":null,"system_fingerprint":"vllm-0.21.0-9afcff33","usage":{"prompt_tokens":73,"total_tokens":88,"completion_tokens":15,"prompt_tokens_details":null,"completion_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"prompt_text":null,"kv_transfer_params":null}
+``` 
+截图
+
+<img width="1920" height="920" alt="Image" src="https://github.com/user-attachments/assets/d330b860-ea0b-442b-8fda-ccb2741a81a0" />
+
+vLLM Benchmark的配置和命令测试结果
+```
+============ Serving Benchmark Result ============
+Successful requests:                     80        
+Failed requests:                         0         
+Maximum request concurrency:             20        
+Benchmark duration (s):                  163.16    
+Total input tokens:                      280000    
+Total generated tokens:                  120000    
+Request throughput (req/s):              0.49      
+Output token throughput (tok/s):         735.46    
+Peak output token throughput (tok/s):    921.00    
+Peak concurrent requests:                25.00     
+Total token throughput (tok/s):          2451.54   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1914.71   
+Median TTFT (ms):                        952.65    
+P99 TTFT (ms):                           7422.44   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          25.88     
+Median TPOT (ms):                        25.69     
+P99 TPOT (ms):                           28.07     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           25.88     
+Median ITL (ms):                         22.70     
+P99 ITL (ms):                            182.71    
+==================================================
+``` 
+截图
+<img width="1920" height="920" alt="Image" src="https://github.com/user-attachments/assets/694228cc-d27a-48da-b8ed-9739b21177f4" />
+
+
+### Suggest a potential alternative/fix
+
+_No response_

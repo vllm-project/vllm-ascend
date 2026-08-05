@@ -54,10 +54,6 @@
      FnExecutionPlan fnExecutionPlan = FN_EXECUTION_PLAN_INVALID;
      FnHostPlan fnHostPlan;
      const int64_t *qslData = nullptr;
-     if (isFn && tiling->inputMode == 0) {
-         const gert::Tensor *qslTensor = context->GetOptionalInputTensor(QUERY_START_LOC_INDEX);
-         qslData = (qslTensor != nullptr) ? qslTensor->GetData<int64_t>() : nullptr;
-     }
  
      if (isFn) {
          fnHostPlan = ChooseFnHostPlan(context, *tiling, ubSize, coreNum);
@@ -169,4 +165,3 @@
      .TilingParse<CausalConv1dCompileInfo>(TilingParseForCausalConv1d);
  
  }
- 

@@ -346,7 +346,7 @@ public:
                     CopyIn(
                         xGm[xGmBaseOffset + rowOuterIdx * tilingData->stage2RowFactor * tilingData->hcMult * tilingData->d +
                             dLoopIdx * tilingData->dFactor],
-                        xLocal, tilingData->stage2RowFactor * tilingData->hcMult, curDFactor, tilingData->d - curDFactor);
+                        xLocal, curRowFactor * tilingData->hcMult, curDFactor, tilingData->d - curDFactor);
                     xQue.template EnQue(xLocal);
                     xLocal = xQue.template DeQue<T>();
 

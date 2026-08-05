@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -25,13 +24,12 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
@@ -489,66 +487,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: torch.Tensor | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
-        tid2eid: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
-        num_logical_experts = get_moe_num_logical_experts(
-            layer,
-            num_experts,
-            global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
-        )
-        assert router_logits.shape[1] == num_logical_experts, (
-            "Number of global experts mismatch (excluding redundancy): "
-            f"router_logits.shape[1]={router_logits.shape[1]}, num_logical_experts={num_logical_experts}"
-        )
-
-        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_logical_experts,
-            tid2eid=tid2eid,
-        )
-
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
-        if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
-
         topk_weights = topk_weights.to(x.dtype)
 
         if self.dynamic_eplb:
@@ -558,6 +501,22 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale = layer.w2_weight_scale_list
             w1_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
+        elif (
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
+            and get_ascend_config().enable_fused_mc2 == 1
+            and _MEGA_MOE_SUPPORTED
+        ):
+            w1 = layer.cann_mega_moe_w13_weight_list
+            w1_scale = layer.cann_mega_moe_w13_weight_scale_list
+            w2 = layer.cann_mega_moe_w2_weight_list
+            w2_scale = layer.cann_mega_moe_w2_weight_scale_list
+
+            def cast_bias_to_fp32(bias):
+                lst = bias if isinstance(bias, list) else [bias]
+                return [t if t.dtype == torch.float32 else t.to(torch.float32) for t in lst]
+
+            w1_scale_bias = cast_bias_to_fp32(layer.cann_mega_moe_w13_scale_bias_list)
+            w2_scale_bias = cast_bias_to_fp32(layer.cann_mega_moe_w2_scale_bias_list)
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale]
@@ -576,13 +535,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
-                activation=activation,
+                expert_map=getattr(layer, "ascend_expert_map", None),
+                global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
+                mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
+                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
+                log2phy=getattr(layer, "log2phy", None),
+                pertoken_scale=getattr(layer, "_ascend_pertoken_scale", None),
+                activation=getattr(layer, "activation", "silu"),
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
@@ -719,10 +678,38 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim new_quant_version path
         layer.w13_weight.data = self.pack_int4_to_int8(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
+        # FIX(mega W4A8 all-route): with MegaMoe on, keep ND int8 (skip trans_nz + pack_to_int32);
+        # _maybe_build_cann_mega_moe_lists casts each expert slice to FRACTAL_NZ individually. See
+        # the modelslim path below for the full rationale. Non-mega keeps the standard NZ-int32 form.
+        if get_ascend_config().enable_fused_mc2 == 1 and not self.dynamic_eplb and _MEGA_MOE_SUPPORTED:
+            self._maybe_build_cann_mega_moe_lists(layer)
+        else:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+
+    def _maybe_build_cann_mega_moe_lists(self, layer):
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+        layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+
+        layer.cann_mega_moe_w13_weight_scale_list = [t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
+        if not hasattr(layer, "w13_scale_bias"):
+            raise RuntimeError(
+                "MegaMoe only support W4A8 INT on A2/A3 for weight with w1 scale bias and w2 scale bias."
+                "Try to disable MegaMoe to avoid this error."
+            )
+        layer.cann_mega_moe_w13_scale_bias_list = [t.reshape(-1) for t in layer.w13_scale_bias.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_scale_bias_list = [t.reshape(-1) for t in layer.w2_scale_bias.data.unbind(dim=0)]
+        del layer.w13_weight
+        del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
+        del layer.w13_scale_bias
+        del layer.w2_scale_bias
 
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -749,10 +736,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.is_per_channel_weight:
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
         if self.dynamic_eplb:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
             layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
@@ -773,6 +760,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w2_weight_scale
             del layer.w13_scale_bias
             del layer.w2_scale_bias
+        # keep weights as ND int8 when MegaMoe is on (skip trans_nz).
+        elif get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+            self._maybe_build_cann_mega_moe_lists(layer)
+
         else:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
             layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)

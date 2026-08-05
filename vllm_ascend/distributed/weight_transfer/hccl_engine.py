@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
 from vllm.config import VllmConfig
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -25,7 +24,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_broadcast_consumer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -116,44 +114,29 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
 
-    if vllm_version_is("0.23.0"):
+    def __init__(  # type: ignore[misc]
+        self,
+        config: WeightTransferConfig,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        model: torch.nn.Module,
+    ) -> None:
+        super().__init__(config, vllm_config, device, model)
+        self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
 
-        def __init__(
-            self,
-            config: WeightTransferConfig,
-            parallel_config: ParallelConfig,
-            model: torch.nn.Module | None = None,
-        ) -> None:
-            super().__init__(config, parallel_config, model)
-            self.model_update_group: PyHcclCommunicator | None = None
+    def start_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
 
-    else:
+        initialize_layerwise_reload(self.model)
 
-        def __init__(  # type: ignore[misc]
-            self,
-            config: WeightTransferConfig,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            model: torch.nn.Module,
-        ) -> None:
-            super().__init__(config, vllm_config, device, model)
-            self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
+    def finish_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
 
-    if not vllm_version_is("0.23.0"):
-
-        def start_weight_update(self) -> None:
-            from vllm.model_executor.model_loader.reload import (
-                initialize_layerwise_reload,
-            )
-
-            initialize_layerwise_reload(self.model)
-
-        def finish_weight_update(self) -> None:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-            )
-
-            finalize_layerwise_reload(self.model, self.model_config)
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """
@@ -186,7 +169,6 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
     def receive_weights(
         self,
         update_info: HCCLWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """
         Receive weights from trainer via HCCL broadcast and load them incrementally.
@@ -198,8 +180,6 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         Args:
             update_info: HCCL update info containing parameter names, dtypes, shapes,
                         and packed flag
-            load_weights: Callable that loads weights into the model. Called
-                         incrementally for each batch of weights to avoid OOM.
         """
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
@@ -215,7 +195,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
-                post_unpack_func=load_weights,
+                post_unpack_func=self.model.load_weights,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
             )
@@ -225,7 +205,7 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                 dtype = getattr(torch, dtype_name)
                 weight = torch.empty(shape, dtype=dtype, device="npu")
                 self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
-                load_weights([(name, weight)])
+                self.model.load_weights([(name, weight)])
                 del weight
 
     def shutdown(self) -> None:

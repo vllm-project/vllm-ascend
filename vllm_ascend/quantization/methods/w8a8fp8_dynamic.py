@@ -70,7 +70,7 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
 class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
     """FusedMoE method for Ascend W8A8FP8_DYNAMIC."""
 
-    quant_type: QuantType = QuantType.W8A8FP8
+    quant_type: QuantType = QuantType.W8A8FP
 
     def __init__(self):
         super().__init__()
