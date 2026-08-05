@@ -2157,41 +2157,10 @@ class MooncakeConnectorWorker:
         return cls._INDEX_CACHE_SUFFIX in layer_name
 
     @staticmethod
-    def _get_spec_head_size(spec: Any) -> int | None:
-        for key in ("head_size", "head_size_v"):
-            head_size = getattr(spec, key, None)
-            if isinstance(head_size, int):
-                return head_size
-        return None
-
-    @classmethod
-    def _sfa_index_cache_spec_from_attn(cls, attn_spec: Any) -> AscendSFAIndexerCacheSpec:
-        """MiniMax M3 indexer side cache: key-only spec aligned with parent attn block."""
-        block_size = getattr(attn_spec, "block_size", None)
-        if not isinstance(block_size, int):
-            block_size = 128
-        head_size = cls._get_spec_head_size(attn_spec)
-        if not isinstance(head_size, int):
-            head_size = 128
-        dtype = getattr(attn_spec, "dtype", torch.bfloat16)
-        return AscendSFAIndexerCacheSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=head_size,
-            dtype=dtype,
-        )
-
-    @classmethod
     def _build_layer_specs_from_kv_cache_config(
-        cls,
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
-        """Per-layer KV cache specs (Full attn vs SFA index_cache).
-
-        Scheduler may collapse ``KVCacheGroupSpec.kv_cache_spec`` to a single
-        ``FullAttentionSpec`` while ``layer_names`` still includes ``*.index_cache``.
-        Reconstruct indexer specs for those layers so Mooncake can split transfer groups.
-        """
+        """Return the real per-layer specs retained by the KV cache config."""
         layer_specs: dict[str, Any] = {}
         for group in kv_cache_config.kv_cache_groups:
             group_kv_spec = group.kv_cache_spec
@@ -2200,10 +2169,7 @@ class MooncakeConnectorWorker:
                     layer_specs[layer_name] = group_kv_spec.kv_cache_specs[layer_name]
                 continue
             for layer_name in group.layer_names:
-                if cls._is_index_cache_layer(layer_name):
-                    layer_specs[layer_name] = cls._sfa_index_cache_spec_from_attn(group_kv_spec)
-                else:
-                    layer_specs[layer_name] = group_kv_spec
+                layer_specs[layer_name] = group_kv_spec
         return layer_specs
 
     @staticmethod
@@ -2235,10 +2201,14 @@ class MooncakeConnectorWorker:
         return group_spec.get("kv_cache_spec_type") == "AscendSFAIndexerCacheSpec"
 
     def _get_spec_total_num_kv_heads(self, spec: Any, layer_idx: int) -> int | None:
-        if isinstance(spec, (MLAAttentionSpec, AscendSlidingWindowMLASpec, AscendSFAIndexerCacheSpec)):
+        # AscendSFAIndexerCacheSpec inherits MLAAttentionSpec for scheduler
+        # grouping, but remains a distinct key-only transfer layout.
+        if isinstance(spec, AscendSFAIndexerCacheSpec):
+            return 1
+        if isinstance(spec, (MLAAttentionSpec, AscendSlidingWindowMLASpec)):
             return 1
         local_num_kv_heads = self._get_spec_num_key_value_heads(spec)
-        if local_num_kv_heads is None or isinstance(spec, MLAAttentionSpec):
+        if local_num_kv_heads is None:
             return local_num_kv_heads
 
         model_config = self.vllm_config.model_config
@@ -2662,42 +2632,11 @@ class MooncakeConnectorWorker:
             return False
         return any(".index_cache" in layer_name for layer_name in group_spec.get("layer_names", []))
 
-    def _get_paired_fullattention_group(self, kv_cache_group_id: int) -> tuple[dict[str, Any], list[int]] | None:
-        for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if group_spec.get("kv_cache_spec_type") != "FullAttentionSpec":
-                continue
-            if self._get_kv_cache_group_id(group_idx, group_spec) == kv_cache_group_id:
-                return group_spec, layer_indices
-        return None
-
-    def _get_kernel_block_scale(self, group_idx: int, group_spec: dict[str, Any], layer_indices: list[int]) -> int:
-        """Kernel block scale for logical->tensor block expansion.
-
-        MiniMax M3 index_cache tensors are row-indexed by logical KV block id (same as
-        sparse K/V), but their metadata layer can report a larger block_size_scale from
-        tensor sizing. Using that scale transfers the wrong tensor rows (zeros).
-        """
-        if self._is_m3_index_cache_group(group_spec):
-            paired = self._get_paired_fullattention_group(self._get_kv_cache_group_id(group_idx, group_spec))
-            if paired is not None:
-                _paired_spec, paired_layer_indices = paired
-                if (
-                    paired_layer_indices
-                    and paired_layer_indices[0] < len(self.block_size_scale)
-                    and self.block_size_scale[paired_layer_indices[0]]
-                ):
-                    return self.block_size_scale[paired_layer_indices[0]][0]
+    def _get_kernel_block_scale(self, layer_indices: list[int]) -> int:
+        """Kernel block scale for logical-to-tensor block expansion."""
         if layer_indices and layer_indices[0] < len(self.block_size_scale) and self.block_size_scale[layer_indices[0]]:
             return self.block_size_scale[layer_indices[0]][0]
         return 1
-
-    def _get_kernel_prefix_skip_group_spec(self, group_idx: int, group_spec: dict[str, Any]) -> dict[str, Any]:
-        if not self._is_m3_index_cache_group(group_spec):
-            return group_spec
-        paired = self._get_paired_fullattention_group(self._get_kv_cache_group_id(group_idx, group_spec))
-        if paired is not None:
-            return paired[0]
-        return group_spec
 
     def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
         """No-CP per-group block ids at kernel granularity: (local, remote).
@@ -2714,7 +2653,7 @@ class MooncakeConnectorWorker:
         remote_block_size = meta.remote_block_size or self.block_size
 
         # kernel_size is the shared (P==D) granularity; remote_scale is derived from it.
-        local_scale = self._get_kernel_block_scale(group_idx, group_spec, layer_indices)
+        local_scale = self._get_kernel_block_scale(layer_indices)
         kernel_size = self.block_size // local_scale
         assert remote_block_size % kernel_size == 0, (
             f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
@@ -2726,8 +2665,7 @@ class MooncakeConnectorWorker:
         # Skip prefix-cached remote kernels (D-side already holds them). The token size of one
         # remote kernel is kernel_size * compress_ratio, so the number to skip is
         # num_computed_tokens // (kernel_size * compress_ratio).
-        prefix_group_spec = self._get_kernel_prefix_skip_group_spec(group_idx, group_spec)
-        remote_kernel_token_size = kernel_size * self._group_compress_ratio(prefix_group_spec)
+        remote_kernel_token_size = kernel_size * self._group_compress_ratio(group_spec)
         remote_start_idx = meta.num_computed_tokens // remote_kernel_token_size
         kernel_remote = kernel_remote[remote_start_idx:]
         num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
@@ -2741,7 +2679,7 @@ class MooncakeConnectorWorker:
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
                 continue
-            local_scale = self._get_kernel_block_scale(group_idx, group_spec, layer_indices)
+            local_scale = self._get_kernel_block_scale(layer_indices)
             kernel_size = self.block_size // local_scale
             assert remote_block_size % kernel_size == 0, (
                 f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
@@ -3398,6 +3336,10 @@ class MooncakeConnectorWorker:
         return num_d_block_heads // num_p_block_heads
 
     def _group_use_mla_rank_routing(self, group_spec: dict[str, Any]) -> bool:
+        # MiniMax M3 index caches inherit MLAAttentionSpec only to preserve
+        # their per-layer spec. Their TP layout is replicated, not MLA-sharded.
+        if self._is_m3_index_cache_group(group_spec):
+            return False
         spec_type = group_spec.get("kv_cache_spec_type", "")
         if spec_type not in ("MLAAttentionSpec", "AscendSFAIndexerCacheSpec"):
             return False
