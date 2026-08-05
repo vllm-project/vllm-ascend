@@ -814,8 +814,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         extra_args = {
                             "dequant_scale_key": c8_k_aq_scale,
                             "dequant_scale_value": c8_v_aq_scale,
-                            "key_antiquant_mode": 0,
-                            "value_antiquant_mode": 0,
+                            "key_quant_mode": 0,
+                            "value_quant_mode": 0,
                             "inner_precise": 1,
                         }
                         input_layout = "BNSD"
@@ -2432,7 +2432,7 @@ class AscendC8Fp8AttentionBackendImpl(AscendAttentionBackendImpl):
                 block_table=None,
                 input_layout="TND",
                 block_size=cache_block_size,
-                actual_seq_lengths=prefill_seq_qlen,
+                actual_seq_qlen=prefill_seq_qlen,
                 actual_seq_kvlen=prefill_seq_kvlen,
                 num_key_value_heads=self.num_kv_heads,
                 num_query_heads=self.num_heads,
