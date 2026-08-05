@@ -476,9 +476,11 @@ class BalanceScheduler(Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                            request
-                        )
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                        ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # In case of hybrid models, obtain hint for Marconi-style APC logic
                     if self.has_mamba_layers:

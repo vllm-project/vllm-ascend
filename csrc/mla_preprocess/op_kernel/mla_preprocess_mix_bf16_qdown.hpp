@@ -318,6 +318,39 @@ __aicore__ inline void ReduceSumCustom(const AscendC::LocalTensor<float> &dst_lo
 #endif
 }
 
+// Keep the reduction scratch bounded under the tight UB layout used by qm1.
+__aicore__ inline void ReduceMaxCustom(const AscendC::LocalTensor<float> &dst_local,
+                                       const AscendC::LocalTensor<float> &src_local,
+                                       const AscendC::LocalTensor<float> &work_local, int32_t count)
+{
+#ifdef __DAV_C220_VEC__
+    uint64_t mask = NUM_PER_REP_FP32;
+    int32_t repeatTimes = count / NUM_PER_REP_FP32;
+    int32_t tailCount = count % NUM_PER_REP_FP32;
+    int32_t bodyCount = repeatTimes * NUM_PER_REP_FP32;
+    AscendC::BinaryRepeatParams repeatParams;
+    repeatParams.src0RepStride = AscendC::ONE_REPEAT_BYTE_SIZE / AscendC::ONE_BLK_SIZE;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1RepStride = 0;
+    repeatParams.src1BlkStride = 1;
+    repeatParams.dstRepStride = 0;
+    repeatParams.dstBlkStride = 1;
+    Duplicate(work_local, -3.402823466e+38f, NUM_PER_REP_FP32);
+    AscendC::PipeBarrier<PIPE_V>();
+    if (likely(repeatTimes > 0)) {
+        Max(work_local, src_local, work_local, mask, repeatTimes, repeatParams);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+    if (unlikely(tailCount != 0)) {
+        Max(work_local, src_local[bodyCount], work_local, tailCount, 1, repeatParams);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+    AscendC::WholeReduceMax(dst_local, work_local, NUM_PER_REP_FP32, 1, 1, 1,
+                            AscendC::DEFAULT_REPEAT_STRIDE);
+    AscendC::PipeBarrier<PIPE_V>();
+#endif
+}
+
 template <typename T, bool WITH_BETA, bool FastComputeMode = false,
           QuantMode quantMode = QuantMode::PER_TENSOR_ASYMM_QUANT, bool NEED_DEQUANT = false>
 class Quant
@@ -477,7 +510,7 @@ public:
                 Abs(abs, fp32_xy, REPEAT_TIME_64, num_col_align_withStride_fp32 / REPEAT_TIME_64,
                     {1, 1, AscendC::DEFAULT_REPEAT_STRIDE, AscendC::DEFAULT_REPEAT_STRIDE});
                 AscendC::PipeBarrier<PIPE_V>();
-                ReduceMax(max, abs, work, num_col_ - input_stride_);
+                ReduceMaxCustom(max, abs, work, num_col_ - input_stride_);
                 AscendC::PipeBarrier<PIPE_V>();
                 float scaleOut = max.GetValue(0) / 127;
                 SET_FLAG(S, V, EVENT_ID0);
@@ -514,7 +547,7 @@ public:
             }
 
             AscendC::LocalTensor<half> tmpfp16 =
-                buf.ReinterpretCast<half>()[OFFSET_SUM * num_col_align_withStride_fp32 * 2];
+                buf.ReinterpretCast<half>()[OFFSET_GAMMA * num_col_align_withStride_fp32];
             CastFrom32To16(tmpfp16, fp32_xy, num_col_align_withStride_fp32);
             AscendC::PipeBarrier<PIPE_V>();
             CastFromF16ToI8(dstTensor, tmpfp16, quantMin_, num_col_align_withStride_fp16);
@@ -800,7 +833,7 @@ public:
                 Abs(abs, fp32_xy, REPEAT_TIME_64, num_col_align_withStride_fp32 / REPEAT_TIME_64,
                     {1, 1, AscendC::DEFAULT_REPEAT_STRIDE, AscendC::DEFAULT_REPEAT_STRIDE});
                 AscendC::PipeBarrier<PIPE_V>();
-                ReduceMax(max, abs, work, num_col_ - input_stride_);
+                ReduceMaxCustom(max, abs, work, num_col_ - input_stride_);
                 AscendC::PipeBarrier<PIPE_V>();
                 float scaleOut = max.GetValue(0) / 127;
                 SET_FLAG(S, V, EVENT_ID0);
@@ -836,6 +869,9 @@ public:
                 WAIT_FLAG(MTE3, V, EVENT_ID0);
             }
 
+            // Gamma at OFFSET_GAMMA is reused by every row handled by this
+            // vector core.  Store the conversion temporary in the now-dead
+            // sqx region so processing pid > 0 cannot overwrite gamma.
             AscendC::LocalTensor<half> tmpfp16 =
                 buf.ReinterpretCast<half>()[OFFSET_SUM * num_col_align_withStride_fp32 * 2];
             CastFrom32To16(tmpfp16, fp32_xy, num_col_align_withStride_fp32);
@@ -2458,6 +2494,16 @@ public:
         this->ropeSplitSizeTwo_ = mlaParams_.ropeSplitSizeTwo;
         this->hiddenStrideRope_ = mlaParams_.hiddenStrideRope;
         this->qkNopeHeadDim_ = mlaParams_.qkNopeHeadDim;
+        this->kv_cache_block_size_ = mlaParams_.kvCacheBlockSize == 0 ? 128U : mlaParams_.kvCacheBlockSize;
+        uint64_t defaultCacheStride0 = static_cast<uint64_t>(kv_cache_block_size_) *
+            (CACHE_MODE == CACHE_MODE_KVCACHE ? static_cast<uint64_t>(splitSizeOne_)
+                                              : static_cast<uint64_t>(splitRmsNormSizeOne_));
+        uint64_t defaultRopeStride0 =
+            static_cast<uint64_t>(kv_cache_block_size_) * static_cast<uint64_t>(splitRmsNormSizeTwo_);
+        this->kv_cache_stride0_ =
+            mlaParams_.kvCacheStride0 == 0 ? defaultCacheStride0 : mlaParams_.kvCacheStride0;
+        this->kv_cache_rope_stride0_ =
+            mlaParams_.kvCacheRopeStride0 == 0 ? defaultRopeStride0 : mlaParams_.kvCacheRopeStride0;
     }
 
     __aicore__ inline void Init(GM_ADDR hiddenStateGm, GM_ADDR quantScale1Gm,
@@ -2573,9 +2619,26 @@ private:
     uint32_t ropeSplitSizeTwo_;
     uint32_t hiddenStrideRope_;
     uint32_t qkNopeHeadDim_;
+    uint32_t kv_cache_block_size_;
+    uint64_t kv_cache_stride0_;
+    uint64_t kv_cache_rope_stride0_;
 
     constexpr static uint32_t C0_SIZE = 16;
     constexpr static uint32_t I8_C0_SIZE = 32;
+
+    __aicore__ inline uint64_t GetCacheOffset(uint64_t slotValue, uint64_t innerSize, uint64_t stride0) const
+    {
+        uint64_t blockIdx = slotValue / kv_cache_block_size_;
+        uint64_t blockOffset = slotValue % kv_cache_block_size_;
+        return blockIdx * stride0 + blockOffset * innerSize;
+    }
+
+    __aicore__ inline uint64_t GetNzCacheOffset(uint64_t slotValue, uint64_t c0Size, uint64_t stride0) const
+    {
+        uint64_t blockIdx = slotValue / kv_cache_block_size_;
+        uint64_t blockOffset = slotValue % kv_cache_block_size_;
+        return blockIdx * stride0 + blockOffset * c0Size;
+    }
 
     template <class T1>
     __aicore__ inline void RmsNormAndRopeConvergence1(
@@ -2624,13 +2687,10 @@ private:
                                   splitRmsNormSizeTwo_);
             }
             SET_FLAG(MTE2, V, EVENT_ID0);
-            // ND
-            uint64_t cacheStart = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitSizeOne_);
-            uint64_t cacheStart1 = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitRmsNormSizeOne_);
-            uint64_t cacheStart2 = static_cast<uint64_t>(slotValue) * static_cast<uint64_t>(splitRmsNormSizeTwo_);
-            // NZ
-            uint32_t outer_idx = slotValue / 128;
-            uint32_t inner_idx = slotValue % 128;
+            uint64_t cacheSlot = static_cast<uint64_t>(slotValue);
+            uint64_t cacheStart = GetCacheOffset(cacheSlot, splitSizeOne_, kv_cache_stride0_);
+            uint64_t cacheStart1 = GetCacheOffset(cacheSlot, splitRmsNormSizeOne_, kv_cache_stride0_);
+            uint64_t cacheStart2 = GetCacheOffset(cacheSlot, splitRmsNormSizeTwo_, kv_cache_rope_stride0_);
 
             SET_FLAG(S, MTE3, EVENT_ID0);
             /* RmsNorm start */
@@ -2738,36 +2798,38 @@ private:
             if constexpr (CACHE_MODE == CACHE_MODE_KVCACHE) {
                 DataCopy(keycacheGmTensor1[cacheStart], outTmpTensor, splitSizeOne_);
             } else if constexpr (CACHE_MODE == CACHE_MODE_INT8_NZCACHE) {
-                uint64_t cacheSatartI8Nz1 = outer_idx * 128 * 512 + inner_idx * I8_C0_SIZE;
-                uint64_t cacheSatartNz2 = outer_idx * 128 * 64 + inner_idx * C0_SIZE;
+                uint64_t cacheSatartI8Nz1 =
+                    GetNzCacheOffset(cacheSlot, I8_C0_SIZE, kv_cache_stride0_);
+                uint64_t cacheSatartNz2 =
+                    GetNzCacheOffset(cacheSlot, C0_SIZE, kv_cache_rope_stride0_);
                 // nope:int8 nz
                 AscendC::DataCopyExtParams outExt;
                 outExt.blockCount = splitRmsNormSizeOne_ / I8_C0_SIZE;
                 outExt.blockLen = I8_C0_SIZE * sizeof(int8_t);
                 outExt.srcStride = 0;
-                outExt.dstStride = (128 * I8_C0_SIZE - I8_C0_SIZE) * sizeof(int8_t);
+                outExt.dstStride = (kv_cache_block_size_ * I8_C0_SIZE - I8_C0_SIZE) * sizeof(int8_t);
                 DataCopyPad(keycacheGmTensor1[cacheSatartI8Nz1], int8OutTensor, outExt);
                 // rope:T1 nz
                 outExt.blockCount = splitRmsNormSizeTwo_ / C0_SIZE;
                 outExt.blockLen = C0_SIZE * sizeof(T1);
                 outExt.srcStride = 0;
-                outExt.dstStride = (128 * C0_SIZE - C0_SIZE) * sizeof(T1);
+                outExt.dstStride = (kv_cache_block_size_ * C0_SIZE - C0_SIZE) * sizeof(T1);
                 DataCopyPad(keycacheGmTensor2[cacheSatartNz2], outTmpTensor[splitRmsNormSizeOne_], outExt);
             } else if constexpr (CACHE_MODE == CACHE_MODE_NZCACHE) {
-                uint64_t cacheSatartNz1 = outer_idx * 128 * 512 + inner_idx * C0_SIZE;
-                uint64_t cacheSatartNz2 = outer_idx * 128 * 64 + inner_idx * C0_SIZE;
+                uint64_t cacheSatartNz1 = GetNzCacheOffset(cacheSlot, C0_SIZE, kv_cache_stride0_);
+                uint64_t cacheSatartNz2 = GetNzCacheOffset(cacheSlot, C0_SIZE, kv_cache_rope_stride0_);
                 // nope:T1 nz
                 AscendC::DataCopyExtParams outExt;
                 outExt.blockCount = splitRmsNormSizeOne_ / C0_SIZE;
                 outExt.blockLen = C0_SIZE * sizeof(T1);
                 outExt.srcStride = 0;
-                outExt.dstStride = (128 * C0_SIZE - C0_SIZE) * sizeof(T1);
+                outExt.dstStride = (kv_cache_block_size_ * C0_SIZE - C0_SIZE) * sizeof(T1);
                 DataCopyPad(keycacheGmTensor1[cacheSatartNz1], outTmpTensor, outExt);
                 // rope:T1 nz
                 outExt.blockCount = splitRmsNormSizeTwo_ / C0_SIZE;
                 outExt.blockLen = C0_SIZE * sizeof(T1);
                 outExt.srcStride = 0;
-                outExt.dstStride = (128 * C0_SIZE - C0_SIZE) * sizeof(T1);
+                outExt.dstStride = (kv_cache_block_size_ * C0_SIZE - C0_SIZE) * sizeof(T1);
                 DataCopyPad(keycacheGmTensor2[cacheSatartNz2], outTmpTensor[splitRmsNormSizeOne_], outExt);
             } else {
                 // keycache1
@@ -2903,8 +2965,8 @@ MLAOperation<InDtype, CACHE_MODE, weightFormat1, weightFormat2, weightFormat3, q
         AscendC::LocalTensor<float> res1_tensor = buf.GetBuffer<BufferType::ASCEND_UB, float>(base_offset + 64);
         AscendC::LocalTensor<float> res3_tensor = buf.GetBuffer<BufferType::ASCEND_UB, float>(
             base_offset + 64 + num_col_align_f32 * 4);
-        AscendC::LocalTensor<int8_t> output_tensor = buf.GetBuffer<BufferType::ASCEND_UB, int8_t>(
-            base_offset + 64 + num_col_align_f32 * 4 + BUF_FACTOR * num_col_align_f32 * 4 + 64);
+        // Stage1 input is dead after FP32 conversion; reuse it for int8 output.
+        AscendC::LocalTensor<int8_t> output_tensor = buf.GetBuffer<BufferType::ASCEND_UB, int8_t>(0);
         Quant1.Launch(output_tensor, input_tensor, scale_tensor, offset_tensor, res1_tensor, res3_tensor);
     }
     FftsCrossCoreSync<PIPE_MTE3, 0>(QUANT1);
