@@ -147,6 +147,7 @@ class LayerNormFn(torch.autograd.Function):
             group_size=group_size,
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
+            activation=activation,
         )
         ctx.save_for_backward(x, weight, bias, mean, rstd, z)
         ctx.x_shape_og = x_shape_og
@@ -196,4 +197,14 @@ class AscendRMSNormGated(RMSNormGated):
 
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+        return LayerNormFn.apply(
+            x,
+            self.weight,
+            self.bias,
+            z,
+            self.eps,
+            self.group_size,
+            self.norm_before_gate,
+            True,
+            self.activation,
+        )
