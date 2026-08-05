@@ -744,6 +744,7 @@ def main():
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
     )
+  
     parser.add_argument(
         "--modules",
         type=str,
