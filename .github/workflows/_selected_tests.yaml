@@ -130,8 +130,8 @@ jobs:
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install . \
-            --build-env-var UV_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/ \
-            --build-env-var UV_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
+            --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simpl
+            --extra-index-url https://download.pytorch.org/whl/cpu
           pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
