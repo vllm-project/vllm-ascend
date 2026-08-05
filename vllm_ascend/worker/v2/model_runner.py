@@ -490,7 +490,10 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        self._copy_num_computed_tokens_to_cpu()
+        # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
+        # from num_computed_tokens_np in _update_seq_lens_cpu instead.
+        if self.speculator is not None:
+            self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
@@ -512,13 +515,18 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        # wait for num_computed_tokens copy to cpu stream to finish.
-        self.num_computed_tokens_event.synchronize()
-        for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-            req_index = self.req_states.req_id_to_index[req_id]
-            # num_computed_tokens_cpu has reverted by num_rejected_tokens already.
-            # in super postprocess method.
-            self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+
+        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
+        # Without MTP, num_computed_tokens_np is already correct from update_requests.
+        if self.speculator is not None:
+            self.num_computed_tokens_event.synchronize()
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
+        else:
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.req_states.num_computed_tokens_np[req_index]
 
         # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):  # type: ignore
