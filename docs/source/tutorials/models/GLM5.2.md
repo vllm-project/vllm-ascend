@@ -159,7 +159,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
@@ -181,7 +181,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 **`--additional-config` fields (Ascend-specific optimizations):**
 
 - `"enable_dsa_cp": true`: Enables DSA context parallelism to accelerate long-context prefill. Since v0.21.0, DSA-CP is decoupled from FlashComm1 and must be enabled explicitly. With DSA-CP enabled, `layer_sharding` cannot include `o_proj`.
-- `"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; If the GPU memory is sufficient, you are advised to disable `enable_sparse_sfa_c8`. If the GPU memory is insufficient due to a long sequence length, you are advised to enable it.
+- `"enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model. `enable_sparse_li_c8` accelerates the layer-index (LI) sparse attention and is recommended to keep `true`; If the GPU memory is insufficient due to a long sequence length, you are advised to enable `enable_sparse_sfa_c8`.
 - `"enable_balance_scheduling": true`: Balance scheduling improves output throughput and reduces TPOT in the v1 scheduler. It replaces the deprecated environment variable `VLLM_ASCEND_BALANCE_SCHEDULING`; TTFT may degrade in some scenarios, and it is not recommended when Prefill-Decode is separated.
 - `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream, improving decode efficiency.
 
@@ -238,7 +238,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.90 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true}'  \
+--additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true}'  \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -289,7 +289,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.90 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true}'  \
+--additional-config '{"enable_dsa_cp": true,"enable_sparse_li_c8": true,"enable_balance_scheduling": true}'  \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 ```
 
@@ -305,9 +305,6 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node
 - `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
-**Scenario-specific `--additional-config` fields:**
-
-- `"fuse_muls_add": true`: Fuses element-wise mul/add operators to reduce kernel launch overhead.
 
 **Notice:**
 This scenario enables `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
@@ -1029,7 +1026,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
         ]
     }
     }' \
-    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}' \
+    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}' \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'
 ```
 
@@ -1125,7 +1122,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     '{
         "cudagraph_mode": "FULL_DECODE_ONLY",
     }' \
-    --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "recompute_scheduler_enable": true}' \
+    --additional-config '{"multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "recompute_scheduler_enable": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
 ```
 
@@ -1261,7 +1258,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1328,7 +1325,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1392,7 +1389,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --enforce-eager \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
   --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1462,7 +1459,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true},"multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
