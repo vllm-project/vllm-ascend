@@ -584,8 +584,9 @@ jobs:
       OBS_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
 
-  select-recommended-tests:
-    name: Parse recommended test list
+  route-recommended-tests:
+    name: Route recommended tests to runners
+    needs: recommend-tests-from-coverage
     # Debug: restore before merge — require the `ready` label to run.
     # if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
@@ -596,8 +597,6 @@ jobs:
       test_groups: ${{ steps.scope.outputs.test_groups }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
-    env:
-      TEST_LIST_FILE: .github/workflows/scripts/recommended_pytest_path.txt
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -623,35 +622,46 @@ jobs:
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Select tests from file
+      - name: Select tests from coverage recommendations
         id: scope
+        env:
+          COVERAGE_PATHS: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths }}
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex pyyaml -q
-          if [ ! -f "$TEST_LIST_FILE" ]; then
-            echo "::warning::Recommended test list not found: $TEST_LIST_FILE"
+
+          if [ -z "${COVERAGE_PATHS// /}" ]; then
+            echo "::notice::No recommended tests from coverage analysis"
             {
               echo "has_tests=false"
               echo "test_groups=[]"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Write coverage-recommended paths to a temp file, then route them
+          # to runners via select_tests.py --test-list-file.
+          LIST_FILE="$RUNNER_TEMP/recommended_from_coverage.txt"
+          printf '%s\n' "${COVERAGE_PATHS}" > "$LIST_FILE"
+          echo "Recommended paths from coverage:"
+          cat "$LIST_FILE"
+
           python3 .github/workflows/scripts/select_tests.py \
-            --test-list-file "$TEST_LIST_FILE"
+            --test-list-file "$LIST_FILE"
 
   run-recommended-tests:
     name: Run recommended tests (${{ matrix.vllm_version }})
-    needs: select-recommended-tests
-    if: ${{ needs.select-recommended-tests.outputs.has_tests == 'true' }}
+    needs: route-recommended-tests
+    if: ${{ needs.route-recommended-tests.outputs.has_tests == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         vllm_version:
-          - ${{ needs.select-recommended-tests.outputs.main_commit }}
-          - ${{ needs.select-recommended-tests.outputs.release_tag }}
+          - ${{ needs.route-recommended-tests.outputs.main_commit }}
+          - ${{ needs.route-recommended-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      test_groups: ${{ needs.select-recommended-tests.outputs.test_groups }}
+      test_groups: ${{ needs.route-recommended-tests.outputs.test_groups }}
