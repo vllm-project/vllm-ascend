@@ -104,7 +104,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "matmul_allreduce_add_rmsnorm"
         "moe_init_routing_custom"
         "moe_gating_top_k"
-        "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"

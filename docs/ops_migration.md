@@ -66,7 +66,7 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 | 19 | kv_quant_sparse_attn_sharedkv_metadata `[A5]` | ✅ | `_C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata` | `cann_ops_transformer.mixed_quant_sparse_flash_mla_metadata` | 同当前 | ot 非 exp, AICPU | 同上 |
 | 20 | rms_norm_dynamic_quant | ⏳ | `_C_ascend.*` | `custom.npu_rms_norm_dynamic_quant` | A5: `torch_npu.npu_dynamic_quant`；A3: `cann_ops_nn.rms_norm_dynamic_quant` | cann-recipes, src/, 无 arch35 | DSV4 A5 用 `npu_dynamic_quant`，A3 用 `cann_ops_nn.*`；需平台分支；ops-nn 未打包 |
 | 21 | swiglu_group_quant `[A5]` | ⏳ | `_C_ascend.*` | `custom.npu_swiglu_group_quant` | `cann_ops_nn.swiglu_group_quant` | cann-recipes, src/, 无 arch35 | DSV4 所有平台都用 `cann_ops_nn.*`；ops-nn 未打包 |
-| 22 | moe_gating_top_k_hash | ⏳ | `_C_ascend.moe_gating_top_k_hash` | `custom.npu_moe_gating_top_k` | PyTorch native fallback | cann-recipes, src/, arch35 ✅ | DSV4 hash 路径用纯 PyTorch 实现；需改 vllm hash 路径为 native fallback |
+| 22 | moe_gating_top_k_hash | ✅ | `_C_ascend.moe_gating_top_k_hash` | `torch_npu.npu_moe_gating_top_k` | 同当前 | ot 非 exp, moe/moe_gating_top_k/, arch35 ✅ | hash 路径改用 `torch_npu.npu_moe_gating_top_k`（调 `aclnnMoeGatingTopKV2`）；`k_group=1, group_count=1`（hash 模式简化路径） |
 | 23 | compressor_metadata | ❌ | `_C_ascend.*` | 同原 | 同原 | vllm csrc, attention/, 无 arch35 | graph capture 不兼容，无外部对应 |
 | 24 | grouped_matmul_swiglu_quant_weight_nz | ❌ | `_C_ascend.*` | 同原 | 同原 | vllm csrc, gmm/, 无 arch35 | 无 torch binding；可行方案：3 阶段分解 |
 | 25 | grouped_matmul_swiglu_quant_weight_nz_tensor_list | ❌ | `_C_ascend.*` | 同原 | 同原 | vllm csrc, gmm/, 无 arch35 | vllm 独有 |
@@ -76,9 +76,9 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 
 | 进度 | 数量 | 说明 |
 |------|:---:|------|
-| ✅ 完成 | 19 | 已对齐 DSV4，当前=目标 |
+| ✅ 完成 | 20 | 已对齐 DSV4，当前=目标 |
 | 📋 待执行 | 0 | 全部完成 |
-| ⏳ 暂缓 | 3 | 依赖 ops-nn 打包或需改 hash 路径为 native fallback |
+| ⏳ 暂缓 | 2 | 依赖 ops-nn 打包 |
 | ❌ 阻塞 | 4 | graph capture 不兼容或无外部对应 |
 | **合计** | 26 | |
 
@@ -91,7 +91,7 @@ vllm-ascend > experimental > ops-transformer(非experimental) > cann-recipes
 | `vllm_ascend/attention/context_parallel/dsa_cp.py` | 同上 |
 | `vllm_ascend/models/deepseek_v4.py` | mhc_pre_sinkhorn/mhc_post→cann_ops_transformer |
 | `vllm_ascend/device/device_op.py` | compressor→cann_ops_transformer；kv_compress_epilog/indexer_quant_cache→cann_ops_transformer；sparse_flash_mla/mixed_quant_sparse_flash_mla→cann_ops_transformer；quant_lightning_indexer quant_mode→DeviceOperator.get_qli_quant_mode()；scatter_nd_update→torch_npu；moe_gating_top_k/moe_init_routing→torch_npu；swiglu_group_quant→custom |
-| `vllm_ascend/ops/fused_moe/experts_selector.py` | moe_gating_top_k_hash→custom |
+| `vllm_ascend/ops/fused_moe/experts_selector.py` | moe_gating_top_k_hash→torch_npu.npu_moe_gating_top_k（hash 路径）；k_group/group_count=1 |
 | `vllm_ascend/ops/fused_moe/fused_moe.py` | swiglu_group_quant→custom；dequant_swiglu_quant→torch_npu |
 | `vllm_ascend/ops/fused_moe/fused_moe_0_23_0.py` | 同上 |
 | `vllm_ascend/ops/fused_moe/moe_mlp.py` | dequant_swiglu_quant→torch_npu |
@@ -178,7 +178,7 @@ COMPILE_CUSTOM_KERNELS=1 pip install -e .
 
 `csrc/build_aclnn.sh` 已按 SOC 版本精简编译列表：
 - **A2 (ascend910b)**：不动，保留全部原始算子
-- **A3 (ascend910_93)**：移除已迁移算子，保留 18 个
+- **A3 (ascend910_93)**：移除已迁移算子，保留 17 个
 - **A5 (ascend950)**：移除已迁移算子，保留 6 个（compressor_metadata、load_index_kv_cache、causal_conv1d、recurrent_gated_delta_rule、chunk_fwd_o、chunk_gated_delta_rule_fwd_h）
 
 ### 3.7 编译顺序
@@ -198,7 +198,6 @@ COMPILE_CUSTOM_KERNELS=1 pip install -e .
 |---|------|---------|
 | 20 | rms_norm_dynamic_quant | DSV4 A5 用 `torch_npu.npu_dynamic_quant`，A3 用 `cann_ops_nn.*`。需平台分支 + ops-nn 打包 |
 | 21 | swiglu_group_quant | DSV4 用 `cann_ops_nn.*`。需 ops-nn 打包 |
-| 22 | moe_gating_top_k_hash | DSV4 hash 路径用纯 PyTorch 实现。需改 vllm hash 路径为 native fallback |
 
 ### 4.3 阻塞（❌，4 个）
 
@@ -239,7 +238,7 @@ COMPILE_CUSTOM_KERNELS=1 pip install -e .
 | MixedQuantSparseFlashMla | ❌ | ❌ | ✅(已打包) | ❌ | 无 | ot | A5 only (arch35)；A3 无 kernel 但 op_def 注册无害 |
 | SparseAttnSharedkv | ✅ | ✅(未打包) | ❌ | ❌ | ⚠️ | A2A3: vllm | A5 已移除；exp 已移除；A2/A3 需移除 |
 | KvQuantSparseAttnSharedkv | ✅ | ✅(未打包) | ❌ | ❌ | ⚠️ | A2A3: vllm | A5 已移除；exp 已移除；A2/A3 需移除 |
-| MoeGatingTopKHash | ✅ | ❌ | ❌ | ✅ | ⚠️ | A5: rc / A2A3: vllm | A5 已移除 |
+| MoeGatingTopKHash | ✅ | ❌ | ❌ | ✅ | ⚠️ | A2A3: vllm | A3 已移除；hash 路径改用 `torch_npu.npu_moe_gating_top_k`（调 `aclnnMoeGatingTopKV2`） |
 | MoeGatingTopK | ✅ | ❌ | ✅ | ✅ | ⚠️ | A5: ot / A2A3: vllm | A5 已移除；A2/A3 需移除 |
 | SwigluGroupQuant | ✅ | ❌ | ❌ | ✅ | ⚠️ | A5: rc / A2A3: vllm | A5 已移除 |
 | ScatterNdUpdate | ✅ | ❌ | ❌ | ✅ | ⚠️ | A5: rc / A2A3: vllm | A5 已移除；A2/A3 需移除 |
