@@ -61,7 +61,7 @@
     "linux-aarch64-a5-4": {
         "chip": "a5",
         "npu_num": 4,
-        "image_tag": "9.1.0-beta.3-950-ubuntu22.04-py3.12-arm64-deb",
+        "image_tag": "9.1.0-950-ubuntu22.04-py3.12",
         "csrc_cache_target": "a5-arm64-ubuntu"
     }
 }
