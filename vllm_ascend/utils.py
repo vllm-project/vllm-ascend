@@ -1316,10 +1316,13 @@ def enable_dsa_cp() -> bool:
     if not has_indexer:
         return False
 
-    dsa_cp_enable = False
-    additional_config = getattr(vllm_config, "additional_config", None)
-    if additional_config is not None and "enable_dsa_cp" in additional_config:
-        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
+    # Read from the validated AscendConfig singleton instead of bypassing it
+    # via additional_config["enable_dsa_cp"]. This converges the bypass read
+    # (architecture debt #7) onto the canonical get_ascend_config() path, so
+    # the value benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    dsa_cp_enable = get_ascend_config().enable_dsa_cp
 
     # DSA-CP shards attention work with its own TP/CP collectives.  It used to
     # be gated by ``enable_sp`` only because that helper represented the
