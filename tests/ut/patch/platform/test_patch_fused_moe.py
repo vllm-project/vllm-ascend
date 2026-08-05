@@ -47,8 +47,8 @@ def test_factory_adapts_only_the_returned_router():
 
     assert result is runner
     assert isinstance(router.eplb_state, AscendEplbLayerState)
-    assert router._apply_eplb_mapping.__func__ is patch_fused_moe._ascend_apply_eplb_mapping
-    assert untouched_router._apply_eplb_mapping.__func__ is _Router._apply_eplb_mapping
+    assert getattr(router._apply_eplb_mapping, "__func__", None) is patch_fused_moe._ascend_apply_eplb_mapping
+    assert getattr(untouched_router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
 
 
 def test_adapted_router_uses_ascend_mapping_operation():
