@@ -308,125 +308,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node
 **Notice:**
 This scenario enables `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
-#### Atlas 800 A2
-
-##### Multi-Node Co-Located Deployment (A2)
-
-- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 8). A single Atlas 800 A2 node (8 × 64GB) cannot fit the w4a8c8 weights, so the 2-node deployment is the minimum configuration for the A2 series.
-
-**node 0**
-
-```shell
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxx"
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=360000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1200
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
---max_model_len 40000 \
---max-num-batched-tokens 4096 \
---served-model-name glm-52 \
---seed 1024 \
---gpu-memory-utilization 0.95 \
---api-server-count 1 \
---max-num-seqs 16 \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---enable-expert-parallel \
---quantization ascend \
---port 7000 \
---safetensors-load-strategy 'prefetch' \
---additional-config '{"multistream_overlap_shared_expert": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-```
-
-**node 1**
-
-```shell
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxx"
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=360000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1200
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
---max_model_len 40000 \
---max-num-batched-tokens 4096 \
---served-model-name glm-52 \
---seed 1024 \
---gpu-memory-utilization 0.95 \
---max-num-seqs 16 \
---headless \
---data-parallel-size 2 \
---data-parallel-size-local 1 \
---data-parallel-start-rank 1 \
---data-parallel-address $node0_ip \
---data-parallel-rpc-port 13389 \
---tensor-parallel-size 8 \
---enable-expert-parallel \
---quantization ascend \
---port 7000 \
---safetensors-load-strategy 'prefetch' \
---block-size 128 \
---additional-config '{"multistream_overlap_shared_expert": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-```
-
-Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node-deployment) and [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)):
-
-The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP are not used here.
-
-**A2-specific environment variables:**
-
-- `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
-- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
-- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
-
-#### Prefill-Decode Disaggregation(A3)
+##### Prefill-Decode Disaggregation(A3)
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
@@ -936,7 +818,125 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
-#### Prefill-Decode Disaggregation (A2)
+#### Atlas 800 A2
+
+##### Multi-Node Co-Located Deployment (A2)
+
+- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 8). A single Atlas 800 A2 node (8 × 64GB) cannot fit the w4a8c8 weights, so the 2-node deployment is the minimum configuration for the A2 series.
+
+**node 0**
+
+```shell
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_RPC_TIMEOUT=360000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export HCCL_EXEC_TIMEOUT=200
+export HCCL_CONNECT_TIMEOUT=120
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ACL_OP_INIT_MODE=1
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+export VLLM_ENGINE_READY_TIMEOUT_S=1200
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+--max_model_len 40000 \
+--max-num-batched-tokens 4096 \
+--served-model-name glm-52 \
+--seed 1024 \
+--gpu-memory-utilization 0.95 \
+--api-server-count 1 \
+--max-num-seqs 16 \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--enable-expert-parallel \
+--quantization ascend \
+--port 7000 \
+--safetensors-load-strategy 'prefetch' \
+--additional-config '{"multistream_overlap_shared_expert": true}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+```
+
+**node 1**
+
+```shell
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export VLLM_RPC_TIMEOUT=360000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export HCCL_EXEC_TIMEOUT=200
+export HCCL_CONNECT_TIMEOUT=120
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ACL_OP_INIT_MODE=1
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+export VLLM_ENGINE_READY_TIMEOUT_S=1200
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+--max_model_len 40000 \
+--max-num-batched-tokens 4096 \
+--served-model-name glm-52 \
+--seed 1024 \
+--gpu-memory-utilization 0.95 \
+--max-num-seqs 16 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--enable-expert-parallel \
+--quantization ascend \
+--port 7000 \
+--safetensors-load-strategy 'prefetch' \
+--block-size 128 \
+--additional-config '{"multistream_overlap_shared_expert": true}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+```
+
+Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node-deployment) and [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)):
+
+The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP are not used here.
+
+**A2-specific environment variables:**
+
+- `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
+- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
+- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
+
+##### Prefill-Decode Disaggregation (A2)
 
 On Atlas 800 A2, where each node exposes 8 cards, the same global P/D topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode nodes hosting 2 DP ranks each (4 cards per rank). The `launch_online_dp.py` above is reused as-is. The prefill side enables FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP (`num_speculative_tokens=1` on prefill, `3` on decode). All IPs, NIC names, ports and weight paths below are placeholders.
 
