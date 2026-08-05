@@ -46,8 +46,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
-from vllm_ascend.ops.layernorm import AscendRMSNormGated
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.kda.fused_norm_gate import apply_kda_rms_norm_sigmoid_gate
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
@@ -175,15 +175,9 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 prefix=f"{prefix}.g_proj",
             )
 
-        # Upstream builds FusedRMSNormGated, which does not match the
-        # RMSNormGated OOT registration used by vllm-ascend. Replace it
-        # explicitly so K3's output norm uses the Ascend fused kernel.
-        self.o_norm = AscendRMSNormGated(
-            self.head_dim,
-            eps=config.rms_norm_eps,
-            norm_before_gate=True,
-            activation="sigmoid",
-        )
+        # The upstream class used FusedRMSNormGated's default epsilon.  K3's
+        # checkpoint config is authoritative and uses the sigmoid gate path.
+        self.o_norm.eps = config.rms_norm_eps
 
         # Multimodal inputs_embeds are built before the Ascend forward context,
         # so the first decoder layer receives the full token sequence.  Every
@@ -265,9 +259,21 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             core_attn_out,
             self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, output_gate.unsqueeze(0))
+        core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _apply_output_norm_gate(
+        self,
+        core_attn_out: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return apply_kda_rms_norm_sigmoid_gate(
+            core_attn_out,
+            output_gate,
+            self.o_norm.weight,
+            self.o_norm.eps,
+        )
 
     @staticmethod
     def _run_causal_conv1d(

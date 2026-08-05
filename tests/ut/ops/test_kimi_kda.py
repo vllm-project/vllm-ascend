@@ -20,9 +20,6 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
-from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
-)
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -112,57 +109,6 @@ def _expected_packed_conv_weights(
         ],
         dim=1,
     ).to(attention.model_config.dtype)
-
-
-def _initialize_minimal_kimi_attention(self, config, vllm_config, prefix):
-    nn.Module.__init__(self)
-    self.head_dim = 8
-    self.num_heads = 2
-    self.local_num_heads = 2
-    self.conv_size = 4
-    self.quant_config = None
-    self.model_config = SimpleNamespace(dtype=torch.bfloat16)
-    self.A_log = nn.Parameter(torch.empty(1))
-    self.q_conv1d = nn.Module()
-    self.k_conv1d = nn.Module()
-    self.v_conv1d = nn.Module()
-
-
-def test_kimi_kda_replaces_upstream_output_norm_with_ascend_fused_norm():
-    config = SimpleNamespace(
-        linear_attn_config={"use_full_rank_gate": False},
-        rms_norm_eps=1e-6,
-    )
-
-    with (
-        patch.object(
-            KimiGatedDeltaNetAttention,
-            "__init__",
-            _initialize_minimal_kimi_attention,
-        ),
-        patch.object(
-            AscendKimiGatedDeltaNetAttention,
-            "_wrap_conv_process_weights",
-        ),
-        patch(
-            "vllm_ascend.ops.kimi_kda.uses_kimi_k3_global_inputs_embeds",
-            return_value=False,
-        ),
-        patch("vllm_ascend.ops.kimi_kda.AscendRMSNormGated") as mock_norm,
-    ):
-        attention = AscendKimiGatedDeltaNetAttention(
-            config,
-            SimpleNamespace(),
-            prefix="model.layers.0.self_attn",
-        )
-
-    mock_norm.assert_called_once_with(
-        8,
-        eps=1e-6,
-        norm_before_gate=True,
-        activation="sigmoid",
-    )
-    assert attention.o_norm is mock_norm.return_value
 
 
 def test_load_a_log_slices_padded_1d_checkpoint_by_tp_rank():

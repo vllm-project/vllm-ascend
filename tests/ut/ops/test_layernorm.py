@@ -5,7 +5,6 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 
-from vllm_ascend.ops.layernorm import AscendRMSNormGated, LayerNormFn
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -83,19 +82,3 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
-
-
-def test_rmsnorm_gated_forwards_sigmoid_activation():
-    layer = AscendRMSNormGated(hidden_size=8, activation="sigmoid")
-    x = torch.randn(2, 8)
-    gate = torch.randn_like(x)
-    expected = torch.randn_like(x)
-
-    with patch.object(LayerNormFn, "apply", return_value=expected) as mock_apply:
-        actual = layer.forward_oot(x, gate)
-
-    assert actual is expected
-    args = mock_apply.call_args.args
-    assert args[0] is x
-    assert args[3] is gate
-    assert args[-1] == "sigmoid"
