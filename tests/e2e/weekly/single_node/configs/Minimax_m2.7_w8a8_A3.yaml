@@ -53,7 +53,7 @@ _benchmarks_acc: &benchmarks_acc
     baseline: 93.33
     threshold: 10
     temperature: 1
-    top_p: 0.95
+    top_p: 1
     top_k: 40
     ignore_eos: false
 
@@ -175,15 +175,15 @@ test_cases:
       - "0.86"
     benchmarks:
       <<: *benchmarks_prefix_128k_50
-#  - name: "MiniMax-M2.7-prefix_max"
-#    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
-#    envs:
-#      <<: *envs
-#    server_cmd: *server_cmd
-#    server_cmd_extra:
-#      - "--max-model-len"
-#      - "204800"
-#      - "--gpu-memory-utilization"
-#      - "0.8"
-#    benchmarks:
-#      <<: *benchmarks_prefix_max
+  - name: "MiniMax-M2.7-prefix_max"
+    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "204800"
+      - "--gpu-memory-utilization"
+      - "0.8"
+    benchmarks:
+      <<: *benchmarks_prefix_max
