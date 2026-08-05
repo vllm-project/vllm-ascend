@@ -320,6 +320,7 @@ class NPUModelRunner(GPUModelRunner):
         # gdn_query_start_loc is an unpadded version of query_start_loc.
         # TODO delete it if fia's check is removed.
         self._has_gdn = check_gdn_layer(vllm_config)
+        self._has_mamba: bool = False
         self._has_sinks = False
         if self._has_gdn:
             self.gdn_query_start_loc = self._make_buffer(
@@ -3531,7 +3532,8 @@ class NPUModelRunner(GPUModelRunner):
             # Dummy graph runs do not go through _prepare_inputs(), but GDN/Mamba
             # metadata reads block_table[:num_reqs_padded] below. Sync padded
             # rows as well so device-side metadata does not see stale block ids.
-            self.input_batch.block_table.commit_block_table(num_reqs_padded)
+            if self._has_gdn or self._has_mamba:
+                self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
@@ -4124,35 +4126,36 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _reset_resume_block_table_device_buffers(self) -> None:
-        """[snapshot] Re-establish the cold-start zero invariant for block-table
-        device tensors after snapshot restore.
+        """[snapshot] Reset block-table buffers required by speculative decoding
+        and GDN/Mamba.
 
         ``BlockTable.commit_block_table`` only copies the first ``num_reqs``
         rows from CPU to the GPU tensor each step; rows ``>= num_reqs`` are never
         touched after allocation. On a cold start they stay ``torch.zeros`` (a
         read there yields block 0, harmless), but after
         ``aclrtSnapShotProcessRestore`` they hold restored device garbage. The
-        MTP drafter's look-ahead slot computation
-        (``compute_new_slot_mapping``: ``block_table_tensor.view(-1)`` indexed by
-        position) can read those stale rows and produce a garbage block id ->
+        Speculative drafter paths such as MTP/Eagle/draft-model use the
+        look-ahead slot computation (``compute_new_slot_mapping``:
+        ``block_table_tensor.view(-1)`` indexed by position), which can read
+        those stale rows and produce a garbage block id ->
         out-of-range slot -> ``npu_kv_rmsnorm_rope_cache`` crashes with an MTE
         "DDR address out of range". The main model never hits this because its
         decode only reads already-committed rows.
 
-        Zeroing the GPU tensor is safe: every active row is re-committed from the
-        CPU source of truth before the next forward, so this restores exactly the
-        cold-start device state.
+        For speculative decoding, zeroing the GPU tensor is safe: every active
+        row is re-committed from the CPU source of truth before the next forward,
+        so this restores exactly the cold-start device state.
 
-        The CPU source is zeroed too. Upstream #10901 added a
+        For GDN/Mamba, zero the CPU source. Upstream #10901 added a
         ``commit_block_table(num_reqs_padded)`` inside ``_dummy_run`` that copies
         the first ``num_reqs_padded`` CPU rows -> GPU right before ACL graph
         (re)capture. After restore the CPU buffer still holds the pre-snapshot
-        request's block ids, so that copy re-dirties the GPU tensor we just
-        zeroed and feeds those (out-of-cold-start-range) blocks into the FULL
-        graph paged-attention capture (run with the max-workspace seq len),
+        block ids, so that copy can feed out-of-cold-start-range blocks into the
+        FULL graph paged-attention capture (run with the max-workspace seq len),
         crashing with ``AclrtSynchronizeDeviceWithTimeout`` / MTE "invalid GM
-        address". Zeroing CPU keeps the commit a zero no-op until real requests
-        re-populate it via ``_prepare_inputs``, exactly matching the cold start.
+        address". Zeroing CPU keeps the padded commit a zero no-op until real
+        requests re-populate it via ``_prepare_inputs``, exactly matching the
+        cold start.
         """
         input_batch = getattr(self, "input_batch", None)
         mgbt = getattr(input_batch, "block_table", None) if input_batch is not None else None
@@ -4160,24 +4163,42 @@ class NPUModelRunner(GPUModelRunner):
         if not tables:
             logger.info("[restore model] block-table device reset skipped: no block tables")
             return
-        zeroed = 0
+
+        reset_spec_gpu = self.speculative_config is not None
+        reset_gdn_mamba_cpu = self._has_gdn or self._has_mamba
+        if not reset_spec_gpu and not reset_gdn_mamba_cpu:
+            logger.info(
+                "[restore model] block-table reset skipped: "
+                "neither speculative decoding nor GDN/Mamba is enabled"
+            )
+            return
+
+        gpu_zeroed = 0
+        cpu_zeroed = 0
         failed: list[str] = []
         for idx, bt in enumerate(tables):
             buf = getattr(bt, "block_table", None)
-            gpu = getattr(buf, "gpu", None)
-            if gpu is None:
-                continue
-            try:
-                gpu.zero_()
+            if reset_spec_gpu:
+                gpu = getattr(buf, "gpu", None)
+                if gpu is not None:
+                    try:
+                        gpu.zero_()
+                        gpu_zeroed += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"gpu-group{idx}:{type(exc).__name__}:{exc}")
+            if reset_gdn_mamba_cpu:
                 cpu = getattr(buf, "cpu", None)
                 if cpu is not None:
-                    cpu.zero_()
-                zeroed += 1
-            except Exception as exc:  # noqa: BLE001
-                failed.append(f"group{idx}:{type(exc).__name__}:{exc}")
+                    try:
+                        cpu.zero_()
+                        cpu_zeroed += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"cpu-group{idx}:{type(exc).__name__}:{exc}")
         logger.info(
-            "[restore model] zeroed %d block-table device tensor(s) to restore cold-start invariant%s",
-            zeroed,
+            "[restore model] zeroed block-table tensors: "
+            "gpu=%d (speculative decoding), cpu=%d (GDN/Mamba)%s",
+            gpu_zeroed,
+            cpu_zeroed,
             "" if not failed else f", failed={failed[: min(8, len(failed))]}",
         )
 
@@ -4456,6 +4477,12 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
             [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+        )
+
+        self._has_mamba = any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for attn_groups in self.attn_groups
+            for group in attn_groups
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
