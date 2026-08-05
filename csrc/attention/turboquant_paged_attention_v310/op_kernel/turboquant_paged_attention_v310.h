@@ -34,12 +34,12 @@
  *   Standard flash-attention running max/sum, so scores for a block are consumed
  *   immediately and only (acc, runningMax, runningSum) persist across blocks.
  */
-#ifndef TURBOQUANT_PAGED_ATTENTION_310_H
-#define TURBOQUANT_PAGED_ATTENTION_310_H
+#ifndef TURBOQUANT_PAGED_ATTENTION_V310_H
+#define TURBOQUANT_PAGED_ATTENTION_V310_H
 
 #include "kernel_operator.h"
-#include "turboquant_codec.h"
-#include "turboquant_paged_attention_310_tiling_data.h"
+#include "turboquant_paged_attention_v310_codec.h"
+#include "turboquant_paged_attention_v310_tiling_data.h"
 
 namespace TurboQuantRead {
 
@@ -65,7 +65,7 @@ struct TQReadParams {
 template <int BITS>
 class TQPagedAttention {
 public:
-    __aicore__ inline TQPagedAttention(const TurboQuantPagedAttention310TilingData *t) : t_(t) {}
+    __aicore__ inline TQPagedAttention(const TurboquantPagedAttentionV310TilingData *t) : t_(t) {}
 
     __aicore__ inline void Init(const TQReadParams &p, TPipe *pipe)
     {
@@ -286,7 +286,7 @@ private:
         return sum * scale;
     }
 
-    const TurboQuantPagedAttention310TilingData *t_;
+    const TurboquantPagedAttentionV310TilingData *t_;
     GlobalTensor<half> qGm_, kCacheGm_, vCacheGm_, kNormGm_, vNormGm_, outGm_;
     GlobalTensor<int32_t> btGm_, seqGm_;
     GlobalTensor<float> signGm_, cbGm_;
@@ -297,4 +297,4 @@ private:
 
 }  // namespace TurboQuantRead
 
-#endif  // TURBOQUANT_PAGED_ATTENTION_310_H
+#endif  // TURBOQUANT_PAGED_ATTENTION_V310_H

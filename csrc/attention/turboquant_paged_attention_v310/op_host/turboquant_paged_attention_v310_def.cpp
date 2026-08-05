@@ -8,31 +8,24 @@
  */
 
 /*!
- * \file turboquant_reshape_and_cache_310_def.cpp
- * \brief TurboQuant KV-cache write path (rotate -> quantize -> pack -> scatter).
+ * \file turboquant_paged_attention_v310_def.cpp
+ * \brief TurboQuant fused dequant + paged attention (decode).
  */
 #include "register/op_def_registry.h"
 
 namespace ops {
-class TurboQuantReshapeAndCache310 : public OpDef {
+class TurboquantPagedAttentionV310 : public OpDef {
 public:
-    explicit TurboQuantReshapeAndCache310(const char *name) : OpDef(name)
+    explicit TurboquantPagedAttentionV310(const char *name) : OpDef(name)
     {
-        // K/V for the tokens being written: [num_tokens, num_kv_heads, head_dim]
-        this->Input("key")
+        // [batch, num_heads, head_dim] -- one query token per sequence (decode)
+        this->Input("query")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("value")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        // Paged caches, FRACTAL_NZ: (num_blocks, C1, block_size, 16).
-        // fp16-typed on purpose -- an int8-typed cache reports success on this
-        // SoC while writing nothing. Packed bytes are carried through the fp16
-        // view; the op is a pure scatter so the bytes move verbatim.
+        // Packed FRACTAL_NZ caches, fp16-typed (packed bytes ride through the
+        // fp16 view; an int8-typed cache silently writes nothing on this SoC).
         this->Input("key_cache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
@@ -43,49 +36,54 @@ public:
             .DataType({ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("slot_mapping")
+        // [num_slots, num_kv_heads] -- produced by the write op
+        this->Input("key_norms")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("value_norms")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("block_table")
             .ParamType(REQUIRED)
             .DataType({ge::DT_INT32})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        // D vector of the rotation Pi = D*H*D, as +-1.0f, length head_dim.
+        this->Input("seq_lens")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        // D vector of Pi = D*H*D, +-1.0f, length head_dim. MUST be the same
+        // vector the write op used, or the rotated bases will not match.
         this->Input("signs")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        // Lloyd-Max table: [LEVELS centroids, LEVELS-1 midpoints]. Ignored when
-        // codebook_mode == uniform, but kept REQUIRED so the graph shape is
-        // stable across A/B scenarios.
         this->Input("centroids")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        // Norm planes: [num_slots, num_kv_heads]. Stored outside the packed
-        // plane so the packed plane keeps exact NZ tile alignment.
-        this->Output("key_norms")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("value_norms")
+        this->Output("attn_out")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        // Scenario selectors. bits drives the tiling key (compile-time);
-        // variant and codebook_mode are runtime tiling-data fields.
         this->Attr("bits").AttrType(REQUIRED).Int(3);
-        this->Attr("variant").AttrType(OPTIONAL).Int(0);        // 0 = MSE, 1 = MSE+QJL
-        this->Attr("codebook_mode").AttrType(OPTIONAL).Int(0);  // 0 = uniform, 1 = Lloyd-Max
+        this->Attr("scale").AttrType(REQUIRED).Float(0.0625f);
+        this->Attr("variant").AttrType(OPTIONAL).Int(0);
+        this->Attr("codebook_mode").AttrType(OPTIONAL).Int(0);
 
-        this->AICore().SetTiling(optiling::TilingForTurboQuantReshapeAndCache310);
         this->AICore().AddConfig("ascend310p");
     }
 };
 
-OP_ADD(TurboQuantReshapeAndCache310);
+OP_ADD(TurboquantPagedAttentionV310);
 }  // namespace ops

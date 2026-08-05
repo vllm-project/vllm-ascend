@@ -1,3 +1,8 @@
+/* SYNCED COPY -- edit csrc/attention/turboquant_common/turboquant_codec.h instead.
+ * The op build copies each op_kernel/ into an isolated tree, so a cross-op
+ * relative include cannot resolve. The build also copies ONLY files matching the
+ * op-name prefix, so this copy must be named <op_name>_codec.h to be picked up.
+ */
 /*
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
  * This file is a part of the vllm-ascend project.

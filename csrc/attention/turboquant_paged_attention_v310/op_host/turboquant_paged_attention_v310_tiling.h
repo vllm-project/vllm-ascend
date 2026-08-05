@@ -6,23 +6,26 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef TURBOQUANT_RESHAPE_AND_CACHE_310_TILING_H
-#define TURBOQUANT_RESHAPE_AND_CACHE_310_TILING_H
+#ifndef TURBOQUANT_PAGED_ATTENTION_V310_TILING_H
+#define TURBOQUANT_PAGED_ATTENTION_V310_TILING_H
 
 #include "register/op_def_registry.h"
+#include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
-#include "../op_kernel/turboquant_reshape_and_cache_310_tiling_data.h"
+#include "tiling/platform/platform_ascendc.h"
+#include "platform/platform_infos_def.h"
+#include "tiling_base/tiling_base.h"
+#include "../op_kernel/turboquant_paged_attention_v310_tiling_data.h"
 
 namespace optiling {
 
-struct TurboQuantReshapeAndCache310CompileInfo {
+struct TurboquantPagedAttentionV310CompileInfo {
     uint32_t coreNum{0};
 };
 
-class TurboQuantReshapeAndCache310Tiling {
+class TurboquantPagedAttentionV310Tiling {
 public:
-    explicit TurboQuantReshapeAndCache310Tiling(gert::TilingContext *context) : context_(context) {}
-
+    explicit TurboquantPagedAttentionV310Tiling(gert::TilingContext *context) : context_(context) {}
     ge::graphStatus Run();
 
 private:
@@ -31,14 +34,14 @@ private:
     ge::graphStatus PostTiling();
 
     gert::TilingContext *context_{nullptr};
-    TurboQuantReshapeAndCache310TilingData tilingData_{};
+    TurboquantPagedAttentionV310TilingData tilingData_{};
     uint64_t tilingKey_{0};
     uint64_t workspaceSize_{0};
     uint32_t bits_{3};
 };
 
-ge::graphStatus TilingForTurboQuantReshapeAndCache310(gert::TilingContext *context);
+ge::graphStatus TilingForTurboquantPagedAttentionV310(gert::TilingContext *context);
 
 }  // namespace optiling
 
-#endif  // TURBOQUANT_RESHAPE_AND_CACHE_310_TILING_H
+#endif  // TURBOQUANT_PAGED_ATTENTION_V310_TILING_H

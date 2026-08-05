@@ -21,12 +21,12 @@
  * norm is 98, not a multiple of the 32B NZ tile, and padding to 128 would drop
  * compression 5.22x -> 4.0x. A separate plane costs ~2% and keeps 5.22x.
  */
-#ifndef TURBOQUANT_RESHAPE_AND_CACHE_310_H
-#define TURBOQUANT_RESHAPE_AND_CACHE_310_H
+#ifndef TURBOQUANT_RESHAPE_AND_CACHE_V310_H
+#define TURBOQUANT_RESHAPE_AND_CACHE_V310_H
 
 #include "kernel_operator.h"
-#include "turboquant_codec.h"
-#include "turboquant_reshape_and_cache_310_tiling_data.h"
+#include "turboquant_reshape_and_cache_v310_codec.h"
+#include "turboquant_reshape_and_cache_v310_tiling_data.h"
 
 namespace TurboQuantWrite {
 
@@ -51,7 +51,7 @@ struct TQWriteParams {
 template <int BITS>
 class TQReshapeAndCache {
 public:
-    __aicore__ inline TQReshapeAndCache(const TurboQuantReshapeAndCache310TilingData *t) : t_(t) {}
+    __aicore__ inline TQReshapeAndCache(const TurboquantReshapeAndCacheV310TilingData *t) : t_(t) {}
 
     __aicore__ inline void Init(const TQWriteParams &p, TPipe *pipe)
     {
@@ -176,7 +176,7 @@ private:
         }
     }
 
-    const TurboQuantReshapeAndCache310TilingData *t_;
+    const TurboquantReshapeAndCacheV310TilingData *t_;
     GlobalTensor<half> keyGm_, valGm_, kCacheGm_, vCacheGm_, kNormGm_, vNormGm_;
     GlobalTensor<int32_t> slotGm_;
     GlobalTensor<float> signGm_, cbGm_;
@@ -189,4 +189,4 @@ private:
 
 }  // namespace TurboQuantWrite
 
-#endif  // TURBOQUANT_RESHAPE_AND_CACHE_310_H
+#endif  // TURBOQUANT_RESHAPE_AND_CACHE_V310_H

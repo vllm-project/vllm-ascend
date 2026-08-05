@@ -6,10 +6,13 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "turboquant_reshape_and_cache_310_tiling.h"
+#include "turboquant_reshape_and_cache_v310_tiling.h"
 
 #include <cmath>
 
+#include "register/op_def_registry.h"
+#include "tiling_base/error_log.h"
+#include "tiling_base/tiling_util.h"
 #include "platform/platform_info.h"
 
 namespace optiling {
@@ -25,7 +28,7 @@ constexpr uint32_t kMinBits = 2;
 constexpr uint32_t kMaxBits = 4;
 }  // namespace
 
-ge::graphStatus TurboQuantReshapeAndCache310Tiling::ParseInputs()
+ge::graphStatus TurboquantReshapeAndCacheV310Tiling::ParseInputs()
 {
     // key: [num_tokens, num_kv_heads, head_dim]
     auto keyShape = context_->GetInputShape(0);
@@ -94,7 +97,7 @@ ge::graphStatus TurboQuantReshapeAndCache310Tiling::ParseInputs()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TurboQuantReshapeAndCache310Tiling::ComputeSplit()
+ge::graphStatus TurboquantReshapeAndCacheV310Tiling::ComputeSplit()
 {
     auto *platformInfo = context_->GetPlatformInfo();
     uint32_t coreNum = 8;
@@ -117,7 +120,7 @@ ge::graphStatus TurboQuantReshapeAndCache310Tiling::ComputeSplit()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TurboQuantReshapeAndCache310Tiling::PostTiling()
+ge::graphStatus TurboquantReshapeAndCacheV310Tiling::PostTiling()
 {
     context_->SetBlockDim(tilingData_.vectorCoreNum);
     context_->SetTilingKey(tilingKey_);
@@ -136,7 +139,7 @@ ge::graphStatus TurboQuantReshapeAndCache310Tiling::PostTiling()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus TurboQuantReshapeAndCache310Tiling::Run()
+ge::graphStatus TurboquantReshapeAndCacheV310Tiling::Run()
 {
     if (ParseInputs() != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
@@ -147,10 +150,26 @@ ge::graphStatus TurboQuantReshapeAndCache310Tiling::Run()
     return PostTiling();
 }
 
-ge::graphStatus TilingForTurboQuantReshapeAndCache310(gert::TilingContext *context)
+ge::graphStatus TilingForTurboquantReshapeAndCacheV310(gert::TilingContext *context)
 {
-    TurboQuantReshapeAndCache310Tiling tiling(context);
+    TurboquantReshapeAndCacheV310Tiling tiling(context);
     return tiling.Run();
 }
 
+static ge::graphStatus TilingPrepareForTurboquantReshapeAndCacheV310(gert::TilingParseContext *context)
+{
+    auto compileInfo = context->GetCompiledInfo<TurboquantReshapeAndCacheV310CompileInfo>();
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE(context->GetNodeName(), "compile info is null"),
+                return ge::GRAPH_FAILED);
+    auto platformInfo = context->GetPlatformInfo();
+    if (platformInfo != nullptr) {
+        auto p = platform_ascendc::PlatformAscendC(platformInfo);
+        compileInfo->coreNum = static_cast<uint32_t>(p.GetCoreNumAiv());
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+IMPL_OP_OPTILING(TurboquantReshapeAndCacheV310)
+    .Tiling(TilingForTurboquantReshapeAndCacheV310)
+    .TilingParse<TurboquantReshapeAndCacheV310CompileInfo>(TilingPrepareForTurboquantReshapeAndCacheV310);
 }  // namespace optiling

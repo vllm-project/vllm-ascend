@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "turboquant_reshape_and_cache_310.h"
+#include "turboquant_reshape_and_cache_v310.h"
 
 using namespace AscendC;
 using namespace TurboQuantWrite;
@@ -26,12 +26,12 @@ using namespace TurboQuantWrite;
  * runtime tiling-data fields, so all twelve A/B scenarios are reachable from
  * these three instantiations instead of twelve.
  */
-extern "C" __global__ __aicore__ void turboquant_reshape_and_cache_310(
+extern "C" __global__ __aicore__ void turboquant_reshape_and_cache_v310(
     GM_ADDR key, GM_ADDR value, GM_ADDR key_cache, GM_ADDR value_cache, GM_ADDR slot_mapping,
     GM_ADDR signs, GM_ADDR centroids, GM_ADDR key_norms, GM_ADDR value_norms, GM_ADDR workspaceGM,
     GM_ADDR tilingGM)
 {
-    REGISTER_TILING_DEFAULT(TurboQuantReshapeAndCache310TilingData);
+    REGISTER_TILING_DEFAULT(TurboquantReshapeAndCacheV310TilingData);
     GET_TILING_DATA(tilingData, tilingGM);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 

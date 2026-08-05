@@ -14,8 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef TURBOQUANT_PAGED_ATTENTION_310_TILING_DATA_H
-#define TURBOQUANT_PAGED_ATTENTION_310_TILING_DATA_H
+#ifndef TURBOQUANT_PAGED_ATTENTION_V310_TILING_DATA_H
+#define TURBOQUANT_PAGED_ATTENTION_V310_TILING_DATA_H
 
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -29,7 +29,7 @@
  * cause of the OOM kills at 6k context. This kernel loops queries within a KV
  * group instead, so K/V are read once per group.
  */
-struct TurboQuantPagedAttention310TilingData {
+struct TurboquantPagedAttentionV310TilingData {
     uint32_t batch;
     uint32_t numHeads;         // query heads (16)
     uint32_t numKvHeads;       // kv heads (4)
@@ -50,4 +50,4 @@ struct TurboQuantPagedAttention310TilingData {
     uint32_t reserved;
 };
 
-#endif  // TURBOQUANT_PAGED_ATTENTION_310_TILING_DATA_H
+#endif  // TURBOQUANT_PAGED_ATTENTION_V310_TILING_DATA_H

@@ -14,8 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef TURBOQUANT_RESHAPE_AND_CACHE_310_TILING_DATA_H
-#define TURBOQUANT_RESHAPE_AND_CACHE_310_TILING_DATA_H
+#ifndef TURBOQUANT_RESHAPE_AND_CACHE_V310_TILING_DATA_H
+#define TURBOQUANT_RESHAPE_AND_CACHE_V310_TILING_DATA_H
 
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -27,7 +27,7 @@
  *   codebook   -> runtime field below (uniform affine vs Lloyd-Max LUT)
  * Three kernel instantiations cover all twelve A/B scenarios.
  */
-struct TurboQuantReshapeAndCache310TilingData {
+struct TurboquantReshapeAndCacheV310TilingData {
     uint32_t numTokens;        // tokens in this launch
     uint32_t numKvHeads;       // 4 for Qwen3.5-4B
     uint32_t headDim;          // 256
@@ -49,4 +49,4 @@ struct TurboQuantReshapeAndCache310TilingData {
     float invSqrtHeadDim;      // 1 / sqrt(headDim)
 };
 
-#endif  // TURBOQUANT_RESHAPE_AND_CACHE_310_TILING_DATA_H
+#endif  // TURBOQUANT_RESHAPE_AND_CACHE_V310_TILING_DATA_H
