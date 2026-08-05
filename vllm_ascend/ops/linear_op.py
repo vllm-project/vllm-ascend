@@ -422,6 +422,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 need_unsqueeze = True
                 x_quant = x_quant.squeeze(dim=1)
                 pertoken_scale = pertoken_scale.squeeze(dim=1)
+            x1_scale = pertoken_scale.reshape(-1, 1).contiguous()
+            weight_scale = getattr(self.layer, "weight_scale_fp32", self.layer.weight_scale)
+            x2_scale = weight_scale.reshape(1, -1).contiguous()
             output = DeviceOperator.npu_mm_reduce_scatter_base(
                 x_quant,
                 self.layer.weight,
@@ -430,8 +433,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 reduce_op="sum",
                 bias=bias_ if quant_method.act_quant_type == torch.int8 else None,
                 comm_turn=0,
-                x1_scale=pertoken_scale,
-                x2_scale=self.layer.weight_scale,
+                x1_scale=x1_scale,
+                x2_scale=x2_scale,
                 output_dtype=x.dtype,
             )
             if need_unsqueeze:

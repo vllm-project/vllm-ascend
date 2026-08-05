@@ -260,7 +260,8 @@ class TestSequenceRowParallelMatmulAndReduce(unittest.TestCase):
         layer = MagicMock()
         layer.quant_method = AscendLinearMethod(quant_method)
         layer.weight = torch.randint(-8, 8, (8, 16), dtype=torch.int8)
-        layer.weight_scale = torch.randn(16, dtype=torch.float32)
+        layer.weight_scale = torch.randn(16, dtype=torch.bfloat16)
+        layer.weight_scale_fp32 = torch.randn(16, dtype=torch.float32)
         layer.tp_size = 2
         layer.tp_rank = 0
 
@@ -296,8 +297,10 @@ class TestSequenceRowParallelMatmulAndReduce(unittest.TestCase):
         mock_dynamic_quant.assert_called_once_with(x, act_quant_type=quant_method.act_quant_type)
         mock_mmrs.assert_called_once()
         _, kwargs = mock_mmrs.call_args
-        self.assertIs(kwargs["x1_scale"], pertoken_scale)
-        self.assertIs(kwargs["x2_scale"], layer.weight_scale)
+        self.assertEqual(kwargs["x1_scale"].shape, (4, 1))
+        self.assertTrue(torch.equal(kwargs["x1_scale"].squeeze(dim=1), pertoken_scale))
+        self.assertEqual(kwargs["x2_scale"].shape, (1, 16))
+        self.assertTrue(torch.equal(kwargs["x2_scale"].squeeze(dim=0), layer.weight_scale_fp32))
         self.assertEqual(kwargs["output_dtype"], x.dtype)
 
 
