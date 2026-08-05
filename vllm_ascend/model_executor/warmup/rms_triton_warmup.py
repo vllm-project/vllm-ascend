@@ -1,12 +1,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Warm up ``triton_rms_kernel`` (see ``ops/triton/rms_norm.py``)."""
+"""Warm up ``triton_q_rms`` (see ``ops/triton/rms_norm.py``)."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -50,47 +49,16 @@ def collect_triton_rms_warmup_block_m_values() -> list[int]:
     return list(range(1, _ROW_BLOCK_SIZE + 1))
 
 
-def _warm_triton_rms_kernel(
-    device: torch.device,
-    total_batch: int,
-    dim: int,
-    block_m: int,
-    q_dtype: torch.dtype,
-    variance_epsilon: float,
-    num_vectorcore: int,
-) -> None:
-    from vllm_ascend.ops.triton.rms_norm import triton_rms_kernel
-
-    hidden_state = torch.randn(
-        total_batch,
-        dim,
-        dtype=q_dtype,
-        device=device,
-    )
-    norm_output = torch.empty_like(hidden_state)
-    grid = (num_vectorcore,)
-
-    triton_rms_kernel[grid](
-        hidden_state,
-        hidden_state.stride(0),
-        norm_output,
-        variance_epsilon,
-        total_batch,
-        dim,
-        block_m,
-    )
-
-
 @torch.inference_mode()
 def triton_rms_warmup(worker: NPUWorker) -> None:
-    """JIT ``triton_rms_kernel`` before the first ``triton_q_rms`` call."""
+    """JIT ``triton_q_rms`` kernels before the first real call."""
     if not HAS_TRITON:
         return
     if not _model_uses_triton_q_rms(worker.model_runner):
         return
 
     try:
-        from vllm_ascend.ops.triton.rms_norm import triton_rms_kernel  # noqa: F401
+        from vllm_ascend.ops.triton.rms_norm import triton_q_rms
     except ImportError:
         return
 
@@ -104,27 +72,19 @@ def triton_rms_warmup(worker: NPUWorker) -> None:
     variance_epsilon = _variance_epsilon(worker.vllm_config.model_config)
     num_vectorcore = max(get_vectorcore_num(), 1)
 
-    logger.info(
-        "Warming up Triton RMS kernel: head_dim=%d, block_m_values=%s, "
-        "num_vectorcore=%d, dtype=%s, eps=%g",
-        head_dim,
-        block_m_values,
-        num_vectorcore,
-        q_dtype,
-        variance_epsilon,
-    )
-
+    # Choose shapes so ``triton_q_rms`` selects each ``BLOCK_M`` value:
+    # ``BLOCK_M = min(16, cdiv(total_batch, num_vectorcore))``.
+    # Use ``head_num=1`` so ``bs * head_num == total_batch``.
     for block_m in block_m_values:
         total_batch = block_m * num_vectorcore
-        _warm_triton_rms_kernel(
-            device,
+        q = torch.randn(
             total_batch,
+            1,
             head_dim,
-            block_m,
-            q_dtype,
-            variance_epsilon,
-            num_vectorcore,
+            dtype=q_dtype,
+            device=device,
         )
+        triton_q_rms(q, variance_epsilon)
 
     if device.type == "npu":
         torch.npu.synchronize()
