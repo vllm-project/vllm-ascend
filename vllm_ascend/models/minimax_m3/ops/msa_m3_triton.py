@@ -895,7 +895,6 @@ def _gqa_sparse_fwd_kernel(
 )
 @triton.jit(
     do_not_specialize=[
-        "total_q",
         "decode_query_len",
     ]
 )
