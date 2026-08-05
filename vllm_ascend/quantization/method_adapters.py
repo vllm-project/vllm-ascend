@@ -16,8 +16,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Callable
-
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
@@ -250,51 +248,18 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor | None = None,
-        global_redundant_expert_num=0,
-        pertoken_scale: torch.Tensor | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts=None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.quant_method.apply(
             layer=layer,
             x=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            num_experts=num_experts,
-            expert_map=expert_map,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance,
-            log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
-            pertoken_scale=pertoken_scale,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            mc2_mask=mc2_mask,
-            tid2eid=self.tid2eid,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
