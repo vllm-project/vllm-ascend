@@ -138,6 +138,10 @@ def _ascend_FusedMoE(
             )
         enable_eplb = True
         num_redundant_experts = configured_redundancy or upstream_redundancy
+    # Keep the upstream hash table as the source of truth and share it with
+    # the legacy Ascend quant-method path until that path also routes solely
+    # through the Router.
+    hash_indices_table_for_legacy_path = hash_indices_table if hash_indices_table is not None else tid2eid
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,
@@ -153,14 +157,14 @@ def _ascend_FusedMoE(
             zero_expert_type=zero_expert_type,
             num_logical_experts=num_experts,
             hash_indices_table=hash_indices_table,
-            tid2eid=tid2eid,
+            tid2eid=hash_indices_table_for_legacy_path,
             eplb_state=AscendEplbLayerState() if enable_eplb else None,
         )
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
     routed_experts_args["router"] = router
     routed_experts_args["n_shared_experts"] = n_shared_experts
-    if tid2eid is not None:
-        routed_experts_args["tid2eid"] = tid2eid
+    if hash_indices_table_for_legacy_path is not None:
+        routed_experts_args["tid2eid"] = hash_indices_table_for_legacy_path
     runner = _original_FusedMoE(
         *args,
         num_experts=num_experts,

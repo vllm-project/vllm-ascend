@@ -452,7 +452,7 @@ class DeepseekV4MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
-            tid2eid=self.gate.tid2eid,
+            hash_indices_table=self.gate.tid2eid,
         )
 
     def forward(self, hidden_states: torch.Tensor, input_ids=None) -> torch.Tensor:

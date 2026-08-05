@@ -68,3 +68,32 @@ def test_adapted_router_uses_ascend_mapping_operation():
 
     assert result is physical_ids
     mapping_op.assert_called_once_with(topk_ids, router.eplb_state.expert_replica_routing_table)
+
+
+def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
+    hash_indices_table = torch.tensor([[1, 3]], dtype=torch.int32)
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=False,
+            expert_map_path=None,
+            num_redundant_experts=0,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+    ):
+        patch_fused_moe._ascend_FusedMoE(
+            num_experts=8,
+            top_k=2,
+            router=router,
+            hash_indices_table=hash_indices_table,
+        )
+
+    kwargs = original_factory.call_args.kwargs
+    assert kwargs["hash_indices_table"] is hash_indices_table
+    assert kwargs["routed_experts_args"]["tid2eid"] is hash_indices_table
