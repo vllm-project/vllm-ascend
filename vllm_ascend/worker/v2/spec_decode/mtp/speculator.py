@@ -24,10 +24,15 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+import torch.nn as nn
 import vllm.v1.worker.gpu.spec_decode.speculator as _upstream_speculator
+from vllm.config import VllmConfig, replace
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.attention.sfa_v1 import force_non_pcp_sfa
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
 
 
@@ -72,6 +77,124 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
     metadata every step, so the MLA ``.decode`` sub-object is fresh each step
     and needs no per-step mirroring.
     """
+
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        super().__init__(vllm_config, device)
+        self._draft_attn_vllm_config = self.vllm_config
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # Phase 1 of MTP+PCP keeps target attention PCP-sharded, while the
+            # single MTP layer runs on the restored global batch on every PCP
+            # rank. Select the non-PCP SFA implementation for that draft layer.
+            draft_parallel_config = replace(
+                vllm_config.parallel_config,
+                prefill_context_parallel_size=1,
+            )
+            self._draft_attn_vllm_config = replace(
+                vllm_config,
+                parallel_config=draft_parallel_config,
+            )
+
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        return self._draft_attn_vllm_config
+
+    def load_draft_model(
+        self,
+        target_model: nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> nn.Module:
+        if self.vllm_config.parallel_config.prefill_context_parallel_size <= 1:
+            return super().load_draft_model(
+                target_model,
+                target_attn_layer_names,
+            )
+        # get_model() installs the target VllmConfig in an inner context, so a
+        # copied current config cannot override backend selection here. Use the
+        # Ascend-local selector while the MTP attention layer is constructed.
+        with force_non_pcp_sfa():
+            return super().load_draft_model(target_model, target_attn_layer_names)
+
+    def set_attn(self, *args, **kwargs) -> None:
+        if self.vllm_config.parallel_config.prefill_context_parallel_size <= 1:
+            super().set_attn(*args, **kwargs)
+            return
+        # Metadata builder selection is dynamic too; keep it paired with the
+        # non-PCP implementation selected during draft model construction.
+        with force_non_pcp_sfa():
+            super().set_attn(*args, **kwargs)
+
+    def propose(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # sample_tokens() has already restored input_batch and hidden states
+            # to global layout, but the target metadata passed by the community
+            # runner is still PCP-local. Rebuild the draft view in global layout.
+            attn_metadata, slot_mappings = self._build_global_pcp_draft_inputs(
+                input_batch
+            )
+        return super().propose(
+            input_batch,
+            attn_metadata,
+            slot_mappings,
+            *args,
+            **kwargs,
+        )
+
+    def _build_global_pcp_draft_inputs(
+        self,
+        input_batch: InputBatch,
+    ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+        """Build global MTP metadata after PCP sampling restoration."""
+        num_reqs = input_batch.num_reqs
+        num_tokens = input_batch.num_tokens
+        block_tables = self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs,
+        )
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            num_tokens,
+        )
+
+        max_query_len = int(input_batch.num_scheduled_tokens.max())
+        max_seq_len = int(
+            input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        )
+        global_attn_metadata = build_attn_metadata(
+            attn_groups=self.attn_groups,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            query_start_loc_gpu=input_batch.query_start_loc[: num_reqs + 1],
+            query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+            max_query_len=max_query_len,
+            seq_lens=input_batch.seq_lens[:num_reqs],
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+            seq_lens_np=input_batch.seq_lens_np,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            positions=input_batch.positions[:num_tokens],
+            attn_state=input_batch.attn_state,
+            num_input_tokens=num_tokens,
+        )
+        slot_mappings_by_layer = {
+            layer_name: slot_mappings[group_idx]
+            for group_idx, kv_cache_group in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            )
+            for layer_name in kv_cache_group.layer_names
+            if layer_name in self.draft_attn_layer_names
+        }
+        return global_attn_metadata, slot_mappings_by_layer
 
     # The signature is split on vllm_version_is: v0.26.0's
     # _build_draft_attn_metadata does not accept seq_lens_cpu_upper_bound /

@@ -19,10 +19,16 @@
 
 from dataclasses import replace
 
+import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.input_batch import (
+    combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
+)
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -60,6 +66,7 @@ class AscendPCPManager(PCPManager):
             cp_interleave=cp_interleave,
         )
         self.vllm_config = vllm_config
+
     @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
@@ -81,10 +88,22 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError("MRV2 PCP does not support speculative decoding yet.")
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if (
+                speculative_config.method != "mtp"
+                or speculative_config.num_speculative_tokens != 1
+            ):
+                raise NotImplementedError(
+                    "MRV2 PCP currently supports MTP with exactly one speculative "
+                    "token only."
+                )
+            if cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "MRV2 PCP + MTP is currently supported in eager mode only."
+                )
+        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         if is_sparse_mla and cudagraph_mode not in {
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL_DECODE_ONLY,
@@ -103,8 +122,36 @@ class AscendPCPManager(PCPManager):
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        local_batch = super().partition_batch(input_batch)
+        global_batch = input_batch
+        has_draft_tokens = input_batch.num_draft_tokens > 0
+        if has_draft_tokens:
+            speculative_config = self.vllm_config.speculative_config
+            if (
+                speculative_config is None
+                or speculative_config.method != "mtp"
+                or speculative_config.num_speculative_tokens != 1
+            ):
+                raise NotImplementedError(
+                    "MRV2 PCP batch partition supports MTP1 draft tokens only."
+                )
+            # The community PCP manager still rejects speculative batches. Feed it
+            # a non-speculative view so it can build the PCP-local token layout,
+            # then rebuild all MTP fields below in the Ascend subclass.
+            community_batch = replace(
+                input_batch,
+                num_draft_tokens=0,
+                num_draft_tokens_per_req=None,
+            )
+        else:
+            community_batch = input_batch
+
+        local_batch = super().partition_batch(community_batch)
+        # Slot-mapping preparation and sampling restoration must keep referring
+        # to the original global batch, not the temporary non-speculative view.
+        self._global_batch = global_batch
         assert isinstance(local_batch, AscendInputBatch)
+        if has_draft_tokens:
+            local_batch = self._rebuild_local_mtp_fields(global_batch, local_batch)
 
         # PCP builds the local layout from actual tokens, but a FULL decode
         # graph replays a fixed padded layout on every rank.
@@ -167,6 +214,73 @@ class AscendPCPManager(PCPManager):
             - (local_batch.num_draft_tokens_per_req if local_batch.num_draft_tokens_per_req is not None else 0),
         )
         return local_batch
+
+    def _rebuild_local_mtp_fields(
+        self,
+        global_batch: AscendInputBatch,
+        local_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Rebuild MTP1 fields after the community PCP layout is partitioned."""
+        assert self._req_states is not None
+        assert global_batch.num_draft_tokens_per_req is not None
+
+        global_draft_counts = np.asarray(
+            global_batch.num_draft_tokens_per_req, dtype=np.int32
+        )
+        draft_count_by_req_id = dict(
+            zip(global_batch.req_ids, global_draft_counts.tolist(), strict=True)
+        )
+        local_draft_counts = np.fromiter(
+            (draft_count_by_req_id[req_id] for req_id in local_batch.req_ids),
+            dtype=np.int32,
+            count=local_batch.num_reqs,
+        )
+
+        # An empty PCP rank uses a zero-length sentinel row. It must not claim a
+        # bonus or draft logit, even if that row reuses a real request id.
+        if local_batch.num_tokens == 0:
+            local_num_logits = np.zeros(local_batch.num_reqs, dtype=np.int32)
+            local_draft_counts.fill(0)
+        else:
+            local_num_logits = local_draft_counts + 1
+
+        local_cu_num_logits_np = np.empty(local_batch.num_reqs + 1, dtype=np.int32)
+        local_cu_num_logits_np[0] = 0
+        np.cumsum(local_num_logits, out=local_cu_num_logits_np[1:])
+        total_num_logits = int(local_cu_num_logits_np[-1])
+        local_cu_num_logits = async_copy_to_gpu(
+            local_cu_num_logits_np, device=self.device
+        )
+
+        expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+            local_batch.idx_mapping,
+            total_num_logits,
+            local_cu_num_logits,
+            max_expand_len=2,
+        )
+        logits_indices = combine_sampled_and_draft_tokens(
+            local_batch.input_ids,
+            local_batch.idx_mapping,
+            self._req_states.last_sampled_tokens,
+            local_batch.query_start_loc,
+            local_batch.seq_lens,
+            self._req_states.prefill_len.gpu,
+            self._req_states.draft_tokens,
+            local_cu_num_logits,
+            total_num_logits,
+            1,
+        )
+
+        return replace(
+            local_batch,
+            num_draft_tokens=int(local_draft_counts.sum()),
+            num_draft_tokens_per_req=local_draft_counts,
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
+            logits_indices=logits_indices,
+            cu_num_logits=local_cu_num_logits,
+            cu_num_logits_np=local_cu_num_logits_np,
+        )
 
     def prepare_slot_mappings(self) -> torch.Tensor: #TODO(lwq) 这个函数是在哪里被调用的？
         '''Pad PCP slot mappings to the fixed FULL-decode graph layout.'''

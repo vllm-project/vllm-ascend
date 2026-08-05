@@ -1,5 +1,7 @@
 import enum
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -102,6 +104,19 @@ def _has_shared_indexer_layers(configs: tuple[Any, ...]) -> bool:
     return any(isinstance(indexer_type, str) and indexer_type.lower() == "shared" for indexer_type in indexer_types)
 
 
+_force_non_pcp_sfa = ContextVar("force_non_pcp_sfa", default=False)
+
+
+@contextmanager
+def force_non_pcp_sfa():
+    """Select the regular SFA builder/implementation inside this context."""
+    token = _force_non_pcp_sfa.set(True)
+    try:
+        yield
+    finally:
+        _force_non_pcp_sfa.reset(token)
+
+
 def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
     for config in configs:
         if config is not None and hasattr(config, attr):
@@ -121,6 +136,8 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if _force_non_pcp_sfa.get():
+            return AscendSFAMetadataBuilder
         if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
@@ -143,6 +160,8 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if _force_non_pcp_sfa.get():
+            return AscendSFAImpl
         if enable_sfa_dcp_replicated_indexer():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
@@ -342,7 +361,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_input_tokens = common_attn_metadata.num_input_tokens # pad长度
+        num_input_tokens = common_attn_metadata.num_input_tokens
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
