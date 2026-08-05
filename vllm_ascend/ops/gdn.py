@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import logging
-
 import torch
 import torch_npu
 from einops import rearrange
@@ -38,8 +36,6 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
-logger = logging.getLogger(__name__)
-
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
@@ -59,7 +55,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             return cls._fused_chunk_available
 
         if not hasattr(torch_npu, "npu_chunk_gated_delta_rule"):
-            logger.warning("torch_npu.npu_chunk_gated_delta_rule not found; using Triton chunk path.")
             cls._fused_chunk_available = False
             return False
 
@@ -87,10 +82,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g=g,
             )
             torch.npu.synchronize()
-            logger.info("npu_chunk_gated_delta_rule smoke test passed; using fused chunk path.")
             cls._fused_chunk_available = True
         except Exception as e:
-            logger.warning("npu_chunk_gated_delta_rule smoke test failed (%s); using Triton chunk path.", e)
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
