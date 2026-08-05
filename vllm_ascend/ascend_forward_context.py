@@ -38,6 +38,8 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "w4a8_dynamic",
     "quanttype.w8a8",
     "quanttype.w4a8",
+    "w4a8_mxfp",
+    "quanttype.w4a8mxfp",
 }
 
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
@@ -326,10 +328,25 @@ def _select_a5_moe_comm_method(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    quant_type = getattr(
+        hf_text_config,
+        "moe_quantize",
+        getattr(hf_text_config, "quantize", None),
+    )
+    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+    if (
+        get_ascend_config().enable_fused_mc2 == 1
+        and _MEGA_MOE_SUPPORTED
+        and quant_name in {"w4a8_mxfp", "quanttype.w4a8mxfp"}
+        and _cann_megamoe_supported_by_config(vllm_config)
+    ):
+        return MoECommType.FUSED_MC2
+
     num_experts_per_tok = getattr(
-        vllm_config.model_config.hf_text_config,
+        hf_text_config,
         "num_experts_per_tok",
-        getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+        getattr(hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
     if num_tokens <= mc2_tokens_capacity and world_size > 1:

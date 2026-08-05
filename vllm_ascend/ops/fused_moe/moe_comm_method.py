@@ -371,16 +371,25 @@ class FusedMC2CommImpl(MoECommMethod):
         def to_list(x):
             return x if isinstance(x, list) else [x]
 
-        weight1 = to_list(fused_experts_input.weights.w1)
-        weight2 = to_list(fused_experts_input.weights.w2)
+        if fused_experts_input.quant.quant_type == QuantType.W4A8MXFP:
+            # W4A8 MXFP weights are stored as transposed views for grouped
+            # matmul. MegaMoe consumes one stacked tensor per projection, so
+            # transpose those views back without duplicating the weights.
+            weight1 = [fused_experts_input.weights.w1.transpose(1, 2)]
+            weight2 = [fused_experts_input.weights.w2.transpose(1, 2)]
+            weight_scales1 = [fused_experts_input.weights.w1_scale.transpose(1, 2)]
+            weight_scales2 = [fused_experts_input.weights.w2_scale.transpose(1, 2)]
+        else:
+            weight1 = to_list(fused_experts_input.weights.w1)
+            weight2 = to_list(fused_experts_input.weights.w2)
+            weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
+            weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
         # A8W4-INT MegaMoe reads N from weight1.storageShape.lastDim treated as int8 (N = lastDim*2)
         # and checks weight2.dim0 == N/2, so the weights MUST be int8-shaped (two int4 per byte), NOT
         # the eight-int4-per-int32 packing (that makes the op read N four times too small and fail
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
-        weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
         # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
         # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
@@ -393,9 +402,21 @@ class FusedMC2CommImpl(MoECommMethod):
                 fused_experts_input,
             )
 
+        activation = "swiglu"
+        activation_alpha = None
+        activation_beta = None
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
+        if isinstance(fused_experts_input.activation, SituActivationConfig):
+            activation = "situ"
+            activation_alpha = fused_experts_input.activation.linear_beta
+            activation_beta = fused_experts_input.activation.beta
+            activation_clamp = None
         x_active_mask = None
-        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+        if (
+            fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
+            and self.token_dispatcher.global_bs == 0
+            and fused_experts_input.routing.mc2_mask is not None
+        ):
             # mc2_mask comes from the reserved bool buffer in
             # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
             # the per-token active mask, so cast only when the dtype does
@@ -423,6 +444,9 @@ class FusedMC2CommImpl(MoECommMethod):
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
             activation_clamp=activation_clamp,
+            activation=activation,
+            activation_alpha=activation_alpha,
+            activation_beta=activation_beta,
             weight1_type=self._mega_moe_weight_type,
             weight2_type=self._mega_moe_weight_type,
         )
@@ -437,9 +461,12 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
-        # SiTU is implemented by the generic MoE path. Keep other activations
-        # on the upstream MegaMoE path, including unquantized shared experts.
-        if isinstance(fused_experts_input.activation, SituActivationConfig):
+        # CANN MegaMoe supports Kimi's SiTU only for the A5 W4A8 MXFP path.
+        # Keep every other SiTU configuration on the decomposed implementation.
+        if isinstance(fused_experts_input.activation, SituActivationConfig) and (
+            fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
+            or fused_experts_input.activation.linear_beta is None
+        ):
             return super().fused_experts(fused_experts_input)
         assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."

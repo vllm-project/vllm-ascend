@@ -28,7 +28,10 @@ COMM_STREAM = None
 
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
+_CANN_ACL_FLOAT8_E4M3FN = 292
+_CANN_ACL_FLOAT4_E2M1 = 296
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
+_CANN_MEGA_MOE_QUANT_MODE_MX = 4
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
@@ -113,6 +116,12 @@ def gather_from_sequence_parallel_region(
 
 
 def load_cann_mega_moe_ops():
+    # Build the communication-context extension while the model is being
+    # initialized. If this is deferred until MegaMoe's first collective, the
+    # per-node JIT lock serializes local workers and the ranks already inside
+    # HCCL can time out waiting for them.
+    comm_context_module = import_module("cann_ops_transformer.ops.comm_context")
+    comm_context_module.comm_context_op_builder.load()
     ops_module = import_module("cann_ops_transformer.ops")
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe
     mega_moe = ops_module.mega_moe
@@ -135,6 +144,12 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
+    if quant_type == QuantType.W4A8MXFP:
+        return (
+            _CANN_MEGA_MOE_QUANT_MODE_MX,
+            _CANN_ACL_FLOAT8_E4M3FN,
+            _CANN_ACL_FLOAT4_E2M1,
+        )
     raise RuntimeError(
         "MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
         "MegaMoe platforms. "

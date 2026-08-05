@@ -312,6 +312,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     [
         ("w4a8", True),
         ("w8a8", True),
+        ("w4a8_mxfp", True),
         ("w8a16", False),
     ],
 )
@@ -367,6 +368,42 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+def test_select_moe_comm_method_a5_uses_megamoe_for_w4a8_mxfp(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "_MEGA_MOE_SUPPORTED", True)
+    vllm_config = _make_vllm_config(
+        world_size=32,
+        num_experts=896,
+        top_k_experts=16,
+        quant_type="w4a8_mxfp",
+        hidden_size=7168,
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_select_moe_comm_method_a5_keeps_existing_path_for_other_quantization(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "_MEGA_MOE_SUPPORTED", True)
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        top_k_experts=4,
+        quant_type="w8a8",
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.ALLTOALL
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
