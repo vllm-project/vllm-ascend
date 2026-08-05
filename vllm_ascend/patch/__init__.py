@@ -158,7 +158,58 @@
 #    Future Plan:
 #       Remove this patch once both upstream fixes are in the supported vLLM.
 #
-# ** 7. File: platform/patch_kv_cache_coordinator.py**
+# ** 7. File: platform/patch_kimi_k3_parsers.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.parser_manager.ParserManager`
+#      `vllm.reasoning.abs_reasoning_parsers.ReasoningParserManager`
+#      `vllm.tool_parsers.abstract_tool_parser.ToolParserManager`
+#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.entrypoints.openai.responses.serving.OpenAIServingResponses`
+#    Why:
+#       The vLLM revision pinned by v0.26.0 predates the native Kimi K3 XTML
+#       parser stack. It cannot compose the K3 reasoning and tool parsers or
+#       preserve their token-aware Chat Completions behavior. Ascend PD prefill
+#       also returns an incomplete internal transfer output that must not be
+#       parsed as a final K3 response.
+#    How:
+#       Register the K3 reasoning, tool, structural-tag, and delegating parsers;
+#       extend ParserManager composition for `kimi_k3`; preserve token IDs and
+#       engine finish reasons in Chat Completions; bypass parsing only for PD
+#       prefill remote-decode output; and reject the unsupported Responses API.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/50093
+#       https://github.com/vllm-project/vllm/pull/50420
+#       https://github.com/vllm-project/vllm/pull/50886
+#       The PD prefill bypass is Ascend-specific and has no upstream PR.
+#    Future Plan:
+#       Remove this patch when every supported vLLM revision contains the native
+#       Kimi K3 parser stack and the Ascend PD path no longer sends incomplete
+#       prefill output through the response parser.
+#
+# ** 8. File: platform/patch_kimi_k3_renderer.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.model.ModelConfig.__post_init__`
+#      `vllm.tokenizers.TokenizerRegistry`
+#      `vllm.renderers.registry.RENDERER_REGISTRY`
+#      `vllm.renderers.online_renderer.OnlineRenderer.render_chat`
+#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#    Why:
+#       The vLLM revision pinned by v0.26.0 has no Kimi K3 renderer or automatic
+#       tokenizer-mode selection. K3 has no Jinja chat template; its trusted
+#       tokenizer-owned Python `encoding_k3.py` implements the XTML protocol.
+#    How:
+#       Register the `kimi_k3` renderer and HF tokenizer loader, select that mode
+#       automatically for `KimiK3ForConditionalGeneration`, and map typed OpenAI
+#       reasoning, tool-choice, response-format, multimodal, and conversation
+#       controls into the official Python encoder.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/50093
+#       https://github.com/vllm-project/vllm/pull/50540
+#    Future Plan:
+#       Remove this patch when every supported vLLM revision contains the native
+#       Kimi K3 Python renderer, request mapping, and automatic tokenizer mode.
+#
+# ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
 #    Why:
@@ -182,7 +233,7 @@
 #       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
 #       upstream vLLM version.
 #
-# ** 8. File: platform/patch_kv_cache_utils.py**
+# ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
 #      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
@@ -201,7 +252,7 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 9. File: platform/patch_mamba_config.py**
+# ** 11. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -213,7 +264,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 10. File: platform/patch_mamba_config_310.py**
+# ** 12. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -230,7 +281,7 @@
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
-# ** 11. File: platform/patch_mamba_manager.py**
+# ** 13. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
@@ -250,7 +301,7 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 12. File: platform/patch_media_connector.py**
+# ** 14. File: platform/patch_media_connector.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.multimodal.media.connector.MediaConnector`
 #      `vllm.multimodal.media.image.ImageMediaIO`
@@ -267,7 +318,7 @@
 #    Future Plan:
 #       Remove this patch when all supported vLLM releases contain PR #49159.
 #
-# ** 13. File: platform/patch_minimax_m2_config.py**
+# ** 15. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
 #    Why:
@@ -328,7 +379,7 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 14. File: platform/patch_mla_prefill_backend.py**
+# ** 16. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
 #    Why:
@@ -350,7 +401,7 @@
 #       platform/device hook so Ascend can be selected (or skipped) without
 #       monkey-patching.
 #
-# ** 15. File: platform/patch_multiproc_executor.py**
+# ** 17. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
 #    Why:
@@ -363,7 +414,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 16. File: platform/patch_pp_mtp.py**
+# ** 18. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.outputs.ModelRunnerOutput`
 #    Why:
@@ -453,7 +504,7 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 17. File: platform/patch_profiling_chunk.py**
+# ** 19. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -481,7 +532,7 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
-# ** 18. File: platform/patch_speculative_config.py**
+# ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -504,7 +555,7 @@
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
 #
-# ** 19. File: platform/patch_structured_output.py**
+# ** 21. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -526,7 +577,7 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
-# ** 20. File: platform/patch_torch_accelerator.py**
+# ** 22. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -546,7 +597,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 21. File: platform/patch_tool_choice_none_content.py**
+# ** 23. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -562,7 +613,7 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 22. File: platform/patch_use_v2_model_runner.py**
+# ** 24. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -587,7 +638,7 @@
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
-# ** 23. File: platform/patch_weight_transfer_engine.py**
+# ** 25. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
 #    Why:
