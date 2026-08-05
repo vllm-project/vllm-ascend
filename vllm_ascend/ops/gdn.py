@@ -83,7 +83,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             torch.npu.synchronize()
             cls._fused_chunk_available = True
-        except Exception as e:
+        except Exception:
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
