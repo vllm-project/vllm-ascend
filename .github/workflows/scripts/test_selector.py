@@ -41,14 +41,13 @@ MIN_AFFECTED_LINES = 1
 # ==================== Configuration ====================
 
 
-def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[str]:
+def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
-    Extract new/modified test files from PR diff and match to test cases.
-    Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
+    Extract new/modified test files from PR diff.
+    Test files must be in tests/ directory and start with test_
 
     Args:
         diff_file: Path to the PR diff file
-        test_case_map: Mapping of test case names to their coverage info
 
     Returns:
         List of test case names that correspond to new/modified test files
@@ -62,10 +61,12 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[st
         print(f"  Warning: Failed to read diff file for test file detection: {e}")
         return test_files_found
 
-    # Pattern to match test file paths: tests/[subdirs/]test_*.py
+    # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
     # In diff output: +++ b/tests/ut/core/test_xxx.py
-    # Capture full relative path (without leading +++)
-    test_file_pattern = re.compile(r"^\+\+\+ [ab]/(tests/.+/\w+\.py)", re.MULTILINE)
+    # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
+    test_file_pattern = re.compile(
+        r"^\+\+\+ [ab]/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py)", re.MULTILINE
+    )
 
     changed_test_files = set()
     for match in test_file_pattern.finditer(diff_content):
@@ -77,25 +78,10 @@ def _get_test_files_from_pr_diff(diff_file: str, test_case_map: dict) -> list[st
 
     print(f"  Found {len(changed_test_files)} changed test file(s): {changed_test_files}")
 
-    # Match changed test files to test cases in test_case_map
-    # Test case names format: tests/e2e/.../test_xxx.py or tests/e2e/.../test_xxx.py::test_func
-    found_in_map = False
-    for test_case_name in test_case_map:
-        for changed_file in changed_test_files:
-            # Match both full file tests and function-level tests
-            if changed_file in test_case_name:
-                if test_case_name not in test_files_found:
-                    test_files_found.append(test_case_name)
-                    found_in_map = True
-                    break
-
-    # If no exact match in test_case_map, add the file path directly as a new test case
-    if not found_in_map:
-        for changed_file in changed_test_files:
-            # Normalize path to test case name format: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
-            test_case_name = changed_file.rsplit(".py", 1)[0]
-            if test_case_name not in test_files_found:
-                test_files_found.append(test_case_name)
+    # Add all changed test files directly to recommended list (no matching with test_case_map)
+    for changed_file in changed_test_files:
+        if changed_file not in test_files_found:
+            test_files_found.append(changed_file)
 
     return test_files_found
 
@@ -705,18 +691,28 @@ class TestSelector:
                             if covered_in_func:
                                 # Get intersection of test covered lines and actual changed lines (for display)
                                 covered_changed_lines = covered_lines & display_changed_lines
-                                func_to_tests[func_name].append((test_case, covered_changed_lines))
+                                func_to_tests[func_name].append((test_case, covered_in_func, covered_changed_lines))
 
                 # Select tests that cover other lines of changed functions (deduplication)
                 for changed_file, func_to_lines in changed_functions.items():
                     for func_name in func_to_lines:
                         if func_name in func_to_tests:
-                            for test_case, covered_changed_lines in func_to_tests[func_name]:
+                            for test_case, covered_in_func, covered_changed_lines in func_to_tests[func_name]:
                                 existing = [s[0] for s in func_results]
-                                if test_case not in existing and covered_changed_lines:
-                                    # Display actual changed line coverage, not full function coverage
+                                if test_case not in existing and covered_in_func:
+                                    # Display changed lines coverage if available, otherwise function coverage
                                     display_lines = covered_changed_lines if covered_changed_lines else set()
-                                    func_results.append((test_case, {changed_file: display_lines}, len(display_lines)))
+                                    func_results.append(
+                                        (
+                                            test_case,
+                                            {changed_file: display_lines},
+                                            len(display_lines) or len(covered_in_func),
+                                        )
+                                    )
+                                    print(
+                                        f"  [Function match] {test_case} covers function '{func_name}' in"
+                                        f" {changed_file}"
+                                    )
 
                 func_results.sort(key=lambda x: x[2], reverse=True)
 
@@ -739,6 +735,10 @@ class TestSelector:
             selected.sort(key=lambda x: x[2], reverse=True)
 
             if selected:
+                print(
+                    f"  Line match: {len(line_results)} tests, Function match: {len(func_results)} tests, "
+                    f"Total: {len(selected)} tests"
+                )
                 return selected, "line+function"
 
             # ===== Stage 3: Function-level matching (only when first two levels are empty) =====
@@ -1125,6 +1125,15 @@ def main():
         changed_files_with_lines = change_detector.detect_changes_by_comparison()
         print(f"Detected {len(changed_files_with_lines)} changed files")
 
+    if not changed_files_with_lines:
+        print("\n=== No product source code changes found in PR ===")
+        print("skipping test recommendation.")
+        # Write empty result file
+        with open("recommended_pytest_paths.txt", "w", encoding="utf-8") as f:
+            pass
+        print("\nResults saved to: recommended_pytest_paths.txt")
+        return
+
     # 3. Select test cases
     print("\n=== Selecting Affected Test Cases ===")
     test_selector = TestSelector(selector.test_case_map)
@@ -1145,7 +1154,7 @@ def main():
     # 4. Add new/modified test files from PR (vllm_ascend/tests/test_*.py)
     test_file_tests = []
     if args.github_pr and diff_file:
-        test_file_tests = _get_test_files_from_pr_diff(diff_file, selector.test_case_map)
+        test_file_tests = _get_test_files_from_pr_diff(diff_file)
         if test_file_tests:
             print("\n=== New/Modified Test Files in PR ===")
             print(f"Adding {len(test_file_tests)} test file(s): {test_file_tests}")

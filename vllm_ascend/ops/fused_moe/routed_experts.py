@@ -265,6 +265,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def __init__(self, *args, tid2eid=None, n_shared_experts: int = 0, **kwargs):
         object.__setattr__(self, "tid2eid", tid2eid)
         super().__init__(*args, **kwargs)
+        if self.quant_config is None:
+            # Preserve the pre-refactor BF16 lifecycle: let upstream create
+            # weights first, then install the Ascend execution method.
+            self._replace_quant_method(
+                AscendUnquantizedFusedMoEMethod(
+                    self.moe_config,
+                    tid2eid=self.tid2eid,
+                )
+            )
         ascend_config = get_ascend_config()
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -277,6 +286,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.log2phy = None
         self.global_redundant_expert_num = 0
         self.init_eplb(n_shared_experts)
+        self.return_with_event = False
+        self.n_shared_experts = n_shared_experts
 
         vllm_config = get_current_vllm_config()
 
@@ -372,7 +383,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         if quant_config is None:
-            return AscendUnquantizedFusedMoEMethod(moe_config, tid2eid=self.tid2eid)
+            return super()._get_quant_method(prefix, quant_config, moe_config)
         return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
 
     def get_eplb_parameter(self, name: str):
@@ -406,12 +417,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             quant_type = getattr(method, "quant_type", QuantType.NONE)
         return quant_type
 
-    def no_shared_forward_impl(
+    def forward_impl(
         self,
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        return_with_event: bool = False,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -496,7 +506,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, None)
 
-        if return_with_event:
+        if self.return_with_event:
             return FusedMoEResult(
                 routed_out=routed_out,
                 before_dispatch_evt=fused_experts_results.before_dispatch_evt,
