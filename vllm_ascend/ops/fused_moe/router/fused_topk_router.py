@@ -50,6 +50,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
             eplb_state=eplb_state,
         )
         self.renormalize = renormalize
