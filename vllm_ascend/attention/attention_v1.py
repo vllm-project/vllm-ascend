@@ -118,7 +118,7 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dst[:, 1]
 
         dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_value_cache.device)
 
     @staticmethod
     def copy_blocks(
