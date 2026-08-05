@@ -38,7 +38,6 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
     OFFLOAD_KV_CACHE_TUPLE_LEN,
@@ -1469,8 +1468,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if q_c_scale.dim() == 2:
                     q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
                 quant_matmul_kwargs.update(
-                    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                    pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                    scale_dtype=torch_npu.float8_e8m0fnu,
+                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
                     group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
                 )
             elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
@@ -1507,7 +1506,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
-        record_attention_compute_start()
         return DeviceOperator.indexer_select_post_process(
             self,
             q_li,
@@ -2024,6 +2022,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
         else:
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+
+        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so recording this
+        # inside indexer_select_post_process would leave their gate closed.
+        record_attention_compute_start()
+
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:

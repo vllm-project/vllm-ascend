@@ -14,14 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from collections.abc import Callable
-
 import torch
+from vllm.model_executor.layers.fused_moe import SharedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -29,7 +27,6 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
-from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
 
 
@@ -61,46 +58,11 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: torch.Tensor | None = None,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        **kwargs,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=num_experts,
-        )
-
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=num_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=x,
-            )
-
         topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
@@ -113,12 +75,10 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=False,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=getattr(layer, "ascend_expert_map", None),
+                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
             ),
         )
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            final_hidden_states += zero_expert_result
         return final_hidden_states
 
 
