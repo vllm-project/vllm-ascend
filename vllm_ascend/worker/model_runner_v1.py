@@ -2900,6 +2900,11 @@ class NPUModelRunner(GPUModelRunner):
             actual_seq_lengths_q=self.actual_seq_lengths_q,
             positions=self.positions,
             positions_cpu=self._dsa_positions_cpu_buf if self.use_compress else None,
+            # Decode-only position equals the number of tokens computed
+            # before this step. Reuse this existing INT32 tensor so grouped
+            # SFA prefetch takes its specialized all-INT32 kernel path
+            # without adding Cast or Sub operators.
+            prefetch_positions=self.num_computed_tokens[:num_reqs_padded],
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             context_parallel_metadata=self.long_seq_metadata,

@@ -26,10 +26,16 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
+from vllm_ascend.attention.sfa_prefetch import (
+    build_sfa_prefetch_plan,
+    get_layer_index,
+    get_layer_name_with_index,
+)
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
+    enable_cp,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -179,6 +185,7 @@ class AscendSFAMetadata:
     #                                   |-- query_len ---|
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
+    positions: torch.Tensor
     seq_lens: torch.Tensor
     seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
@@ -202,6 +209,10 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
+    # Produced by grouped gather and consumed by all shared layers in a group.
+    prefetch_current_topk_slots: torch.Tensor | None = None
+    # Existing INT32 per-request positions used by grouped prefetch.
+    prefetch_positions: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -455,6 +466,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
+            positions=input_positions,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -466,6 +478,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            prefetch_positions=common_attn_metadata.prefetch_positions,
         )
 
     def build_for_graph_capture(
@@ -497,6 +510,12 @@ class AscendSFAImpl(MLAAttentionImpl):
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
+
+    _prefetched_kv: torch.Tensor | None = None     # [max_prefetch_layers, max_num_seqs, index_topk, kv_lora_rank]
+    _prefetched_k_pe: torch.Tensor | None = None   # [max_prefetch_layers, max_num_seqs, index_topk, qk_rope_head_dim]
+    _prefetch_current_topk_slots: torch.Tensor | None = None
+    _gather_stream: torch_npu.npu.Stream | None = None
+    _gather_done_event: torch_npu.npu.Event | None = None
 
     def __init__(
         self,
@@ -615,6 +634,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.qk_rope_head_dim,
                 self.sfa_qsfa_tile_size,
             )
+        self._init_prefetch_optimization(hf_config, hf_text_config)
         self.preprocess_type = PreprocessType.NATIVE
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
@@ -640,14 +660,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         When sparse C8 packs the SFA KV cache into a single tensor, the indexer
         key cache moves from slot 2 to slot 1:
 
-        ================  =========  =========  =============  ==============
+        ================  ===========  ===========  =============  ==============
         Layout            kv_cache[0]  kv_cache[1]  kv_cache[2]  kv_cache[3]
-        ================  =========  =========  =============  ==============
-        Default           k_nope     k_pe       indexer_k      indexer_scale
+        ================  ===========  ===========  =============  ==============
+        Default           k_nope        k_pe         indexer_k      indexer_scale
         Sparse C8         packed_kv  indexer_k  indexer_scale  (unused)
-        ================  =========  =========  =============  ==============
+        ================  ===========  ===========  =============  ==============
         """
-        return 1 if self.enable_sparse_sfa_c8 else 2
+        return 1 if self.use_sparse_c8_sfa else 2
 
     @property
     def kv_cache_indexer_scale_idx(self) -> int:
@@ -1163,6 +1183,128 @@ class AscendSFAImpl(MLAAttentionImpl):
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
+
+
+    def _init_prefetch_optimization(self, hf_config, hf_text_config) -> None:
+        """Initialize this layer from the model-level SFA prefetch plan."""
+        self.is_prefetch_producer = False
+        self.prefetch_buffer_index = -1
+        self.prefetch_target_layer_ids: list[int] = []
+        self.prefetch_target_kv_caches = None
+        self.prefetch_topk_size = 0
+        self.prefetch_plan = build_sfa_prefetch_plan(hf_config, hf_text_config)
+        self.prefetch_enabled = (
+            get_ascend_config().enable_sfa_kv_cache_prefetch
+            and not self.use_sparse_c8_sfa
+            and self.prefetch_plan.max_prefetch_layers > 0
+        )
+        if not self.prefetch_enabled:
+            return
+
+        layer_id = get_layer_index(self.layer_name)
+        role = self.prefetch_plan.get_role(layer_id)
+        self.is_prefetch_producer = role.is_producer
+        self.prefetch_target_layer_ids = list(role.target_layer_ids)
+        self.prefetch_buffer_index = role.buffer_index
+        self.prefetch_topk_size = self.prefetch_plan.topk_size
+
+    def _ensure_prefetch_buffer(self, kv_cache) -> None:
+        """Allocate the shared prefetch buffers on the first producer call."""
+        max_tokens = self.vllm_config.scheduler_config.max_num_seqs
+        device = kv_cache[0].device
+        dtype = kv_cache[0].dtype
+        topk = self.prefetch_topk_size
+        if (
+            AscendSFAImpl._prefetched_kv is not None
+            and AscendSFAImpl._prefetched_k_pe is not None
+            and AscendSFAImpl._prefetch_current_topk_slots is not None
+            and AscendSFAImpl._prefetch_current_topk_slots.shape
+            == (max_tokens, 8)
+            and AscendSFAImpl._prefetched_kv.shape
+            == (
+                self.prefetch_plan.max_prefetch_layers,
+                max_tokens,
+                topk,
+                self.kv_lora_rank,
+            )
+            and AscendSFAImpl._prefetched_kv.dtype == dtype
+            and AscendSFAImpl._prefetched_kv.device == device
+        ):
+            return
+        AscendSFAImpl._prefetched_kv = torch.empty(
+            self.prefetch_plan.max_prefetch_layers,
+            max_tokens,
+            topk,
+            self.kv_lora_rank,
+            dtype=dtype,
+            device=device,
+        )
+        AscendSFAImpl._prefetched_k_pe = torch.empty(
+            self.prefetch_plan.max_prefetch_layers,
+            max_tokens,
+            topk,
+            self.qk_rope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        AscendSFAImpl._prefetch_current_topk_slots = torch.empty(
+            max_tokens,
+            8,
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def _ensure_prefetch_target_kv_caches(self) -> None:
+        """Resolve the producer follower caches from the static context."""
+        if not self.is_prefetch_producer or self.prefetch_target_kv_caches is not None:
+            return
+        context = self.vllm_config.compilation_config.static_forward_context
+        caches = []
+        for layer_id in self.prefetch_target_layer_ids:
+            layer_context = context.get(
+                get_layer_name_with_index(self.layer_name, layer_id)
+            )
+            if layer_context is None or layer_context.kv_cache is None:
+                logger.warning(
+                    "Grouped sparse-KV prefetch is disabled for %s because a "
+                    "shared-layer KV cache is unavailable.",
+                    self.layer_name,
+                )
+                self.is_prefetch_producer = False
+                return
+            caches.append(layer_context.kv_cache)
+        self.prefetch_target_kv_caches = caches
+
+    def _get_prefetch_slice(self, num_actual_tokens: int):
+        if self.prefetch_buffer_index < 0 or AscendSFAImpl._prefetched_kv is None:
+            return None, None
+        kv = AscendSFAImpl._prefetched_kv[self.prefetch_buffer_index][:num_actual_tokens]
+        kpe = AscendSFAImpl._prefetched_k_pe[self.prefetch_buffer_index][:num_actual_tokens]
+        return kv, kpe
+
+    def _patch_prefetched_current_tokens(
+        self,
+        kv_cache,
+        slot_mapping: torch.Tensor,
+        attn_metadata: AscendSFAMetadata,
+        prefetched_kv: torch.Tensor,
+        prefetched_k_pe: torch.Tensor,
+    ) -> None:
+        """Restore current-token cache entries with one fused Ascend C op."""
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        current_topk_slots = attn_metadata.prefetch_current_topk_slots
+        if current_topk_slots is None:
+            raise RuntimeError(
+                "Grouped SFA prefetch did not publish current-token slots."
+            )
+        torch.ops._C_ascend.npu_sparse_kv_patch_out(
+            kv_cache[0],
+            kv_cache[1],
+            slot_mapping[:num_actual_tokens].contiguous(),
+            current_topk_slots[:num_actual_tokens],
+            prefetched_kv,
+            prefetched_k_pe,
+        )
 
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape
@@ -1992,8 +2134,71 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
         else:
             topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+        used_prefetch = False
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
+            if (
+                self.prefetch_enabled
+                and self.prefetch_buffer_index >= 0
+                and AscendSFAImpl._prefetched_kv is not None
+            ):
+                num_actual = attn_metadata.num_actual_tokens
+                if AscendSFAImpl._gather_done_event is not None:
+                    torch_npu.npu.current_stream().wait_event(
+                        AscendSFAImpl._gather_done_event
+                    )
+                prefetched_kv, prefetched_k_pe = self._get_prefetch_slice(
+                    num_actual
+                )
+                if (
+                    prefetched_kv is not None
+                    and attn_metadata.attn_state
+                    == AscendAttentionState.DecodeOnly
+                ):
+                    self._patch_prefetched_current_tokens(
+                        kv_cache,
+                        slot_mapping_sfa,
+                        attn_metadata,
+                        prefetched_kv,
+                        prefetched_k_pe,
+                    )
+
+                    kv_len = self.prefetch_topk_size
+                    dense_kv = prefetched_kv.unsqueeze(2).contiguous()
+                    valid_kv_lengths = [
+                        min(seq_len, kv_len)
+                        for seq_len in attn_metadata.seq_lens_cpu[
+                            :num_actual
+                        ].tolist()
+                    ]
+                    attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                        ql_nope[:num_actual].unsqueeze(1),
+                        dense_kv,
+                        dense_kv,
+                        num_heads=self.num_heads,
+                        num_key_value_heads=1,
+                        input_layout="BSND",
+                        query_rope=q_pe[:num_actual].unsqueeze(1),
+                        key_rope=prefetched_k_pe.unsqueeze(2).contiguous(),
+                        atten_mask=None,
+                        sparse_mode=0,
+                        scale=self.scale,
+                        antiquant_mode=0,
+                        antiquant_scale=None,
+                        block_table=None,
+                        block_size=0,
+                        softmax_lse_flag=True,
+                        actual_seq_lengths=[1] * num_actual,
+                        actual_seq_lengths_kv=valid_kv_lengths,
+                    )
+                    attn_output = attn_output.squeeze(1)
+                    if num_actual < num_input_tokens:
+                        padded = attn_output.new_zeros(
+                            num_input_tokens, *attn_output.shape[1:]
+                        )
+                        padded[:num_actual] = attn_output
+                        attn_output = padded
+                    used_prefetch = True
         else:
             if not self.has_indexer:
                 raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
@@ -2011,15 +2216,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
 
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-        )
+        if not used_prefetch:
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
 
         attn_output = self._v_up_proj(attn_output)
 
@@ -2042,6 +2248,102 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = result
 
         output[...] = self.o_proj(attn_output)[0]
+
+        if (
+            self.prefetch_enabled
+            and self.is_prefetch_producer
+            and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        ):
+            self._ensure_prefetch_buffer(kv_cache)
+            self._ensure_prefetch_target_kv_caches()
+            if self.prefetch_target_kv_caches is not None:
+                num_actual_tokens = attn_metadata.num_actual_tokens
+                topk_indices_for_prefetch = topk_indices[
+                    :num_actual_tokens
+                ].reshape(num_actual_tokens, -1)
+                if attn_metadata.prefetch_positions is None:
+                    raise RuntimeError(
+                        "SFA prefetch requires INT32 positions metadata."
+                    )
+                current_positions = attn_metadata.prefetch_positions[
+                    :num_actual_tokens
+                ]
+                current_topk_slots = (
+                    AscendSFAImpl._prefetch_current_topk_slots
+                )
+                assert current_topk_slots is not None
+                current_topk_slots = current_topk_slots[
+                    :num_actual_tokens
+                ]
+                attn_metadata.prefetch_current_topk_slots = (
+                    current_topk_slots
+                )
+
+                if AscendSFAImpl._gather_stream is None:
+                    AscendSFAImpl._gather_stream = torch_npu.npu.Stream()
+                gather_stream = AscendSFAImpl._gather_stream
+                # The grouped gather consumes top-k indices produced on the
+                # main stream and reuses shared output buffers read by FIA on
+                # that stream. Make both dependencies explicit before
+                # launching the next asynchronous prefetch. Operations
+                # enqueued after this producer can still overlap the gather.
+                gather_stream.wait_stream(torch_npu.npu.current_stream())
+                with torch_npu.npu.stream(gather_stream):
+                    num_prefetch_layers = len(self.prefetch_target_kv_caches)
+                    target_kv_caches = self.prefetch_target_kv_caches
+                    # The Ascend C binding has three cache-output pairs.
+                    prefetch_outputs = [
+                        (
+                            AscendSFAImpl._prefetched_kv[index][
+                                :num_actual_tokens
+                            ],
+                            AscendSFAImpl._prefetched_k_pe[index][
+                                :num_actual_tokens
+                            ],
+                        )
+                        for index in range(3)
+                    ]
+                    if num_prefetch_layers > len(prefetch_outputs):
+                        raise ValueError(
+                            "SFA prefetch group has more target layers than "
+                            "the grouped gather operator input slots."
+                        )
+                    ctkv_0, kpe_0 = target_kv_caches[0]
+                    ctkv_1, kpe_1 = (
+                        target_kv_caches[1]
+                        if num_prefetch_layers > 1
+                        else target_kv_caches[0]
+                    )
+                    ctkv_2, kpe_2 = (
+                        target_kv_caches[2]
+                        if num_prefetch_layers > 2
+                        else target_kv_caches[0]
+                    )
+                    out_ctkv_0, out_kpe_0 = prefetch_outputs[0]
+                    out_ctkv_1, out_kpe_1 = prefetch_outputs[1]
+                    out_ctkv_2, out_kpe_2 = prefetch_outputs[2]
+                    torch.ops._C_ascend.npu_sparse_kv_gather_group_out(
+                        ctkv_0,
+                        kpe_0,
+                        ctkv_1,
+                        kpe_1,
+                        ctkv_2,
+                        kpe_2,
+                        attn_metadata.block_table.contiguous(),
+                        topk_indices_for_prefetch.contiguous(),
+                        current_positions.contiguous(),
+                        out_ctkv_0,
+                        out_kpe_0,
+                        out_ctkv_1,
+                        out_kpe_1,
+                        out_ctkv_2,
+                        out_kpe_2,
+                        current_topk_slots,
+                        128,
+                        num_prefetch_layers,
+                    )
+                AscendSFAImpl._gather_done_event = torch_npu.npu.Event()
+                AscendSFAImpl._gather_done_event.record(gather_stream)
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

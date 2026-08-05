@@ -48,6 +48,9 @@
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "attention/sparse_kv_gather/sparse_kv_gather_torch_adpt.h"
+#include "attention/sparse_kv_gather_group/sparse_kv_gather_torch_adpt.h"
+#include "attention/sparse_kv_patch/sparse_kv_patch_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2749,5 +2752,46 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+    // sparse_kv_gather
+    ops.def(
+        "npu_sparse_kv_gather("
+            "Tensor paged_ctkv, Tensor paged_kpe,"
+            "Tensor block_table, Tensor topk_indices, Tensor cur_pos,"
+            "int block_size"
+        ") -> (Tensor out_ctkv, Tensor out_kpe)"
+    );
+    ops.impl("npu_sparse_kv_gather", torch::kPrivateUse1, &vllm_ascend::npu_sparse_kv_gather);
+
+    // Group out-variant: one Ascend C launch gathers one to three shared cache
+    // layers directly into caller-owned prefetch buffers. Inactive fixed ABI
+    // slots are ignored according to num_cache_layers.
+    ops.def(
+        "npu_sparse_kv_gather_group_out("
+            "Tensor paged_ctkv_0, Tensor paged_kpe_0, "
+            "Tensor paged_ctkv_1, Tensor paged_kpe_1, "
+            "Tensor paged_ctkv_2, Tensor paged_kpe_2, "
+            "Tensor block_table, Tensor topk_indices, Tensor cur_pos, "
+            "Tensor(a!) out_ctkv_0, Tensor(b!) out_kpe_0, "
+            "Tensor(c!) out_ctkv_1, Tensor(d!) out_kpe_1, "
+            "Tensor(e!) out_ctkv_2, Tensor(f!) out_kpe_2, "
+            "Tensor(g!) current_topk_slots, "
+            "int block_size, int num_cache_layers"
+        ") -> ()"
+    );
+    ops.impl("npu_sparse_kv_gather_group_out", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_kv_gather_group_out);
+
+    // Consumer-side current-token repair. The grouped gather emits one slot
+    // per request; this op copies both cache components into that slot with a
+    // single Ascend C launch.
+    ops.def(
+        "npu_sparse_kv_patch_out("
+            "Tensor paged_ctkv, Tensor paged_kpe, "
+            "Tensor slot_mapping, Tensor current_topk_slots, "
+            "Tensor(a!) prefetched_ctkv, Tensor(b!) prefetched_kpe"
+        ") -> ()"
+    );
+    ops.impl("npu_sparse_kv_patch_out", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_kv_patch_out);
 }
 #endif
