@@ -71,7 +71,7 @@ def test_qwen3_dense_fc1_tp2(model):
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    time.sleep()
+    time.sleep(10000000000)
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
