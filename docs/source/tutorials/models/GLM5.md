@@ -45,6 +45,7 @@ You can use our official docker image to run GLM-5/5.1 directly.
 ::::{tab-item} A3 series
 :sync: A3
 
+
 Start the docker image on each node.
 
 ```{code-block} bash
@@ -91,6 +92,7 @@ docker run --rm \
 ::::
 ::::{tab-item} A2 series
 :sync: A2
+
 
 Start the docker image on each node.
 
@@ -147,6 +149,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ::::{tab-item} A3 series
 :sync: A3
+
 
 - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
@@ -230,6 +233,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 ::::{tab-item} A2 series
 :sync: A2
 
+
 - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
 
 Run the following script to execute online inference.
@@ -310,6 +314,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 ::::{tab-item} A3 series
 :sync: A3
 
+
 - `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
 
 Run the following scripts on two nodes respectively.
@@ -327,7 +332,6 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -373,7 +377,6 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -411,6 +414,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 ::::
 ::::{tab-item} A2 series
 :sync: A2
+
 
 Run the following scripts on two nodes respectively.
 
@@ -475,7 +479,6 @@ local_ip="xxx"
 node0_ip="xxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -587,7 +590,6 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -638,7 +640,6 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -819,27 +820,22 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -853,10 +849,6 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
@@ -898,29 +890,23 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -934,10 +920,6 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager": true}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
@@ -978,31 +960,23 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
-
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
-
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-
-
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
         export TASK_QUEUE_ENABLE=1
-
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1017,10 +991,6 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 200000 \
@@ -1060,30 +1030,23 @@ Before you start, please
          local_ip="xxxx" # change to your own ip
 
          export HCCL_OP_EXPANSION_MODE="AIV"
-
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
          export TASK_QUEUE_ENABLE=1
-
          export ASCEND_RT_VISIBLE_DEVICES=$1
-
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1098,10 +1061,6 @@ Before you start, please
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
              --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
              --seed 1024 \
              --served-model-name glm-5 \
              --max-model-len 200000 \
@@ -1141,30 +1100,23 @@ Before you start, please
          local_ip="xxxx" # change to your own ip
 
          export HCCL_OP_EXPANSION_MODE="AIV"
-
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
          export TASK_QUEUE_ENABLE=1
-
          export ASCEND_RT_VISIBLE_DEVICES=$1
-
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1179,10 +1131,6 @@ Before you start, please
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
              --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
              --seed 1024 \
              --served-model-name glm-5 \
              --max-model-len 200000 \
@@ -1222,30 +1170,23 @@ Before you start, please
          local_ip="xxxx" # change to your own ip
 
          export HCCL_OP_EXPANSION_MODE="AIV"
-
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
          export TASK_QUEUE_ENABLE=1
-
          export ASCEND_RT_VISIBLE_DEVICES=$1
-
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -1260,10 +1201,6 @@ Before you start, please
              --tensor-parallel-size $7 \
              --enable-expert-parallel \
              --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp", "enforce_eager": true}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
              --seed 1024 \
              --served-model-name glm-5 \
              --max-model-len 200000 \
