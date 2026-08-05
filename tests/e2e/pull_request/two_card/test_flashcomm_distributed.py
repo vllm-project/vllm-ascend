@@ -22,6 +22,7 @@ Run `pytest tests/e2e/pull_request/two_card/test_flashcomm_distributed.py`.
 """
 
 import os
+import time
 from unittest.mock import patch
 
 import pytest
@@ -70,6 +71,7 @@ def test_qwen3_dense_fc1_tp2(model):
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
+    time.sleep()
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
