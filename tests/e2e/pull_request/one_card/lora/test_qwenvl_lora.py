@@ -258,7 +258,6 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
 
 @wait_until_npu_memory_free()
 def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
-
     import os
     from pathlib import Path
 
