@@ -72,6 +72,27 @@ def set_gmmswigluquant_method():
     return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
 
 
+def refresh_all2all_expert_ids_after_l2_discard() -> None:
+    """Re-fill All2AllV ``expert_ids_per_ep_rank`` after sleep level 2 discard (not in named_buffers)."""
+    try:
+        for comm_method in list(_MoECommMethods.values()):
+            if not isinstance(comm_method, AlltoAllCommImpl):
+                continue
+            dispatcher = comm_method.token_dispatcher
+            ids = getattr(dispatcher, "expert_ids_per_ep_rank", None)
+            num_local = getattr(dispatcher, "num_local_experts", 0)
+            num_experts = getattr(dispatcher, "num_experts", 0)
+            if ids is None or num_local <= 1 or num_experts <= 0:
+                continue
+            correct = torch.arange(num_experts, dtype=ids.dtype, device=ids.device) % num_local
+            if ids.shape == correct.shape:
+                ids.copy_(correct)
+            else:
+                dispatcher.expert_ids_per_ep_rank = correct
+    except Exception as exc:
+        logger.warning("Failed to restore expert_ids_per_ep_rank after L2 wake: %s", exc)
+
+
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor
