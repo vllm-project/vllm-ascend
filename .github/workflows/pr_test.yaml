@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -334,7 +334,7 @@ jobs:
     if: >-
       ${{
         needs.select-tests.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready')
+        (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5'))
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
@@ -488,19 +488,19 @@ jobs:
           fi 
           
   run-selected-tests-a5:
-      needs: [pre-commit, select-tests]
-      if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
-      strategy:
-        matrix:
-          vllm_version:
-            - ${{ needs.pre-commit.outputs.main_commit }}
-            - ${{ needs.pre-commit.outputs.release_tag }}
-      uses: ./.github/workflows/_selected_tests.yaml
-      with:
-        vllm: ${{ matrix.vllm_version }}
-        ref: ${{ github.event.pull_request.head.sha }}
-        base_ref: ${{ github.base_ref }}
-        test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
+    needs: [pre-commit, select-tests]
+    if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
         
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
@@ -510,6 +510,9 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
+        env:
+          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+          HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
 
