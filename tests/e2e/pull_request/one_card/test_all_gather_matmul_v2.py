@@ -70,11 +70,8 @@ def _run_all_gather_matmul_v2_quant(rank: int, master_port: int) -> None:
 
     hcom = _get_hccl_comm_name(rank)
     torch.manual_seed(SEED + rank)
-    input_fp = torch.randn((LOCAL_M, K_SIZE),
-                           device="npu",
-                           dtype=torch.bfloat16)
-    quantized_x, x1_scale = torch_npu.npu_dynamic_quant(input_fp,
-                                                        dst_type=torch.int8)
+    input_fp = torch.randn((LOCAL_M, K_SIZE), device="npu", dtype=torch.bfloat16)
+    quantized_x, x1_scale = torch_npu.npu_dynamic_quant(input_fp, dst_type=torch.int8)
     quantized_x = quantized_x.contiguous()
     x1_scale = x1_scale.reshape(-1, 1).contiguous()
 
@@ -145,8 +142,5 @@ def _run_all_gather_matmul_v2_quant(rank: int, master_port: int) -> None:
 )
 def test_all_gather_matmul_v2_dynamic_quant() -> None:
     os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
-    os.environ.setdefault("HCCL_NPU_SOCKET_PORT_RANGE",
-                          _make_hccl_socket_port_range())
-    mp.spawn(_run_all_gather_matmul_v2_quant,
-             args=(_find_free_port(), ),
-             nprocs=WORLD_SIZE)
+    os.environ.setdefault("HCCL_NPU_SOCKET_PORT_RANGE", _make_hccl_socket_port_range())
+    mp.spawn(_run_all_gather_matmul_v2_quant, args=(_find_free_port(),), nprocs=WORLD_SIZE)
