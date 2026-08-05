@@ -38,6 +38,7 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
@@ -207,3 +208,4 @@ benchmarks:
     top_p: 0.95
     ignore_eos: false
     thinking: true
+

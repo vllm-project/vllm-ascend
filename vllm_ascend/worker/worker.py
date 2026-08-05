@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -61,6 +62,9 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_host_device_memory_usage_ratio,
+)
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -247,23 +251,36 @@ class NPUWorker(WorkerBase):
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
         if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[2] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+            weight_models = [model]
+            speculative_config = self.vllm_config.speculative_config
+            if speculative_config is not None and speculative_config.method == "mtp":
+                drafter = getattr(self.model_runner, "drafter", None)
+                draft_model = getattr(drafter, "model", None)
+                if draft_model is not None and draft_model is not model:
+                    weight_models.append(draft_model)
 
-                    w2_data = param.transpose(1, 2)
-                    w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-                    setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[1] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+            # Unquantized Ascend MoE stores weights in an execution layout
+            # after loading. Restore the loadable layout for every model that
+            # receives online updates. The MTP drafter is a separate model and
+            # must follow the same wake-up preparation as the target.
+            for weight_model in weight_models:
+                for name, param in weight_model.named_parameters():
+                    if "w2_weight" in name and param.shape[2] == hidden_size:
+                        parts = name.split(".")
+                        param_name = parts[-1]
+                        parent_module = weight_model.get_submodule(".".join(parts[:-1]))
 
-                    w13_data = param.transpose(1, 2)
-                    w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-                    setattr(parent_module, param_name, w13_data)
+                        # Preserve weight_loader for subsequent online updates.
+                        w2_data = param.transpose(1, 2)
+                        replace_parameter(parent_module, param_name, w2_data)
+                    elif "w13_weight" in name and param.shape[1] == hidden_size:
+                        parts = name.split(".")
+                        param_name = parts[-1]
+                        parent_module = weight_model.get_submodule(".".join(parts[:-1]))
+
+                        # Preserve weight_loader for subsequent online updates.
+                        w13_data = param.transpose(1, 2)
+                        replace_parameter(parent_module, param_name, w13_data)
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -512,6 +529,7 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(kv_cache_memory_bytes)
             return kv_cache_memory_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -555,8 +573,45 @@ class NPUWorker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
+        self.available_kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(
+            self.available_kv_cache_memory_bytes,
+        )
 
         return int(self.available_kv_cache_memory_bytes)
+
+    def update_available_memory_for_sparse_kv_offload(self, available_memory):
+        """
+        A simple patch for Sparse KV offload: add additional available_memory according to the
+        ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
+        using all original available device memory without modify original kv_spec or vllm code.
+        For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
+        or reuse hisparse's host pool logic after it's merged to vllm.
+        """
+        GiB = lambda b: b / GiB_bytes
+        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
+        if not sparse_kv_offload_config.enabled:
+            return available_memory
+        keep_device_kv_cache = sparse_kv_offload_config.keep_device_kv_cache
+        if keep_device_kv_cache:
+            needed_dram_size_bytes = available_memory
+        else:
+            kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+            host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
+            needed_dram_size_bytes = host_device_memory_usage_ratio * available_memory
+        if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30):
+            raise ValueError(
+                f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
+                f"user specified dram size ({sparse_kv_offload_config.dram_size_per_dp_GB} GB). "
+                "Please increase sparse_kv_offload_config.dram_size_per_dp_GB if available on your device."
+            )
+        if not keep_device_kv_cache:
+            available_memory += needed_dram_size_bytes
+            logger.info_once(
+                "Sparse KV offload is enabled, enlarge total available memory to %.2f GiB",
+                GiB(available_memory),
+                scope="local",
+            )
+        return int(available_memory)
 
     def execute_model(
         self,
@@ -847,7 +902,11 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            # reserve kv_cache_spec for sparse kv offload memory profile usage.
+            self.kv_cache_spec = kv_cache_spec
+        return kv_cache_spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
