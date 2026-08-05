@@ -882,8 +882,7 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
             if upstream_eplb_config.use_async:
                 raise ValueError(
-                    "Async EPLB is not supported by Model Runner V2 on Ascend yet; "
-                    "set eplb_config.use_async to false."
+                    "Async EPLB is not supported by Model Runner V2 on Ascend yet; set eplb_config.use_async to false."
                 )
             if upstream_eplb_config.communicator not in (None, "torch_nccl", "torch_gloo"):
                 raise ValueError(
