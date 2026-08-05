@@ -80,7 +80,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         topk_weights = torch.randn(tokens, 2)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
         layer.activation = "silu"
-        layer._ascend_pertoken_scale = torch.randn(tokens)
+        layer.ascend_pertoken_scale = torch.randn(tokens)
         layer.apply_router_weight_on_input = True
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)

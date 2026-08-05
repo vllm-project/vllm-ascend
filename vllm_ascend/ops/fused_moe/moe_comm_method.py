@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import comm_utils
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -285,7 +285,7 @@ class FusedMC2CommImpl(MoECommMethod):
         self._mega_moe_symm_buffer = None
         self._mega_moe_weight_type = None
         if _MEGA_MOE_SUPPORTED:
-            self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops()
+            self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -309,7 +309,7 @@ class FusedMC2CommImpl(MoECommMethod):
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         dispatch_quant_mode, dispatch_quant_out_dtype, self._mega_moe_weight_type = (
-            comm_utils._get_cann_mega_moe_quant_settings(fused_experts_input.quant.quant_type)
+            moe_utils._get_cann_mega_moe_quant_settings(fused_experts_input.quant.quant_type)
         )
         group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a

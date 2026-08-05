@@ -292,8 +292,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         layer.swiglu_limit = 1000000
         layer.activation = "gelu"
         layer.apply_router_weight_on_input = True
-        layer._ascend_mc2_mask = mc2_mask
-        layer._ascend_pertoken_scale = pertoken_scale
+        layer.ascend_mc2_mask = mc2_mask
+        layer.ascend_pertoken_scale = pertoken_scale
 
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)

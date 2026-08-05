@@ -386,8 +386,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         log2phy = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
         layer.ascend_expert_map = expert_map
         layer.log2phy = log2phy
-        layer._ascend_mc2_mask = mc2_mask
-        layer._ascend_pertoken_scale = pertoken_scale
+        layer.ascend_mc2_mask = mc2_mask
+        layer.ascend_pertoken_scale = pertoken_scale
         layer.activation = "silu"
         layer.apply_router_weight_on_input = False
 

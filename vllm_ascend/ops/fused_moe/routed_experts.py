@@ -32,7 +32,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+from vllm_ascend.ops.fused_moe.moe_utils import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
@@ -101,7 +101,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer: "RoutedExperts",
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -147,20 +147,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=getattr(layer, "ascend_expert_map", None),
-                global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
-                mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
-                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
-                log2phy=getattr(layer, "log2phy", None),
-                pertoken_scale=getattr(layer, "_ascend_pertoken_scale", None),
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                log2phy=layer.log2phy,
+                pertoken_scale=layer.ascend_pertoken_scale,
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
-                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
+                swiglu_alpha=layer.swiglu_alpha,
+                swiglu_beta=layer.swiglu_beta,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
@@ -211,6 +211,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
         self.router = router
         ascend_config = get_ascend_config()
+        self.n_shared_experts = n_shared_experts
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.dynamic_eplb = False
@@ -224,6 +226,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.init_eplb(n_shared_experts)
         self.return_with_event = False
         self.n_shared_experts = n_shared_experts
+        self.ascend_pertoken_scale = None
+        self.ascend_mc2_mask = None
 
         vllm_config = get_current_vllm_config()
 
@@ -237,9 +241,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
 
     def init_eplb(self, n_shared_experts):
-        ascend_config = get_ascend_config()
-        mix_placement = getattr(ascend_config, "mix_placement", False)
-
         # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
         AscendRoutedExperts.moe_counter += 1
         self.moe_instance_id = AscendRoutedExperts.moe_counter
@@ -252,7 +253,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # a shallow config view with the logical count.
         placement_moe_config = copy(self.moe_config)
         placement_moe_config.num_experts = self.moe_config.num_logical_experts + (
-            n_shared_experts if mix_placement else 0
+            n_shared_experts if self.mix_placement else 0
         )
         allocated_redundancy = self.moe_config.num_experts - self.moe_config.num_logical_experts
         if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
@@ -271,7 +272,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             placement_eplb_config,
             AscendRoutedExperts.moe_counter,
             placement_moe_config,
-            mix_placement,
+            self.mix_placement,
             n_shared_experts,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
@@ -371,13 +372,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         try:
             _vllm_config = get_current_vllm_config()
-        except AssertionError:
-            _vllm_config = None
-        model_config = None if _vllm_config is None else _vllm_config.model_config
-        if model_config is not None and model_config.enable_return_routed_experts:
-            capturer = getattr(self, "_ascend_routed_experts_capturer", None)
-            if capturer is not None:
-                capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
+
+            model_config = None if _vllm_config is None else _vllm_config.model_config
+            if model_config is not None and model_config.enable_return_routed_experts:
+                capturer = getattr(self, "_ascend_routed_experts_capturer", None)
+                if capturer is not None:
+                    capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
+        except Exception as e:
+            logger.warning("Something went wrong.")
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
@@ -476,8 +478,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
         )
-        self._ascend_pertoken_scale = pertoken_scale
-        self._ascend_mc2_mask = mc2_mask
+        self.ascend_pertoken_scale = pertoken_scale
+        self.ascend_mc2_mask = mc2_mask
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -488,8 +490,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 shared_experts_input=None,
             )
         finally:
-            self._ascend_pertoken_scale = None
-            self._ascend_mc2_mask = None
+            self.ascend_pertoken_scale = None
+            self.ascend_mc2_mask = None
         if zero_expert_result is not None:
             fused_experts_results.routed_out += zero_expert_result
 

@@ -37,7 +37,7 @@ from vllm_ascend.lora.fused_moe import (
     postprocess_lora_indices,
     preprocess_lora_indices,
 )
-from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
+from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,

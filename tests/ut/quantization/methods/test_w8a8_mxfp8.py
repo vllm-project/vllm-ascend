@@ -149,7 +149,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         topk_weights = torch.randn(tokens, 2)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
         layer.activation = "silu"
-        layer._ascend_pertoken_scale = torch.randn(tokens)
+        layer.ascend_pertoken_scale = torch.randn(tokens)
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
         mock_ctx.moe_comm_method = mock_comm
