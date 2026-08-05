@@ -8,6 +8,25 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import get_fc3_quant_x_group
 
 
+class TensorHoldingWork:
+    """Proxy async work while retaining its input and output tensors."""
+
+    def __init__(self, work: torch.distributed.Work, input: torch.Tensor, output: torch.Tensor):
+        self._work = work
+        self._input: torch.Tensor | None = input
+        self._output: torch.Tensor | None = output
+
+    def wait(self, *args, **kwargs):
+        completed = self._work.wait(*args, **kwargs)
+        if completed is not False:
+            self._input = None
+            self._output = None
+        return completed
+
+    def __getattr__(self, name):
+        return getattr(self._work, name)
+
+
 def get_decode_context_model_parallel_world_size() -> int:
     """Return DCP world size (v0.21.0 helper removed on vLLM main)."""
     return get_dcp_group().world_size
@@ -56,7 +75,10 @@ def all_gather_async(
         input_size = input.size()
         output_size = (input_size[0] * group.world_size,) + input_size[1:]
         output = torch.empty(output_size, dtype=input.dtype, device=input.device)
-    return output, dist.all_gather_into_tensor(output, input, group=group.device_group, async_op=async_op)
+    work = dist.all_gather_into_tensor(output, input, group=group.device_group, async_op=async_op)
+    if work is None:
+        return output, None
+    return output, TensorHoldingWork(work, input, output)
 
 
 def split_tensor_along_first_dim(
