@@ -1,0 +1,192 @@
+/*
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+ * This file is a part of the vllm-ascend project.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * TurboQuant write path: rotate -> norm -> quantize -> pack -> scatter to the
+ * FRACTAL_NZ paged cache, plus a separate fp16 norm plane.
+ *
+ * Norms live OUTSIDE the packed plane deliberately: 96 packed bytes + a 2-byte
+ * norm is 98, not a multiple of the 32B NZ tile, and padding to 128 would drop
+ * compression 5.22x -> 4.0x. A separate plane costs ~2% and keeps 5.22x.
+ */
+#ifndef TURBOQUANT_RESHAPE_AND_CACHE_310_H
+#define TURBOQUANT_RESHAPE_AND_CACHE_310_H
+
+#include "kernel_operator.h"
+#include "turboquant_codec.h"
+#include "turboquant_reshape_and_cache_310_tiling_data.h"
+
+namespace TurboQuantWrite {
+
+using namespace AscendC;
+using namespace TurboQuant;
+
+constexpr int32_t kNzC0 = 16;        // fp16 NZ tile on 310P
+constexpr int32_t kBufferNum = 1;    // single-buffered; the vector work dominates
+
+struct TQWriteParams {
+    GM_ADDR key;
+    GM_ADDR value;
+    GM_ADDR keyCache;
+    GM_ADDR valueCache;
+    GM_ADDR slotMapping;
+    GM_ADDR keyNorms;
+    GM_ADDR valueNorms;
+    GM_ADDR signs;        // D vector, +-1.0f, length headDim
+    GM_ADDR centroids;    // Lloyd-Max table (LEVELS) + midpoints (LEVELS-1); unused when uniform
+};
+
+template <int BITS>
+class TQReshapeAndCache {
+public:
+    __aicore__ inline TQReshapeAndCache(const TurboQuantReshapeAndCache310TilingData *t) : t_(t) {}
+
+    __aicore__ inline void Init(const TQWriteParams &p, TPipe *pipe)
+    {
+        const uint32_t d = t_->headDim;
+        keyGm_.SetGlobalBuffer((__gm__ half *)p.key);
+        valGm_.SetGlobalBuffer((__gm__ half *)p.value);
+        kCacheGm_.SetGlobalBuffer((__gm__ half *)p.keyCache);
+        vCacheGm_.SetGlobalBuffer((__gm__ half *)p.valueCache);
+        slotGm_.SetGlobalBuffer((__gm__ int32_t *)p.slotMapping);
+        kNormGm_.SetGlobalBuffer((__gm__ half *)p.keyNorms);
+        vNormGm_.SetGlobalBuffer((__gm__ half *)p.valueNorms);
+        signGm_.SetGlobalBuffer((__gm__ float *)p.signs);
+        cbGm_.SetGlobalBuffer((__gm__ float *)p.centroids);
+
+        pipe->InitBuffer(inQue_, kBufferNum, d * sizeof(half));
+        pipe->InitBuffer(vecBuf_, d * sizeof(float));
+        pipe->InitBuffer(tmpBuf_, d * sizeof(float));
+        pipe->InitBuffer(codeBuf_, d * sizeof(int32_t));
+        pipe->InitBuffer(byteBuf_, TQTraits<BITS>::PackedBytes(d));
+        pipe->InitBuffer(signBuf_, d * sizeof(float));
+        pipe->InitBuffer(cbBuf_, (2 * (1 << BITS)) * sizeof(float));
+
+        signs_ = signBuf_.Get<float>();
+        DataCopy(signs_, signGm_, d);
+        if (t_->codebookMode == TQ_CB_LUT) {
+            cb_ = cbBuf_.Get<float>();
+            DataCopy(cb_, cbGm_, 2 * (1 << BITS));
+        }
+        invSqrtLen_ = t_->invSqrtHeadDim;   // host-computed: AscendC Sqrt is tensor-only
+        sqrtLen_ = t_->sqrtHeadDim;
+    }
+
+    __aicore__ inline void Process()
+    {
+        const uint32_t core = GetBlockIdx();
+        const uint32_t begin = core * t_->tokensPerCore;
+        const uint32_t end = (begin + t_->tokensPerCore < t_->numTokens) ? (begin + t_->tokensPerCore)
+                                                                        : t_->numTokens;
+        for (uint32_t tok = begin; tok < end; ++tok) {
+            const int32_t slot = slotGm_.GetValue(tok);
+            if (slot < 0) {
+                continue;  // padded / masked token
+            }
+            for (uint32_t h = 0; h < t_->numKvHeads; ++h) {
+                HandleVector(keyGm_, kCacheGm_, kNormGm_, tok, h, slot);
+                HandleVector(valGm_, vCacheGm_, vNormGm_, tok, h, slot);
+            }
+        }
+    }
+
+private:
+    /*
+     * One (token, head) vector: load -> norm -> normalise -> Pi -> quantize ->
+     * pack -> scatter. The norm is stored separately, so the packed plane keeps
+     * its exact NZ tile alignment.
+     */
+    __aicore__ inline void HandleVector(const GlobalTensor<half> &src, const GlobalTensor<half> &cache,
+                                        GlobalTensor<half> &normPlane, uint32_t tok, uint32_t h,
+                                        int32_t slot)
+    {
+        const uint32_t d = t_->headDim;
+        LocalTensor<half> in = inQue_.AllocTensor<half>();
+        DataCopy(in, src[(tok * t_->numKvHeads + h) * d], d);
+        inQue_.EnQue(in);
+        in = inQue_.DeQue<half>();
+
+        LocalTensor<float> v = vecBuf_.Get<float>();
+        LocalTensor<float> tmp = tmpBuf_.Get<float>();
+        Cast(v, in, RoundMode::CAST_NONE, d);
+        PipeBarrier<PIPE_V>();
+        inQue_.FreeTensor(in);
+
+        // ||x||, then normalise. Pi is orthogonal so the order (normalise then
+        // rotate, or rotate then normalise) is free; we normalise first so the
+        // quantizer always sees a unit vector.
+        Mul(tmp, v, v, d);
+        PipeBarrier<PIPE_V>();
+        ReduceSum(tmp, tmp, tmp, d);
+        PipeBarrier<PIPE_V>();
+        Sqrt(tmp, tmp, 1);                  // tensor form; no scalar overload exists
+        PipeBarrier<PIPE_V>();
+        float nrm = tmp.GetValue(0);
+        if (nrm < 1e-12f) {
+            nrm = 1e-12f;
+        }
+        Muls(v, v, 1.0f / nrm, d);
+        PipeBarrier<PIPE_V>();
+
+        RotatePi(v, signs_, tmp, d, invSqrtLen_);
+
+        LocalTensor<int32_t> codes = codeBuf_.Get<int32_t>();
+        QuantizeVec<BITS>(v, codes, cb_[1 << BITS], tmp, d, sqrtLen_, t_->codebookMode);
+
+        LocalTensor<uint8_t> bytes = byteBuf_.Get<uint8_t>();
+        PackCodes<BITS>(codes, bytes, d);
+        PipeBarrier<PIPE_V>();
+
+        ScatterNz(cache, bytes, h, slot);
+        normPlane.SetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + h, static_cast<half>(nrm));
+    }
+
+    /*
+     * Scatter packed halves into (numBlocks, C1, blockSize, 16) fp16.
+     * Feature index f = h*packedHalves + j maps to [c1 = f/16, off, c0 = f%16],
+     * so a head's run is packedHalves/16 contiguous 16-element groups, each
+     * landing at a fixed stride. 16 halves = 32B: aligned, no DataCopyPad
+     * (which 310P does not support).
+     */
+    __aicore__ inline void ScatterNz(const GlobalTensor<half> &cache, const LocalTensor<uint8_t> &bytes,
+                                     uint32_t h, int32_t slot)
+    {
+        const uint32_t blockSize = t_->blockSize;
+        const uint32_t blk = static_cast<uint32_t>(slot) / blockSize;
+        const uint32_t off = static_cast<uint32_t>(slot) % blockSize;
+        const uint32_t ph = t_->packedHalves;
+        const uint32_t groups = ph / kNzC0;
+        LocalTensor<half> asHalf = bytes.ReinterpretCast<half>();
+        for (uint32_t g = 0; g < groups; ++g) {
+            const uint32_t c1 = (h * ph) / kNzC0 + g;
+            const uint64_t dst = ((static_cast<uint64_t>(blk) * t_->c1 + c1) * blockSize + off) * kNzC0;
+            DataCopy(cache[dst], asHalf[g * kNzC0], kNzC0);
+        }
+    }
+
+    const TurboQuantReshapeAndCache310TilingData *t_;
+    GlobalTensor<half> keyGm_, valGm_, kCacheGm_, vCacheGm_, kNormGm_, vNormGm_;
+    GlobalTensor<int32_t> slotGm_;
+    GlobalTensor<float> signGm_, cbGm_;
+    TQue<QuePosition::VECIN, kBufferNum> inQue_;
+    TBuf<TPosition::VECCALC> vecBuf_, tmpBuf_, codeBuf_, byteBuf_, signBuf_, cbBuf_;
+    LocalTensor<float> signs_, cb_;
+    float invSqrtLen_{1.0f};
+    float sqrtLen_{1.0f};
+};
+
+}  // namespace TurboQuantWrite
+
+#endif  // TURBOQUANT_RESHAPE_AND_CACHE_310_H
