@@ -19,7 +19,7 @@ name: Schedule Test Coverage
 
 on:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: "55 0 * * *"
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -119,6 +119,7 @@ jobs:
       base_sha: ${{ needs.select-full-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
       enable-coverage: true
+      timeout-minutes: 180
     secrets:
       OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

@@ -138,8 +138,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.select_experts")
-    def test_apply_full_params(self, mock_select, mock_ctx):
+    def test_apply_full_params(self, mock_ctx):
         tokens = 4
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
@@ -147,10 +146,10 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         layer.swiglu_limit = 1000000
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
-        router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
-        mock_select.return_value = (topk_weights, topk_ids)
+        layer.activation = "silu"
+        layer._ascend_pertoken_scale = torch.randn(tokens)
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
         mock_ctx.moe_comm_method = mock_comm
@@ -158,12 +157,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.scheme.apply(
             layer,
             x,
-            router_logits,
-            top_k=2,
-            renormalize=True,
-            num_experts=self.num_experts,
-            activation="silu",
-            pertoken_scale=torch.randn(tokens),
+            topk_weights,
+            topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
         )
-        mock_select.assert_called_once()
         mock_comm.fused_experts.assert_called_once()

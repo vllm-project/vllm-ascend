@@ -87,6 +87,11 @@ def setup_vllm_config_mock(mocker: MockerFixture):
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     mock_moe_comm_method = MagicMock()
+    mock_eplb_config = MagicMock(dynamic_eplb=False, expert_map_path=None)
+    mock_ascend_config = MagicMock(
+        enable_multistream_moe=False,
+        eplb_config=mock_eplb_config,
+    )
 
     def mock_prepare(hidden_states, router_logits, **kwargs):
         return MoEPrepareOutput(
@@ -129,12 +134,12 @@ def mock_dist_env(mocker: MockerFixture):
         patch("vllm.model_executor.layers.fused_moe.layer.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
         patch("vllm.model_executor.layers.fused_moe.config.get_dp_group", return_value=mock_dp_and_tp_group(mocker)),
         patch(
-            "vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config",
-            return_value=MagicMock(enable_multistream_moe=False, expert_map_path=None),
+            "vllm_ascend.patch.platform.patch_fused_moe.get_ascend_config",
+            return_value=mock_ascend_config,
         ),
         patch(
             "vllm_ascend.ops.fused_moe.routed_experts.get_ascend_config",
-            return_value=MagicMock(enable_multistream_moe=False, expert_map_path=None),
+            return_value=mock_ascend_config,
         ),
         patch(
             "vllm_ascend.ops.fused_moe.routed_experts.init_eplb_config",
@@ -159,13 +164,14 @@ def mock_moe_env(mocker: MockerFixture):
         patch(
             "torch_npu.npu_moe_init_routing",
             return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), torch.tensor([0, 1, 2, 4, 6, 2, 7, 1])),
+            create=True,
         ),
-        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2))),
-        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)])),
-        patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_moe_finalize_routing", return_value=(torch.randn(16, 2))),
+        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2)), create=True),
+        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2)), create=True),
+        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2)), create=True),
+        patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)]), create=True),
+        patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2)), create=True),
+        patch("torch_npu.npu_moe_finalize_routing", return_value=(torch.randn(16, 2)), create=True),
     ):
         if hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             with (

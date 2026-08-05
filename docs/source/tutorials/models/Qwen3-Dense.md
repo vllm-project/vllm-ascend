@@ -217,7 +217,7 @@ Expected result: The version information is displayed, confirming a successful i
 
     If deploying a multi-node environment, set up the environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -527,7 +527,7 @@ After several minutes, you will get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | FUSED_MC2 | EP Switch | Async Scheduling |
+| Scenario | Configuration | NPUs | TP | DP | FUSED_MC2 | EP Switch | Async Scheduling |
 |----------|---------------|-------|----|----|-------------|--------------|--------------|
 | High Throughput | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |

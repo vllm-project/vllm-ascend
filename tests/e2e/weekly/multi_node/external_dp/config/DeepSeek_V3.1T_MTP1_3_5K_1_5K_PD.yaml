@@ -47,6 +47,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   ASCEND_LOG_DEVICE_FLUSH_TIMEOUT: "0"
@@ -252,3 +253,4 @@ benchmarks:
     request_rate: 0
     baseline: 9800
     threshold: 0.97
+
