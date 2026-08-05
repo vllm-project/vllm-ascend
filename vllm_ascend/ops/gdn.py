@@ -525,15 +525,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # returns a copy, safe to clear in place.
                 initial_state = ssm_state[prefill_state_indices]
                 clear_ssm_states(initial_state, prefill_has_initial_state)
-                core_attn_out_non_spec, last_recurrent_state = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=initial_state,
-                    cu_seqlens=prefill_query_start_loc,
-                    scale=key_non_spec.shape[-1] ** -0.5,
+                core_attn_out_non_spec, last_recurrent_state = (
+                    AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state,
+                        cu_seqlens=prefill_query_start_loc,
+                        scale=key_non_spec.shape[-1] ** -0.5,
+                    )
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             else:
