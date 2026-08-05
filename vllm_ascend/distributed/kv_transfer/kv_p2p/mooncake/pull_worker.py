@@ -4,7 +4,7 @@
 
 import queue
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec
 import torch
@@ -12,7 +12,9 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 
+from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
@@ -28,9 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
-
-if TYPE_CHECKING:
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer
 
 logger = init_logger(__name__)
 
@@ -47,6 +47,10 @@ class MooncakePullRecvingThread(threading.Thread):
         self,
         engine: Any,
         vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_specs: list[KVCacheSpec],
+        layer_name_to_group_index: dict[str, int],
+        layer_name_to_spec_index: dict[str, int],
         local_metadata: MooncakeTransferMetadata,
         tp_rank: int,
         tp_size: int,
@@ -62,7 +66,35 @@ class MooncakePullRecvingThread(threading.Thread):
         super().__init__(daemon=True, name="MooncakePullRecvingThread")
         self.engine = engine
         self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.kv_cache_config = kv_cache_config
+        self.kv_cache_specs = kv_cache_specs
+        self.layer_name_to_group_index = layer_name_to_group_index
+        self.layer_name_to_spec_index = layer_name_to_spec_index
         self.local_metadata = local_metadata
+
+        self.block_size = local_metadata.block_size
+        self.layer_names = local_metadata.layer_names
+        self.group_indices = local_metadata.group_indices
+        self.spec_indices = local_metadata.spec_indices
+        self.kv_caches_base_addr = local_metadata.kv_caches_base_addr
+        self.block_strides = local_metadata.block_strides
+        self.block_lens = local_metadata.block_lens
+        self.block_shapes = local_metadata.block_shapes
+        self.block_size_scales = local_metadata.block_size_scales
+
+        self.use_mla = self.model_config.is_deepseek_mla
+        hf_text_config = self.model_config.hf_text_config
+        self.num_key_value_heads = getattr(
+            hf_text_config, "num_key_value_heads", 0
+        )
+        speculative_config = vllm_config.speculative_config
+        self.num_speculative_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.dp_rank = dp_rank
@@ -251,7 +283,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         self,
         vllm_config: VllmConfig,
         engine_id: str,
-        kv_cache_config: "KVCacheConfig",
+        kv_cache_config: KVCacheConfig,
     ) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
@@ -267,9 +299,17 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             self._recving_thread = MooncakePullRecvingThread(
                 engine=self.engine,
                 vllm_config=self.vllm_config,
+                ascend_config=self.ascend_config,
+                kv_cache_config=self.kv_cache_config,
+                kv_cache_specs=self.kv_cache_specs,
+                layer_name_to_group_index=self.layer_name_to_group_index,
+                layer_name_to_spec_index=self.layer_name_to_spec_index,
+                kv_caches=self.kv_caches,
                 local_metadata=self.xfer_handshake_metadata,
                 tp_rank=self.tp_rank,
                 tp_size=self.tp_size,
+                pp_rank=self.pp_rank,
+                pp_size=self.pp_size,
                 dp_rank=self.dp_rank,
                 dp_size=self.dp_size,
                 pcp_rank=self.pcp_rank,
