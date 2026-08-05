@@ -95,7 +95,7 @@ MiniMax-H3 uses the dedicated `vllm-omni` image. Pull the tag that matches your 
 
     ```bash
     # Please replace the tag with the actual published version for your environment.
-    export IMAGE=quay.io/ascend/vllm-omni:minimax-h3-a2
+    export IMAGE=quay.io/ascend/vllm-omni:minimax-h3
     docker pull $IMAGE
     ```
 
