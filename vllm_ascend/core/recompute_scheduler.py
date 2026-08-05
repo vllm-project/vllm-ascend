@@ -293,35 +293,11 @@ class RecomputeScheduler(Scheduler):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                        self.running.remove(preempted_req)
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                            req_index -= 1
-                    else:
-                        preempted_req = self.running.pop()
-
                     # NOTE: We add the preempted_req to recomputed_reqs in kv_consumer to
                     # drop the request to PD proxy.
                     transfer_config = self.vllm_config.kv_transfer_config
                     if transfer_config is not None and not transfer_config.is_kv_producer:
-                        recomputed_req = preempted_req
+                        recomputed_req = self.running.pop()
                         recomputed_req_id = recomputed_req.request_id
                         recomputed_block_ids = self.kv_cache_manager.get_block_ids(recomputed_req_id)
                         recomputed_num_computed_tokens = recomputed_req.num_computed_tokens
@@ -369,6 +345,30 @@ class RecomputeScheduler(Scheduler):
                         if recomputed_req == request:
                             break
                     else:
+                        if self.policy == SchedulingPolicy.PRIORITY:
+                            preempted_req = max(
+                                self.running,
+                                key=lambda r: (r.priority, r.arrival_time),
+                            )
+                            self.running.remove(preempted_req)
+                            if preempted_req in scheduled_running_reqs:
+                                preempted_req_id = preempted_req.request_id
+                                scheduled_running_reqs.remove(preempted_req)
+                                token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                                req_to_new_blocks.pop(preempted_req_id)
+                                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                                preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
+                                if preempted_encoder_inputs:
+                                    # Restore encoder compute budget if the preempted
+                                    # request had encoder inputs scheduled in this step.
+                                    num_embeds_to_restore = sum(
+                                        preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
+                                    )
+                                    encoder_compute_budget += num_embeds_to_restore
+                                req_index -= 1
+                        else:
+                            preempted_req = self.running.pop()
+
                         self._preempt_request(preempted_req, scheduled_timestamp)
                         preempted_reqs.append(preempted_req)
                         logger.info(
