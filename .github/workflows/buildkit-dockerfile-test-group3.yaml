@@ -51,7 +51,7 @@ jobs:
           build-args: |
             PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
             PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
-            GIT_PROXY=https://gh-proxy.test.osinfra.cn/
+            GIT_PROXY=https://git-cdn.test.osinfra.cn/
             PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
             ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
             MOONCAKE_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
