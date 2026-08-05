@@ -15,7 +15,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -32,21 +31,10 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 
 @dataclass
 class AscendSFACPMetadata(AscendSFAMetadata):
-    """SFA metadata with the full PCP cache-write slot mapping."""
-
     pcp_slot_mapping: torch.Tensor | None = None
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
-    """Metadata builder for SFA under MRV2 Prefill Context Parallelism.
-
-    Batch partitioning (zigzag), seq_lens_np / attn_state rebuild, and
-    num_decode_tokens propagation are handled by AscendPCPManager at the
-    model_runner level plus the upstream MLACommonMetadataBuilder. This
-    class is intentionally thin: it exists primarily so that
-    AscendSFABackend.get_builder_cls() can route to it when PCP is on.
-    """
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -70,7 +58,6 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         build_metadata: Callable[[], AscendSFAMetadata],
     ) -> AscendSFAMetadata:
-        """Keep PCPManager's gathered slots beside the local SFA view."""
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         metadata = super()._build_with_metadata_view(
             common_attn_metadata,
@@ -80,36 +67,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.pcp_slot_mapping = pcp_slot_mapping
         return metadata
 
-    def build_for_cudagraph_capture(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-    ) -> AscendSFACPMetadata:
-        '''Capture PCP FULL-decode graphs with decode-shaped cache inputs.'''
-        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
-        assert isinstance(metadata, AscendSFACPMetadata)
-        metadata.pcp_slot_mapping = common_attn_metadata.slot_mapping
-        metadata.attn_state = AscendAttentionState.DecodeOnly
-        metadata.num_decodes = common_attn_metadata.num_reqs
-        metadata.num_decode_tokens = common_attn_metadata.num_input_tokens
-        return metadata
-
-
 class AscendSFACPImpl(AscendSFAImpl):
-    """SFA impl for MRV2 Prefill Context Parallelism.
-
-    Reuses every method on AscendSFAImpl unchanged, and only overrides
-    the hooks where PCP needs to step in:
-
-    1. __init__: force the native preprocess path (prolog_v3 / mlapo
-       fused ops bypass the cross-rank KV gather and are incompatible).
-    2. exec_kv: gather latent KV + cos/sin + slot_mapping across PCP
-       ranks before the fused RMSNorm+RoPE+cache-write op, so every
-       rank writes the complete KV into its replicated cache.
-    3. _write_indexer_cache: gather indexer key (+ optional scale) and
-       slot_mapping across PCP ranks before the parent's scatter write,
-       so every rank writes the complete set of indexer keys.
-    """
-
     def __init__(
         self,
         num_heads: int,
@@ -137,15 +95,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             kv_sharing_target_layer_name,
             **kwargs,
         )
-        # PCP requires the native forward branch; fused prolog_v3 / mlapo
-        # paths bypass the cross-rank KV gather and are incompatible.
         self.preprocess_type = PreprocessType.NATIVE
-        # PCP owns the prefill aggregation in exec_kv/_write_indexer_cache.
-        # The FlashComm SP path would gather hidden states before indexer
-        # RoPE, then PCP would gather those cache inputs a second time while
-        # the metadata remains local.  Keep this implementation on its
-        # native local-token path and perform the single required gather in
-        # the PCP hooks below.
         self.enable_sp = False
 
     def exec_kv(
@@ -157,15 +107,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        # PCP: gather latent KV and positional cos/sin across PCP ranks before
-        # the fused RMSNorm+RoPE+cache-write op. Slots are already gathered by
-        # PCPManager. Decode
-        # tokens are replicated across ranks and stay local; only the
-        # prefill partition is all-gathered. After this every rank sees the
-        # complete set of tokens and writes the full KV into its replicated
-        # cache. cos/sin must be gathered alongside kv_no_split because
-        # they are derived from per-token positions and the gathered half
-        # would otherwise be rotated with the wrong positions.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
             (kv_no_split, cos, sin), slots, num_decode_tokens
@@ -190,12 +131,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_cache: tuple,
         attn_metadata: M,
     ) -> None:
-        # PCP: gather indexer key (and optional scale) across PCP ranks before
-        # delegating to the parent's scatter write; PCPManager has already
-        # gathered the slot mapping, so every rank writes the complete set of
-        # indexer keys into its
-        # replicated indexer cache. Same pattern as exec_kv: decode tokens
-        # stay local (replicated), only the prefill partition is gathered.
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
         slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
         tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)

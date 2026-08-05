@@ -35,6 +35,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -109,7 +110,6 @@ _force_non_pcp_sfa = ContextVar("force_non_pcp_sfa", default=False)
 
 @contextmanager
 def force_non_pcp_sfa():
-    """Select the regular SFA builder/implementation inside this context."""
     token = _force_non_pcp_sfa.set(True)
     try:
         yield
@@ -265,14 +265,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        # PCP represents each prefill request as at most two rank-local
-        # DualChunkSwap segments. Size the graph-stable sequence-length
-        # buffers for that local virtual batch rather than the global batch.
         if vllm_config.parallel_config.prefill_context_parallel_size > 1:
             max_num_reqs *= 2
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
-        # Reuse this graph-stable key-length buffer for global seq_lens in the
-        # non-DSA-CP path and for local key lengths in the DSA-CP path.
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
         self.spec_actual_seq_lengths_query: list[torch.Tensor] | None = None
         self.spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
@@ -362,6 +357,18 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+        attn_state = common_attn_metadata.attn_state
+
+        if attn_state == AscendAttentionState.DecodeOnly:
+            num_decodes = num_reqs
+            num_decode_tokens = num_input_tokens
+            num_prefills = 0
+        else:
+            num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                treat_short_extends_as_decodes=common_attn_metadata.context_parallel_metadata is None,
+            )
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -495,7 +502,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
-            attn_state=common_attn_metadata.attn_state,
+            attn_state=attn_state,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
             block_table=block_table,
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
@@ -701,8 +711,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        # seq_lens reuses the builder-owned actual_seq_lengths_key buffer and
-        # is refreshed in AscendSFAMetadataBuilder._build before graph replay.
+        # sfa does not need to update graph params
         pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1847,7 +1856,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
-            )
+            )  # b, s, n, d
         if self.enable_sparse_li_c8:
             assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
             if k_li_scale is not None:
@@ -1987,7 +1996,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_slots = slot_mapping_cp
             else:
                 kv_slots = slot_mapping_sfa
-            kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata) # pcp rebuild
+            kv_outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, kv_slots, attn_metadata)
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
 
@@ -2036,7 +2045,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if kv_cache is not None and self.has_indexer:
             assert k_li is not None
-            self._write_indexer_cache(k_li, k_li_scale, slot_mapping, kv_cache, attn_metadata) # pcp rebuild
+            self._write_indexer_cache(k_li, k_li_scale, slot_mapping, kv_cache, attn_metadata)
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start

@@ -69,12 +69,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 kv_cache_spec[layer_name] = spec
             continue
         if isinstance(attn_module, DeepseekV32IndexerCache):
-            # SFA keeps the indexer key cache in a distinct cache layer.  It
-            # cannot use the generic MLA spec: that would split it into K/V
-            # buffers, while SFA consumes one indexer-K buffer.  The upstream
-            # cache module's ``head_dim`` includes four serialized FP8 scale
-            # bytes (132 for a 128-dim key).  Native non-C8 SFA instead writes
-            # BF16 indexer keys, so allocate the model's actual index head dim.
             hf_config = vllm_config.model_config.hf_config
             index_head_size = getattr(hf_config, "index_head_dim", None)
             if index_head_size is None:

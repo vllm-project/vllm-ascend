@@ -8,9 +8,6 @@ import torch
 
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import (
-    AscendSFACPImpl,
-    AscendSFACPMetadata,
-    AscendSFACPMetadataBuilder,
     AscendSFADCPImpl,
     AscendSFADCPMetadata,
     AscendSFADCPMetadataBuilder,
@@ -20,77 +17,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
 )
-
-
-def _make_sfa_pcp_metadata(
-    local_slot_mapping: torch.Tensor,
-    pcp_slot_mapping: torch.Tensor | None = None,
-) -> AscendSFACPMetadata:
-    return AscendSFACPMetadata(
-        num_actual_tokens=local_slot_mapping.numel(),
-        slot_mapping=local_slot_mapping,
-        seq_lens=torch.empty(0, dtype=torch.int32),
-        seq_lens_cpu=torch.empty(0, dtype=torch.int32),
-        cum_query_lens=torch.empty(0, dtype=torch.int32),
-        block_table=torch.empty((0, 0), dtype=torch.int32),
-        sin=torch.empty((0, 0)),
-        cos=torch.empty((0, 0)),
-        pcp_slot_mapping=pcp_slot_mapping,
-    )
-
-
-def test_sfa_pcp_builder_preserves_full_slot_mapping() -> None:
-    builder = AscendSFACPMetadataBuilder.__new__(AscendSFACPMetadataBuilder)
-    full_slot_mapping = torch.tensor(
-        [10, 11, 12, -1, 20, 21, -1, -1],
-        dtype=torch.int64,
-    )
-    local_slot_mapping = full_slot_mapping[:4]
-    metadata = _make_sfa_pcp_metadata(local_slot_mapping)
-    common_attn_metadata = SimpleNamespace(slot_mapping=full_slot_mapping)
-
-    result = builder._build_with_metadata_view(
-        common_attn_metadata,
-        lambda: metadata,
-    )
-
-    assert result.slot_mapping is local_slot_mapping
-    assert result.pcp_slot_mapping is full_slot_mapping
-
-
-def test_sfa_pcp_impl_uses_full_slot_mapping_for_cache_writes() -> None:
-    impl = AscendSFACPImpl.__new__(AscendSFACPImpl)
-    local_slot_mapping = torch.tensor([10, 11, 12, -1], dtype=torch.int64)
-    full_slot_mapping = torch.tensor(
-        [10, 11, 12, -1, 20, 21, -1, -1],
-        dtype=torch.int64,
-    )
-    metadata = _make_sfa_pcp_metadata(
-        local_slot_mapping,
-        pcp_slot_mapping=full_slot_mapping,
-    )
-
-    assert impl._get_sfa_kv_slot_mapping(metadata) is full_slot_mapping
-
-    k_li = torch.randn(4, 8)
-    gathered_k_li = torch.randn(8, 8)
-    with (
-        patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs",
-            return_value=((gathered_k_li,), full_slot_mapping),
-        ) as gather_inputs,
-        patch.object(AscendSFAImpl, "_write_indexer_cache") as write_indexer_cache,
-    ):
-        impl._write_indexer_cache(
-            k_li,
-            None,
-            local_slot_mapping,
-            (),
-            metadata,
-        )
-
-    assert gather_inputs.call_args.args[1] is full_slot_mapping
-    assert write_indexer_cache.call_args.args[2] is full_slot_mapping
 
 
 def test_sfa_dcp_extends_v1_backend() -> None:

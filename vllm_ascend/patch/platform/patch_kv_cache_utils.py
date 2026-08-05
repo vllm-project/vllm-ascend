@@ -27,13 +27,12 @@ def _ascend_resolve_kv_cache_block_sizes(
     """Ascend-compatible resolve_kv_cache_block_sizes.
 
     vLLM PR #40860 added a restriction that hybrid KV cache groups with
-    multiple block sizes do not support context parallelism (dcp > 1).
+    multiple block sizes do not support DCP.
     This restriction is correct for CUDA but not for Ascend, which implements
     context parallelism for MLA and SWA-MLA layers independently.
 
     For multiple KV cache groups with CP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp to maintain alignment, consistent
-    with the pre-PR-#40860 behavior of block_size * dcp.
+    lcm(group_block_sizes) * dcp to maintain alignment.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size

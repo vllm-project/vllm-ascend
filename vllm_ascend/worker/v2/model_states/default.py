@@ -57,9 +57,6 @@ class AscendModelState(DefaultModelState):
             self.vllm_config.parallel_config.prefill_context_parallel_size > 1
             or cudagraph_mode == CUDAGraphMode.FULL
         )
-        # PCP pads each rank's local inputs for collective alignment. FULL
-        # graphs likewise replay fixed-size input buffers. Other paths retain
-        # the upstream actual-token semantics.
         num_input_tokens = (
             input_batch.num_tokens_after_padding
             if use_padded_input_tokens
@@ -71,8 +68,6 @@ class AscendModelState(DefaultModelState):
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            # SFA derives RoPE inputs from this count. PCP pads every rank
-            # to an equal local token count for collectives.
             num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,

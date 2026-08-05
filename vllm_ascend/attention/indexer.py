@@ -30,16 +30,10 @@ class AscendSFAIndexerBackend(AttentionBackend):
     """
 
     accept_output_buffer: bool = True
-    # The layer owns a physical cache tensor but never executes attention.
-    # Graph replay must select an executable attention backend for graph
-    # parameter updates.
     is_cache_only_backend = True
 
     @classmethod
     def supports_pcp(cls) -> bool:
-        # This is a cache-only backend. PCP cache writes are performed by
-        # AscendSFACPImpl through the real SFA attention layer, which gathers
-        # the indexer keys before populating this replicated cache.
         return True
 
     @staticmethod

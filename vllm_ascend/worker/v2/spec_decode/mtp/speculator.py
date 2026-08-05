@@ -82,9 +82,6 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         super().__init__(vllm_config, device)
         self._draft_attn_vllm_config = self.vllm_config
         if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-            # Phase 1 of MTP+PCP keeps target attention PCP-sharded, while the
-            # single MTP layer runs on the restored global batch on every PCP
-            # rank. Select the non-PCP SFA implementation for that draft layer.
             draft_parallel_config = replace(
                 vllm_config.parallel_config,
                 prefill_context_parallel_size=1,
@@ -108,9 +105,6 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
                 target_model,
                 target_attn_layer_names,
             )
-        # get_model() installs the target VllmConfig in an inner context, so a
-        # copied current config cannot override backend selection here. Use the
-        # Ascend-local selector while the MTP attention layer is constructed.
         with force_non_pcp_sfa():
             return super().load_draft_model(target_model, target_attn_layer_names)
 
@@ -118,8 +112,6 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         if self.vllm_config.parallel_config.prefill_context_parallel_size <= 1:
             super().set_attn(*args, **kwargs)
             return
-        # Metadata builder selection is dynamic too; keep it paired with the
-        # non-PCP implementation selected during draft model construction.
         with force_non_pcp_sfa():
             super().set_attn(*args, **kwargs)
 
@@ -132,9 +124,6 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         **kwargs,
     ) -> torch.Tensor:
         if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
-            # sample_tokens() has already restored input_batch and hidden states
-            # to global layout, but the target metadata passed by the community
-            # runner is still PCP-local. Rebuild the draft view in global layout.
             attn_metadata, slot_mappings = self._build_global_pcp_draft_inputs(
                 input_batch
             )
@@ -150,7 +139,6 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         self,
         input_batch: InputBatch,
     ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-        """Build global MTP metadata after PCP sampling restoration."""
         num_reqs = input_batch.num_reqs
         num_tokens = input_batch.num_tokens
         block_tables = self.block_tables.gather_block_tables(

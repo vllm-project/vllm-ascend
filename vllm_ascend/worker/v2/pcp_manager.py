@@ -72,7 +72,6 @@ class AscendPCPManager(PCPManager):
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
     ) -> None:
-        """Allow only the graph-safe PCP decode path on Ascend."""
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
         pcp_size = parallel_config.prefill_context_parallel_size
@@ -134,9 +133,6 @@ class AscendPCPManager(PCPManager):
                 raise NotImplementedError(
                     "MRV2 PCP batch partition supports MTP1 draft tokens only."
                 )
-            # The community PCP manager still rejects speculative batches. Feed it
-            # a non-speculative view so it can build the PCP-local token layout,
-            # then rebuild all MTP fields below in the Ascend subclass.
             community_batch = replace(
                 input_batch,
                 num_draft_tokens=0,
@@ -146,23 +142,17 @@ class AscendPCPManager(PCPManager):
             community_batch = input_batch
 
         local_batch = super().partition_batch(community_batch)
-        # Slot-mapping preparation and sampling restoration must keep referring
-        # to the original global batch, not the temporary non-speculative view.
         self._global_batch = global_batch
         assert isinstance(local_batch, AscendInputBatch)
         if has_draft_tokens:
             local_batch = self._rebuild_local_mtp_fields(global_batch, local_batch)
 
-        # PCP builds the local layout from actual tokens, but a FULL decode
-        # graph replays a fixed padded layout on every rank.
         graph_num_tokens = input_batch.num_tokens_after_padding
         is_decode_only = not bool(input_batch.is_prefilling_np.any())
-        # FULL_DECODE_ONLY graphs capture one token for every padded request.
-        # Keep the request-shaped metadata at that same fixed graph extent.
         graph_num_reqs = (
             graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
         )
-        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding: #TODO(lwq) 这里的判断是在干什么
+        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens
@@ -220,7 +210,6 @@ class AscendPCPManager(PCPManager):
         global_batch: AscendInputBatch,
         local_batch: AscendInputBatch,
     ) -> AscendInputBatch:
-        """Rebuild MTP1 fields after the community PCP layout is partitioned."""
         assert self._req_states is not None
         assert global_batch.num_draft_tokens_per_req is not None
 
@@ -236,8 +225,6 @@ class AscendPCPManager(PCPManager):
             count=local_batch.num_reqs,
         )
 
-        # An empty PCP rank uses a zero-length sentinel row. It must not claim a
-        # bonus or draft logit, even if that row reuses a real request id.
         if local_batch.num_tokens == 0:
             local_num_logits = np.zeros(local_batch.num_reqs, dtype=np.int32)
             local_draft_counts.fill(0)
@@ -282,8 +269,7 @@ class AscendPCPManager(PCPManager):
             cu_num_logits_np=local_cu_num_logits_np,
         )
 
-    def prepare_slot_mappings(self) -> torch.Tensor: #TODO(lwq) 这个函数是在哪里被调用的？
-        '''Pad PCP slot mappings to the fixed FULL-decode graph layout.'''
+    def prepare_slot_mappings(self) -> torch.Tensor:
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
         graph_num_tokens = self._global_batch.num_tokens_after_padding

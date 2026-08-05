@@ -135,7 +135,7 @@ class NPUModelRunner(GPUModelRunner):
             try:
                 super().initialize_kv_cache(kv_cache_config)
             finally:
-                vllm_model_runner.pcp.PCPManager.validate_config = original_validate_config #TODO(lwq) 这里的validate的逻辑是不是修改有点太多了
+                vllm_model_runner.pcp.PCPManager.validate_config = original_validate_config
 
             # GPUModelRunner constructs the community PCP manager while initializing
             # the KV cache. Replace it with the Ascend subclass.

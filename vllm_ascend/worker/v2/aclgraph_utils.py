@@ -51,7 +51,6 @@ def _prepare_pcp_inputs_to_capture(
     skip_attn: bool,
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
-    """Build graph inputs with the same PCP-local layout used on replay."""
     input_batch = cudagraph_utils.InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers
     )
@@ -162,11 +161,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            # Preserve the original backend selection for ordinary models.
-            # Split SFA prepends a cache-only indexer backend, which has no
-            # AttentionImpl and therefore cannot update graph parameters.
             attn_backend = self.model_runner.attn_groups[0][0].backend
-            if getattr(attn_backend, "is_cache_only_backend", False): #NOTE cache only backend不能执行update_graph
+            if getattr(attn_backend, "is_cache_only_backend", False):
                 try:
                     attn_backend = next(
                         group.backend
@@ -207,9 +203,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         with communicator_switch():
-            # PCPManager belongs to the model runner, not the graph manager.
-            # Capture must partition the dummy decode batch through the same
-            # manager as replay so the graph binds to PCP-local input buffers.
             pcp_manager = getattr(self.model_runner, "pcp_manager", None)
             if pcp_manager is None:
                 return super().capture(
