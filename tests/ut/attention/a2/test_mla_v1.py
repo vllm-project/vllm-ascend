@@ -1750,7 +1750,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.weight_uq_qr.shape, (q_lora_rank, num_heads_padded * q_head_dim))
         self.assertEqual(self.impl.mlapo_W_UK_T.shape, (num_heads_padded, 10, kv_lora_rank))
         self.assertEqual(self.impl.mlapo_num_heads, num_heads_padded)
-        self.assertEqual(self.impl.mlapo_rope_empty.shape, (0, rope_dim))
         self.assertEqual(self.impl.mlapo_weight_quant_mode, 0)
         self.assertFalse(hasattr(self.impl, "weight_dq_scale"))
         self.assertFalse(hasattr(self.impl, "weight_dkv_kr_scale"))

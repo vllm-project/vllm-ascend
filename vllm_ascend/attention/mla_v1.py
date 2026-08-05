@@ -1299,13 +1299,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
         self.mlapo_weight_quant_mode = 0 if is_native else 3
-        if not self.use_mla_rope:
-            rope_shape = (0, self.qk_rope_head_dim) if is_native else (0, 1, self.qk_rope_head_dim)
-            self.mlapo_rope_empty = torch.empty(
-                rope_shape,
-                dtype=act_dtype,
-                device=self.weight_dq.device,
-            )
         if is_native:
             self.mlapo_num_heads = self.num_heads_padded
             self.mlapo_W_UK_T = self.W_UK_T

@@ -54,11 +54,7 @@ def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
         mock.patch(
             "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
             return_value=(query_nope, query_rope, None, None, None),
-        ) as mock_rope_prolog,
-        mock.patch(
-            "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
-            return_value=(query_nope, query_rope, None, None, None),
-        ) as mock_no_rope_prolog,
+        ) as mock_prolog,
     ):
         A5DeviceAdaptor.mla_preprocess_only_decode(
             atten_obj,
@@ -68,16 +64,13 @@ def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
             use_mla_rope=use_mla_rope,
         )
 
-    mock_prolog = mock_rope_prolog if use_mla_rope else mock_no_rope_prolog
     call_kwargs = mock_prolog.call_args.kwargs
     if use_mla_rope:
         torch.testing.assert_close(call_kwargs["rope_cos"], cos.view(num_tokens, 1, rope_dim))
         torch.testing.assert_close(call_kwargs["rope_sin"], sin.view(num_tokens, 1, rope_dim))
     else:
-        assert call_kwargs["rope_cos"].shape == (0, 1, rope_dim)
-        assert call_kwargs["rope_sin"].shape == (0, 1, rope_dim)
-        assert call_kwargs["rope_cos"].numel() == 0
-        assert call_kwargs["rope_sin"].numel() == 0
+        assert call_kwargs["rope_cos"] is None
+        assert call_kwargs["rope_sin"] is None
 
 
 def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
@@ -116,7 +109,7 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
     with (
         mock.patch("vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant") as mock_quant,
         mock.patch(
-            "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
+            "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
             return_value=(query_nope, query_rope, None, None, None),
         ) as mock_prolog,
     ):
@@ -137,10 +130,8 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
     assert call_kwargs["dequant_scale_w_dq"] is None
     assert call_kwargs["dequant_scale_w_uq_qr"] is None
     assert call_kwargs["dequant_scale_w_dkv_kr"] is None
-    assert call_kwargs["rope_cos"].shape == (0, rope_dim)
-    assert call_kwargs["rope_sin"].shape == (0, rope_dim)
-    assert call_kwargs["rope_cos"].numel() == 0
-    assert call_kwargs["rope_sin"].numel() == 0
+    assert call_kwargs["rope_cos"] is None
+    assert call_kwargs["rope_sin"] is None
     assert call_kwargs["cache_index"].shape == (num_tokens,)
 
 

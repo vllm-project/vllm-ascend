@@ -36,19 +36,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
-def _npu_mla_prolog_v3_no_rope(**kwargs):
-    """Convert empty RoPE sentinels to null ACL inputs via the custom wrapper."""
-    # A5 deliberately disables the generic custom-op loader. This binding is
-    # only an op-api adapter (it does not dispatch a custom kernel), so load it
-    # lazily for the no-RoPE path instead of enabling every custom op on A5.
-    from vllm_ascend.utils import bootstrap_custom_op_env
-
-    bootstrap_custom_op_env(include_vendor_lib=True)
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
-
-    return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
-
-
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
@@ -1438,27 +1425,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cos_shape = attn_metadata.decode.cos.shape
             cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
             sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
-            prolog_op = torch_npu.npu_mla_prolog_v3
         else:
-            # torch_npu declares RoPE tensors as required and cannot pass Python
-            # None through to ACL. The custom wrapper converts correctly-ranked
-            # empty sentinels into null ACL inputs.
-            rope_shape = (0, atten_obj.qk_rope_head_dim)
-            if token_x.dim() == 3:
-                rope_shape = (0, 1, atten_obj.qk_rope_head_dim)
-            rope_empty = getattr(atten_obj, "mlapo_rope_empty", None)
-            if rope_empty is None or rope_empty.shape != rope_shape:
-                rope_empty = hidden_states.new_empty(rope_shape)
-            cos = rope_empty
-            sin = rope_empty
-            prolog_op = _npu_mla_prolog_v3_no_rope
+            cos = None
+            sin = None
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
         if token_x.dim() == 3:
             cache_index = cache_index.view(bsz, -1)
         else:
             cache_index = cache_index.view(-1)
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = prolog_op(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
             token_x=token_x,
             weight_dq=atten_obj.weight_dq,
             weight_uq_qr=atten_obj.weight_uq_qr,
