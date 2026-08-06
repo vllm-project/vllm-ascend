@@ -72,13 +72,9 @@ class MooncakeBaseConnectorWorker:
 
         self.vllm_config = vllm_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            self.kv_transfer_config.is_kv_consumer
-            == self.kv_transfer_config.is_kv_producer
-        ):
+        if self.kv_transfer_config.is_kv_consumer == self.kv_transfer_config.is_kv_producer:
             raise ValueError(
-                "Mooncake worker requires exactly one KV transfer role, "
-                f"got {self.kv_transfer_config.kv_role!r}"
+                f"Mooncake worker requires exactly one KV transfer role, got {self.kv_transfer_config.kv_role!r}"
             )
         self.engine_id = engine_id
         self.kv_cache_config = kv_cache_config
@@ -101,10 +97,7 @@ class MooncakeBaseConnectorWorker:
         pcp_group = get_pcp_group()
         self.pcp_rank = pcp_group.rank_in_group
         self.pcp_size = pcp_group.world_size
-        assert self.pcp_size == 1, (
-            "Mooncake temporarily requires prefill context parallel size 1, "
-            f"got {self.pcp_size}"
-        )
+        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
@@ -188,10 +181,7 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
-        spec_properties = [
-            self._get_spec_transfer_properties(spec)
-            for spec in self.kv_cache_specs
-        ]
+        spec_properties = [self._get_spec_transfer_properties(spec) for spec in self.kv_cache_specs]
         spec_block_sizes = [properties[0] for properties in spec_properties]
         spec_head_sizes = [properties[1] for properties in spec_properties]
 

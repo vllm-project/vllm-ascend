@@ -54,8 +54,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
         for field_name, values in per_layer_fields.items():
             if len(values) != num_layers:
                 raise ValueError(
-                    f"Mooncake transfer metadata field {field_name!r} has "
-                    f"{len(values)} layers, expected {num_layers}."
+                    f"Mooncake transfer metadata field {field_name!r} has {len(values)} layers, expected {num_layers}."
                 )
 
         for layer_index, layer_name in enumerate(self.layer_names):

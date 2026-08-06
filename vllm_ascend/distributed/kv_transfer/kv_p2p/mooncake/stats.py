@@ -34,9 +34,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
             "num_failed_transfers": [],
         }
 
-    def record_transfer(
-        self, transfer_duration: float, bytes_transferred: int
-    ) -> None:
+    def record_transfer(self, transfer_duration: float, bytes_transferred: int) -> None:
         """Record one completed D2D transfer.
 
         ``transfer_duration`` is expressed in seconds.
@@ -53,10 +51,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
         return previous
 
     def is_empty(self) -> bool:
-        return (
-            self.num_successful_transfers == 0
-            and not self.data["num_failed_transfers"]
-        )
+        return self.num_successful_transfers == 0 and not self.data["num_failed_transfers"]
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
@@ -70,9 +65,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
         if self.num_successful_transfers == 0:
             return {
                 "Num successful transfers": 0,
-                "Num failed transfers": len(
-                    self.data["num_failed_transfers"]
-                ),
+                "Num failed transfers": len(self.data["num_failed_transfers"]),
                 "Avg xfer time (ms)": 0,
                 "P90 xfer time (ms)": 0,
                 "Avg MB per transfer": 0,
@@ -82,17 +75,13 @@ class MooncakeKVConnectorStats(KVConnectorStats):
         durations = np.asarray(self.data["transfer_duration"])
         megabytes = np.asarray(self.data["bytes_transferred"]) / 2**20
         total_duration = durations.sum()
-        throughput = (
-            megabytes.sum() / total_duration if total_duration > 0 else 0
-        )
+        throughput = megabytes.sum() / total_duration if total_duration > 0 else 0
 
         return {
             "Num successful transfers": self.num_successful_transfers,
             "Num failed transfers": len(self.data["num_failed_transfers"]),
             "Avg xfer time (ms)": round(durations.mean() * 1e3, 3),
-            "P90 xfer time (ms)": round(
-                np.percentile(durations, 90).item() * 1e3, 3
-            ),
+            "P90 xfer time (ms)": round(np.percentile(durations, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(megabytes.mean(), 3),
             "Throughput (MB/s)": round(float(throughput), 3),
         }
@@ -121,9 +110,7 @@ class MooncakePromMetrics(KVConnectorPromMetrics):
 
         transfer_duration = self._histogram_cls(
             name="vllm:mooncake_xfer_time_seconds",
-            documentation=(
-                "Histogram of Mooncake KV cache D2D transfer duration."
-            ),
+            documentation=("Histogram of Mooncake KV cache D2D transfer duration."),
             buckets=[
                 0.005,
                 0.01,
@@ -140,35 +127,24 @@ class MooncakePromMetrics(KVConnectorPromMetrics):
             ],
             labelnames=labelnames,
         )
-        self.transfer_duration = create_metric_per_engine(
-            transfer_duration, self.per_engine_labelvalues
-        )
+        self.transfer_duration = create_metric_per_engine(transfer_duration, self.per_engine_labelvalues)
 
         bytes_transferred = self._histogram_cls(
             name="vllm:mooncake_bytes_transferred",
-            documentation=(
-                "Histogram of bytes transferred per Mooncake KV cache D2D "
-                "transfer."
-            ),
+            documentation=("Histogram of bytes transferred per Mooncake KV cache D2D transfer."),
             buckets=[2 ** (10 + index) for index in range(1, 25, 2)],
             labelnames=labelnames,
         )
-        self.bytes_transferred = create_metric_per_engine(
-            bytes_transferred, self.per_engine_labelvalues
-        )
+        self.bytes_transferred = create_metric_per_engine(bytes_transferred, self.per_engine_labelvalues)
 
         failed_transfers = self._counter_cls(
             name="vllm:mooncake_num_failed_transfers",
             documentation="Number of failed Mooncake KV cache D2D transfers.",
             labelnames=labelnames,
         )
-        self.failed_transfers = create_metric_per_engine(
-            failed_transfers, self.per_engine_labelvalues
-        )
+        self.failed_transfers = create_metric_per_engine(failed_transfers, self.per_engine_labelvalues)
 
-    def observe(
-        self, transfer_stats_data: dict[str, Any], engine_idx: int = 0
-    ) -> None:
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
         for duration in transfer_stats_data["transfer_duration"]:
             self.transfer_duration[engine_idx].observe(duration)
         for num_bytes in transfer_stats_data["bytes_transferred"]:
