@@ -45,7 +45,6 @@ You can use our official docker image to run GLM-5/5.1 directly.
 ::::{tab-item} A3 series
 :sync: A3
 
-
 Start the docker image on each node.
 
 ```{code-block} bash
@@ -92,7 +91,6 @@ docker run --rm \
 ::::
 ::::{tab-item} A2 series
 :sync: A2
-
 
 Start the docker image on each node.
 
@@ -149,7 +147,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ::::{tab-item} A3 series
 :sync: A3
-
 
 - Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
 
@@ -233,7 +230,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 ::::{tab-item} A2 series
 :sync: A2
 
-
 - Quantized model `glm-5-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
 
 Run the following script to execute online inference.
@@ -313,7 +309,6 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 ::::{tab-item} A3 series
 :sync: A3
-
 
 - `glm-5-bf16` and `glm-5.1-bf16`: require at least 2 Atlas 800 A3 (64GB × 16).
 
@@ -414,7 +409,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
 ::::
 ::::{tab-item} A2 series
 :sync: A2
-
 
 Run the following scripts on two nodes respectively.
 

@@ -39,7 +39,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ::::{tab-item} A3 series
 :sync: A3
 
-
 Start the docker image on each node.
 
 ```{code-block} bash
@@ -83,7 +82,6 @@ docker run --rm \
 ::::
 ::::{tab-item} A2 series
 :sync: A2
-
 
 Start the docker image on each of your nodes.
 
@@ -450,7 +448,7 @@ The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
 
-#### Prefill-Decode Disaggregation(A3)
+#### Prefill-Decode Disaggregation on A3
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
@@ -958,7 +956,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
-#### Prefill-Decode Disaggregation (A2)
+#### Prefill-Decode Disaggregation on A2
 
 On Atlas 800 A2, where each node exposes 8 cards, the same global P/D topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode nodes hosting 2 DP ranks each (4 cards per rank). The `launch_online_dp.py` above is reused as-is. The prefill side enables FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP (`num_speculative_tokens=1` on prefill, `3` on decode). All IPs, NIC names, ports and weight paths below are placeholders.
 
@@ -1204,9 +1202,9 @@ python load_balance_proxy_server_example.py \
       9900 9901 9900 9901
 ```
 
-Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)):
+Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3)):
 
-This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank, `DP4 TP8`) and 4 decode nodes hosting 2 DP ranks each (4 cards per rank, `DP8 TP4`). The `launch_online_dp.py` script is the same as in [Prefill-Decode Disaggregation](#prefill-decode-disaggregation).
+This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank, `DP4 TP8`) and 4 decode nodes hosting 2 DP ranks each (4 cards per rank, `DP8 TP4`). The `launch_online_dp.py` script is the same as in [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3).
 
 **Prefill node-specific configurations (A2):**
 
@@ -1220,7 +1218,7 @@ This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes
 **Multi-connector KV transfer configuration (`--kv-transfer-config`):**
 
 - `"kv_connector": "MultiConnector"`: Combines multiple KV transfer connectors.
-- `MooncakeConnectorV1`: Mooncake KV cache transfer between prefill and decode nodes (same role as in [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)).
+- `MooncakeConnectorV1`: Mooncake KV cache transfer between prefill and decode nodes (same role as in [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3)).
 - `AscendStoreConnector`: The KV Cache Pool (Ascend Store) connector, available since v0.23.0 — see the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html).
 - `"kv_load_failure_policy": "recompute"`: When a KV block fails to load from the KV pool, the request falls back to recomputation instead of failing.
 - `"load_async": true` (decode side): Asynchronously loads KV cache from the pool on decode nodes.
@@ -1522,7 +1520,7 @@ python load_balance_proxy_server_example.py \
   --decoder-ports 9900
 ```
 
-Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#prefill-decode-disaggregation) and [Single-Node 1M Deployment](#single-node-1m-deployment)):
+Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3) and [Single-Node 1M Deployment](#single-node-1m-deployment)):
 
 **Prefill nodes (1M):**
 
@@ -1590,7 +1588,7 @@ The tables below provide recommended parameter configurations for different depl
 |Low Latency<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, FlashComm1, DSA CP|
 |Low Latency<br>(128K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, FlashComm1, DSA CP|
 |High Throughput<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp4 tp8, fused MC2, MTP3, max-num-seqs 16, max-model-len 66000, FlashComm1, DSA CP|
-|High Throughput|PD Disaggregation (A3), [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w4a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192, MTP1); D: dp32 tp1 (max-num-seqs 32, max-num-batched-tokens 164, MTP5), max-model-len 133120, dedicated P/D nodes, Mooncake KV transfer|
+|High Throughput|PD Disaggregation (A3), [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3)|4 nodes (A3)|w4a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192, MTP1); D: dp32 tp1 (max-num-seqs 32, max-num-batched-tokens 164, MTP5), max-model-len 133120, dedicated P/D nodes, Mooncake KV transfer|
 |Long Context<br>(1M)|PD Disaggregation (A3), [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|4 nodes (A3)|w4a8c8|P/D: dp4 tp8, DCP8, max-model-len 1040000, Mooncake KV transfer|
 
 #### Table 2: Detailed Node Configuration
@@ -1598,15 +1596,15 @@ The tables below provide recommended parameter configurations for different depl
 > The TP/DP columns show the values **per node** as configured in the Deployment scripts (a node hosting 2 DP ranks of TP8, or 1 DP rank of TP16, uses 16 NPUs).
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
 |Scenario|Configuration|NPUs (per node)|TP|DP (per node)|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
 |--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
 |Low Latency 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
 |Low Latency 128K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
 |High Throughput 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#multi-node-co-located-deployment)|16|8|2|16|8192|66000|3|
-|High Throughput (A3)|PD — Server-P Node, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|16|8|2|64|8192|133120|1|
-|High Throughput (A3)|PD — Server-D Node, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|16|1|16|32|164|133120|5|
+|High Throughput (A3)|PD — Server-P Node, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3)|16|8|2|64|8192|133120|1|
+|High Throughput (A3)|PD — Server-D Node, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation-on-a3)|16|1|16|32|164|133120|5|
 |Long Context 1M (A3)|PD — Server-P Node, [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|16|8|2|8|16384|1040000|1|
 |Long Context 1M (A3)|PD — Server-D Node, [PD Disaggregation 1M Deployment](#pd-disaggregation-1m-deployment)|16|8|2|32|128|1040000|3|
 
