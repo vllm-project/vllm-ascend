@@ -134,6 +134,7 @@ class KVPoolScheduler:
         self._unfinished_request_ids: set[str] = set()
         self._loading_req_ids: set[str] = set()
         self._delayed_free_req_ids: set[str] = set()
+        self._last_delayed_free_reqs = 0
 
         self._block_pool: BlockPool | None = None
         self.sending_event_id = 0
@@ -982,9 +983,6 @@ class KVPoolScheduler:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
-        if delayed_free_reqs := len(self._delayed_free_req_ids):
-            logger.info("KV pool put status: delayed_free_reqs=%d", delayed_free_reqs)
-
         return meta
 
     def get_sending_event_id(self):
@@ -1018,6 +1016,12 @@ class KVPoolScheduler:
         """
         hand the connector_output, free non-null mamba blocks and so on.
         """
+        self.update_finished_sending(connector_output.finished_sending)
+        delayed_free_reqs = len(self._delayed_free_req_ids)
+        if delayed_free_reqs != self._last_delayed_free_reqs:
+            logger.info("KV pool put status: delayed_free_reqs=%d", delayed_free_reqs)
+            self._last_delayed_free_reqs = delayed_free_reqs
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return
