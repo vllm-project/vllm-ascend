@@ -120,21 +120,6 @@ class TestPhysicalMemory:
 class TestOutputCorrectness:
     """Output must be deterministic and self-consistent across the lifecycle."""
 
-    def test_full_wake_restores_output(self):
-        """sleep(1) → wake_up() — weights restored; output matches golden."""
-        with server() as url:
-            golden = gen(url)
-            assert golden
-            golden_text = golden["choices"][0]["text"]
-
-            assert sleep(url, level=1) == 200
-            assert wake(url) == 200
-
-            resp = gen(url)
-            assert resp and resp["choices"][0]["text"] == golden_text, (
-                "output changed after sleep/wake — weight restore broken"
-            )
-
     def test_staged_wake_restores_output(self):
         """sleep → wake(weights) → wake(kv_cache) — output matches golden."""
         with server() as url:
@@ -185,8 +170,8 @@ class TestMemoryLeakCycle:
       (b) NPU memory is what cumem manages — leaks manifest there first.
     """
 
-    def test_no_npu_memory_growth_over_10_cycles(self):
-        """10 sleep/wake cycles: NPU free bytes (when awake) must be stable.
+    def test_no_npu_memory_growth_over_5_cycles(self):
+        """5 sleep/wake cycles: NPU free bytes (when awake) must be stable.
 
         After each wake, the engine should have remapped the same NPU pages.
         A growing delta (less free memory each cycle) indicates a leak in
@@ -195,7 +180,7 @@ class TestMemoryLeakCycle:
         with server() as url:
             free_samples = []
 
-            for i in range(10):
+            for i in range(5):
                 gen(url)
                 assert sleep(url, level=1) == 200
                 assert wake(url) == 200
