@@ -365,9 +365,8 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # on the module that ``AscendUnquantizedFusedMoEMethod.apply`` reads via
         # ``getattr(layer, "_ascend_moe_lora_context", None)``
         # Build the per-layer MoELoRAContext once punica_wrapper is available and
-        # publish it through the Ascend MoE runner. The runner propagates it to
-        # routed and shared experts; batch-local LoRA indices are refreshed before
-        # each forward.
+        # publish it through the Ascend MoE runner. The runner stores it on
+        # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
         self.base_layer.set_lora_context(self._build_lora_context())
 
