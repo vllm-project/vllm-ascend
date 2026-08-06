@@ -1231,7 +1231,9 @@ class MooncakeLayerwiseConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
 
-    def rebuild_kv_transfer_endpoint(self, local_ip: str) -> None:
+    def rebuild_kv_transfer_endpoint(
+        self, local_ip: str, new_engine_id: str | None = None
+    ) -> None:
         """[snapshot] Rebind KV transfer endpoints on the new pod IP after resume."""
         self.side_channel_host = local_ip
 
