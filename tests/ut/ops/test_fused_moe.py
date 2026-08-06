@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+import inspect
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -279,6 +280,42 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner.use_dp_chunking is False
     assert runner._fused_output_is_reduced is expected
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
+
+
+def test_runner_maybe_reduce_final_output_never_skips_all_reduce_for_non_sp():
+    """Regression guard for A00282 / upstream #10557.
+
+    In the ALLGATHER (non-SP) MoE path the final-output reduction decision
+    must stay inside the runtime custom op: ``_maybe_reduce_final_output``
+    must always call ``maybe_all_reduce_tensor_model_parallel``, even when an
+    ``output_is_reduced`` flag says otherwise. Before the fix, the decision
+    was a Python ``@property`` evaluated during graph capture and baked into
+    the replay graph, so the all-reduce was skipped at runtime and
+    multi-concurrency output was garbled on A2.
+    """
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=False)
+    states = torch.randn(4, 8)
+    # The `output_is_reduced` kwarg only exists for vllm < 0.26.0; the
+    # 0.26.0 signature is `(states, trunc_size)`. Inspect at runtime so the
+    # test stays compatible across all supported vllm versions.
+    reduce_kwargs = {}
+    if "output_is_reduced" in inspect.signature(runner._maybe_reduce_final_output).parameters:
+        reduce_kwargs["output_is_reduced"] = True
+
+    with patch(
+        "torch.ops.vllm.maybe_all_reduce_tensor_model_parallel",
+        side_effect=lambda x: x,
+    ) as mock_reduce:
+        result = runner._maybe_reduce_final_output(
+            states,
+            5,
+            **reduce_kwargs,
+        )
+
+    mock_reduce.assert_called_once_with(states)
+    assert result.shape == (4, 5)
+    torch.testing.assert_close(result, states[..., :5])
 
 
 def test_routed_experts_select_experts_validates_router_logits(monkeypatch):
