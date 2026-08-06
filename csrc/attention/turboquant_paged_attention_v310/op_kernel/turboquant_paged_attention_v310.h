@@ -156,6 +156,7 @@ private:
         PipeBarrier<PIPE_V>();
         float runMax = kNegInf;
         float runSum = 0.0f;
+        float dbgDot = -12345.0f;   // variant==5 probe: raw ReduceSum result at tk==0
 
         const int32_t seqLen = seqGm_.GetValue(b);
         const uint32_t nBlocks = (seqLen + t_->blockSize - 1) / t_->blockSize;
@@ -194,6 +195,10 @@ private:
                  */
                 ReduceSum(red, tmp, wrk, d);
                 PipeBarrier<PIPE_V>();
+                // NOTE: a Muls(red, red, 1.0f, 1) was tried here to mirror the
+                // write path's Sqrt(tmp, tmp, 1). count=1 is NOT a valid vector
+                // op (AscendC needs >= 8 elements / 32 B), so it was a no-op --
+                // results came back bit-identical. Removed.
                 /*
                  * V -> S. The score is a SCALAR read of a tensor the vector pipe
                  * just wrote. PipeBarrier<PIPE_V> orders V ops against each other
@@ -220,9 +225,27 @@ private:
                  *            six sync hypotheses were aimed at the wrong half
                  * Runtime field, so both cases run from ONE build.
                  */
-                const float score = (t_->variant == 2u)
-                                        ? 0.0f
-                                        : (red.GetValue(0) * kNorm * t_->scale);
+                /*
+                 * variant==2: all scores 0  -> softmax uniform (probe B).
+                 * variant==3: score = 2*tk  -> a KNOWN, strongly varying score
+                 *   that never touches ReduceSum. The last token then dominates
+                 *   and the output must equal v[last].
+                 *     v[last]  -> softmax/accumulate plumbing is FINE, so the
+                 *                 defect is red.GetValue(0) (the reduction)
+                 *     mean     -> the weights ignore the score; plumbing broken
+                 * This separates the two remaining candidates in one build.
+                 */
+                if (tk == 0) {
+                    dbgDot = red.GetValue(0);
+                }
+                float score;
+                if (t_->variant == 2u) {
+                    score = 0.0f;
+                } else if (t_->variant == 3u) {
+                    score = 2.0f * static_cast<float>(static_cast<int32_t>(tk));  // uint->float is banned in aicore
+                } else {
+                    score = red.GetValue(0) * kNorm * t_->scale;
+                }
 
                 // ---- online softmax update ---------------------------------
                 const float newMax = (score > runMax) ? score : runMax;
@@ -256,6 +279,18 @@ private:
         }
         // Pi is self-inverse: one rotation returns the output to the original basis
         RotatePi(acc, signs_, tmp, d, t_->invSqrtHeadDim);
+
+        /*
+         * variant==5: overwrite the output with the RAW ReduceSum result from
+         * tk==0, so Python can read what the reduction actually produced.
+         * Expected: <Pi q, yhat_k>, i.e. <q, k>/||k||, order 1. A constant
+         * (0, or the -12345 sentinel) localises the defect to the reduction
+         * itself rather than to anything downstream.
+         */
+        if (t_->variant == 5u) {
+            Duplicate(acc, dbgDot, d);
+            PipeBarrier<PIPE_V>();
+        }
 
         LocalTensor<half> out = outBuf_.Get<half>();
         Cast(out, acc, RoundMode::CAST_NONE, d);
