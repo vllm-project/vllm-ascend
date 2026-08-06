@@ -69,6 +69,71 @@ class AllGatherDynamicQuantMatmulPattern(BasePattern):
         return replacement
 
 
+class AllGatherUnquantizedMatmulPattern(BasePattern):
+    """
+    Pattern that matches sequence-parallel all-gather followed by an
+    unquantized linear matmul and replaces it with AllGatherMatmulV2.
+    """
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = torch.randn(2, 256, device="npu", dtype=self.dtype)
+        weight = torch.randn(128, 256, device="npu", dtype=self.dtype)
+        return [x, weight]
+
+    def get_pattern(self):
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+        ):
+            gathered = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(x, label=True)
+            return torch.ops.vllm.unquantized_gemm(gathered, weight, None)
+
+        return pattern
+
+    def get_replacement(self):
+        def replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+        ):
+            return torch.ops.vllm.all_gather_unquantized_matmul(x, weight, None)
+
+        return replacement
+
+
+class AllGatherUnquantizedMatmulWithBiasPattern(BasePattern):
+    """
+    Pattern that matches sequence-parallel all-gather followed by an
+    unquantized linear matmul with bias and replaces it with AllGatherMatmulV2.
+    """
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = torch.randn(2, 256, device="npu", dtype=self.dtype)
+        weight = torch.randn(128, 256, device="npu", dtype=self.dtype)
+        bias = torch.randn(128, device="npu", dtype=self.dtype)
+        return [x, weight, bias]
+
+    def get_pattern(self):
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor,
+        ):
+            gathered = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(x, label=True)
+            return torch.ops.vllm.unquantized_gemm(gathered, weight, bias)
+
+        return pattern
+
+    def get_replacement(self):
+        def replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor,
+        ):
+            return torch.ops.vllm.all_gather_unquantized_matmul(x, weight, bias)
+
+        return replacement
+
+
 class AllGatherMatmulFusionPass(VllmInductorPass):
     """
     Fuse sequence-parallel all-gather + dynamic quant matmul for column-parallel
@@ -87,6 +152,8 @@ class AllGatherMatmulFusionPass(VllmInductorPass):
             return
 
         AllGatherDynamicQuantMatmulPattern(vllm_config).register(self.pattern_match_passes)
+        AllGatherUnquantizedMatmulPattern(vllm_config).register(self.pattern_match_passes)
+        AllGatherUnquantizedMatmulWithBiasPattern(vllm_config).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph) -> None:  # type: ignore[override]
         self.begin()

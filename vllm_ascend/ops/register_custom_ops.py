@@ -214,6 +214,18 @@ def _all_gather_then_dynamic_quant_matmul(
     return _dynamic_quant_matmul(gathered, weight, weight_scale)
 
 
+def _all_gather_then_unquantized_matmul(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    gathered = tensor_model_parallel_all_gather(input_, 0)
+    pad_size = _EXTRA_CTX.pad_size
+    if pad_size > 0:
+        gathered = gathered[:-pad_size]
+    return torch.ops.vllm.unquantized_gemm(gathered, weight, bias)
+
+
 def _all_gather_dynamic_quant_matmul_impl(
     input_: torch.Tensor,
     weight: torch.Tensor,
@@ -260,6 +272,48 @@ def _all_gather_dynamic_quant_matmul_impl(
     return output
 
 
+def _all_gather_unquantized_matmul_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    try:
+        get_forward_context()
+    except AssertionError:
+        return torch.ops.vllm.unquantized_gemm(input_, weight, bias)
+
+    if input_.dim() != 2:
+        return _all_gather_then_unquantized_matmul(input_, weight, bias)
+
+    tp_group = get_tp_group()
+    world_size = tp_group.world_size
+    if world_size == 1:
+        return torch.ops.vllm.unquantized_gemm(input_, weight, bias)
+
+    hcom_name = tp_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(
+        tp_group.rank_in_group,
+    )
+    output, _ = DeviceOperator.npu_all_gather_base_mm(
+        input_,
+        weight.t(),
+        hcom_name,
+        world_size,
+        bias=bias,
+        x1_scale=None,
+        x2_scale=None,
+        gather_index=0,
+        gather_output=True,
+        comm_turn=0,
+        output_dtype=input_.dtype,
+        comm_mode="aiv",
+    )
+
+    pad_size = _EXTRA_CTX.pad_size
+    if pad_size > 0:
+        output = output[:-pad_size]
+    return output
+
+
 def _all_gather_dynamic_quant_matmul_fake(
     input_: torch.Tensor,
     weight: torch.Tensor,
@@ -277,6 +331,28 @@ def _all_gather_dynamic_quant_matmul_fake(
         output_tokens -= pad_size
     return torch.empty(
         (*input_.shape[:-2], output_tokens, weight.shape[-1]),
+        device=input_.device,
+        dtype=input_.dtype,
+    )
+
+
+def _all_gather_unquantized_matmul_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    try:
+        world_size = get_tensor_model_parallel_world_size()
+        pad_size = _EXTRA_CTX.pad_size
+    except Exception:
+        world_size = 1
+        pad_size = 0
+
+    output_tokens = input_.shape[0] * world_size
+    if pad_size > 0:
+        output_tokens -= pad_size
+    return torch.empty(
+        (*input_.shape[:-2], output_tokens, weight.shape[0]),
         device=input_.device,
         dtype=input_.dtype,
     )
@@ -354,6 +430,14 @@ direct_register_custom_op(
     op_name="all_gather_dynamic_quant_matmul",
     op_func=_all_gather_dynamic_quant_matmul_impl,
     fake_impl=_all_gather_dynamic_quant_matmul_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="all_gather_unquantized_matmul",
+    op_func=_all_gather_unquantized_matmul_impl,
+    fake_impl=_all_gather_unquantized_matmul_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

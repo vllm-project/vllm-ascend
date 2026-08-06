@@ -29,6 +29,7 @@ WORLD_SIZE = 8
 LOCAL_M = 32
 K_SIZE = 6144
 N_SIZE = 1024
+UNQUANTIZED_N_SIZE = 256
 SEED = 2026
 TOLERANCE = 1e-2
 HCCL_SOCKET_PORT_RANGE_SIZE = 32
@@ -132,6 +133,65 @@ def _run_all_gather_matmul_v2_quant(rank: int, master_port: int) -> None:
     dist.destroy_process_group()
 
 
+def _run_all_gather_matmul_v2_unquantized(rank: int, master_port: int) -> None:
+    torch_npu.npu.set_device(rank)
+    dist.init_process_group(
+        backend="hccl",
+        rank=rank,
+        world_size=WORLD_SIZE,
+        init_method=f"tcp://127.0.0.1:{master_port}",
+    )
+
+    hcom = _get_hccl_comm_name(rank)
+    torch.manual_seed(SEED + rank)
+    input_fp = torch.randn((LOCAL_M, K_SIZE), device="npu", dtype=torch.bfloat16)
+
+    torch.manual_seed(SEED)
+    linear_weight = torch.randn(
+        (UNQUANTIZED_N_SIZE, K_SIZE),
+        device="npu",
+        dtype=torch.bfloat16,
+    )
+
+    output, gather_out = torch_npu.npu_all_gather_base_mm(
+        input_fp,
+        linear_weight.t(),
+        hcom,
+        WORLD_SIZE,
+        bias=None,
+        x1_scale=None,
+        x2_scale=None,
+        gather_index=0,
+        gather_output=True,
+        comm_turn=0,
+        output_dtype=torch.bfloat16,
+        comm_mode="aiv",
+    )
+    torch.npu.synchronize()
+
+    gathered_x = _all_gather_tensor(input_fp)
+    expected = torch.nn.functional.linear(gathered_x, linear_weight, bias=None)
+    torch.npu.synchronize()
+
+    assert output.shape == (LOCAL_M * WORLD_SIZE, UNQUANTIZED_N_SIZE)
+    assert gather_out.shape == (LOCAL_M * WORLD_SIZE, K_SIZE)
+    torch.testing.assert_close(
+        output.float().cpu(),
+        expected.float().cpu(),
+        atol=TOLERANCE,
+        rtol=TOLERANCE,
+    )
+    torch.testing.assert_close(
+        gather_out.cpu(),
+        gathered_x.cpu(),
+        atol=0,
+        rtol=0,
+    )
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
 @pytest.mark.skipif(
     not hasattr(torch, "npu") or not torch.npu.is_available(),
     reason="NPU is required for AllGatherMatmulV2 e2e test.",
@@ -144,3 +204,17 @@ def test_all_gather_matmul_v2_dynamic_quant() -> None:
     os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
     os.environ.setdefault("HCCL_NPU_SOCKET_PORT_RANGE", _make_hccl_socket_port_range())
     mp.spawn(_run_all_gather_matmul_v2_quant, args=(_find_free_port(),), nprocs=WORLD_SIZE)
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "npu") or not torch.npu.is_available(),
+    reason="NPU is required for AllGatherMatmulV2 e2e test.",
+)
+@pytest.mark.skipif(
+    hasattr(torch, "npu") and torch.npu.device_count() < WORLD_SIZE,
+    reason="AllGatherMatmulV2 e2e test requires 8 visible NPUs.",
+)
+def test_all_gather_matmul_v2_unquantized() -> None:
+    os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
+    os.environ.setdefault("HCCL_NPU_SOCKET_PORT_RANGE", _make_hccl_socket_port_range())
+    mp.spawn(_run_all_gather_matmul_v2_unquantized, args=(_find_free_port(),), nprocs=WORLD_SIZE)
