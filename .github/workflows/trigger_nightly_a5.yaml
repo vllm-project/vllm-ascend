@@ -34,7 +34,6 @@ jobs:
       - name: Parse test‑cases from comment body
         id: parse_comment
         run: |
-          COMMENT_BODY="${{ github.event.comment.body }}"
           RAW="${COMMENT_BODY#/nightly }"
           TEST_CASES=$(echo "$RAW" | tr '\n' ',' | sed -e 's/,,*/,/g' -e 's/^,//' -e 's/,$//')
           echo "test_cases=${TEST_CASES}" >> $GITHUB_OUTPUT
@@ -48,8 +47,8 @@ jobs:
       vllm_ascend_branch: ${{ needs.trigger.outputs.pr_branch }}
       vllm_ascend_ref: ${{ needs.trigger.outputs.pr_sha }}
       test_cases: ${{ needs.trigger.outputs.test_cases }}
-      skip_build_image: "false"
+      skip_build_image: false
       aop_enabled: false
-      build_type: "release"
+      build_type: release
       cann_version: "2026.08.03"
     secrets: inherit
