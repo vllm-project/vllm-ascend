@@ -10,10 +10,18 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.force_topk_sample import build_compact_for_logprobs, force_topk_sample
+from vllm_ascend.ops.force_topk_sample import (
+    build_compact_for_logprobs,
+    force_topk_sample,
+)
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.topk_map import CompactDist
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    global_stream,
+    npu_stream_switch,
+)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -81,8 +89,7 @@ class AscendSampler(Sampler):
         self.force_topk = ascend_envs.VLLM_ASCEND_SAMPLER_FORCE_TOPK
         if self.force_topk > 0:
             logger.info(
-                "[sample/sampler] force_topk enabled, k=%d. "
-                "See FORCE_TOPK_DESIGN.md for semantics and fallback conditions.",
+                "[sample/sampler] force_topk enabled, k=%d.",
                 self.force_topk,
             )
         logger.debug(
@@ -134,58 +141,68 @@ class AscendSampler(Sampler):
         else:
             return logits.argmax(dim=-1).view(-1)
 
-    # ------------------------------------------------------------------ #
-    # force_topk: override sample() and gather_logprobs()                #
-    # See FORCE_TOPK_DESIGN.md §4.2 / §4.5                               #
-    # ------------------------------------------------------------------ #
+    # force_topk: override sample() and gather_logprobs()
 
-    def _force_topk_enabled(self, sampling_metadata: SamplingMetadata) -> bool:
+    def _force_topk_enabled(
+        self, sampling_metadata: SamplingMetadata
+    ) -> bool:
         """Check whether force_topk is safe to use for this batch.
 
-        Returns False (→ fall back to super().sample()) when any of the
-        design's safety conditions are violated. See FORCE_TOPK_DESIGN.md
-        §4.6 and the decision log (D1-D8).
+        Returns False when any safety condition is violated.
         """
         if self.force_topk <= 0:
             return False
-        # D2: batch_invariant debug mode requires bit-exact upstream path
         if envs.VLLM_BATCH_INVARIANT:
-            logger.warning_once("[force_topk] fallback: VLLM_BATCH_INVARIANT enabled")  # TODO: remove after debugging
+            logger.debug_once(
+                "[force_topk] fallback: VLLM_BATCH_INVARIANT"
+            )
             return False
-        # D3: reduce_sample uses TP-sharded logits; force_topk on local shard
-        # would not be a global top-k. Needs separate analysis (design TODO).
         if get_ascend_config().enable_reduce_sample:
-            logger.warning_once("[force_topk] fallback: enable_reduce_sample=True")  # TODO: remove after debugging
+            logger.debug_once(
+                "[force_topk] fallback: enable_reduce_sample"
+            )
             return False
-        # D7: CompactDist semantics only match raw_logprobs or processed_logprobs
-        if self.logprobs_mode not in ("raw_logprobs", "processed_logprobs"):
-            logger.warning_once("[force_topk] fallback: logprobs_mode=%s not in (raw_logprobs, processed_logprobs)", self.logprobs_mode)  # TODO: remove after debugging
+        if self.logprobs_mode not in (
+            "raw_logprobs", "processed_logprobs"
+        ):
+            logger.debug_once(
+                "[force_topk] fallback: logprobs_mode=%s",
+                self.logprobs_mode,
+            )
             return False
-        # D4/D5: top-n must fit in k; -1 means full-vocab logprobs request
         num_lp = sampling_metadata.max_num_logprobs
-        if num_lp is not None and (num_lp == -1 or num_lp > self.force_topk):
-            logger.warning_once("[force_topk] fallback: num_logprobs=%d, k=%d", num_lp, self.force_topk)  # TODO: remove after debugging
+        if num_lp is not None and (
+            num_lp == -1 or num_lp > self.force_topk
+        ):
+            logger.debug_once(
+                "[force_topk] fallback: num_logprobs=%d, k=%d",
+                num_lp,
+                self.force_topk,
+            )
             return False
-        # D6: logprob_token_ids (generative_scoring) may query tokens outside
-        # top-k → CompactDist.gather would return -inf (incorrect)
         if sampling_metadata.logprob_token_ids:
-            logger.warning_once("[force_topk] fallback: logprob_token_ids non-empty")  # TODO: remove after debugging
+            logger.debug_once(
+                "[force_topk] fallback: logprob_token_ids"
+            )
             return False
-        # D8: penalties change LSE, breaking I3 (raw vs post-penalty logprobs).
-        # Only matters for raw_logprobs mode (raw requires pre-penalty LSE).
-        # processed_logprobs mode uses post-penalty distribution directly.
         wants_logprobs = num_lp is not None or bool(
             sampling_metadata.logprob_token_ids
         )
-        if (not sampling_metadata.no_penalties and wants_logprobs
-                and self.logprobs_mode == "raw_logprobs"):
-            logger.warning_once("[force_topk] fallback: penalties + raw_logprobs requested")  # TODO: remove after debugging
+        if (
+            not sampling_metadata.no_penalties
+            and wants_logprobs
+            and self.logprobs_mode == "raw_logprobs"
+        ):
+            logger.debug_once(
+                "[force_topk] fallback: penalties + raw_logprobs"
+            )
             return False
-        # Decision B: if there are argmax_invariant processors other than
-        # MinP, we cannot cover their logic in force_topk_sample → fall back.
         for proc in sampling_metadata.logitsprocs.argmax_invariant:
             if not hasattr(proc, "min_p_count"):
-                logger.warning_once("[force_topk] fallback: non-MinP argmax_invariant processor %s", type(proc).__name__)  # TODO: remove after debugging
+                logger.debug_once(
+                    "[force_topk] fallback: non-MinP processor %s",
+                    type(proc).__name__,
+                )
                 return False
         return True
 
@@ -193,16 +210,11 @@ class AscendSampler(Sampler):
     def _extract_min_p(
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor | None:
-        """Extract the min_p tensor from MinPLogitsProcessor without running
-        its apply() (which would do a [B,V] softmax — the very thing force_topk
-        aims to eliminate).
-
-        Uses duck-typing on the ``min_p_count`` / ``min_p`` attributes.
-        Returns None if no request uses min_p.
+        """Extract min_p tensor from MinPLogitsProcessor without running
+        its apply() (which would do a [B,V] softmax).
         """
         for proc in sampling_metadata.logitsprocs.argmax_invariant:
             if hasattr(proc, "min_p_count") and proc.min_p_count > 0:
-                # min_p is stored as [B, 1]; squeeze to [B]
                 return proc.min_p.squeeze(-1)
         return None
 
@@ -212,27 +224,14 @@ class AscendSampler(Sampler):
         sampling_metadata: SamplingMetadata,
         logprobs_mode_override: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Override sample() to add the force_topk branch.
-
-        When force_topk is disabled or unsafe, delegates to super().sample().
-        Otherwise, performs sampling entirely in [B, k] compact space and
-        returns a CompactDist (instead of None) as the second element.
-        The CompactDist flows through forward()'s ``raw_logprobs = cdist``
-        assignment (sampler.py:103-104) into our gather_logprobs() override.
-        """
         if not self._force_topk_enabled(sampling_metadata):
-            return super().sample(logits, sampling_metadata, logprobs_mode_override)
+            return super().sample(
+                logits, sampling_metadata, logprobs_mode_override
+            )
 
         k = self.force_topk
-        logger.warning(  # TODO: remove after debugging
-            "[force_topk] sample() enter: B=%d, V=%d, k=%d, all_greedy=%s, all_random=%s",
-            logits.shape[0], logits.shape[1], k,
-            sampling_metadata.all_greedy, sampling_metadata.all_random,
-        )
-        # I1: all-greedy batch → full-vocab argmax, skip sampling path.
-        # Still build CompactDist for logprobs reporting if requested.
+        # I1: all-greedy batch -> full-vocab argmax
         if sampling_metadata.all_greedy:
-            logger.warning("[force_topk] all_greedy branch")  # TODO: remove after debugging
             greedy = self.greedy_sample(logits)
             cdist = None
             if (
@@ -244,36 +243,29 @@ class AscendSampler(Sampler):
 
         assert sampling_metadata.temperature is not None
 
-        # Determine logprobs mode: raw_logprobs → return_raw_logprobs=True,
-        # processed_logprobs → return_raw_logprobs=False (skip full-vocab LSE).
-        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        logprobs_mode = (
+            logprobs_mode_override or self.logprobs_mode
+        )
         return_raw_logprobs = (logprobs_mode == "raw_logprobs")
 
-        # Greedy for mixed batches (computed but only used via torch.where)
         greedy_sampled = None
         if not sampling_metadata.all_random:
             greedy_sampled = self.greedy_sample(logits)
 
-        # Prepare per-request params for force_topk_sample.
-        # top_p / top_k may be None when no request uses them; provide defaults.
         device = logits.device
         B = logits.shape[0]
         top_p = sampling_metadata.top_p
         if top_p is None:
-            top_p = torch.ones(B, dtype=torch.float32, device=device)
+            top_p = torch.ones(
+                B, dtype=torch.float32, device=device
+            )
         top_k = sampling_metadata.top_k
         if top_k is None:
-            top_k = torch.full((B,), -1, dtype=torch.int32, device=device)
+            top_k = torch.full(
+                (B,), -1, dtype=torch.int32, device=device
+            )
         min_p = self._extract_min_p(sampling_metadata)
 
-        logger.warning(  # TODO: remove after debugging
-            "[force_topk] random branch: top_p=%s, top_k=%s, min_p=%s, generators=%d, mode=%s",
-            "None" if sampling_metadata.top_p is None else f"{top_p.shape}",
-            "None" if sampling_metadata.top_k is None else f"{top_k.shape}",
-            "None" if min_p is None else f"{min_p.shape}",
-            len(sampling_metadata.generators),
-            logprobs_mode,
-        )
         sampled, cdist = force_topk_sample(
             logits,
             sampling_metadata.temperature,
@@ -285,7 +277,6 @@ class AscendSampler(Sampler):
             return_raw_logprobs=return_raw_logprobs,
         )
 
-        # Mixed batch: select greedy for temperature < eps rows
         if greedy_sampled is not None:
             sampled = torch.where(
                 sampling_metadata.temperature < _SAMPLING_EPS,
@@ -293,10 +284,6 @@ class AscendSampler(Sampler):
                 sampled,
                 out=greedy_sampled,
             )
-        logger.warning(  # TODO: remove after debugging
-            "[force_topk] sample() done: sampled.shape=%s, cdist=%s",
-            sampled.shape, "CompactDist" if cdist is not None else "None",
-        )
         return sampled, cdist
 
     @staticmethod
@@ -305,18 +292,13 @@ class AscendSampler(Sampler):
         num_logprobs: int,
         token_ids: torch.Tensor,
     ) -> LogprobsTensors:
-        """Override gather_logprobs() to handle CompactDist.
-
-        When logprobs is a CompactDist (force_topk path), use O(k) compact
-        queries. Otherwise delegate to the upstream full-vocab implementation.
-        """
         if isinstance(logprobs, CompactDist):
-            logger.warning("[force_topk] gather_logprobs: compact path, n=%d", num_logprobs)  # TODO: remove after debugging
             return AscendSampler._gather_logprobs_compact(
                 logprobs, num_logprobs, token_ids
             )
-        logger.warning("[force_topk] gather_logprobs: standard path, n=%d", num_logprobs)  # TODO: remove after debugging
-        return Sampler.gather_logprobs(logprobs, num_logprobs, token_ids)
+        return Sampler.gather_logprobs(
+            logprobs, num_logprobs, token_ids
+        )
 
     @staticmethod
     def _gather_logprobs_compact(
@@ -326,43 +308,44 @@ class AscendSampler(Sampler):
     ) -> LogprobsTensors:
         """Gather logprobs from a CompactDist (force_topk path).
 
-        Replaces the upstream [B,V] topk+gather+rank with O(k) operations:
-          - topn(n): zero-cost slice (already sorted)
-          - gather + rank: single O(k) search, shared between logprob and rank
+        Replaces upstream [B,V] topk+gather+rank with O(k) operations.
         """
         assert token_ids.dtype == torch.int64
-        logger.warning(  # TODO: remove after debugging
-            "[force_topk] _gather_logprobs_compact: n=%d, cdist.k=%d",
-            num_logprobs, cdist.token_index.shape[1],
-        )
-        # top-n logprobs and token ids (already descending → slice)
-        topk_logprobs, topk_indices = cdist.topn(num_logprobs)   # [B, n]
+        topk_logprobs, topk_indices = cdist.topn(
+            num_logprobs
+        )  # [B, n]
 
         # Single search: find sampled token position in token_index.
-        # Reuse hit/pos/found for both logprob lookup and rank computation.
-        hit = cdist.token_index == token_ids.long().unsqueeze(-1)  # [B, k]
-        pos = hit.long().argmax(dim=-1)                            # [B]
-        found = hit.any(dim=-1)                                    # [B]
+        hit = (
+            cdist.token_index == token_ids.long().unsqueeze(-1)
+        )  # [B, k]
+        pos = hit.long().argmax(dim=-1)  # [B]
+        found = hit.any(dim=-1)  # [B]
 
-        # Logprob: hit → value at pos, miss → -inf
-        val = cdist.logprobs.gather(1, pos.unsqueeze(1)).squeeze(1)  # [B]
+        val = cdist.logprobs.gather(
+            1, pos.unsqueeze(1)
+        ).squeeze(1)  # [B]
         token_logprobs = torch.where(
-            found, val, torch.full_like(val, float("-inf"))
+            found,
+            val,
+            torch.full_like(val, float("-inf")),
         )
 
-        # Rank: hit → pos, miss → k (approximate, design §4.5)
         k = cdist.token_index.shape[1]
         token_ranks = torch.where(
             found, pos, torch.full_like(pos, k)
         )
 
-        # Concatenate: sampled token (col 0) + top-k (cols 1..n)
-        indices = torch.cat((token_ids.unsqueeze(-1), topk_indices), dim=1)
+        indices = torch.cat(
+            (token_ids.unsqueeze(-1), topk_indices), dim=1
+        )
         logprobs_cat = torch.cat(
             (token_logprobs.unsqueeze(-1), topk_logprobs), dim=1
         )
         indices = indices.to(torch.int32)
-        return LogprobsTensors(indices, logprobs_cat, token_ranks)
+        return LogprobsTensors(
+            indices, logprobs_cat, token_ranks
+        )
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):

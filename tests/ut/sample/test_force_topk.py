@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vllm project
-"""force_topk sampler unit tests — aligned against full-vocab golden.
+# SPDX-FileCopyrightText: Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# All Rights Reserved.
+"""force_topk sampler unit tests.
 
-Tests the force_topk reference implementation (vllm_ascend.ops.force_topk_sample)
-and CompactDist (vllm_ascend.sample.topk_map) against full-vocab computations.
-
-Design reference: FORCE_TOPK_DESIGN.md
-  - §4.3 / §4.3.1  fused kernel contract + small-operator reference impl
-  - §4.6           semantic guardrails I1/I2/I3 + fallback switch
-  - §6             test case table (implemented below)
+Tests the force_topk reference implementation
+(vllm_ascend.ops.force_topk_sample) and CompactDist
+(vllm_ascend.sample.topk_map) against full-vocab computations.
 
 Run (CPU, no NPU required):
     pytest -sv tests/ut/sample/test_force_topk.py
