@@ -732,6 +732,10 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
     def _make_proposer_for_init():
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
         proposer.vllm_config = SimpleNamespace()
+        # The real proposer constructor always sets this field.  These
+        # lightweight initializer tests bypass __init__, so preserve that
+        # production invariant with a generic non-K3 draft config.
+        proposer.draft_model_config = SimpleNamespace(hf_config=object())
         proposer.device = torch.device("cpu")
         return proposer
 
@@ -785,6 +789,10 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         proposer.model = SimpleNamespace(
             get_draft_kv_cache_layer_names=lambda: {"L0", "L1"}
         )
+        assert not isinstance(
+            proposer.draft_model_config.hf_config,
+            dspark_proposer_module.K3DSparkConfig,
+        )
         proposer.max_query_tokens = 8
         proposer.max_num_tokens = 16
         kv_cache_config = SimpleNamespace(
@@ -813,6 +821,63 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             call.kwargs["kernel_block_size"]
             for call in create_builders.call_args_list
         ] == [128, 64]
+
+    def test_k3_initialization_enables_rope_on_mla_builders(self, monkeypatch):
+        class FakeK3Config:
+            pass
+
+        class FakeMLABuilder:
+            def __init__(self):
+                self.use_mla_rope = False
+
+        fake_builder = FakeMLABuilder()
+
+        def create_metadata_builders(group, *args, **kwargs):
+            del args, kwargs
+            group.metadata_builders = [fake_builder]
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layer = MagicMock()
+        layer.get_attn_backend.return_value = backend
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "get_layers_from_vllm_config",
+            lambda *args, **kwargs: {"L0": layer},
+        )
+        monkeypatch.setattr(dspark_proposer_module, "K3DSparkConfig", FakeK3Config)
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "AscendMLAMetadataBuilder",
+            FakeMLABuilder,
+        )
+        monkeypatch.setattr(
+            AttentionGroup,
+            "create_metadata_builders",
+            create_metadata_builders,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.draft_model_config = SimpleNamespace(hf_config=FakeK3Config())
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"L0"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        manager_spec = MagicMock()
+        manager_spec.block_size = 128
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["L0"],
+                    kv_cache_spec=manager_spec,
+                )
+            ]
+        )
+
+        proposer.initialize_attn_backend(kv_cache_config)
+
+        assert fake_builder.use_mla_rope is dspark_proposer_module.K3_DSPARK_USE_MLA_ROPE
 
     def test_kernel_block_size_falls_back_to_cache_spec(self):
         proposer = self._make_proposer_for_init()

@@ -354,6 +354,7 @@ class AscendMLAMetadata:
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
+    causal: bool = True
 
     decode: AscendMLADecodeMetadata | None = None
     prefill: AscendMLAPrefillMetadata | None = None
@@ -628,6 +629,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             num_prefills=self.num_prefills,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             attn_state=common_attn_metadata.attn_state,
+            causal=common_attn_metadata.causal,
             prefill=prefill_metadata,
             decode=decode_metadata,
             query_start_loc=query_start_loc,
@@ -1692,8 +1694,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
             attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
-            sparse_mode = 3
-            attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            if not attn_metadata.causal:
+                # The DSpark MLA draft block is non-causal (bidirectional):
+                # every query token attends to the trailing context window plus
+                # all other query tokens in the draft block. On Ascend FIA this
+                # is sparse_mode=0 with NO atten_mask (a mask under sparse_mode=0
+                # is applied as defaultMask and would wrongly hide the upper
+                # triangle -- see vllm_ascend/attention/attention_mask.py).
+                sparse_mode = 0
+                attn_mask = None
+            else:
+                sparse_mode = 3
+                attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
