@@ -3,7 +3,7 @@
 # ==========================================
 test_cases:
   - name: "Qwen3.5-122B-A10B-in16k-out1k-0-256-64"
-    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
     envs:
       HCCL_BUFFSIZE: "2048"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
@@ -57,7 +57,7 @@ test_cases:
         baseline: 409.7045
         threshold: 0.97
   - name: "Qwen3.5-122B-A10B-in128k-out1k-90-16-4"
-    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
     envs:
       HCCL_BUFFSIZE: "2048"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
@@ -111,7 +111,7 @@ test_cases:
         baseline: 21.9443
         threshold: 0.97
   - name: "Qwen3.5-122B-A10B-in984k-out1k-0-8-2"
-    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
     envs:
       HCCL_BUFFSIZE: "2048"
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
