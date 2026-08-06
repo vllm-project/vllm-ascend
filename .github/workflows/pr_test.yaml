@@ -406,6 +406,7 @@ jobs:
 
   recommend-tests-from-coverage:
     name: Recommend tests from coverage
+    needs: pre-commit
     runs-on: linux-amd64-cpu-8-hk
     continue-on-error: true
     outputs:
@@ -587,8 +588,6 @@ jobs:
   route-recommended-tests:
     name: Route recommended tests to runners
     needs: recommend-tests-from-coverage
-    # Debug: restore before merge — require the `ready` label to run.
-    # if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -651,14 +650,25 @@ jobs:
 
   run-recommended-tests:
     name: Run recommended tests (${{ matrix.vllm_version }})
-    needs: route-recommended-tests
-    if: ${{ needs.route-recommended-tests.outputs.has_tests == 'true' }}
+    needs:
+      - pre-commit
+      - route-recommended-tests
+      - ensure-csrc-cache
+    if: >-
+      ${{
+        always() &&
+        needs.pre-commit.result == 'success' &&
+        needs.route-recommended-tests.result == 'success' &&
+        needs.route-recommended-tests.outputs.has_tests == 'true' &&
+        contains(github.event.pull_request.labels.*.name, 'ready') &&
+        needs.ensure-csrc-cache.result == 'success'
+      }}
     strategy:
       fail-fast: false
       matrix:
         vllm_version:
-          - ${{ needs.route-recommended-tests.outputs.main_commit }}
-          - ${{ needs.route-recommended-tests.outputs.release_tag }}
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
