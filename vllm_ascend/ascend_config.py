@@ -850,7 +850,7 @@ class SparseKVOffloadConfig:
     Configuration for the Sparse KV cache offloading.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", user_config: dict[str, Any]):
+    def __init__(self, vllm_config: VllmConfig, user_config: dict[str, Any]):
         self.enabled = bool(user_config.get("enabled", False))
         if not self.enabled:
             return
@@ -936,24 +936,40 @@ def init_ascend_config(vllm_config):
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
-    # Extract only the keys that correspond to declared AscendConfig fields and
-    # strip bypass keys (extra="forbid" would otherwise reject them). Bypass
-    # keys are read elsewhere (refresh by this factory; enable_dsa_cp /
-    # draft_window_size by other modules directly off additional_config;
-    # enable_balance_scheduling by SchedulerConfig above; dump_config resolved
-    # into dump_config_path above). Sub-config dicts (ascend_compilation_config
-    # etc.) are kept in kwargs so pydantic coerces dict→dataclass.
-    fields = AscendConfig.__pydantic_fields__
+    # Strip keys that must NOT flow from additional_config into AscendConfig:
+    #   - control-flow flags (refresh: not a config)
+    #   - injected fields (factory passes explicitly; additional_config copy would conflict)
+    #   - derived fields (after-validator computes them; user input would residualize)
+    #   - SchedulerConfig-internal top-level legacy key
+    # Keys NOT in this set flow into kwargs; pydantic extra="forbid" then catches
+    # typos (e.g. enable_cpu_bindng) that are neither declared fields nor bypass keys.
     _BYPASS_KEYS = {
-        "refresh",  # control-flow flag (singleton/cache refresh), not a config; not converged
-        "dump_config_path",  # passed explicitly below
-        "enable_balance_scheduling",  # SchedulerConfig field; stripped (not AscendConfig field)
-        "xlite_graph_config",  # pre-constructed above (vllm_config dep)
-        "finegrained_tp_config",  # pre-constructed above (vllm_config dep)
-        "scheduler_config",  # pre-constructed above (vllm_config dep)
-        "sparse_kv_offload_config",  # pre-constructed above (vllm_config dep)
+        # control-flow flag (singleton/cache refresh), not a config; not converged
+        "refresh",
+        # injected fields (factory passes explicitly below)
+        "vllm_config",
+        "xlite_graph_config",
+        "finegrained_tp_config",
+        "scheduler_config",
+        "sparse_kv_offload_config",
+        "dump_config_path",
+        # derived fields (after-validator computes; user input would residualize)
+        "enable_shared_expert_dp",
+        "enable_sp_by_pass",
+        "enable_sparse_sfa_c8",
+        "enable_sparse_li_c8",
+        "c8_enable_reshape_optim",
+        "pd_tp_ratio",
+        "pd_head_ratio",
+        "num_head_replica",
+        # private derived state (init=False, but list for safety)
+        "_sparse_li_c8_layer_ids",
+        "_sparse_li_c8_layer_names",
+        "_sparse_li_c8_layer_filter_enabled",
+        # SchedulerConfig field (top-level legacy, SchedulerConfig resolves internally)
+        "enable_balance_scheduling",
     }
-    kwargs = {k: v for k, v in additional_config.items() if k in fields and k not in _BYPASS_KEYS}
+    kwargs = {k: v for k, v in additional_config.items() if k not in _BYPASS_KEYS}
 
     new_config = AscendConfig(
         vllm_config=vllm_config,
