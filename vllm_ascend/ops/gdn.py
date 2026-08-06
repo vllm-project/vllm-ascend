@@ -39,7 +39,7 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
-    # smoke call runs at most once per process. None = not probed yet.
+    # smoke call runs at most once per process.
     _fused_chunk_available: bool | None = None
 
     @classmethod
