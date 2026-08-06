@@ -24,10 +24,25 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # cann and atb environment setup
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/cann-9.0.1/share/info/ascendnpu-ir/bin/set_env.sh
+
+# The CANN install directory varies between release (cann-9.0.1) and daily
+# (e.g. cann-2026.08.03) images, so discover it dynamically instead of
+# hardcoding a version-specific path. The ascendnpu-ir component is optional;
+# a missing component must not abort the script.
+CANN_DIR=$(ls -d /usr/local/Ascend/cann-* 2>/dev/null | head -1 || true)
+CANN_IR_SET_ENV="${CANN_DIR}/share/info/ascendnpu-ir/bin/set_env.sh"
+if [ -n "${CANN_DIR}" ] && [ -f "${CANN_IR_SET_ENV}" ]; then
+    source "${CANN_IR_SET_ENV}"
+else
+    echo "WARNING: ascendnpu-ir set_env.sh not found (CANN_DIR=${CANN_DIR:-none}), skipping" >&2
+fi
 
 set +eu
-source /usr/local/Ascend/nnal/atb/set_env.sh
+if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+else
+    echo "WARNING: /usr/local/Ascend/nnal/atb/set_env.sh not found, skipping" >&2
+fi
 set -eu
 
 # Home path for aisbench

@@ -91,7 +91,7 @@ class TestProfilingChunkConfig(TestBase):
 
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_enabled_without_pp_raises(self, _mock):
         clear_ascend_config()
         vllm_config = VllmConfig()
@@ -108,7 +108,7 @@ class TestProfilingChunkConfig(TestBase):
 
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_enabled_with_pp_ok(self, _mock):
         clear_ascend_config()
         vllm_config = VllmConfig()
@@ -124,7 +124,7 @@ class TestProfilingChunkConfig(TestBase):
 
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def test_disabled_without_pp_ok(self, _mock):
         clear_ascend_config()
         vllm_config = VllmConfig()
