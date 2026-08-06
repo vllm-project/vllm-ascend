@@ -252,6 +252,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            input_ids=None,
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
@@ -260,6 +261,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            input_ids=None,
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()

@@ -4,6 +4,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+import torch
 from torch import nn
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
@@ -23,6 +25,12 @@ class _FakeMoERunner(nn.Module):
     def __init__(self, router):
         super().__init__()
         self.router = router
+        self.is_internal_router = True
+        self.input_ids = None
+
+    def forward(self, hidden_states, router_logits, input_ids=None):
+        self.input_ids = input_ids
+        return hidden_states
 
 
 def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
@@ -98,3 +106,10 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
     assert kwargs["hash_indices_table"] is moe.gate.tid2eid
     assert isinstance(moe.experts.router, FusedTopKBiasRouter)
     assert moe.experts.router._hash_indices_table is moe.gate.tid2eid
+
+    input_ids = torch.tensor([11, 22])
+    moe(torch.randn(2, config.hidden_size), input_ids=input_ids)
+    assert moe.experts.input_ids is input_ids
+
+    with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
+        moe(torch.randn(2, config.hidden_size))

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -83,7 +84,7 @@ def _patch_select_moe_comm_method_deps(
     )
 
 
-def test_deepseek_v4_forward_publishes_input_ids_to_mrv2_context(monkeypatch):
+def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     from vllm.forward_context import ForwardContext, override_forward_context
 
     from vllm_ascend.models import deepseek_v4
@@ -95,11 +96,14 @@ def test_deepseek_v4_forward_publishes_input_ids_to_mrv2_context(monkeypatch):
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
 
+    layer = MagicMock()
+    layer.layer_idx = 0
+    layer.side_effect = lambda _positions, hidden_states, *_args, **_kwargs: (hidden_states, None)
     model = SimpleNamespace(
         hc_mult=1,
-        layers=[],
+        layers=[layer],
         start_layer=0,
-        end_layer=0,
+        end_layer=1,
         aux_hidden_state_layers=set(),
         _mtp_hidden_buffer=torch.empty(3, 4),
         hc_head=lambda hidden_states, *_: hidden_states.squeeze(1),
@@ -125,7 +129,8 @@ def test_deepseek_v4_forward_publishes_input_ids_to_mrv2_context(monkeypatch):
             inputs_embeds=torch.randn(input_ids.numel(), 4),
         )
 
-    assert forward_context.additional_kwargs["input_ids"] is input_ids
+    assert layer.call_args.kwargs["input_ids"] is input_ids
+    assert "input_ids" not in forward_context.additional_kwargs
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
