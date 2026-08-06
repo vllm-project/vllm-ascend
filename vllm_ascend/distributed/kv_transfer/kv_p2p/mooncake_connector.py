@@ -1378,8 +1378,10 @@ class KVCacheRecvingThread(threading.Thread):
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
             if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
-                logger.warning(
-                    "Remote kv_group2layeridx is inconsistent with local. remote=%s, local=%s. ",
+                logger.debug(
+                    "Remote kv_group2layeridx differs from local. Inspect the remote and local metadata "
+                    "to determine whether the difference is expected for the configured parallelism "
+                    "and KV cache layouts. remote=%s, local=%s. ",
                     agent_meta.kv_group2layeridx,
                     self.kv_group2layeridx,
                 )
