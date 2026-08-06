@@ -90,6 +90,8 @@ public:
         pipe->InitBuffer(signBuf_, d * sizeof(float));
         pipe->InitBuffer(cbBuf_, (2 * (1 << BITS)) * sizeof(float));
         pipe->InitBuffer(outBuf_, d * sizeof(half));
+        pipe->InitBuffer(redBuf_, d * sizeof(float));   // ReduceSum dst (must not alias src)
+        pipe->InitBuffer(wrkBuf_, d * sizeof(float));   // ReduceSum workLocal (must not alias src/dst)
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
@@ -138,11 +140,14 @@ private:
         LocalTensor<float> tmp = tmpBuf_.Get<float>();
         LocalTensor<uint8_t> bytes = byteBuf_.Get<uint8_t>();
         LocalTensor<int32_t> codes = codeBuf_.Get<int32_t>();
+        LocalTensor<float> red = redBuf_.Get<float>();
+        LocalTensor<float> wrk = wrkBuf_.Get<float>();
 
         // q -> fp32, then into the rotated basis (once per head, not per key)
         LocalTensor<half> qh16 = outBuf_.Get<half>();
         DataCopy(qh16, qGm_[(b * t_->numHeads + qh) * d], d);
-        PipeBarrier<PIPE_ALL>();
+        SetFlag<HardEvent::MTE2_V>(EVENT_ID3);   // MTE2 -> V is NOT implicit on 310P
+        WaitFlag<HardEvent::MTE2_V>(EVENT_ID3);
         Cast(q, qh16, RoundMode::CAST_NONE, d);
         PipeBarrier<PIPE_V>();
         RotatePi(q, signs_, tmp, d, t_->invSqrtHeadDim);
@@ -172,12 +177,22 @@ private:
                 // ---- score: <Pi q, yhat_k> * ||k|| * scale -------------------
                 GatherNz(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
                 UnpackCodes<BITS>(bytes, codes, d);
-                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::S_V>(EVENT_ID1);   // scalar wrote `codes` -> vector reads it
+                WaitFlag<HardEvent::S_V>(EVENT_ID1);
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
 
                 Mul(tmp, q, kv, d);
                 PipeBarrier<PIPE_V>();
-                ReduceSum(tmp, tmp, tmp, d);
+                /*
+                 * ReduceSum(dst, src, workLocal, count) with THREE DISTINCT
+                 * buffers. This previously passed `tmp` for all three: the
+                 * reduction's scratch then clobbers its own input, so dst[0]
+                 * depends on leftover UB state. That is a nondeterministic
+                 * score, which is what the determinism sweep measured -- and no
+                 * pipe flag can fix it, which is why six sync hypotheses moved
+                 * the failure around without ever converging.
+                 */
+                ReduceSum(red, tmp, wrk, d);
                 PipeBarrier<PIPE_V>();
                 /*
                  * V -> S. The score is a SCALAR read of a tensor the vector pipe
@@ -191,11 +206,23 @@ private:
                  * It also explains the near-flat bit-width response: the error
                  * was in the attention WEIGHTS, not in quantization.
                  */
-                SetFlag<HardEvent::V_S>(EVENT_ID0);
-                WaitFlag<HardEvent::V_S>(EVENT_ID0);
+                SetFlag<HardEvent::V_S>(EVENT_ID2);
+                WaitFlag<HardEvent::V_S>(EVENT_ID2);
                 const float kNorm = static_cast<float>(
                     kNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
-                const float score = tmp.GetValue(0) * kNorm * t_->scale;
+                /*
+                 * BISECT SWITCH (variant == 2): force every score to 0 so the
+                 * softmax is exactly uniform. Probe B (identical keys, varying
+                 * V) must then return mean(V) EXACTLY.
+                 *   passes -> the defect is in the score computation
+                 *            (gather/unpack/dequant/ReduceSum for K)
+                 *   fails  -> the defect is NOT in the score path at all, and
+                 *            six sync hypotheses were aimed at the wrong half
+                 * Runtime field, so both cases run from ONE build.
+                 */
+                const float score = (t_->variant == 2u)
+                                        ? 0.0f
+                                        : (red.GetValue(0) * kNorm * t_->scale);
 
                 // ---- online softmax update ---------------------------------
                 const float newMax = (score > runMax) ? score : runMax;
@@ -211,7 +238,8 @@ private:
                 // ---- accumulate w * ||v|| * yhat_v (still rotated) ----------
                 GatherNz(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
                 UnpackCodes<BITS>(bytes, codes, d);
-                PipeBarrier<PIPE_V>();
+                SetFlag<HardEvent::S_V>(EVENT_ID1);   // scalar wrote `codes` -> vector reads it
+                WaitFlag<HardEvent::S_V>(EVENT_ID1);
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
                 const float vNorm = static_cast<float>(
                     vNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
@@ -231,9 +259,11 @@ private:
 
         LocalTensor<half> out = outBuf_.Get<half>();
         Cast(out, acc, RoundMode::CAST_NONE, d);
-        PipeBarrier<PIPE_ALL>();
+        SetFlag<HardEvent::V_MTE3>(EVENT_ID4);   // V -> MTE3 is NOT implicit
+        WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
         DataCopy(outGm_[(b * t_->numHeads + qh) * d], out, d);
-        PipeBarrier<PIPE_ALL>();
+        SetFlag<HardEvent::MTE3_V>(EVENT_ID5);   // guards `out`/`qh16` reuse next head
+        WaitFlag<HardEvent::MTE3_V>(EVENT_ID5);
     }
 
     /*
@@ -254,7 +284,11 @@ private:
                 ((static_cast<uint64_t>(blk) * t_->c1 + c1) * t_->blockSize + off) * kNzC0;
             DataCopy(asHalf[g * kNzC0], cache[src], kNzC0);
         }
-        PipeBarrier<PIPE_ALL>();
+        // MTE2 -> S. UnpackCodes reads these bytes with scalar GetValue().
+        // PipeBarrier<PIPE_ALL> was here: not a real barrier on 310P, and the
+        // implicit X->S drain requires PipeBarrier<X> specifically.
+        SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
     }
 
     /*
@@ -305,7 +339,7 @@ private:
     GlobalTensor<int32_t> btGm_, seqGm_;
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
-        outBuf_;
+        outBuf_, redBuf_, wrkBuf_;
     LocalTensor<float> signs_, cb_;
 };
 
