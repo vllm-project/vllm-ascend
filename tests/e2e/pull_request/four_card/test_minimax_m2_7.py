@@ -215,18 +215,8 @@ def _assert_v2_not_slower(v1: dict[str, Any], v2: dict[str, Any], case: str) -> 
 
     v1_throughput = float(v1["output_throughput"])
     v2_throughput = float(v2["output_throughput"])
-    print(
-        f"[{case}] V1: output_throughput={v1_throughput:.2f} tok/s, "
-        f"median_ttft_ms={v1.get('median_ttft_ms')}, "
-        f"median_tpot_ms={v1.get('median_tpot_ms')}, "
-        f"median_e2el_ms={v1.get('median_e2el_ms')}"
-    )
-    print(
-        f"[{case}] V2: output_throughput={v2_throughput:.2f} tok/s, "
-        f"median_ttft_ms={v2.get('median_ttft_ms')}, "
-        f"median_tpot_ms={v2.get('median_tpot_ms')}, "
-        f"median_e2el_ms={v2.get('median_e2el_ms')}"
-    )
+    print(f"[{case}] V1: output_throughput={v1_throughput:.2f} tok/s")
+    print(f"[{case}] V2: output_throughput={v2_throughput:.2f} tok/s")
     assert v2_throughput >= v1_throughput * THROUGHPUT_THRESHOLD, (
         f"[{case}] V2 output throughput {v2_throughput:.2f} tok/s is below "
         f"V1 * {THROUGHPUT_THRESHOLD} = {v1_throughput * THROUGHPUT_THRESHOLD:.2f} tok/s"
