@@ -40,6 +40,7 @@ from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -49,6 +50,11 @@ from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.kda.fused_norm_gate import apply_kda_rms_norm_sigmoid_gate
+else:
+    apply_kda_rms_norm_sigmoid_gate = None
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
@@ -258,9 +264,23 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             core_attn_out,
             self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, output_gate)
+        core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _apply_output_norm_gate(
+        self,
+        core_attn_out: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        if apply_kda_rms_norm_sigmoid_gate is None:
+            return self.o_norm(core_attn_out, output_gate)
+        return apply_kda_rms_norm_sigmoid_gate(
+            core_attn_out,
+            output_gate,
+            self.o_norm.weight,
+            self.o_norm.eps,
+        )
 
     @staticmethod
     def _run_causal_conv1d(

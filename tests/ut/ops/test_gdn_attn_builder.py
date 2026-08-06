@@ -125,6 +125,47 @@ def create_common_attn_metadata(
     )
 
 
+def test_single_token_prefill_with_state_is_treated_as_decode():
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[1, 5, 6], query_lens=[1, 1, 1]),
+        block_size=16,
+        device=torch.device("cpu"),
+    ).replace(is_prefilling=torch.tensor([True, True, False]))
+
+    updated = ascend_gdn_attn_builder._treat_single_token_prefills_with_state_as_decodes(metadata)
+
+    torch.testing.assert_close(updated.is_prefilling, torch.tensor([True, False, False]))
+    # The helper must not mutate the common metadata shared by other backends.
+    torch.testing.assert_close(metadata.is_prefilling, torch.tensor([True, True, False]))
+
+
+def test_spec_sized_prefill_with_state_is_folded_into_spec():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=4,
+        num_speculative_tokens=3,
+    )
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[12, 4, 20], query_lens=[4, 4, 1]),
+        block_size=16,
+        device=torch.device("cpu"),
+    ).replace(is_prefilling=torch.tensor([True, True, False]))
+    spec_mask = torch.tensor([False, False, True])
+    accepted = torch.tensor([1, 1, 2], dtype=torch.int32)
+
+    folded_mask, folded_accepted = builder._fold_spec_sized_prefill_chunks_into_spec(
+        metadata,
+        spec_mask,
+        accepted,
+    )
+
+    torch.testing.assert_close(folded_mask, torch.tensor([True, False, True]))
+    assert folded_accepted is not None
+    torch.testing.assert_close(folded_accepted, torch.tensor([4, 1, 2], dtype=torch.int32))
+    torch.testing.assert_close(spec_mask, torch.tensor([False, False, True]))
+    torch.testing.assert_close(accepted, torch.tensor([1, 1, 2], dtype=torch.int32))
+
+
 def _make_vllm_config(
     *,
     max_model_len: int = 8192,
