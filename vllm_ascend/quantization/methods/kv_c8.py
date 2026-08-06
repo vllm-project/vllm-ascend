@@ -181,9 +181,9 @@ class AscendC8Fp8KVCacheAttentionMethod(AscendAttentionScheme):
         layer.kv_cache_torch_dtype = torch.float8_e4m3fn
 
         if hasattr(layer, "impl"):
-            from vllm_ascend.attention.attention_v1 import AscendC8Fp8AttentionBackendImpl
+            from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
 
-            layer.impl.__class__ = AscendC8Fp8AttentionBackendImpl
+            layer.impl.__class__ = AscendC8AttentionBackendImpl
 
         dtype = torch.get_default_dtype()
         layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
