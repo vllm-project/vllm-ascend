@@ -17,8 +17,10 @@
 # MiniMax-M2 on Ascend: fused attention.
 #
 
+from collections.abc import Iterable
+
 import torch
-from vllm.model_executor.models.minimax_m2 import MiniMaxM2Attention
+from vllm.model_executor.models.minimax_m2 import MiniMaxM2Attention, MiniMaxM2Model
 
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
 
@@ -52,3 +54,47 @@ def _patch_forward(
 
 
 MiniMaxM2Attention.forward = _patch_forward
+
+
+# ---------------------------------------------------------------------------
+# MiniMaxM2Model: skip surplus decoder layers on a reduced config.
+# ---------------------------------------------------------------------------
+def _filter_reduced_layer_weights(
+    self: "MiniMaxM2Model",
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Skip decoder layers that exceed the configured reduced stack.
+
+    The MiniMax-M2.7 4-card e2e case loads the full 62-layer checkpoint with
+    a 16-layer config (``num_hidden_layers=16``, ``num_hidden_layers_orig=62``).
+    Layers 16..61 have no destination module, so they must be filtered before
+    ``AutoWeightsLoader`` sees them.
+    """
+    num_layers = getattr(self.config, "num_hidden_layers", None)
+    orig_layers = getattr(self.config, "num_hidden_layers_orig", None)
+    if not isinstance(num_layers, int) or not isinstance(orig_layers, int) or orig_layers <= num_layers:
+        yield from weights
+        return
+
+    for name, loaded_weight in weights:
+        parts = name.split(".")
+        if len(parts) > 1 and parts[0] == "layers" and parts[1].isdigit():
+            if int(parts[1]) >= num_layers:
+                continue
+        yield name, loaded_weight
+
+
+MiniMaxM2Model._filter_reduced_layer_weights = _filter_reduced_layer_weights
+
+_original_load_weights = MiniMaxM2Model.load_weights
+
+
+def _patched_load_weights(
+    self: "MiniMaxM2Model",
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> set[str]:
+    weights = self._filter_reduced_layer_weights(weights)
+    return _original_load_weights(self, weights)
+
+
+MiniMaxM2Model.load_weights = _patched_load_weights
