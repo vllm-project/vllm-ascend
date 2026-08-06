@@ -5,6 +5,12 @@
 test_cases:
   - name: "Qwen3.5-27B-w8a8"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+    test_content:
+      - "messages"
+    prompts:
+      - "Hello!"
+    api_keyword_args:
+      max_tokens: 100
     envs:
       VLLM_USE_MODELSCOPE: "true"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"

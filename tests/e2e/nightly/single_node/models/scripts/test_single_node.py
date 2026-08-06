@@ -53,6 +53,30 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
     )
 
 
+async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
+    import requests
+
+    url = f"http://{server.host}:{server.port}"
+    max_tokens = config.api_keyword_args.get("max_tokens", 100)
+    prompt = config.prompts[0] if config.prompts else "Hello!"
+
+    response = requests.post(
+        f"{url}/v1/messages",
+        headers={"Content-Type": "application/json"},
+        json={
+            "model": config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        },
+    )
+    assert response.status_code == 200, f"Request failed with status {response.status_code}: {response.text}"
+    data = response.json()
+    assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
+    assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
+    assert len(data["content"]) > 0, "Expected non-empty content in response"
+    print(f"Messages API response: {data}")
+
+
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
     """General assertion engine for aisbench outcomes mapped directly from YAML."""
 
@@ -147,6 +171,7 @@ TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
+    "messages": run_messages_test,
     "check_rank0_process_count": run_check_rank0_process_count,
 }
 
