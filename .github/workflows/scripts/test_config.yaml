@@ -40,6 +40,7 @@
 #                paths after directory scanning)
 
 # === Modules ===
+
 # A5 (Ascend 950) curated test suite
 - name: a5
   optional: true
