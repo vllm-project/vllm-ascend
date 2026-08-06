@@ -18,6 +18,8 @@ jobs:
       pr_branch: ${{ steps.pr_meta.outputs.pr_branch }}
       pr_sha: ${{ steps.pr_meta.outputs.pr_sha }}
       test_cases: ${{ steps.parse_comment.outputs.test_cases }}
+    env:
+      COMMENT_BODY: ${{ github.event.comment.body }}
     steps:
       - name: Get PR head branch & commit sha
         id: pr_meta
@@ -41,7 +43,7 @@ jobs:
   run-nightly-a5:
     name: Execute Nightly‑A5
     needs: trigger
-    uses: ./.github/workflows/Nightly-A5.yaml
+    uses: ./.github/workflows/schedule_nightly_test_a5.yaml
     with:
       vllm_ascend_branch: ${{ needs.trigger.outputs.pr_branch }}
       vllm_ascend_ref: ${{ needs.trigger.outputs.pr_sha }}
