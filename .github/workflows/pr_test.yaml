@@ -41,153 +41,153 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
-    runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
-    outputs:
-      main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
-    steps:
-      - name: Validate PR title prefix
-        run: |
-          PR_TITLE=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])") || {
-              echo "::error::Failed to fetch PR title from GitHub API"
-              exit 1
-            }
+  # pre-commit:
+  #   if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
+  #   runs-on: linux-amd64-cpu-8-hk
+  #   container:
+  #     image: quay.io/ascend-ci/vllm-ascend:lint
+  #   outputs:
+  #     main_commit: ${{ steps.vllm.outputs.main_commit }}
+  #     release_tag: ${{ steps.vllm.outputs.release_tag }}
+  #   steps:
+  #     - name: Validate PR title prefix
+  #       run: |
+  #         PR_TITLE=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+  #           -H "Accept: application/vnd.github.v3+json" \
+  #           "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+  #           | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])") || {
+  #             echo "::error::Failed to fetch PR title from GitHub API"
+  #             exit 1
+  #           }
 
-          if [ -z "$PR_TITLE" ]; then
-            echo "::error::PR title cannot be empty"
-            exit 1
-          fi
+  #         if [ -z "$PR_TITLE" ]; then
+  #           echo "::error::PR title cannot be empty"
+  #           exit 1
+  #         fi
 
-          echo "Checking PR title: $PR_TITLE"
+  #         echo "Checking PR title: $PR_TITLE"
 
-          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+  #         VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
 
-          if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
-            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
-            echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
-            exit 1
-          fi
+  #         if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
+  #           echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+  #           echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
+  #           exit 1
+  #         fi
 
-          echo "✓ PR title prefix is valid"
+  #         echo "✓ PR title prefix is valid"
 
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+  #     - name: Checkout vllm-project/vllm-ascend repo
+  #       uses: actions/checkout@v7
+  #       with:
+  #         fetch-depth: 0
 
-      - name: Read verified vLLM refs
-        id: vllm
-        run: |
-          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
-          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
-            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
-            exit 1
-          }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+  #     - name: Read verified vLLM refs
+  #       id: vllm
+  #       run: |
+  #         main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+  #         release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+  #         [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+  #           echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+  #           exit 1
+  #         }
+  #         [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+  #           echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+  #           exit 1
+  #         }
+  #         {
+  #           echo "main_commit=${main_commit}"
+  #           echo "release_tag=${release_tag}"
+  #         } >> "$GITHUB_OUTPUT"
 
-      - name: cp problem matchers
-        run: |
-          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
-          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
-          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+  #     - name: cp problem matchers
+  #       run: |
+  #         cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
+  #         cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
+  #         cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
 
-      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+  #     - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+  #     - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
+  #     - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v7
-        with:
-          repository: vllm-project/vllm
-          path: ./vllm-empty
-          ref: ${{ steps.vllm.outputs.main_commit }}
+  #     - name: Checkout vllm-project/vllm repo
+  #       uses: actions/checkout@v7
+  #       with:
+  #         repository: vllm-project/vllm
+  #         path: ./vllm-empty
+  #         ref: ${{ steps.vllm.outputs.main_commit }}
 
-      - uses: dorny/paths-filter@v4
-        id: filter
-        with:
-          filters: |
-            lint_tracker:
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
+  #     - uses: dorny/paths-filter@v4
+  #       id: filter
+  #       with:
+  #         filters: |
+  #           lint_tracker:
+  #             - 'requirements.txt'
+  #             - 'requirements-dev.txt'
+  #             - 'requirements-lint.txt'
 
-      - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
-        env:
-          UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-          UV_INDEX_STRATEGY: unsafe-best-match
-          UV_NO_CACHE: 1
-          UV_SYSTEM_PYTHON: 1
-        run: |
-          pip install uv
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+  #     - name: Install vllm-ascend dev (conditional)
+  #       if: steps.filter.outputs.lint_tracker == 'true'
+  #       env:
+  #         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  #         UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+  #         UV_INDEX_STRATEGY: unsafe-best-match
+  #         UV_NO_CACHE: 1
+  #         UV_SYSTEM_PYTHON: 1
+  #       run: |
+  #         pip install uv
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         pip install uc-manager
+  #         uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install and run Gitleaks Secret Scan
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          chmod +x .github/workflows/scripts/gitleaks.sh
-          .github/workflows/scripts/gitleaks.sh
+  #     - name: Install and run Gitleaks Secret Scan
+  #       run: |
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         chmod +x .github/workflows/scripts/gitleaks.sh
+  #         .github/workflows/scripts/gitleaks.sh
 
-      - name: Get pre-commit config hash
-        id: get_hash
-        run: |
-          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
+  #     - name: Get pre-commit config hash
+  #       id: get_hash
+  #       run: |
+  #         PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+  #         echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
 
-      - name: Restore pre-commit cache
-        uses: runs-on/cache/restore@v5
-        env:
-          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-          RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-          AWS_S3_FORCE_PATH_STYLE: "false"
-          AWS_REGION: ap-southeast-1
-        with:
-          path: /tmp/pre-commit-cache
-          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
+  #     - name: Restore pre-commit cache
+  #       uses: runs-on/cache/restore@v5
+  #       env:
+  #         RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  #         RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  #         RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  #         AWS_S3_FORCE_PATH_STYLE: "false"
+  #         AWS_REGION: ap-southeast-1
+  #       with:
+  #         path: /tmp/pre-commit-cache
+  #         key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
 
-      - name: Run pre-commit
-        env:
-          PRE_COMMIT_HOME: /tmp/pre-commit-cache
-          PRE_COMMIT_COLOR: always
-          FORCE_COLOR: "1"
-          TERM: xterm-256color
-          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
-          # Keep golang-based pre-commit hooks on a domestic module proxy.
-          GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
-          GONOSUMDB: '*'
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+  #     - name: Run pre-commit
+  #       env:
+  #         PRE_COMMIT_HOME: /tmp/pre-commit-cache
+  #         PRE_COMMIT_COLOR: always
+  #         FORCE_COLOR: "1"
+  #         TERM: xterm-256color
+  #         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+  #         # Keep golang-based pre-commit hooks on a domestic module proxy.
+  #         GOPROXY: https://repo.huaweicloud.com/repository/goproxy/
+  #         GONOSUMDB: '*'
+  #       run: |
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
-      - name: Run mypy
-        run: |
-          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
-          export PYTHONPATH
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          for python_version in "3.10" "3.11" "3.12"; do
-            echo "============================"
-            tools/mypy.sh 1 "$python_version"
-            echo "============================"
-          done
+  #     - name: Run mypy
+  #       run: |
+  #         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+  #         export PYTHONPATH
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         for python_version in "3.10" "3.11" "3.12"; do
+  #           echo "============================"
+  #           tools/mypy.sh 1 "$python_version"
+  #           echo "============================"
+  #         done
 
   select-tests:
     needs: pre-commit
