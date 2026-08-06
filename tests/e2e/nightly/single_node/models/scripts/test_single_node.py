@@ -386,7 +386,6 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     postprocess_benchmark_results(
         list(zip(benchmark_keys, case_configs, results)),
         job_name=job_name,
-        model_name=config.model,
     )
 
 

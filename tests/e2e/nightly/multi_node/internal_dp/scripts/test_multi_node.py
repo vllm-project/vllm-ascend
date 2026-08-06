@@ -154,7 +154,6 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     postprocess_benchmark_results(
         [(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)],
         job_name=job_name or config.test_name,
-        model_name=config.model,
     )
 
 

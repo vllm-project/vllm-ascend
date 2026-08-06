@@ -239,6 +239,5 @@ def write_benchmark_results_json(
     postprocess_benchmark_results(
         [(key, case, result) for (key, case), result in zip(valid_items, results)],
         job_name=job_name,
-        model_name=config.model,
     )
     return path

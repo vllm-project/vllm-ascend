@@ -21,7 +21,7 @@ For each accuracy/performance benchmark entry:
   1. Read a preset JSON template
   2. Patch nested testcase_info fields (preserve base_info)
   3. Write a new JSON file
-  4. Invoke an external Python script on that file
+  4. Upload via tools/upload_to_openlibing.py
 
 Missing preset/script files only emit warnings and never fail the test.
 """
@@ -30,58 +30,76 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 PRESET_JSON_PATH = Path("/root/.cache/xxx/test.json")
-POSTPROCESS_SCRIPT_PATH = Path("/root/.cache/xxx/xxx.py")
 OUTPUT_DIR = Path("/root/.cache/xxx/results")
+UPLOAD_LABEL = "performance"
+_DATASET_PREFIX = "vllm-ascend/"
 
-PERF_METRIC_RENAME: dict[str, str] = {
-    "Benchmark Duration": "Benchmark_Duration(BD)",
-    "Prefill Token Throughput": "Prefill_Token_Throughput(PTT)",
-    "Input Token Throughput": "Input_Token_Throughput(ITT)",
-    "Output Token Throughput": "Output_Token_Throughput(OTT)",
-    "Total Token Throughput": "Total_Token_Throughput(TTT)",
-}
+
+def _default_upload_script_path() -> Path:
+    cwd_candidate = Path("tools/upload_to_openlibing.py")
+    if cwd_candidate.is_file():
+        return cwd_candidate.resolve()
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "tools" / "upload_to_openlibing.py"
+        if candidate.is_file():
+            return candidate
+    return cwd_candidate
+
+
+POSTPROCESS_SCRIPT_PATH = _default_upload_script_path()
 
 
 def _safe_name(name: str) -> str:
     return name.replace("/", "_").replace(" ", "_")
 
 
+def resolve_suite_name(config_base_path: str | None = None) -> str:
+    """Return 'weekly' or 'nightly' from CONFIG_BASE_PATH."""
+    base = config_base_path if config_base_path is not None else os.getenv("CONFIG_BASE_PATH", "")
+    normalized = base.replace("\\", "/")
+    return "weekly" if "weekly" in normalized else "nightly"
+
+
+def resolve_testcase_name(config_yaml_path: str | None = None, fallback: str = "") -> str:
+    """Return YAML stem from CONFIG_YAML_PATH (without .yaml/.yml)."""
+    raw = config_yaml_path if config_yaml_path is not None else os.getenv("CONFIG_YAML_PATH", "")
+    if not raw:
+        return fallback
+    name = Path(raw).name
+    for suffix in (".yaml", ".yml"):
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def _extract_dataset_name(case_config: dict[str, Any]) -> str:
-    dataset_path = case_config.get("dataset_path", "")
-    dataset_conf = case_config.get("dataset_conf", "")
-    if dataset_path:
-        return dataset_path.split("/", 1)[-1]
-    if dataset_conf:
-        return dataset_conf.split("/")[0]
+    dataset_path = str(case_config.get("dataset_path", "") or "")
+    if dataset_path.startswith(_DATASET_PREFIX):
+        return dataset_path[len(_DATASET_PREFIX) :]
     return ""
 
 
-def _extract_perf_metrics(result: Any) -> dict[str, float]:
-    metrics: dict[str, float] = {}
+def _extract_output_tps(result: Any) -> float | None:
     if not (isinstance(result, list) and len(result) == 2):
-        return metrics
+        return None
     _, result_json = result
     if not isinstance(result_json, dict):
-        return metrics
-    for metric_name, metric_data in result_json.items():
-        if not isinstance(metric_data, dict):
-            continue
-        total_str = metric_data.get("total", "")
-        try:
-            value = float(str(total_str).replace("token/s", "").replace("ms", "").replace("s", "").strip())
-            metrics[PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
-        except (ValueError, AttributeError):
-            continue
-    return metrics
+        return None
+    metric = result_json.get("Output Token Throughput", {})
+    if not isinstance(metric, dict):
+        return None
+    total_str = metric.get("total", "")
+    try:
+        return round(float(str(total_str).replace("token/s", "").strip()), 4)
+    except (ValueError, AttributeError):
+        return None
 
 
 def merge_postprocess_payload(
@@ -89,21 +107,18 @@ def merge_postprocess_payload(
     case_config: dict[str, Any],
     result: Any,
     *,
-    model_name: str,
+    testcase_name: str,
+    suite_name: str | None = None,
 ) -> dict[str, Any]:
-    """Deep-copy preset and patch nested fields per the preset JSON schema.
-
-    Hierarchy follows:
-      testcase_info.featureFullName / testEnv / extraTestEnv / testIndicator
-      base_info (left unchanged)
-    """
+    """Deep-copy preset and patch nested fields per the preset JSON schema."""
     payload = copy.deepcopy(preset)
     testcase_info = payload.setdefault("testcase_info", {})
     if not isinstance(testcase_info, dict):
         testcase_info = {}
         payload["testcase_info"] = testcase_info
 
-    testcase_info["featureFullName"] = model_name
+    testcase_info["featureFullName"] = suite_name or resolve_suite_name()
+    testcase_info["Testcase_Name"] = testcase_name
 
     test_env = testcase_info.get("testEnv")
     if not isinstance(test_env, dict):
@@ -117,22 +132,19 @@ def merge_postprocess_payload(
         test_env["Concurrency"] = case_config["batch_size"]
     if "num_prompts" in case_config:
         test_env["data_num"] = case_config["num_prompts"]
-
-    case_type = case_config.get("case_type")
-    if case_type == "accuracy":
-        test_env["data_set"] = _extract_dataset_name(case_config)
-    else:
-        # Performance cases leave data_set empty.
-        test_env["data_set"] = ""
+    test_env["data_set"] = _extract_dataset_name(case_config)
 
     testcase_info["extraTestEnv"] = {}
 
     indicator: dict[str, Any] = {}
+    case_type = case_config.get("case_type")
     if case_type == "accuracy":
         if isinstance(result, (int, float)):
             indicator["accuracy"] = round(float(result), 4)
     elif case_type == "performance":
-        indicator.update(_extract_perf_metrics(result))
+        output_tps = _extract_output_tps(result)
+        if output_tps is not None:
+            indicator["output_tps"] = output_tps
     testcase_info["testIndicator"] = indicator
 
     return payload
@@ -140,36 +152,44 @@ def merge_postprocess_payload(
 
 def _load_preset_json(preset_path: Path) -> dict[str, Any] | None:
     if not preset_path.is_file():
-        logger.warning("Preset JSON not found, skip postprocess: %s", preset_path)
+        print(f"Warning: Preset JSON not found, skip postprocess: {preset_path}")
         return None
     try:
         return json.loads(preset_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read preset JSON %s: %s", preset_path, exc)
+        print(f"Warning: Failed to read preset JSON {preset_path}: {exc}")
         return None
 
 
 def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     if not script_path.is_file():
-        logger.warning("Postprocess script not found, skip running: %s", script_path)
+        print(f"Warning: Postprocess script not found, skip running: {script_path}")
         return
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--label",
+        UPLOAD_LABEL,
+        "--files",
+        str(output_path),
+    ]
     try:
         completed = subprocess.run(
-            [sys.executable, str(script_path), str(output_path)],
+            cmd,
             check=False,
             capture_output=True,
             text=True,
         )
     except OSError as exc:
-        logger.warning("Failed to run postprocess script %s: %s", script_path, exc)
+        print(f"Warning: Failed to run postprocess script {script_path}: {exc}")
         return
+    if completed.stdout:
+        print(completed.stdout.rstrip())
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
-        logger.warning(
-            "Postprocess script exited with code %s for %s%s",
-            completed.returncode,
-            output_path,
-            f": {stderr}" if stderr else "",
+        print(
+            f"Warning: Postprocess script exited with code {completed.returncode} "
+            f"for {output_path}" + (f": {stderr}" if stderr else "")
         )
 
 
@@ -179,21 +199,25 @@ def postprocess_one_benchmark(
     result: Any,
     *,
     job_name: str,
-    model_name: str,
+    testcase_name: str | None = None,
     preset_path: Path = PRESET_JSON_PATH,
-    script_path: Path = POSTPROCESS_SCRIPT_PATH,
+    script_path: Path | None = None,
     output_dir: Path = OUTPUT_DIR,
 ) -> Path | None:
-    """Read preset JSON, patch nested fields, write output JSON, and run xxx.py."""
+    """Read preset JSON, patch nested fields, write output JSON, and upload."""
+    if script_path is None:
+        script_path = POSTPROCESS_SCRIPT_PATH
+
     preset = _load_preset_json(preset_path)
     if preset is None:
         return None
 
+    resolved_name = testcase_name or resolve_testcase_name(fallback=job_name)
     payload = merge_postprocess_payload(
         preset,
         case_config,
         result,
-        model_name=model_name,
+        testcase_name=resolved_name,
     )
 
     safe_job = _safe_name(job_name or "benchmark")
@@ -203,10 +227,10 @@ def postprocess_one_benchmark(
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
-        logger.warning("Failed to write postprocess JSON %s: %s", output_path, exc)
+        print(f"Warning: Failed to write postprocess JSON {output_path}: {exc}")
         return None
 
-    logger.info("Postprocess JSON written to %s", output_path)
+    print(f"Postprocess JSON written to {output_path}")
     _run_postprocess_script(script_path, output_path)
     return output_path
 
@@ -215,12 +239,13 @@ def postprocess_benchmark_results(
     items: list[tuple[str, dict[str, Any], Any]],
     *,
     job_name: str,
-    model_name: str,
+    testcase_name: str | None = None,
     preset_path: Path = PRESET_JSON_PATH,
-    script_path: Path = POSTPROCESS_SCRIPT_PATH,
+    script_path: Path | None = None,
     output_dir: Path = OUTPUT_DIR,
 ) -> list[Path]:
     """Post-process every (case_key, case_config, result) entry."""
+    resolved_name = testcase_name or resolve_testcase_name(fallback=job_name)
     written: list[Path] = []
     for case_key, case_config, result in items:
         path = postprocess_one_benchmark(
@@ -228,7 +253,7 @@ def postprocess_benchmark_results(
             case_config,
             result,
             job_name=job_name,
-            model_name=model_name,
+            testcase_name=resolved_name,
             preset_path=preset_path,
             script_path=script_path,
             output_dir=output_dir,
