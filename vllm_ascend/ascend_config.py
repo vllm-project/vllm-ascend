@@ -936,24 +936,20 @@ def init_ascend_config(vllm_config):
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
-    # Strip keys that must NOT flow from additional_config into AscendConfig:
-    #   - control-flow flags (refresh: not a config)
-    #   - injected fields (factory passes explicitly; additional_config copy would conflict)
-    #   - derived fields (after-validator computes them; user input would residualize)
-    #   - SchedulerConfig-internal top-level legacy key
-    # Keys NOT in this set flow into kwargs; pydantic extra="forbid" then catches
-    # typos (e.g. enable_cpu_bindng) that are neither declared fields nor bypass keys.
-    _BYPASS_KEYS = {
-        # control-flow flag (singleton/cache refresh), not a config; not converged
+    # Keys that must NOT flow from additional_config into AscendConfig.
+    # These are stripped so that only user-configurable keys reach pydantic,
+    # where extra="forbid" can catch typos (e.g. enable_cpu_bindng).
+    _NON_USER_INPUT_KEYS = {
+        # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
-        # injected fields (factory passes explicitly below)
+        # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "vllm_config",
         "xlite_graph_config",
         "finegrained_tp_config",
         "scheduler_config",
         "sparse_kv_offload_config",
         "dump_config_path",
-        # derived fields (after-validator computes; user input would residualize)
+        # pure-derived fields (after-validator computes them; user input would residualize)
         # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
         # c8_enable_reshape_optim are NOT here — they are user-input fields that
         # after-validator *augments* (self.x = self.x and condition), so the user
@@ -962,14 +958,14 @@ def init_ascend_config(vllm_config):
         "pd_tp_ratio",
         "pd_head_ratio",
         "num_head_replica",
-        # private derived state (init=False, but list for safety)
+        # private derived state (init=False, but listed for safety)
         "_sparse_li_c8_layer_ids",
         "_sparse_li_c8_layer_names",
         "_sparse_li_c8_layer_filter_enabled",
-        # SchedulerConfig field (top-level legacy, SchedulerConfig resolves internally)
+        # SchedulerConfig-internal top-level legacy key (SchedulerConfig resolves it internally)
         "enable_balance_scheduling",
     }
-    kwargs = {k: v for k, v in additional_config.items() if k not in _BYPASS_KEYS}
+    kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
 
     new_config = AscendConfig(  # type: ignore[call-arg]
         vllm_config=vllm_config,

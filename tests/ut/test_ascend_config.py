@@ -738,7 +738,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # A typo'd top-level key (not a declared field, not a bypass key) flows
         # into kwargs and extra="forbid" catches it. Previously the factory
         # filtered by __pydantic_fields__ which stripped typos silently; now
-        # only _BYPASS_KEYS is stripped, so typos reach pydantic and are rejected.
+        # only _NON_USER_INPUT_KEYS is stripped, so typos reach pydantic and are rejected.
         vc = VllmConfig()
         vc.additional_config = {"enable_cpu_bindng": True}  # typo: bindng
         with self.assertRaises(ValueError):
