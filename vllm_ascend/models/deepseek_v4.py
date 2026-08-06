@@ -206,6 +206,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
+            page_size_padded=_dsv4_block_sizes()[vllm_config.cache_config.block_size][1][0],
         )
 
     def forward(self): ...
