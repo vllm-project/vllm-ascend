@@ -32,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
-
+from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
@@ -118,12 +118,20 @@ class DeepseekV4DSparkModel(nn.Module):
         )
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
+
+        _model_quant_cfg = getattr(config, "quantization_config", None)
+        _main_proj_qconfig = (
+            vllm_config.quant_config
+            if _model_quant_cfg is not None
+            and _model_quant_cfg.get("quant_method") == "fp8"
+            else None
+        )
         self.main_proj = ReplicatedLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
             bias=False,
             return_bias=False,
-            quant_config=vllm_config.quant_config,
+            quant_config=_main_proj_qconfig,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -268,8 +276,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.has_own_embed_tokens = vllm_config.quant_config is not None
-        self.has_own_lm_head = vllm_config.quant_config is not None
+        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
         self.model = DeepseekV4DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -375,9 +382,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
-            if name == "embed.weight":
+            if name == "embed.weight" and not self.rotation_path:
                 name = "model.embed_tokens.weight"
-            elif name == "head.weight":
+            elif name == "head.weight" and not self.rotation_path:
                 name = "lm_head.weight"
             elif name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
                 name = f"model.{name}"
