@@ -231,10 +231,17 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/eplb
+    - vllm_ascend/distributed/eplb_communicator.py
+    - vllm_ascend/distributed/eplb_state.py
+    - vllm_ascend/ops/fused_moe/eplb.py
+    - vllm_ascend/ops/fused_moe/router.py
+    - vllm_ascend/patch/platform/patch_eplb.py
+    - vllm_ascend/worker/v2/eplb.py
   tests:
     - tests/ut/eplb
     - tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+    - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
 # weight transfer
 - name: weight_transfer
@@ -289,6 +296,7 @@
   source_file_dependencies:
     - vllm_ascend/models
   tests:
+    - tests/ut/models/test_deepseek_v4_moe.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: models_minimax_m3
@@ -332,6 +340,7 @@
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/test_moe_routing_replay.py
     - tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py
+    - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
 - name: ops_vl
   optional: false
@@ -590,6 +599,7 @@
     - tests/ut/worker
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/two_card/model_runner_v2
+    - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
 # XLite
 - name: xlite
@@ -808,6 +818,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 610
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1180
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
+  tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 1200
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 1800
   tests/ut/attention/a2/test_attention_cp.py: 40
