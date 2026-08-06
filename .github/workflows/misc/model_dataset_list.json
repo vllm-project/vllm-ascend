@@ -280,6 +280,7 @@
       "Eco-Tech/MiniMax-M3-w8a8-0626",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
       "vllm-ascend/MiniMax-M2.5-eagle-model-0318",
+      "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16",
       "Eco-Tech/GLM-5.1-w8a8",
