@@ -28,6 +28,11 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+else:
+    # At runtime VllmConfig is not imported (avoids heavy/circular import), but
+    # pydantic must resolve the field type name. Treat it as Any so pydantic
+    # stores the reference without recursive validation (arbitrary_types_allowed).
+    VllmConfig = Any
 
 
 @config
@@ -650,22 +655,25 @@ class ProfilingChunkConfig:
     """Configuration for profiling-based dynamic chunk sizing.
 
     Migrated to ``@config`` (pydantic dataclass). Range/positivity checks
-    moved to an ``after`` model_validator. ``need_timing`` defaults to
-    ``enabled`` via the after-validator (field default is False, overridden
-    post-construction to mirror the original ``config.get("need_timing", self.enabled)``).
+    moved to an ``after`` model_validator. ``need_timing`` uses ``None`` as a
+    "not provided" sentinel so the after-validator can distinguish "user did
+    not set it" (→ default to ``enabled``) from "user explicitly set False"
+    (→ keep False), mirroring the original ``config.get("need_timing", self.enabled)``.
     """
 
     enabled: bool = False
     smooth_factor: float = 1.0
     min_chunk: int = 4096
-    need_timing: bool = False
+    need_timing: bool | None = None
     max_fit_chunk: int = 30
 
     @model_validator(mode="after")
     def _validate_and_link_need_timing(self):
         # need_timing defaults to enabled when not explicitly set by the user.
-        # (Original: config.get("need_timing", self.enabled).)
-        self.need_timing = self.need_timing if self.need_timing else self.enabled
+        # (Original: config.get("need_timing", self.enabled).) Using None as
+        # sentinel distinguishes "not provided" from "explicitly False".
+        if self.need_timing is None:
+            self.need_timing = self.enabled
         if not (0 < self.smooth_factor <= 1.0):
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
