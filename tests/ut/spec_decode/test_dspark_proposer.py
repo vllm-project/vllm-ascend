@@ -349,6 +349,66 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
 
+    @pytest.mark.parametrize(
+        ("hf_config", "max_num_tokens", "expected_query_budget"),
+        [
+            pytest.param(
+                SimpleNamespace(),
+                5,
+                "num_speculative_tokens * max_num_seqs",
+                id="anchor-sampling",
+            ),
+            pytest.param(
+                SimpleNamespace(dspark_bonus_anchor=True),
+                7,
+                "(num_speculative_tokens + 1) * max_num_seqs",
+                id="bonus-anchor",
+            ),
+        ],
+    )
+    def test_warns_when_query_budget_exceeds_max_num_tokens(
+        self,
+        hf_config: SimpleNamespace,
+        max_num_tokens: int,
+        expected_query_budget: str,
+    ) -> None:
+        with patch("vllm_ascend.spec_decode.dspark_proposer.logger.warning") as warning:
+            self._make_proposer(
+                max_num_tokens=max_num_tokens,
+                num_reqs=_MAX_BATCH_SIZE,
+                block_size=_NUM_SPECULATIVE_TOKENS,
+                hf_config=hf_config,
+            )
+
+        warning.assert_called_once_with(
+            "max_num_batched_tokens must be greater than or equal to %s when using DSpark.",
+            expected_query_budget,
+        )
+
+    @pytest.mark.parametrize(
+        "hf_config",
+        [
+            pytest.param(SimpleNamespace(), id="anchor-sampling"),
+            pytest.param(SimpleNamespace(dspark_bonus_anchor=True), id="bonus-anchor"),
+        ],
+    )
+    def test_does_not_warn_when_query_budget_equals_max_num_tokens(
+        self,
+        hf_config: SimpleNamespace,
+    ) -> None:
+        num_query_per_req = (
+            1 + _NUM_SPECULATIVE_TOKENS if getattr(hf_config, "dspark_bonus_anchor", False) else _NUM_SPECULATIVE_TOKENS
+        )
+        with patch("vllm_ascend.spec_decode.dspark_proposer.logger.warning") as warning:
+            self._make_proposer(
+                max_num_tokens=_MAX_BATCH_SIZE * num_query_per_req,
+                num_reqs=_MAX_BATCH_SIZE,
+                block_size=_NUM_SPECULATIVE_TOKENS,
+                hf_config=hf_config,
+            )
+
+        warning.assert_not_called()
+
 
 # fmt: off
 class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):

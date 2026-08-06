@@ -27,7 +27,11 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         scheduler_config = vllm_config.scheduler_config
-        if scheduler_config.max_num_batched_tokens < (self.num_speculative_tokens + 1) * scheduler_config.max_num_seqs:
+        if (
+            self.method == "dflash"
+            and scheduler_config.max_num_batched_tokens
+            < (self.num_speculative_tokens + 1) * scheduler_config.max_num_seqs
+        ):
             logger.warning(
                 "max_num_batched_tokens must be greater than or equal to "
                 "(num_speculative_tokens + 1) * max_num_seqs when using DFlash."
