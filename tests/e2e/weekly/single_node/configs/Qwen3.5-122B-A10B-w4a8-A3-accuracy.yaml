@@ -3,7 +3,7 @@
 # ==========================================
 test_cases:
   - name: "Qwen3.5-122B-A10B-w4a8-A3-accuracy"
-    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
     envs:
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
