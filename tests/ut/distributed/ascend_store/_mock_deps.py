@@ -175,7 +175,11 @@ class _FakeKVCacheSpec:
         return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
 
 
-class _FakeFullAttentionSpec(_FakeKVCacheSpec):
+class _FakeAttentionSpec(_FakeKVCacheSpec):
+    pass
+
+
+class _FakeFullAttentionSpec(_FakeAttentionSpec):
     pass
 
 
@@ -321,6 +325,7 @@ _single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
 
 _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
+_kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
