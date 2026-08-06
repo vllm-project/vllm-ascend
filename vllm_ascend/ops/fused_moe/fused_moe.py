@@ -18,7 +18,6 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,  # noqa: F401
     MoERunner,
 )
 
