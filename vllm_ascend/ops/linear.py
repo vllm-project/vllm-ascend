@@ -43,7 +43,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import (
     AscendDeviceType,
-    enable_sp,
     get_ascend_device_type,
     is_310p,
     maybe_trans_nz,
@@ -119,6 +118,7 @@ class AscendLinearBase(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
     ):
         nn.Module.__init__(self)
 
@@ -137,6 +137,7 @@ class AscendLinearBase(LinearBase):
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
         self.disable_tp = disable_tp
+        self.sequence_parallel = sequence_parallel
 
 
 class AscendQKVParallelLinear(QKVParallelLinear):
@@ -165,6 +166,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        sequence_parallel: bool = False,
     ):
         self.v_head_size = v_head_size if v_head_size is not None else head_size
         self.custom_op, _, tp_size = get_parallel_op(disable_tp, prefix, self, "column")
@@ -203,16 +205,19 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            sequence_parallel=sequence_parallel,
         )
 
     def forward(
         self,
         input_,
+        *,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        return super().forward(input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size)
 
 
 class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -239,6 +244,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
@@ -257,16 +263,19 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            sequence_parallel=sequence_parallel,
         )
 
     def forward(
         self,
         input_,
+        *,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        return super().forward(input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size)
 
 
 class AscendRowParallelLinear(RowParallelLinear):
@@ -274,9 +283,6 @@ class AscendRowParallelLinear(RowParallelLinear):
     Use the MLP tensor parallelism group in the MLP module,
     and the original TP group in other modules.
     """
-
-    # NOTE: Globally unique prefix identifier used in SP scenarios
-    unique_prefix_idx = 0
 
     def __init__(
         self,
@@ -293,17 +299,8 @@ class AscendRowParallelLinear(RowParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
     ):
-        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
-        if enable_sp():
-            compilation_config = get_current_vllm_config().compilation_config
-            unique_prefix = prefix
-            if prefix in compilation_config.static_forward_context:
-                unique_prefix = f"{prefix}.unique_prefix{AscendRowParallelLinear.unique_prefix_idx}"
-                AscendRowParallelLinear.unique_prefix_idx += 1
-            self.unique_prefix = unique_prefix
-            compilation_config.static_forward_context[unique_prefix] = self
-
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "row")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
@@ -323,6 +320,7 @@ class AscendRowParallelLinear(RowParallelLinear):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            sequence_parallel=sequence_parallel,
         )
 
         self.input_is_parallel = input_is_parallel
@@ -392,6 +390,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        sequence_parallel: bool = False,
     ):
         #
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
@@ -414,6 +413,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            sequence_parallel=sequence_parallel,
         )
 
         self.gather_output = gather_output
@@ -458,11 +458,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
     def forward(
         self,
         input_,
+        *,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        return super().forward(input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:

@@ -18,11 +18,13 @@
 
 
 import torch
-import vllm.model_executor.models.qwen3_next as qwen3_next_module
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
-from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
+from vllm.model_executor.models.qwen3_next import (
+    Qwen3NextSparseMoeBlock,
+    _all_gather_hidden_and_residual,
+)
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -32,39 +34,18 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import is_310p
-
-
-def _ascend_all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # FlashComm maintains its own sequence-parallel communication. Let the
-    # patched linear layers gather the sharded input instead of gathering
-    # it once here and again in the column-parallel projection.
-    if _EXTRA_CTX.flash_comm_v1_enabled:
-        return hidden_states, residual
-
-    return _all_gather_hidden_and_residual(
-        hidden_states,
-        residual,
-        full_num_tokens,
-        hidden_size,
-    )
-
-
-qwen3_next_module._all_gather_hidden_and_residual = _ascend_all_gather_hidden_and_residual
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(
+            hidden_states,
+            sequence_parallel_unpadded_size=positions.shape[-1],
+        )
         if "qwen3_5" in self.config.model_type:
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
@@ -129,7 +110,10 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(hidden_states=hidden_states)
+            hidden_states = self.linear_attn(
+                hidden_states=hidden_states,
+                sequence_parallel_unpadded_size=positions.shape[-1],
+            )
         elif self.layer_type == "full_attention":
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
@@ -146,7 +130,13 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, Qwen3NextSparseMoeBlock):
+            hidden_states = self.mlp(
+                hidden_states,
+                already_sequence_parallel=self.is_sequence_parallel,
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:

@@ -131,29 +131,6 @@ def _maybe_all_reduce_tensor_model_parallel_impl(final_hidden_states: torch.Tens
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
 
-def _matmul_and_reduce_impl(input_parallel: torch.Tensor, layer_name: str) -> torch.Tensor:
-    forward_context = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    assert self.custom_op is not None
-    bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-    output = self.custom_op.matmul_and_reduce(input_parallel, bias_)
-
-    return output
-
-
-def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor, layer_name: str) -> torch.Tensor:
-    forward_context = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    num_tokens = input_parallel.size(0)
-    if _EXTRA_CTX.flash_comm_v1_enabled:
-        num_tokens = num_tokens // self.tp_size
-    output = torch.empty(
-        size=(num_tokens, self.output_size_per_partition), device=input_parallel.device, dtype=input_parallel.dtype
-    )
-
-    return output
-
-
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
 # is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
 # aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
@@ -220,14 +197,6 @@ direct_register_custom_op(
     op_name="maybe_all_reduce_tensor_model_parallel",
     op_func=_maybe_all_reduce_tensor_model_parallel_impl,
     fake_impl=lambda x: x,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="matmul_and_reduce",
-    op_func=_matmul_and_reduce_impl,
-    fake_impl=_matmul_and_reduce_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
