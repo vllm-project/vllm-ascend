@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -105,6 +106,16 @@ class ACLGraphWrapper:
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
         self.graph_pool = current_platform.get_global_graph_pool()
+        # E31 diagnostic: fresh, separate pool for decode (uniform) graphs.
+        # Set VLLM_ASCEND_DEBUG_FA3_SEPARATE_POOL=1 to route decode captures
+        # (FA3 decode graphs) into this pool so they do not share the pool /
+        # capture session with the prefill CANN V1 graphs.
+        self.fa3_graph_pool = None
+        if os.environ.get("VLLM_ASCEND_DEBUG_FA3_SEPARATE_POOL") == "1":
+            try:
+                self.fa3_graph_pool = torch.npu.graph_pool_handle()
+            except (AttributeError, RuntimeError):
+                self.fa3_graph_pool = None
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -184,7 +195,16 @@ class ACLGraphWrapper:
                 get_offloader().sync_prev_onload()
                 forward_context.capturing = True
                 try:
-                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                    # E31 diagnostic: use a separate graph pool for decode
+                    # (uniform) graphs when enabled, so FA3 decode captures do
+                    # not share the pool / capture session with the prefill
+                    # CANN V1 graphs.
+                    pool = self.graph_pool
+                    if self.fa3_graph_pool is not None and getattr(
+                        batch_descriptor, "uniform", False
+                    ):
+                        pool = self.fa3_graph_pool
+                    with torch.npu.graph(aclgraph, pool=pool):
                         # `output` is managed by pytorch's aclgraph pool
                         output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
