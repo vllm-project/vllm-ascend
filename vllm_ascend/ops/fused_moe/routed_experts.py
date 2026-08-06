@@ -88,14 +88,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
+            if _MEGA_MOE_SUPPORTED and not self.dynamic_eplb:
                 layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                 layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+            else:
+                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                if enable_fused_mc2 == 1 and self.dynamic_eplb:
+                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -188,10 +192,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
             if _MEGA_MOE_SUPPORTED:
-                w1_list = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-                w2_list = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-                w1 = list(w1_list[0].data.unbind(dim=0))
-                w2 = list(w2_list[0].data.unbind(dim=0))
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
                 w1_scale = None
                 w2_scale = None
                 w1_scale_bias = None
