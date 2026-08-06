@@ -87,6 +87,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         if getattr(vllm_config.model_config, "enable_sleep_mode", False):
             raise NotImplementedError("Sleep mode is outside the 310P Model Runner V2 first-release scope.")
 
+    def _get_uniform_decode_query_len(self) -> int:
+        """Bridge vLLM versions that do not expose this V2 attribute."""
+        return getattr(self, "uniform_decode_query_len", self.decode_query_len)
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Initialize 310P V2 KV cache directly in its required formats."""
         kv_cache_config = deepcopy(kv_cache_config)
@@ -135,7 +139,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
-            self.uniform_decode_query_len,
+            self._get_uniform_decode_query_len(),
             self.parallel_config.tensor_parallel_size,
             self.kv_cache_config,
             self.max_num_reqs,

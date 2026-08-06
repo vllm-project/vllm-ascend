@@ -137,6 +137,16 @@ def test_first_release_config_rejects_expert_parallelism() -> None:
         NPUModelRunner310V2._validate_first_release_config(config)
 
 
+def test_uniform_decode_query_len_falls_back_to_decode_query_len() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.decode_query_len = 1
+
+    assert runner._get_uniform_decode_query_len() == 1
+
+    runner.uniform_decode_query_len = 2
+    assert runner._get_uniform_decode_query_len() == 2
+
+
 def test_v2_allocates_attention_kv_cache_directly_as_nz() -> None:
     spec = FullAttentionSpec(
         block_size=128,
