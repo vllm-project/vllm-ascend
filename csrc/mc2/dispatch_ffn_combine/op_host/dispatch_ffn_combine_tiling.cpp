@@ -44,7 +44,6 @@ namespace {
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
     constexpr uint32_t X_ACTIVE_MASK_INDEX = 7;
-    constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
     constexpr uint64_t MB_SIZE = 1024 * 1024UL;
 }
@@ -266,7 +265,7 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
      int64_t expertTokensCountOrCumsumFlag = 2;
      bool expertTokensBeforeCapacityFlag = false;
      int64_t quantMode = 1;
-     uint32_t aivNumInitRouting = 2 * BLOCK_NUM;
+     uint32_t aivNumInitRouting = info.aivNum;
     moeInitRoutingQuantV2TilingBase.DoTiling(info.M, info.K, info.topK, expertCapacity, expertNum, activeNum, dropPadMode, 
         expertTokensCountOrCumsumFlag, expertTokensBeforeCapacityFlag, inuptXDtypeSize, quantMode, scaleDim0, aivNumInitRouting, ubSize);
     uint64_t initRoutingQuantTilingKey = moeInitRoutingQuantV2TilingBase.tilingKey_;
