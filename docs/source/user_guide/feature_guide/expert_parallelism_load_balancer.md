@@ -17,7 +17,7 @@ All MoE models supported by vLLM-Ascend.
 But we have only verified the performance on deepseek-v3.1/r1 models.
 
 > [!IMPORTANT]
-> Ascend A5 does not support using EPLB with quant type "W4A8MXFP4", "W4A16", "W4A16MXFP4".
+> Ascend 950 Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16", "W4A16MXFP4".
 
 ### MOE QuantType
 
