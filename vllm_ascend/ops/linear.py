@@ -217,7 +217,9 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size)
+        return super().forward(
+            input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size
+        )
 
 
 class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -266,16 +268,11 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             sequence_parallel=sequence_parallel,
         )
 
-    def forward(
-        self,
-        input_,
-        *,
-        sequence_parallel_unpadded_size: int | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+    def forward(self, input_) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size)
+        return super().forward(input_)
 
 
 class AscendRowParallelLinear(RowParallelLinear):
@@ -455,16 +452,11 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             self.n_local_groups = getattr(hf_config, "o_groups", 0) // self.tp_size
             self.o_lora_rank = getattr(hf_config, "o_lora_rank", 0)
 
-    def forward(
-        self,
-        input_,
-        *,
-        sequence_parallel_unpadded_size: int | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+    def forward(self, input_) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size)
+        return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:

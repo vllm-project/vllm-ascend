@@ -17,10 +17,8 @@
 
 # Patch vllm's FusedMoE factory to use AscendMoERunner by default.
 #
-# vllm's FusedMoE is a factory function (not a class). deepseek_v2 and other
-# models do `from vllm.model_executor.layers.fused_moe import FusedMoE` and
-# call it directly, so we must patch the binding in the package __init__ as
-# well as the layer module before any model is imported.
+# vllm exposes the MoE factory as ``FusedMoEFactory``. Patch both the package
+# and layer bindings before model imports capture the factory.
 #
 # Import order in worker.__init__:
 #   1. adapt_patch()  ->  this file runs  ->  FusedMoE patched
@@ -39,8 +37,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 from vllm_ascend.utils import is_310p
 
-# Capture the real original before fused_moe.py's module-level code runs.
-_original_FusedMoE = _fused_moe_layer.FusedMoE
+# Capture the real original before the module-level patch runs.
+_original_FusedMoE = _fused_moe_layer.FusedMoEFactory
 _DefaultAscendMoERunner: Any
 _DefaultAscendRoutedExperts: Any
 _IS_310P = is_310p()
@@ -151,5 +149,5 @@ def _ascend_FusedMoE(
     )
 
 
-_fused_moe_layer.FusedMoE = _ascend_FusedMoE
-_fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+_fused_moe_layer.FusedMoEFactory = _ascend_FusedMoE
+_fused_moe_pkg.FusedMoEFactory = _ascend_FusedMoE

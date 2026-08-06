@@ -42,10 +42,7 @@ _GDN_PATCH_TARGET = _GDNBaseCls
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
-        qkv, _ = self.qkv_proj(
-            hidden_states,
-            sequence_parallel_unpadded_size=positions.shape[-1],
-        )
+        qkv, _ = self.qkv_proj(hidden_states)
         if "qwen3_5" in self.config.model_type:
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
@@ -110,10 +107,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(
-                hidden_states=hidden_states,
-                sequence_parallel_unpadded_size=positions.shape[-1],
-            )
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
