@@ -333,17 +333,18 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
-        expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
-            1,
-            num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
-        )
+        # Let CANN derive the SoC-specific receive-token capacity. A2/A3 and
+        # A5 use different semantics, and A5 only accepts this attribute in
+        # [0, 4096]; zero is the operator's documented automatic mode.
+        max_recv_token_num = 0
 
         logger.info(
-            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
+            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
+            "ep_rank=%s ep_world=%s global_bs=%s tokens_per_rank=%s",
             getattr(self.token_dispatcher, "ep_rank_id", "?"),
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
+            num_max_tokens_per_rank,
         )
         self._mega_moe_symm_buffer = self.get_symm_buffer_for_mega_moe(
             group,
@@ -373,12 +374,19 @@ class FusedMC2CommImpl(MoECommMethod):
 
         if fused_experts_input.quant.quant_type == QuantType.W4A8MXFP:
             # W4A8 MXFP weights are stored as transposed views for grouped
-            # matmul. MegaMoe consumes one stacked tensor per projection, so
-            # transpose those views back without duplicating the weights.
-            weight1 = [fused_experts_input.weights.w1.transpose(1, 2)]
-            weight2 = [fused_experts_input.weights.w2.transpose(1, 2)]
-            weight_scales1 = [fused_experts_input.weights.w1_scale.transpose(1, 2)]
-            weight_scales2 = [fused_experts_input.weights.w2_scale.transpose(1, 2)]
+            # matmul. Transpose those views back without duplicating the
+            # weights; MegaMoe accepts either a stacked tensor or one tensor
+            # per expert inside each projection list.
+            # Use relative dimensions so the same operation also handles a
+            # list containing one tensor per expert.
+            weight1 = [tensor.transpose(-2, -1) for tensor in to_list(fused_experts_input.weights.w1)]
+            weight2 = [tensor.transpose(-2, -1) for tensor in to_list(fused_experts_input.weights.w2)]
+            weight_scales1 = [
+                tensor.transpose(-3, -2) for tensor in to_list(fused_experts_input.weights.w1_scale)
+            ]
+            weight_scales2 = [
+                tensor.transpose(-3, -2) for tensor in to_list(fused_experts_input.weights.w2_scale)
+            ]
         else:
             weight1 = to_list(fused_experts_input.weights.w1)
             weight2 = to_list(fused_experts_input.weights.w2)

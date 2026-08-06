@@ -1,5 +1,6 @@
 import importlib.util
 import math
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -41,6 +42,7 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "w4a8_mxfp",
     "quanttype.w4a8mxfp",
 }
+_CANN_MEGAMOE_W4A8_MXFP_FORMATS = {"mxfp4-pack-quantized"}
 
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
@@ -93,6 +95,69 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
         return True
     quant_name = str(getattr(quant_type, "name", quant_type)).lower()
     return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
+
+
+def _config_value(config: object, name: str, default=None):
+    if isinstance(config, Mapping):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _modelslim_k3_w4a8_mxfp_by_config(vllm_config: VllmConfig) -> bool:
+    """Recognize K3 routed expert W4A8 MXFP in ModelSlim metadata."""
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if quant_config is None or not callable(getattr(quant_config, "get_name", None)):
+        return False
+    if str(quant_config.get_name()).lower() != "ascend":
+        return False
+
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not isinstance(quant_description, Mapping):
+        return False
+
+    hf_text_config = vllm_config.model_config.hf_text_config
+    first_moe_layer = int(getattr(hf_text_config, "first_k_dense_replace", 0))
+    expert_prefixes = (
+        f"language_model.model.layers.{first_moe_layer}.block_sparse_moe.experts.0",
+        f"model.layers.{first_moe_layer}.block_sparse_moe.experts.0",
+    )
+    return any(
+        all(
+            str(quant_description.get(f"{prefix}.{projection}.weight", "")).upper()
+            == "W4A8_MXFP"
+            for projection in ("w1", "w2", "w3")
+        )
+        for prefix in expert_prefixes
+    )
+
+
+def _cann_megamoe_w4a8_mxfp_by_config(vllm_config: VllmConfig) -> bool:
+    """Recognize K3 W4A8 MXFP across its supported checkpoint formats."""
+    if _modelslim_k3_w4a8_mxfp_by_config(vllm_config):
+        return True
+
+    hf_text_config = vllm_config.model_config.hf_text_config
+    quant_type = getattr(
+        hf_text_config,
+        "moe_quantize",
+        getattr(hf_text_config, "quantize", None),
+    )
+    if quant_type is not None:
+        quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+        return quant_name in {"w4a8_mxfp", "quanttype.w4a8mxfp"}
+
+    quant_config = getattr(hf_text_config, "quantization_config", None)
+    if quant_config is None:
+        return False
+    quant_method = str(_config_value(quant_config, "quant_method", "")).lower()
+    if quant_method not in {"compressed-tensors", "compressed_tensors"}:
+        return False
+
+    formats = {_config_value(quant_config, "format", "")}
+    config_groups = _config_value(quant_config, "config_groups", {})
+    if isinstance(config_groups, Mapping):
+        formats.update(_config_value(group, "format", "") for group in config_groups.values())
+    return bool(formats & _CANN_MEGAMOE_W4A8_MXFP_FORMATS)
 
 
 @contextmanager
@@ -329,16 +394,10 @@ def _select_a5_moe_comm_method(
     mc2_tokens_capacity: int,
 ) -> MoECommType:
     hf_text_config = vllm_config.model_config.hf_text_config
-    quant_type = getattr(
-        hf_text_config,
-        "moe_quantize",
-        getattr(hf_text_config, "quantize", None),
-    )
-    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
     if (
         get_ascend_config().enable_fused_mc2 == 1
         and _MEGA_MOE_SUPPORTED
-        and quant_name in {"w4a8_mxfp", "quanttype.w4a8mxfp"}
+        and _cann_megamoe_w4a8_mxfp_by_config(vllm_config)
         and _cann_megamoe_supported_by_config(vllm_config)
     ):
         return MoECommType.FUSED_MC2

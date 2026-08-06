@@ -6,6 +6,60 @@ from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
 
 
+K3_QUANTIZATION_CONFIG = {
+    "config_groups": {
+        "group_0": {
+            "format": "mxfp4-pack-quantized",
+            "input_activations": None,
+            "output_activations": None,
+            "targets": ["Linear"],
+            "weights": {
+                "dynamic": False,
+                "group_size": 32,
+                "num_bits": 4,
+                "scale_dtype": "torch.uint8",
+                "strategy": "group",
+                "symmetric": True,
+                "type": "float",
+            },
+        }
+    },
+    "format": "mxfp4-pack-quantized",
+    "ignore": [
+        "re:.*self_attn.*",
+        "re:.*shared_experts.*",
+        r"re:.*mlp\.(gate|up|gate_up|down)_proj.*",
+        "re:.*lm_head.*",
+        "re:.*vision_tower.*",
+        "re:.*mm_projector.*",
+    ],
+    "quant_method": "compressed-tensors",
+    "quantization_status": "compressed",
+}
+
+K3_MODELSLIM_QUANT_DESCRIPTION = {
+    "group_size": 32,
+    "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight": (
+        "W4A8_MXFP"
+    ),
+    "language_model.model.layers.1.block_sparse_moe.experts.0.w2.weight": (
+        "W4A8_MXFP"
+    ),
+    "language_model.model.layers.1.block_sparse_moe.experts.0.w3.weight": (
+        "W4A8_MXFP"
+    ),
+    "language_model.model.layers.1.block_sparse_moe.shared_experts.gate_proj.weight": (
+        "W4A8_MXFP"
+    ),
+    "language_model.model.layers.1.block_sparse_moe.shared_experts.up_proj.weight": (
+        "W4A8_MXFP"
+    ),
+    "language_model.model.layers.1.block_sparse_moe.shared_experts.down_proj.weight": (
+        "W4A8_MXFP"
+    ),
+}
+
+
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
@@ -24,6 +78,8 @@ def _make_vllm_config(
     tensor_parallel_size: int = 1,
     num_experts: int = 128,
     quant_type: str | None = None,
+    quantization_config: dict[str, object] | None = None,
+    modelslim_quant_description: dict[str, object] | None = None,
     top_k_experts: int = 1,
     num_experts_per_tok: int | None = None,
     cudagraph_capture_sizes: list[int] | None = None,
@@ -31,9 +87,14 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
 ):
-    hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
+    hf_text_config_attrs: dict[str, object] = {
+        "first_k_dense_replace": 1,
+        "top_k_experts": top_k_experts,
+    }
     if quant_type is not None:
         hf_text_config_attrs["quantize"] = quant_type
+    if quantization_config is not None:
+        hf_text_config_attrs["quantization_config"] = quantization_config
     if num_experts_per_tok is not None:
         hf_text_config_attrs["num_experts_per_tok"] = num_experts_per_tok
     hf_text_config_attrs["hidden_size"] = hidden_size
@@ -53,12 +114,18 @@ def _make_vllm_config(
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
     scheduler_config = SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens)
-    return SimpleNamespace(
+    vllm_config = SimpleNamespace(
         model_config=model_config,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
         scheduler_config=scheduler_config,
     )
+    if modelslim_quant_description is not None:
+        vllm_config.quant_config = SimpleNamespace(
+            get_name=lambda: "ascend",
+            quant_description=modelslim_quant_description,
+        )
+    return vllm_config
 
 
 def _patch_select_moe_comm_method_deps(
@@ -325,6 +392,44 @@ def test_cann_megamoe_supported_by_config_quant_type(
     assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
 
 
+def test_cann_megamoe_recognizes_k3_compressed_tensors_config():
+    vllm_config = _make_vllm_config(quantization_config=K3_QUANTIZATION_CONFIG)
+
+    assert afc._cann_megamoe_w4a8_mxfp_by_config(vllm_config)
+
+
+def test_cann_megamoe_recognizes_k3_modelslim_routed_and_shared_w4a8_mxfp():
+    vllm_config = _make_vllm_config(
+        modelslim_quant_description=K3_MODELSLIM_QUANT_DESCRIPTION,
+    )
+
+    assert afc._cann_megamoe_w4a8_mxfp_by_config(vllm_config)
+
+
+def test_cann_megamoe_rejects_modelslim_shared_only_w4a8_mxfp():
+    shared_only = {
+        key: value
+        for key, value in K3_MODELSLIM_QUANT_DESCRIPTION.items()
+        if ".experts." not in key
+    }
+    vllm_config = _make_vllm_config(modelslim_quant_description=shared_only)
+
+    assert not afc._cann_megamoe_w4a8_mxfp_by_config(vllm_config)
+
+
+@pytest.mark.parametrize(
+    "quantization_config",
+    [
+        {"quant_method": "compressed-tensors", "format": "float-quantized"},
+        {"quant_method": "other", "format": "mxfp4-pack-quantized"},
+    ],
+)
+def test_cann_megamoe_rejects_non_k3_compressed_tensors_config(quantization_config):
+    vllm_config = _make_vllm_config(quantization_config=quantization_config)
+
+    assert not afc._cann_megamoe_w4a8_mxfp_by_config(vllm_config)
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
@@ -382,7 +487,26 @@ def test_select_moe_comm_method_a5_uses_megamoe_for_w4a8_mxfp(monkeypatch):
         world_size=32,
         num_experts=896,
         top_k_experts=16,
-        quant_type="w4a8_mxfp",
+        quantization_config=K3_QUANTIZATION_CONFIG,
+        hidden_size=7168,
+    )
+
+    assert afc.select_moe_comm_method(129, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_select_moe_comm_method_a5_uses_megamoe_for_modelslim_k3(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "_MEGA_MOE_SUPPORTED", True)
+    vllm_config = _make_vllm_config(
+        world_size=32,
+        num_experts=896,
+        top_k_experts=16,
+        modelslim_quant_description=K3_MODELSLIM_QUANT_DESCRIPTION,
         hidden_size=7168,
     )
 

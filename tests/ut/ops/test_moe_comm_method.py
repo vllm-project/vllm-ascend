@@ -1,3 +1,5 @@
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -131,6 +133,36 @@ class TestMoECommMethod(TestBase):
             (4, 292, 296),
         )
 
+    def test_init_megamoe_buffer_covers_prefill_token_shard(self):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.global_bs = 0
+        comm_impl.token_dispatcher.max_num_tokens_per_rank = 512
+        comm_impl.token_dispatcher.ep_rank_id = 0
+        comm_impl.token_dispatcher.ep_world_size = 32
+        comm_impl.moe_config = SimpleNamespace(
+            num_experts=896,
+            experts_per_token=16,
+            hidden_dim=7168,
+            intermediate_size_per_partition=1024,
+        )
+        comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value=object())
+        fused_input = SimpleNamespace(
+            quant=SimpleNamespace(quant_type=QuantType.W4A8MXFP),
+        )
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group",
+                return_value=SimpleNamespace(device_group=object()),
+            ),
+        ):
+            comm_impl._init_mega_moe_symm_buffer(fused_input)
+
+        call = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call.args[1:4], (896, 512, 16))
+        self.assertEqual(call.kwargs["max_recv_token_num"], 0)
+
     def test_apply_cann_megamoe_w4a8_mxfp_situ(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
         comm_impl._mega_moe_symm_buffer = object()
@@ -181,6 +213,28 @@ class TestMoECommMethod(TestBase):
         self.assertIsNone(call.kwargs["x_active_mask"])
         self.assertEqual(call.kwargs["weight1_type"], 296)
         self.assertEqual(call.kwargs["weight2_type"], 296)
+
+        comm_impl.mega_moe.reset_mock()
+        list_weights_input = replace(
+            fused_input,
+            weights=MoEWeights(
+                w1=list(w1.unbind(0)),
+                w2=list(w2.unbind(0)),
+                w1_scale=list(w1_scale.unbind(0)),
+                w2_scale=list(w2_scale.unbind(0)),
+            ),
+        )
+        comm_impl._apply_cann_mega_moe(list_weights_input, list_weights_input.topk_ids)
+
+        call = comm_impl.mega_moe.call_args
+        self.assertEqual(len(call.args[3]), 2)
+        self.assertEqual(len(call.args[4]), 2)
+        self.assertEqual(call.args[3][0].shape, (6, 2))
+        self.assertEqual(call.args[4][0].shape, (4, 3))
+        self.assertEqual(call.kwargs["l1_weights_sf"][0].shape, (6, 1, 2))
+        self.assertEqual(call.kwargs["l2_weights_sf"][0].shape, (4, 1, 2))
+        self.assertEqual(call.args[3][0].data_ptr(), w1[0].data_ptr())
+        self.assertEqual(call.args[4][0].data_ptr(), w2[0].data_ptr())
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
