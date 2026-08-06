@@ -179,6 +179,20 @@ private:
                 PipeBarrier<PIPE_V>();
                 ReduceSum(tmp, tmp, tmp, d);
                 PipeBarrier<PIPE_V>();
+                /*
+                 * V -> S. The score is a SCALAR read of a tensor the vector pipe
+                 * just wrote. PipeBarrier<PIPE_V> orders V ops against each other
+                 * but is NOT a cross-pipe sync, so the scalar unit could read
+                 * tmp[0] before the reduction landed.
+                 *
+                 * Invisible at seq_len == 1 -- with a single key softmax is
+                 * exactly 1.0 and the score is never used, which is why the
+                 * single-key probe scored 0.995 while multi-token sat at 0.69.
+                 * It also explains the near-flat bit-width response: the error
+                 * was in the attention WEIGHTS, not in quantization.
+                 */
+                SetFlag<HardEvent::V_S>(EVENT_ID0);
+                WaitFlag<HardEvent::V_S>(EVENT_ID0);
                 const float kNorm = static_cast<float>(
                     kNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
                 const float score = tmp.GetValue(0) * kNorm * t_->scale;
