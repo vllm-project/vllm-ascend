@@ -35,6 +35,7 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
@@ -142,6 +143,7 @@ def _ascend_FusedMoE(
     # the legacy Ascend quant-method path until that path also routes solely
     # through the Router.
     hash_indices_table_for_legacy_path = hash_indices_table if hash_indices_table is not None else tid2eid
+    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,
@@ -158,7 +160,7 @@ def _ascend_FusedMoE(
             num_logical_experts=num_experts,
             hash_indices_table=hash_indices_table,
             tid2eid=hash_indices_table_for_legacy_path,
-            eplb_state=AscendEplbLayerState() if enable_eplb else None,
+            eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
         )
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
     routed_experts_args["router"] = router
@@ -190,7 +192,7 @@ def _ascend_FusedMoE(
         routed_experts_args=routed_experts_args,
         **kwargs,
     )
-    _adapt_eplb_router(runner.router, enable_eplb)
+    _adapt_eplb_router(runner.router, enable_router_eplb)
     return runner
 
 

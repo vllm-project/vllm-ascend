@@ -37,6 +37,11 @@ def test_factory_adapts_only_the_returned_router():
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
         patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+        patch.object(
+            patch_fused_moe,
+            "get_current_vllm_config",
+            return_value=SimpleNamespace(use_v2_model_runner=True),
+        ),
     ):
         result = patch_fused_moe._ascend_FusedMoE(
             num_experts=8,
@@ -49,6 +54,42 @@ def test_factory_adapts_only_the_returned_router():
     assert isinstance(router.eplb_state, AscendEplbLayerState)
     assert getattr(router._apply_eplb_mapping, "__func__", None) is patch_fused_moe._ascend_apply_eplb_mapping
     assert getattr(untouched_router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
+
+
+def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    router_factory = MagicMock(return_value=router)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=True,
+            expert_map_path=None,
+            num_redundant_experts=2,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+        patch.object(
+            patch_fused_moe,
+            "get_current_vllm_config",
+            return_value=SimpleNamespace(use_v2_model_runner=False),
+        ),
+    ):
+        result = patch_fused_moe._ascend_FusedMoE(
+            num_experts=8,
+            top_k=2,
+        )
+
+    assert result is runner
+    assert router_factory.call_args.kwargs["eplb_state"] is None
+    assert original_factory.call_args.kwargs["enable_eplb"] is True
+    assert original_factory.call_args.kwargs["num_redundant_experts"] == 2
+    assert router.eplb_state is None
+    assert getattr(router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
 
 
 def test_adapted_router_uses_ascend_mapping_operation():
