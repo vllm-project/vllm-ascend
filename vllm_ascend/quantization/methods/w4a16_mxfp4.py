@@ -50,6 +50,7 @@ def unpack_uint8_to_fp4_return_float32(packed: torch.Tensor) -> torch.Tensor:
 class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W4A16_MXFP4."""
 
+    supports_eplb = False
     quant_type: QuantType = QuantType.W4A16MXFP
 
     def __init__(self) -> None:
@@ -62,7 +63,7 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not vllm_config.model_config.enforce_eager
         )
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
 
     def get_weight(
         self,
