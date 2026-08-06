@@ -193,6 +193,7 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     mega_moe_max_tokens: int = 131072
@@ -918,7 +919,6 @@ def init_ascend_config(vllm_config):
     fields = AscendConfig.__pydantic_fields__
     _BYPASS_KEYS = {
         "refresh",
-        "draft_window_size",
         "dump_config",
         "dump_config_path",  # passed explicitly below
         "enable_balance_scheduling",  # SchedulerConfig internal (top-level legacy)
