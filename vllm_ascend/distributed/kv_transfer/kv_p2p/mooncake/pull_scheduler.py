@@ -28,6 +28,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakePPTransferMetadata,
+    MooncakeTPTransferMetadata,
     MooncakeTransferMetadata,
     MooncakeTransferMetadataGroups,
 )
@@ -70,42 +72,15 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.tp_size = tp_size
         self.pp_size = pp_size
         self.engine_id = engine_id
-        metadata_by_tp_rank = self._group_metadata_by_tp_rank(metadata)
-
-        worker_engine_ids = {
-            worker_metadata.engine_id
-            for metadata_by_pp_rank in metadata_by_tp_rank.values()
-            for worker_metadata in metadata_by_pp_rank.values()
-        }
-        if worker_engine_ids != {engine_id}:
-            raise ValueError(
-                "Mooncake worker metadata engine IDs do not match scheduler "
-                f"engine ID {engine_id!r}: {sorted(worker_engine_ids)!r}"
-            )
-
-        metadata_by_tp_rank = {
-            tp_rank: dict(sorted(metadata_by_pp_rank.items()))
-            for tp_rank, metadata_by_pp_rank in sorted(metadata_by_tp_rank.items())
-        }
+        metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
         self.encoded_metadata = encoder.encode(
             MooncakeTransferMetadataGroups(
                 engine_id=engine_id,
                 scheduler_host=host,
                 scheduler_port=port,
-                metadata_by_tp_rank=metadata_by_tp_rank,
+                metadata_by_pp_rank=metadata_by_pp_rank,
             )
         )
-        self.encoded_metadata_by_tp_rank = {
-            tp_rank: encoder.encode(
-                MooncakeTransferMetadataGroups(
-                    engine_id=engine_id,
-                    scheduler_host=host,
-                    scheduler_port=port,
-                    metadata_by_tp_rank={tp_rank: metadata_by_pp_rank},
-                )
-            )
-            for tp_rank, metadata_by_pp_rank in metadata_by_tp_rank.items()
-        }
         self.ready_event = ready_event
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
@@ -113,11 +88,12 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.finished_request_ids: set[str] = set()
         self.state_lock = threading.Lock()
 
-    @staticmethod
-    def _group_metadata_by_tp_rank(
+    def _merge_metadata_by_pp_rank(
+        self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
-    ) -> dict[int, dict[int, MooncakeTransferMetadata]]:
-        grouped: dict[int, dict[int, MooncakeTransferMetadata]] = {}
+    ) -> dict[int, MooncakePPTransferMetadata]:
+        """Validate worker metadata and merge TP-invariant fields by PP."""
+        workers_by_pp_rank: dict[int, dict[int, MooncakeTransferMetadata]] = {}
         for metadata_key, rank_metadata in metadata.items():
             if isinstance(metadata_key, int):
                 pp_rank, tp_rank = 0, metadata_key
@@ -134,14 +110,109 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                     "Mooncake scheduler expects MooncakeTransferMetadata, "
                     f"got {type(rank_metadata).__name__} for key {metadata_key!r}"
                 )
-
-            metadata_by_pp_rank = grouped.setdefault(tp_rank, {})
-            if pp_rank in metadata_by_pp_rank:
+            if rank_metadata.engine_id != self.engine_id:
                 raise ValueError(
-                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, TP rank {tp_rank}"
+                    "Mooncake worker metadata engine ID mismatch: expected "
+                    f"{self.engine_id!r}, got {rank_metadata.engine_id!r}"
                 )
-            metadata_by_pp_rank[pp_rank] = rank_metadata
-        return grouped
+
+            workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {})
+            if tp_rank in workers_by_tp_rank:
+                raise ValueError(
+                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, "
+                    f"TP rank {tp_rank}"
+                )
+            workers_by_tp_rank[tp_rank] = rank_metadata
+
+        expected_pp_ranks = set(range(self.pp_size))
+        if set(workers_by_pp_rank) != expected_pp_ranks:
+            raise ValueError(
+                "Mooncake worker metadata has incomplete PP ranks: expected "
+                f"{sorted(expected_pp_ranks)}, got "
+                f"{sorted(workers_by_pp_rank)}"
+            )
+
+        common_fields = (
+            "block_size",
+            "num_blocks",
+            "spec_block_sizes",
+            "spec_head_sizes",
+            "layer_names",
+            "group_indices",
+            "spec_indices",
+            "block_strides",
+            "block_lens",
+            "block_shapes",
+            "block_size_scales",
+            "pcp_size",
+            "dcp_size",
+            "tp_size",
+        )
+        expected_tp_ranks = set(range(self.tp_size))
+        merged: dict[int, MooncakePPTransferMetadata] = {}
+        for pp_rank, workers_by_tp_rank in sorted(
+            workers_by_pp_rank.items()
+        ):
+            if set(workers_by_tp_rank) != expected_tp_ranks:
+                raise ValueError(
+                    "Mooncake worker metadata has incomplete TP ranks for "
+                    f"PP rank {pp_rank}: expected {sorted(expected_tp_ranks)}, "
+                    f"got {sorted(workers_by_tp_rank)}"
+                )
+
+            reference_tp_rank = min(workers_by_tp_rank)
+            reference = workers_by_tp_rank[reference_tp_rank]
+            if reference.tp_size != self.tp_size:
+                raise ValueError(
+                    "Mooncake worker metadata TP size mismatch for PP rank "
+                    f"{pp_rank}: expected {self.tp_size}, "
+                    f"got {reference.tp_size}"
+                )
+
+            for tp_rank, worker_metadata in workers_by_tp_rank.items():
+                mismatched_fields = [
+                    field_name
+                    for field_name in common_fields
+                    if getattr(worker_metadata, field_name)
+                    != getattr(reference, field_name)
+                ]
+                if mismatched_fields:
+                    raise ValueError(
+                        "Mooncake worker metadata differs across TP ranks for "
+                        f"PP rank {pp_rank}: TP {reference_tp_rank} and "
+                        f"TP {tp_rank} mismatch in {mismatched_fields}"
+                    )
+
+            merged[pp_rank] = MooncakePPTransferMetadata(
+                block_size=reference.block_size,
+                num_blocks=reference.num_blocks,
+                spec_block_sizes=reference.spec_block_sizes,
+                spec_head_sizes=reference.spec_head_sizes,
+                layer_names=reference.layer_names,
+                group_indices=reference.group_indices,
+                spec_indices=reference.spec_indices,
+                block_strides=reference.block_strides,
+                block_lens=reference.block_lens,
+                block_shapes=reference.block_shapes,
+                block_size_scales=reference.block_size_scales,
+                pcp_size=reference.pcp_size,
+                dcp_size=reference.dcp_size,
+                tp_size=reference.tp_size,
+                metadata_by_tp_rank={
+                    tp_rank: MooncakeTPTransferMetadata(
+                        te_rpc_port=worker_metadata.te_rpc_port,
+                        kv_caches_base_addr=(
+                            worker_metadata.kv_caches_base_addr
+                        ),
+                        local_ip=worker_metadata.local_ip,
+                        handshake_port=worker_metadata.handshake_port,
+                    )
+                    for tp_rank, worker_metadata in sorted(
+                        workers_by_tp_rank.items()
+                    )
+                },
+            )
+        return merged
 
     def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
         with self.state_lock:
@@ -188,9 +259,10 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
             try:
                 msg = decoder.decode(payload[0])
-                if msg[0] == GET_META_MSG and len(msg) == 2:
-                    metadata = self._get_metadata(msg[1])
-                    sock.send_multipart((identity, b"", metadata or b""))
+                if msg and msg[0] == GET_META_MSG:
+                    sock.send_multipart(
+                        (identity, b"", self.encoded_metadata)
+                    )
                 elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
                     self._handle_finished_request(str(msg[1]))
                     sock.send_multipart((identity, b"", ACK_MSG))
@@ -198,14 +270,6 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                     logger.warning("Unexpected Mooncake scheduler control message: %s", msg)
             except Exception:
                 logger.exception("Failed to handle Mooncake scheduler control message")
-
-    def _get_metadata(self, tp_rank: Any) -> bytes | None:
-        if not isinstance(tp_rank, int):
-            logger.warning("Invalid Mooncake metadata TP rank: %r", tp_rank)
-            return None
-        if tp_rank == -1:
-            return self.encoded_metadata
-        return self.encoded_metadata_by_tp_rank.get(tp_rank)
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
