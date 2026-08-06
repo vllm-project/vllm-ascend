@@ -190,7 +190,17 @@ jobs:
           done
 
   select-tests:
-    needs: pre-commit
+    needs:
+      - pre-commit
+      - recommend-tests-from-coverage
+      - route-recommended-tests
+    if: >-
+      ${{
+        always() &&
+        needs.pre-commit.result == 'success' &&
+        (needs.recommend-tests-from-coverage.result != 'success' ||
+         needs.route-recommended-tests.result != 'success')
+      }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -408,7 +418,6 @@ jobs:
     name: Recommend tests from coverage
     needs: pre-commit
     runs-on: linux-amd64-cpu-8-hk
-    continue-on-error: true
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
     env:
