@@ -70,6 +70,96 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
 
+    def test_allocate_compressed_packed_kv_cache_reuses_backing(self):
+        runner = self._build_runner()
+        runner.use_compress = True
+        kv_cache_spec = FullAttentionSpec(
+            block_size=1,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.int8,
+        )
+        layer_names = ["layers.0.attn", "layers.1.attn"]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=64,
+                    shared_by=[layer_names[0]],
+                    offset=0,
+                    block_stride=16,
+                ),
+                KVCacheTensor(
+                    size=64,
+                    shared_by=[layer_names[1]],
+                    offset=8,
+                    block_stride=16,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=layer_names,
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+
+        with patch.object(
+            runner,
+            "_allocate_int8_cache_tensor",
+            wraps=runner._allocate_int8_cache_tensor,
+        ) as allocate:
+            raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        self.assertEqual(allocate.call_count, 1)
+        self.assertEqual(raw_tensors[layer_names[0]].numel(), 64)
+        self.assertEqual(
+            raw_tensors[layer_names[0]].data_ptr(),
+            raw_tensors[layer_names[1]].data_ptr(),
+        )
+
+    def test_adjust_kv_layout_uses_packed_offset_and_block_stride(self):
+        runner = self._build_runner()
+        raw_tensor = torch.arange(64, dtype=torch.int8)
+
+        first, second = runner._adjust_kv_layout(
+            raw_tensor,
+            [(4, 2), (4, 1)],
+            [torch.int8, torch.int8],
+            page_size_bytes=3,
+            packing=(4, 16),
+        )
+
+        torch.testing.assert_close(
+            first,
+            torch.tensor(
+                [[4, 5], [20, 21], [36, 37], [52, 53]],
+                dtype=torch.int8,
+            ),
+        )
+        torch.testing.assert_close(
+            second,
+            torch.tensor([[6], [22], [38], [54]], dtype=torch.int8),
+        )
+        self.assertEqual(first.stride(), (16, 1))
+        self.assertEqual(second.stride(), (16, 1))
+
+    def test_adjust_packed_kv_layout_reinterprets_noncontiguous_pages(self):
+        runner = self._build_runner()
+        raw_tensor = torch.arange(64, dtype=torch.int8)
+
+        (tensor,) = runner._adjust_kv_layout(
+            raw_tensor,
+            [(4, 2)],
+            [torch.float16],
+            page_size_bytes=4,
+            packing=(4, 16),
+        )
+
+        expected = raw_tensor.view(4, 16)[:, 4:8].clone().view(torch.float16)
+        torch.testing.assert_close(tensor, expected)
+        self.assertEqual(tensor.stride(), (8, 1))
+
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
