@@ -1,6 +1,6 @@
 # GLM-5/GLM-5.1
 
-## Introduction
+## 1 Introduction
 
 This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified, all descriptions, configurations, and deployment procedures for `GLM-5` in this document also apply to `GLM-5.1`. For brevity, `GLM-5` is used hereafter as a unified reference to both `GLM-5` and `GLM-5.1`.
 
@@ -10,15 +10,15 @@ The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.1
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Prerequisites
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
 - `GLM-5-w4a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
@@ -29,13 +29,13 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-### Verify Multi-node Communication (Optional)
+### 3.2 Verify Multi-node Communication (Optional)
 
 If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
-## Installation
+## 4 Installation
 
-### Docker Image Installation
+### 4.1 Docker Image Installation
 
 You can use our official docker image to run GLM-5/5.1 directly.
 
@@ -130,7 +130,7 @@ To verify the successful installation of the environment, please refer to [insta
 ::::
 :::::
 
-### Source Code Installation
+### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
@@ -138,9 +138,9 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Online Service Deployment
+## 5 Online Service Deployment
 
-### Single-Node Online Deployment
+### 5.1 Single-Node Online Deployment
 
 :::::{tab-set}
 :sync-group: install
@@ -298,7 +298,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 ::::
 :::::
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
@@ -675,7 +675,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 
 Key Parameter Descriptions for multi-node deployment:
 
-In addition to all single-node parameters described in [Single-Node Online Deployment](#single-node-online-deployment), the following parameters are specific to multi-node deployment:
+In addition to all single-node parameters described in [Single-Node Online Deployment](#51-single-node-online-deployment), the following parameters are specific to multi-node deployment:
 
 **Network and data parallel configuration:**
 
@@ -696,7 +696,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 ::::
 :::::
 
-### Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
@@ -1271,7 +1271,7 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
     ```
 
-### Request Forwarding
+### 5.4 Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -1350,7 +1350,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 
 For further explanation and restrictions of the environment variables above, refer to: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
 
-## Functional Verification
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -1371,45 +1371,45 @@ Expected Result:
 {"id": "chatcmlib-bc44ad093dec79a2", "object": "chat.completion", "created": "1770903266", "model": "glm-5", "choices": [{ "index": 0, "message": {"role": "assistant", "content": "The future of AI is not one thing, but a convergence of several powerful trends.", "annotations": "null", "audio": "null", "function_call": "null", "tool_calls": [], "reasoning": "null"}, "logprobs": "null", "finish_reason": "length", "stop_reason": "null", "token_ids": null}], "service_tier": "null", "system fingerprint": "null", "usage": {"prompt_tokens": 5, "total_tokens": 20, "completion_tokens": 15, "prompt_tokens_details": null}, "prompt_logprobs": "null", "prompt_token_ids": "null", "kv_transfer_params": null}
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result.
 
-## Performance Evaluation
+## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## Performance Tuning
+## 9 Performance Tuning
 
-### Recommended Configurations
+### 9.1 Recommended Configurations
 
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Tuning Guidelines](#tuning-guidelines) for tuning based on actual conditions.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Tuning Guidelines](#92-tuning-guidelines) for tuning based on actual conditions.
 
-The tables below provide recommended parameter configurations for different deployment scenarios. All scenarios are categorized by use case (High Throughput, Low Latency, Long Context) and correspond to the deployment modes documented in [Online Service Deployment](#online-service-deployment).
+The tables below provide recommended parameter configurations for different deployment scenarios. All scenarios are categorized by use case (High Throughput, Low Latency, Long Context) and correspond to the deployment modes documented in [Online Service Deployment](#5-online-service-deployment).
 
-#### Table 1: Scenario Overview
+#### 9.1.1 Table 1: Scenario Overview
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs) or 1 Atlas 800 A2 server (64G × 8 NPUs).
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|Low Latency<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|Low Latency<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|High Throughput<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|High Throughput<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|Long Context<br>(198K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Long Context<br>(198K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
 
-#### Table 2: Detailed Node Configuration
+#### 9.1.2 Table 2: Detailed Node Configuration
 
 > The TP/DP columns show the values **per node** as configured in the Deployment scripts (a prefill node hosting 2 DP ranks of TP8 uses 16 NPUs; a decode node hosting 4 DP ranks of TP4 uses 16 NPUs).
 
@@ -1426,9 +1426,9 @@ The tables below provide recommended parameter configurations for different depl
 |Long Context 198K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
 |Long Context 198K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
 
-> For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Online Service Deployment](#online-service-deployment).
+> For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Online Service Deployment](#5-online-service-deployment).
 
-#### Table 3: Performance-Related Parameter Tuning Guide
+#### 9.1.3 Table 3: Performance-Related Parameter Tuning Guide
 
 |Parameter|Low Latency|High Throughput|Long Context|Description|
 |---------|-----------|---------------|-------------|-----------|
@@ -1442,7 +1442,7 @@ The tables below provide recommended parameter configurations for different depl
 |`VLLM_ASCEND_ENABLE_MLAPO`|1 (w8a8)|1 (w8a8)|0 or 1|Enables MLA fusion on w8a8 models. Improves decode performance but consumes more NPU memory. Disable for long-context if memory is insufficient.|
 |`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1|1|Communication optimization. Recommended in all scenarios unless layer_sharding includes o_proj.|
 
-### Tuning Guidelines
+### 9.2 Tuning Guidelines
 
 For general performance tuning methods, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
 
@@ -1450,7 +1450,7 @@ For detailed feature descriptions and configuration options, refer to the [Featu
 
 For environment variable descriptions and constraints, refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py).
 
-## FAQ
+## 10 FAQ
 
 - Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
