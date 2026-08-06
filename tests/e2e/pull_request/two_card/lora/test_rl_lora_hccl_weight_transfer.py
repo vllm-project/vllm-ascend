@@ -187,7 +187,7 @@ UPDATE_TIMEOUT = 300
 CONTROL_TIMEOUT = 60
 PACKED_BUFFER_SIZE_BYTES = 64 * 2**20
 WORKER_EXTENSION = (
-    "tests.e2e.pull_request.two_card.test_rl_lora_weight_transfer."
+    "tests.e2e.pull_request.two_card.lora.test_rl_lora_hccl_weight_transfer."
     "LoRAHCCLWorkerExtension"
 )
 
