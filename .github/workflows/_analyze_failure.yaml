@@ -114,7 +114,7 @@ jobs:
 
       # ---- Step 4: Upload report ----
       - name: Upload failure analysis report
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: failure-analysis-report
