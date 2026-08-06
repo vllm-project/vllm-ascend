@@ -1250,9 +1250,7 @@ Recommended configurations for serving `GLM-5.2` with a 1M context window on Atl
 
 The 1M context scenarios are validated on Atlas 800 A3 only; the A2 series is not validated for 1M context.
 
-#### 5.2.1 Atlas 800 A3
-
-##### 5.2.1.1 Single-Node 1M Deployment
+#### 5.2.1 Single-Node 1M Deployment
 
 Recommended command:
 
@@ -1303,7 +1301,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 - `--prefill-context-parallel-size 1` / `--decode-context-parallel-size 16`: Decode context parallelism (DCP) of 16 for the decode phase; prefill uses PCP 1.
 - `--cp-kv-cache-interleave-size 128`: KV cache interleave size for context parallelism.
 
-##### 5.2.1.2 Dual-Node Co-Located 1M Deployment
+#### 5.2.2 Dual-Node Co-Located 1M Deployment
 
 Recommended command for both co-located nodes:
 
@@ -1357,7 +1355,7 @@ vllm serve <MODEL_PATH> \
   --safetensors-load-strategy prefetch
 ```
 
-Key Parameter Descriptions (in addition to [Single-Node 1M Deployment](#5211-single-node-1m-deployment)):
+Key Parameter Descriptions (in addition to [Single-Node 1M Deployment](#521-single-node-1m-deployment)):
 
 **Multi-node configuration:**
 
@@ -1365,7 +1363,7 @@ Key Parameter Descriptions (in addition to [Single-Node 1M Deployment](#5211-sin
 - `--data-parallel-address $node_0_ip` / `--data-parallel-rpc-port 16591`: Data parallel master node IP and RPC port, identical on both nodes.
 - `--tensor-parallel-size 8` / `--decode-context-parallel-size 8`: `DP4 TP8 DCP8` layout — each node hosts 2 DP ranks × TP8.
 
-##### 5.2.1.3 PD Disaggregation 1M Deployment
+#### 5.2.3 PD Disaggregation 1M Deployment
 
 Recommended command for both prefiller nodes:
 
@@ -1522,7 +1520,7 @@ python load_balance_proxy_server_example.py \
   --decoder-ports 9900
 ```
 
-Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation) and [Single-Node 1M Deployment](#5211-single-node-1m-deployment)):
+Key Parameter Descriptions (in addition to [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation) and [Single-Node 1M Deployment](#521-single-node-1m-deployment)):
 
 **Prefill nodes (1M):**
 
@@ -1591,7 +1589,7 @@ The tables below provide recommended parameter configurations for different depl
 |Low Latency<br>(128K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, FlashComm1, DSA CP|
 |High Throughput<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp4 tp8, fused MC2, MTP3, max-num-seqs 16, max-model-len 66000, FlashComm1, DSA CP|
 |High Throughput|PD Disaggregation (A3), [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)|4 nodes (A3)|w4a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192, MTP1); D: dp32 tp1 (max-num-seqs 32, max-num-batched-tokens 164, MTP5), max-model-len 133120, dedicated P/D nodes, Mooncake KV transfer|
-|Long Context<br>(1M)|PD Disaggregation (A3), [PD Disaggregation 1M Deployment](#5213-pd-disaggregation-1m-deployment)|4 nodes (A3)|w4a8c8|P/D: dp4 tp8, DCP8, max-model-len 1040000, Mooncake KV transfer|
+|Long Context<br>(1M)|PD Disaggregation (A3), [PD Disaggregation 1M Deployment](#523-pd-disaggregation-1m-deployment)|4 nodes (A3)|w4a8c8|P/D: dp4 tp8, DCP8, max-model-len 1040000, Mooncake KV transfer|
 
 #### 9.1.2 Table 2: Detailed Node Configuration
 
@@ -1607,8 +1605,8 @@ The tables below provide recommended parameter configurations for different depl
 |High Throughput 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|8|2|16|8192|66000|3|
 |High Throughput (A3)|PD — Server-P Node, [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)|16|8|2|64|8192|133120|1|
 |High Throughput (A3)|PD — Server-D Node, [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)|16|1|16|32|164|133120|5|
-|Long Context 1M (A3)|PD — Server-P Node, [PD Disaggregation 1M Deployment](#5213-pd-disaggregation-1m-deployment)|16|8|2|8|16384|1040000|1|
-|Long Context 1M (A3)|PD — Server-D Node, [PD Disaggregation 1M Deployment](#5213-pd-disaggregation-1m-deployment)|16|8|2|32|128|1040000|3|
+|Long Context 1M (A3)|PD — Server-P Node, [PD Disaggregation 1M Deployment](#523-pd-disaggregation-1m-deployment)|16|8|2|8|16384|1040000|1|
+|Long Context 1M (A3)|PD — Server-D Node, [PD Disaggregation 1M Deployment](#523-pd-disaggregation-1m-deployment)|16|8|2|32|128|1040000|3|
 
 > On PD decode nodes, `--max-num-batched-tokens` is configured as `(MTP Spec Num + 1) × Max Num Seqs` — each sequence generates one target token plus the speculated MTP tokens per decode step.
 >
