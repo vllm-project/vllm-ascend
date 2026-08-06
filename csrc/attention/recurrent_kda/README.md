@@ -6,9 +6,6 @@
 
 `RecurrentKda` 是 KDA 的 fused recurrent 前向算子。算子在一个 AICore kernel 内完成 recurrent state decay、delta 更新和输出计算；`raw gate -> log gate` 和 `beta sigmoid` 可以在 kernel 内完成，不依赖 `KdaGateCumsum` 或 GDN recurrent 的接口。
 
-完整接口和调用示例见 [API 文档](docs/api.md)，实现方案见 [设计文档](docs/design.md)。
-Shape 约定见下方「语义」小节。
-
 ## Kimi K3 单算子验证接口
 
 ```python
