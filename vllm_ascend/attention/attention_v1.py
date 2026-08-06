@@ -143,6 +143,17 @@ def _dump_fa3_memory_overlap() -> None:
         print("  no overlap between FA3 buffers and CANN workspaces")
 
 
+def _no_fa3_graph_capture() -> bool:
+    """E3 diagnostic: disable FA3 decode GRAPH capture (decode captures via CANN
+    V1) while keeping FA3 eager decode active.  Set VLLM_ASCEND_DEBUG_FA3_NO_GRAPH=1.
+
+    If prefill recovers → the FA3 decode graph capture itself is the corruptor
+    (M1: CANN task-group / runtime state).  If prefill still wrong → the FA3
+    eager warmup activity is the corruptor (H3).
+    """
+    return os.environ.get("VLLM_ASCEND_DEBUG_FA3_NO_GRAPH") == "1"
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -599,6 +610,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         Returns ``None`` for non-decode attention states (prefill stays on
         the CANN V1 graph path).
         """
+        # E3 diagnostic: do not seed FA3 graph buffers / _FA3_GRAPH_TENSORS when
+        # decode graph capture is switched back to CANN V1.  The eager FA3 path
+        # (which builds its own fresh scheduler_metadata) is unaffected.
+        if _no_fa3_graph_capture():
+            return None
         if num_tokens in self._fa3_scheduler_metadata:
             return self._fa3_scheduler_metadata[num_tokens]
 
@@ -1637,7 +1653,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            if self._fa3_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            if (
+                self._fa3_enabled
+                and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                and not _no_fa3_graph_capture()
+            ):
                 # FA3 decode-only graph capture.  Decode has exactly 1 query
                 # token per request (num_tokens == batch size), so the fixed
                 # scheduler config is always valid.  Prefill (variable batch /
