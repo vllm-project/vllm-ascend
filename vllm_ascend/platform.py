@@ -273,10 +273,10 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        if not is_310p():
-            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
-        else:
+        if is_310p():
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
+        else:
+            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
 
         _config_deprecated_logging()
 
@@ -344,47 +344,60 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
-
-        device_config = getattr(vllm_config, "device_config", None)
-        if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
-            logger.debug(
-                "Skipping Ascend-specific config updates for device type %s.",
-                device_config.device_type,
-            )
-            return
-
-        if vllm_config.model_config is None:
-            logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
-            return
-
-        maybe_auto_detect_quantization(vllm_config)
-
-        _validate_draft_decode_context_parallel_config(vllm_config)
-        _validate_parallel_config(vllm_config)
-
-        # initialize ascend config from vllm additional_config
-        _fix_incompatible_config(vllm_config)
-
-        ascend_config = init_ascend_config(vllm_config)
-
-        from vllm_ascend.logger import configure_ascend_file_logging
-        from vllm_ascend.logger import configure_ascend_logging
-
-        configure_ascend_file_logging()
-        configure_ascend_logging()
-
-        if vllm_config.kv_transfer_config is not None:
-            check_kv_extra_config(vllm_config)
-            if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
-                vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
-                vllm_config.kv_transfer_config._engine_id_patched = True
-        from vllm.config import CompilationMode  # noqa: E402
+        from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
+        from vllm.config import CompilationMode
+        from vllm.config.compilation import CUDAGraphMode
+        from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+
+        # 1.Early exit checks
+        device_config = getattr(vllm_config, "device_config", None)
+        if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
+            logger.debug("Skipping Ascend-specific config updates for device type %s.", device_config.device_type)
+            return
+
+        if model_config is None:
+            logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
+            return
+
+        # 2.Auto detect quantization method
+        maybe_auto_detect_quantization(vllm_config)
+
+        # 3.Validate parallel config and fix incompatible settings
+        _validate_draft_decode_context_parallel_config(vllm_config)
+        _validate_parallel_config(vllm_config)
+
+        # 4.Make sure the config is compatible with Ascend
+        _fix_incompatible_config(vllm_config)
+
+        # 5.Initialize Ascend config from vllm additional_config
+        ascend_config = init_ascend_config(vllm_config)
+
+        # 6.Configure logging
+        configure_ascend_file_logging()
+        configure_ascend_logging()
+
+        # 7.Reject conflicting MC2 communication options
+        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
+            raise ValueError(
+                "fused mc2 op cannot be used with hierarchy communication."
+                "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
+            )
+
+        # 8.KV transfer config legal check
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+            if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
+                vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
+                vllm_config.kv_transfer_config._engine_id_patched = True
+
+        # 9.Sync ascend compilation & fusion configs and derived settings
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config:
             vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
@@ -404,10 +417,23 @@ class NPUPlatform(Platform):
                 vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
             )
 
+        # 10.Update compilation mode in some cases
         enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        from vllm.config.compilation import CUDAGraphMode
+        if enforce_eager:
+            logger.info("Compilation disabled, using eager mode by default")
+            compilation_config.mode = CompilationMode.NONE
+            if compilation_config.splitting_ops is None:
+                compilation_config.splitting_ops = []
 
+        if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
+            logger.warning(
+                "NPU does not support compilation mode. mode=%s, action: setting CUDAGraphMode to NONE.",
+                compilation_config.mode,
+            )
+            compilation_config.mode = CompilationMode.NONE
+
+        # 11.Update cudagraph_mode in some cases
         if ascend_config.xlite_graph_config.enabled:
             if ascend_config.xlite_graph_config.full_mode and vllm_config.speculative_config is None:
                 logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
@@ -418,25 +444,31 @@ class NPUPlatform(Platform):
                 logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
                 compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
-        if enforce_eager:
-            logger.info("Compilation disabled, using eager mode by default")
-            compilation_config.mode = CompilationMode.NONE
-            if compilation_config.splitting_ops is None:
-                compilation_config.splitting_ops = []
-
-        compilation_config.cudagraph_num_of_warmups = 1
-
-        if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
-            logger.warning(
-                "NPU does not support compilation mode. mode=%s, action: setting CUDAGraphMode to NONE.",
-                compilation_config.mode,
+        # Encoder-decoder models currently only support PIECEWISE mode
+        # TODO(Jian Li): Confirm this behavior and explain why
+        if (
+            model_config
+            and model_config.is_encoder_decoder
+            and compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE)
+        ):
+            cudagraph_mode = (
+                CUDAGraphMode.PIECEWISE
+                if compilation_config.mode == CompilationMode.VLLM_COMPILE
+                else CUDAGraphMode.NONE
             )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.info_once(
+                "Encoder-decoder models don't support %s, fallback to %s.",
+                compilation_config.cudagraph_mode,
+                cudagraph_mode,
+            )
+            compilation_config.cudagraph_mode = cudagraph_mode
 
+        # 12.Recompute cudagraph sizes before extending compilation_config.splitting_ops
         # Recompute cudagraph sizes after Ascend-specific compatibility updates.
         # The platform default max is injected earlier via
         # `apply_config_platform_defaults`, so this late pass should only honor
         # the current max / size inputs after the mode adjustments above.
+        compilation_config.cudagraph_num_of_warmups = 1
         vllm_config._set_cudagraph_sizes()
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
@@ -461,26 +493,7 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
-        # Encoder-decoder models currently only support PIECEWISE mode
-        # TODO(Jian Li): Confirm this behavior and explain why
-        if (
-            model_config
-            and model_config.is_encoder_decoder
-            and compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE)
-        ):
-            cudagraph_mode = (
-                CUDAGraphMode.PIECEWISE
-                if compilation_config.mode == CompilationMode.VLLM_COMPILE
-                else CUDAGraphMode.NONE
-            )
-            logger.info_once(
-                "Encoder-decoder models don't support %s, fallback to %s.",
-                compilation_config.cudagraph_mode,
-                cudagraph_mode,
-            )
-            compilation_config.cudagraph_mode = cudagraph_mode
-
-        # get custom compile backend for graph fusion
+        # 13.get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
 
         compilation_config.use_inductor = False
@@ -550,6 +563,7 @@ class NPUPlatform(Platform):
                 "for more information about runtime errors."
             )
 
+        # 14.Select worker class and refresh block size
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             if not vllm_config.compilation_config.pass_config.enable_sp:
@@ -564,10 +578,11 @@ class NPUPlatform(Platform):
 
         refresh_block_size(vllm_config)
 
-        # Activate custom ops for v1, except on 310P
+        # 15.Activate custom ops, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        # 16.Validate scheduler extension policies
         scheduler_extension_config = ascend_config.scheduler_config
         if scheduler_extension_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
@@ -633,11 +648,10 @@ class NPUPlatform(Platform):
                     f"(kv_role='kv_consumer', but got kv_role={kv_role!r}), and is not supported in PD-mixed mode."
                 )
             else:
-                from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
-
                 recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
                 vllm_config.scheduler_config = recompute_scheduler_config
 
+        # 17.Select specialized scheduler class
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
         if scheduler_extension_config.profiling_chunk_config.enabled:
             vllm_config.scheduler_config.scheduler_cls = (
@@ -656,6 +670,7 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
                 )
 
+        # 18.Validate SFA / DCP / KV and SP consistency
         cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
@@ -702,6 +717,7 @@ class NPUPlatform(Platform):
                 "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
             )
 
+        # 19.Set pytorch NPU allocator env
         # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
         # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
         # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
@@ -721,12 +737,6 @@ class NPUPlatform(Platform):
                 npu_alloc_configs += ",expandable_segments:True"
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
-
-        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
-            raise ValueError(
-                "fused mc2 op cannot be used with hierarchy communication."
-                "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
-            )
 
     @classmethod
     def set_additional_forward_context(
