@@ -220,7 +220,7 @@ class AscendConfig:
     # ---- sub-configs (need vllm_config / special): factory pre-constructs, kw_only ----
     xlite_graph_config: XliteGraphConfig = dataclasses.field(kw_only=True)
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(kw_only=True)
-    scheduler_config: Any = dataclasses.field(kw_only=True)
+    scheduler_config: SchedulerConfig = dataclasses.field(kw_only=True)
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
@@ -765,10 +765,36 @@ class ShortRequestFirstConfig:
         return self
 
 
+@config
 class SchedulerConfig:
-    """Configuration object for ``additional_config[\"scheduler_config\"]``."""
+    """Configuration object for ``additional_config["scheduler_config"]``.
 
-    def __init__(self, additional_config: dict[str, Any], balance_env_value: Any):
+    Migrated to ``@config`` (pydantic dataclass). The three-level precedence
+    (nested scheduler_config > top-level legacy > env) is resolved in a
+    ``before`` model_validator that handles ``ArgsKwargs``, preserving the
+    original deprecation warnings. Sub-configs (ShortRequestFirstConfig /
+    ProfilingChunkConfig / BatchJobSchedConfig) are typed fields that pydantic
+    coerces from nested dicts.
+    """
+
+    enable_balance_scheduling: Any = False
+    recompute_scheduler_enable: Any = False
+    short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
+    profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
+    batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
+    # Injected for three-level precedence resolution (not user input):
+    _additional_config: dict[str, Any] = dataclasses.field(kw_only=True, repr=False)
+    _balance_env_value: Any = dataclasses.field(kw_only=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_three_level_precedence(cls, data: Any) -> Any:
+        if not isinstance(data, ArgsKwargs):
+            return data
+        kw = dict(data.kwargs)
+        additional_config = kw.pop("_additional_config", {})
+        balance_env_value = kw.pop("_balance_env_value", False)
+
         scheduler_config = additional_config.get("scheduler_config")
         if scheduler_config is None:
             scheduler_config = {}
@@ -776,67 +802,47 @@ class SchedulerConfig:
             raise ValueError(
                 f"additional_config.scheduler_config must be a dict, got {type(scheduler_config).__name__}."
             )
-        self.enable_balance_scheduling = self._get_config_value(
-            scheduler_config,
-            additional_config,
-            "enable_balance_scheduling",
-            balance_env_value,
-            "VLLM_ASCEND_BALANCE_SCHEDULING",
-        )
-        self.recompute_scheduler_enable = self._get_config_value(
-            scheduler_config,
-            additional_config,
-            "recompute_scheduler_enable",
-            False,
-        )
-        self.short_request_first_config = ShortRequestFirstConfig(
-            **self._get_config_value(scheduler_config, additional_config, "short_request_first_config", {})
-        )
-        self.profiling_chunk_config = ProfilingChunkConfig(
-            **self._get_config_value(scheduler_config, additional_config, "profiling_chunk_config", {})
-        )
-        self.batch_job_sched_config = BatchJobSchedConfig(
-            **self._get_config_value(scheduler_config, additional_config, "batch_job_sched_config", {})
-        )
 
-    @staticmethod
-    def _get_config_value(
-        scheduler_config: dict[str, Any],
-        additional_config: dict[str, Any],
-        config_key: str,
-        default: Any,
-        env_key: str | None = None,
-    ) -> Any:
-        if config_key in scheduler_config:
+        def _resolve(config_key: str, default: Any, env_key: str | None = None) -> Any:
+            if config_key in scheduler_config:
+                if config_key in additional_config:
+                    logger.warning_once(
+                        "additional_config.%s is deprecated and ignored because "
+                        "additional_config.scheduler_config.%s is set.",
+                        config_key,
+                        config_key,
+                    )
+                return scheduler_config[config_key]
             if config_key in additional_config:
                 logger.warning_once(
-                    "additional_config.%s is deprecated and ignored because "
-                    "additional_config.scheduler_config.%s is set.",
+                    "additional_config.%s is deprecated; use additional_config.scheduler_config.%s instead.",
                     config_key,
                     config_key,
                 )
-            return scheduler_config[config_key]
+                return additional_config[config_key]
+            if env_key is not None and env_key in os.environ:
+                logger.info_once(
+                    "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
+                    "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
+                    "next release.",
+                    config_key,
+                    env_key,
+                    default,
+                    config_key,
+                    env_key,
+                )
+            return default
 
-        if config_key in additional_config:
-            logger.warning_once(
-                "additional_config.%s is deprecated; use additional_config.scheduler_config.%s instead.",
-                config_key,
-                config_key,
-            )
-            return additional_config[config_key]
-
-        if env_key is not None and env_key in os.environ:
-            logger.info_once(
-                "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
-                "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
-                "next release.",
-                config_key,
-                env_key,
-                default,
-                config_key,
-                env_key,
-            )
-        return default
+        # Scalar fields: resolve via three-level precedence
+        kw["enable_balance_scheduling"] = _resolve(
+            "enable_balance_scheduling", balance_env_value, "VLLM_ASCEND_BALANCE_SCHEDULING"
+        )
+        kw["recompute_scheduler_enable"] = _resolve("recompute_scheduler_enable", False)
+        # Sub-config dicts: resolve then let pydantic coerce dict→dataclass
+        kw["short_request_first_config"] = _resolve("short_request_first_config", {})
+        kw["profiling_chunk_config"] = _resolve("profiling_chunk_config", {})
+        kw["batch_job_sched_config"] = _resolve("batch_job_sched_config", {})
+        return ArgsKwargs(data.args, kw)
 
 
 class SparseKVOffloadConfig:
@@ -922,7 +928,9 @@ def init_ascend_config(vllm_config):
 
     xlite = XliteGraphConfig(vllm_config=vllm_config, **additional_config.get("xlite_graph_config", {}))
     finegrained = FinegrainedTPConfig(vllm_config=vllm_config, **additional_config.get("finegrained_tp_config", {}))
-    sched = SchedulerConfig(additional_config, balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING)
+    sched = SchedulerConfig(
+        _additional_config=additional_config, _balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING
+    )
     sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
     # pre-step; the resolved path is passed as the dump_config_path field.
@@ -939,7 +947,7 @@ def init_ascend_config(vllm_config):
     _BYPASS_KEYS = {
         "refresh",  # control-flow flag (singleton/cache refresh), not a config; not converged
         "dump_config_path",  # passed explicitly below
-        "enable_balance_scheduling",  # SchedulerConfig internal (top-level legacy)
+        "enable_balance_scheduling",  # SchedulerConfig field; stripped (not AscendConfig field)
         "xlite_graph_config",  # pre-constructed above (vllm_config dep)
         "finegrained_tp_config",  # pre-constructed above (vllm_config dep)
         "scheduler_config",  # pre-constructed above (vllm_config dep)
