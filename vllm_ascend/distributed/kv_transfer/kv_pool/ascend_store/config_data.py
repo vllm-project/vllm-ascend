@@ -266,6 +266,7 @@ class ChunkedTokenDatabase:
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
+        self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.group_cache_families: dict[str, dict[int, str]] = {
             "kv": {},
             "state": {},
@@ -373,6 +374,7 @@ class ChunkedTokenDatabase:
         cache_role: str = "kv",
         group_cache_families: dict[int, str] | None = None,
         group_num_layers: dict[int, int] | None = None,
+        group_layer_cache_entry_offsets: dict[int, list[int]] | None = None,
     ) -> None:
         if cache_role == "state":
             # Keep the interface for future explicit state groups, but this
@@ -382,6 +384,7 @@ class ChunkedTokenDatabase:
             self.group_kv_caches_base_addr = group_kv_caches_base_addr
             self.group_block_len = group_block_len
             self.group_block_stride = group_block_stride or {}
+            self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -919,8 +922,8 @@ class ReqMeta:
         load_block_gvas_np: np.ndarray | None = None,
         load_block_gvas_by_group_np: list[np.ndarray] | None = None,
         load_gva_block_offset: int = 0,
-        partial_save_gvas_by_group: list[int] | None = None,
-        partial_load_gvas_by_group: list[int] | None = None,
+        partial_save_gva_per_group: list[int] | None = None,
+        partial_load_gva_per_group: list[int] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -957,8 +960,8 @@ class ReqMeta:
         self.load_block_gvas_np = load_block_gvas_np
         self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
         self.load_gva_block_offset = load_gva_block_offset
-        self.partial_save_gvas_by_group = partial_save_gvas_by_group or []
-        self.partial_load_gvas_by_group = partial_load_gvas_by_group or []
+        self.partial_save_gva_per_group = partial_save_gva_per_group or []
+        self.partial_load_gva_per_group = partial_load_gva_per_group or []
 
     @property
     def block_ids(self) -> list[int]:
@@ -984,8 +987,8 @@ class ReqMeta:
     block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
     load_block_gvas_by_group_np: list[np.ndarray] | None = None
-    partial_save_gvas_by_group: list[int] = field(default_factory=list)
-    partial_load_gvas_by_group: list[int] = field(default_factory=list)
+    partial_save_gva_per_group: list[int] = field(default_factory=list)
+    partial_load_gva_per_group: list[int] = field(default_factory=list)
 
     @staticmethod
     def from_request_tracker(
@@ -999,6 +1002,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
+        hash_block_size: int | None = None,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1019,14 +1023,20 @@ class ReqMeta:
             if discard_partial_chunks
             else target_token_len
         )
+        hash_block_size = hash_block_size or cache_transfer_granularity
+        assert cache_transfer_granularity % hash_block_size == 0
+        # Request hashes use hash_block_size, which may be finer than the
+        # transfer granularity used to advance num_saved_tokens.
+        hashes_per_transfer_block = cache_transfer_granularity // hash_block_size
         full_block_count = target_token_len // cache_transfer_granularity
+        available_full_block_count = len(block_hashes) // hashes_per_transfer_block
         boundary_without_hash = (
             target_token_len > 0
             and target_token_len % cache_transfer_granularity == 0
-            and full_block_count > len(block_hashes)
+            and full_block_count > available_full_block_count
         )
         if boundary_without_hash:
-            num_tokens_to_save = len(block_hashes) * cache_transfer_granularity
+            num_tokens_to_save = available_full_block_count * cache_transfer_granularity
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
         ):
@@ -1036,11 +1046,11 @@ class ReqMeta:
         else:
             partial_block_index = None
 
-        has_partial_block = save_partial_block and (
+        should_save_partial_block = save_partial_block and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
         )
         skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary and partial_block_index is None and not has_partial_block
+            num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
         )
         if skip_save and load_spec is None:
             return None

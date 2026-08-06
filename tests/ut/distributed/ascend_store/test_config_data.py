@@ -526,6 +526,40 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.save_end_token, 32)
         self.assertEqual(meta.target_token_len, 33)
 
+    def test_from_request_tracker_defers_c8_boundary_without_hash(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=128,
+            allocated_block_ids=list(range(8)),
+            num_saved_tokens=0,
+        )
+
+        partial_meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=128,
+            block_hashes=[f"h{i}".encode() for i in range(7)],
+            save_partial_block=True,
+            hash_block_size=16,
+        )
+
+        self.assertIsNotNone(partial_meta)
+        self.assertTrue(partial_meta.can_save)
+        self.assertEqual(partial_meta.save_end_token, 0)
+        self.assertEqual(tracker.num_saved_tokens, 0)
+
+        full_meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=128,
+            block_hashes=[f"h{i}".encode() for i in range(8)],
+            save_partial_block=True,
+            hash_block_size=16,
+        )
+
+        self.assertIsNotNone(full_meta)
+        self.assertTrue(full_meta.can_save)
+        self.assertEqual(full_meta.save_end_token, 128)
+        self.assertEqual(tracker.num_saved_tokens, 128)
+
     def test_from_request_tracker_no_discard(self):
         tracker = RequestTracker(
             req_id="r1",

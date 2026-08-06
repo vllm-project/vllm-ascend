@@ -44,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+    LayerBatchBuilder,
 )
 
 
@@ -88,6 +89,43 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
             return True
         block_idx = start // self.get_block_size(kv_cache_group_id)
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
+
+
+class TestLayerBatchBuilder(unittest.TestCase):
+    def test_uses_real_offsets_for_variable_cache_entries_per_layer(self):
+        database = FakeTokenDatabase()
+        database.set_group_buffers(
+            {0: [1000, 2000, 3000]},
+            {0: [10, 20, 30]},
+            {0: [100, 200, 300]},
+            group_num_layers={0: 2},
+            group_layer_cache_entry_offsets={0: [0, 2, 3]},
+        )
+        builder = LayerBatchBuilder(
+            database,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=60,
+            num_layers=2,
+        )
+
+        layer_0 = builder._build_transfer_arrays(
+            np.asarray([2]),
+            np.asarray([500]),
+            layer_id=0,
+        )
+        layer_1 = builder._build_transfer_arrays(
+            np.asarray([2]),
+            np.asarray([500]),
+            layer_id=1,
+        )
+
+        np.testing.assert_array_equal(layer_0[0], [1200, 2400])
+        np.testing.assert_array_equal(layer_0[1], [10, 20])
+        np.testing.assert_array_equal(layer_0[2], [500, 510])
+        np.testing.assert_array_equal(layer_1[0], [3600])
+        np.testing.assert_array_equal(layer_1[1], [30])
+        np.testing.assert_array_equal(layer_1[2], [530])
 
 
 class TestKVTransferThread(unittest.TestCase):

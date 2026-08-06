@@ -29,7 +29,7 @@ Layerwise Prefill offload currently requires:
 - `use_layerwise: true`;
 - an MLA, SFA, or DSA attention backend with the layerwise wait/save
   integration;
-- identical KV cache tensor sizes and cache specs for layers that share a
+- compatible KV cache specifications and tensor sizes for layers that share a
   buffer;
 - eager execution; graph mode is not currently supported.
 
@@ -68,14 +68,14 @@ transfer bandwidth.
 | :--- | :--- | :--- |
 | `use_layerwise` | `false` | Enables layer-by-layer KV transfer. |
 | `backend` | `"mooncake"` | Must be `"memcache"` for shared-buffer layerwise offload. |
-| `layerwise_num_shared_buffers` | Number of base transformer layers | Number of reusable buffers assigned to non-independent layers. If omitted, no cross-layer buffer reuse is enabled. The value must be at least `1`. |
-| `layerwise_independent_layers` | `[0]` | Base transformer layers that keep dedicated buffers. Accepts a list of integers or `"all"`. Negative indices are resolved against the base transformer layers. |
+| `layerwise_num_shared_buffers` | Number of cache-bearing layers | Number of reusable buffers assigned to non-independent layers. If omitted, no cross-layer buffer reuse is enabled. The value must be at least `1`. |
+| `layerwise_independent_layers` | `[0]` | Cache-bearing layers that keep dedicated buffers. Accepts a list of integers or `"all"`. Negative indices are resolved against all cache-bearing layers, including MTP layers. |
 
 ## Buffer Layout
 
-Let:
+For a uniform KV cache layout, let:
 
-- `N` be the number of base transformer layers;
+- `N` be the number of physical layers, including MTP layers;
 - `I` be the number of independent layers;
 - `R = N - I` be the number of reusable layers;
 - `B` be `layerwise_num_shared_buffers`.
@@ -103,18 +103,33 @@ Layer 4 reuses layer 1's physical buffer, layer 7 reuses layer 4's buffer, and
 so on. Before loading layer 4, the transfer thread waits until layer 1 has
 finished saving.
 
-For the supported uniform KV layout, the approximate logical-to-physical
-memory factor is `N / (I + min(B, R))`.
+When cache-bearing layers have different KV cache layouts, the planner first
+groups them by their complete cache signature. Each signature gets its own
+reusable buffer pool, so incompatible layouts never share storage. The number
+of physical KV buffers is then:
+
+```text
+I + sum(min(B, reusable layers with signature S) for each signature S)
+```
+
+For a uniform layout, the approximate logical-to-physical memory factor remains
+`N / (I + min(B, R))`. For heterogeneous layouts, the implementation calculates
+the factor from the actual cache page bytes assigned to every physical buffer.
 
 ## Request Flow
 
 ### Initialization
 
-1. Layers are assigned to dedicated or shared physical KV buffers.
-2. KV cache tensor descriptors assigned to the same buffer are merged.
-3. The worker registers the resulting physical buffers with Memcache and
-   adjusts the logical KV cache memory budget according to the reduction in
-   allocated buffers.
+1. The KV cache planner maps logical layer names to cache-bearing layer indices.
+2. Base transformer layers keep their normal indices. MTP layers are appended
+   after the base layers.
+3. The planner builds the complete KV cache signature of each cache-bearing
+   layer.
+4. Compatible layers are assigned to dedicated or shared physical KV buffers.
+5. Corresponding KV cache tensor descriptors assigned to the same buffer are
+   merged.
+6. The worker registers the resulting physical buffers with Memcache and
+   adjusts the logical KV cache memory budget according to the bytes saved.
 
 ### Prefill Execution
 
@@ -134,13 +149,43 @@ During each Prefill step:
    save. Attention computation continues while this save and later prefetches
    run on the transfer thread.
 
+## MTP and Sparse C8 Layouts
+
+### MTP
+
+MTP layers use names such as `mtp.0.self_attn` and are placed after the base
+transformer layers in the physical layout. They participate in buffer
+assignment, transfer event allocation, and memory accounting.
+
+Because negative independent-layer indices use the complete physical layout,
+`-1` refers to the last MTP layer when MTP is enabled, not the last base
+transformer layer.
+
+### Sparse C8
+
+An SFA layer can contain separate cache entries:
+
+- the main MLA/SFA KV cache;
+- the sparse indexer cache;
+- their corresponding C8 scale data when enabled.
+
+The planner does not identify these entries by model-specific names. It builds
+the physical layer's signature from their actual KV cache specifications and
+only reuses a buffer when the complete signature matches. Transfer addresses and
+allocation sizes are derived from each group's real per-layer offsets and page
+bytes. This allows MTP and sparse C8 layouts to use the same layerwise offload
+pipeline without assuming that every layer has one tensor.
+
+An incompatible layout receives a separate buffer pool instead of being
+transferred through an incorrectly sized buffer.
+
 ## Verification
 
 The following log messages indicate that shared-buffer offload is active:
 
 ```text
-Layerwise KV cache reuse merged ... tensor descriptors into ... shared buffers.
-Layerwise KV cache reuse uses ... buffers for ... layers; scale logical KV budget by ...
+Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
+Layerwise KV cache reuse maps ... layers onto ... buffer assignments; scale logical KV budget by ...
 ```
 
 If the first message is absent, check that:
@@ -149,7 +194,7 @@ If the first message is absent, check that:
 - `use_layerwise` is `true`;
 - `layerwise_num_shared_buffers` is smaller than the number of reusable
   layers;
-- the model exposes one uniform KV cache tensor per base transformer layer.
+- all expected base and MTP layer cache specifications are present.
 
 ## Limitations
 
@@ -157,5 +202,6 @@ If the first message is absent, check that:
 - TP-size mismatch is not supported with layerwise KV transfer.
 - Context-parallel configurations have not been validated with shared-buffer
   layerwise offload.
-- MTP, multiple KV cache groups, and non-uniform or compressed KV layouts are
-  not supported by the base layer-reuse implementation.
+- Multiple non-packed attention KV cache groups are supported. State-cache
+  groups and packed or pre-shared KV cache tensor descriptors are not
+  supported by shared-buffer reuse.
