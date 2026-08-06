@@ -370,6 +370,47 @@ jobs:
           echo "a5_run_id=$A5_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched Nightly-A5 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
 
+  dispatch-310p:
+    name: Trigger Nightly-310P
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_310p == 'true'
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      _310p_run_id: ${{ steps.dispatch_310p.outputs._310p_run_id }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch nightly-310p workflow
+        id: dispatch_310p
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
+          gh workflow run schedule_nightly_test_310p.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+          sleep 8
+          _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_310p.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "_310p_run_id=$_310P_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched Nightly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
   dispatch-weekly-a2:
     name: Trigger Weekly-A2
     needs: [authorize]
@@ -494,7 +535,7 @@ jobs:
 
   post-links:
     name: Post workflow links
-    needs: [authorize, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-a5, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-310p]
+    needs: [authorize, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-a5, dispatch-310p, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-310p]
     if: always() && needs.authorize.outputs.is_authorized == 'true'
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -517,6 +558,10 @@ jobs:
           if [[ "${{ needs.dispatch-a5.result }}" == "success" ]]; then
             BODY="$BODY
           - Nightly-A5: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a5.outputs.a5_run_id }})"
+          fi
+          if [[ "${{ needs.dispatch-310p.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Nightly-310P: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-310p.outputs._310p_run_id }})"
           fi
           if [[ "${{ needs.dispatch-weekly-a2.result }}" == "success" ]]; then
             BODY="$BODY
