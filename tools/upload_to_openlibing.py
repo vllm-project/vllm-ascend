@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import mimetypes
 import os
+from contextlib import ExitStack
 from pathlib import Path
-from typing import List, Dict
 
 import requests
 
-
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -23,44 +22,44 @@ logger = logging.getLogger(__name__)
 DEFAULT_UPLOAD_URL = "https://apig.openlibing.com/openlibing-sync/sync/testcase/metadata/upload"
 
 
-def _process_json_param(param: str) -> Dict:
+def _process_json_param(param: str) -> dict:
     """
     Process JSON parameter that may be in simplified format (without quotes).
-    
+
     Supports both:
     - Standard JSON: {"key": "value", ...}
     - Simplified format: {key: value, ...} or {key:value,key:value}
-    
+
     Args:
         param: Input string to process
-        
+
     Returns:
         Dict: Parsed JSON dictionary, empty dict if parsing fails
     """
     try:
         if param and param.find('"') == -1:
-            inner = param.strip('{}')
-            pairs = [p.strip() for p in inner.split(',')]
+            inner = param.strip("{}")
+            pairs = [p.strip() for p in inner.split(",")]
             json_pairs = []
             for pair in pairs:
-                if ':' in pair:
-                    k, v = pair.split(':', 1)
+                if ":" in pair:
+                    k, v = pair.split(":", 1)
                     json_pairs.append(f'"{k.strip()}":"{v.strip()}"')
-            tmp_secret = '{' + ','.join(json_pairs) + '}'
-            param: dict = json.loads(tmp_secret)
+            tmp_secret = "{" + ",".join(json_pairs) + "}"
+            parsed: dict = json.loads(tmp_secret)
         else:
-            param: dict = json.loads(param)
+            parsed = json.loads(param)
     except Exception as e:
-        logger.info(f"process special json err: {e}", exc_info=True)
-        param = {}
+        logger.info("process special json err: %s", e, exc_info=True)
+        parsed = {}
 
-    return param
+    return parsed
 
 
 def upload_data_to_openlibing(
-    file_paths: List[Path],
-    openlibing_secret: Dict[str, str],
-    upload_config: Dict[str, str] = None
+    file_paths: list[Path],
+    openlibing_secret: dict[str, str],
+    upload_config: dict[str, str] | None = None,
 ) -> requests.Response:
     """
     Upload files to OpenLibing OBS bucket.
@@ -92,8 +91,8 @@ def upload_data_to_openlibing(
     label = upload_config.get("label", "")
     archive_path = upload_config.get("archive_path", "")
     label_info = f" (label: {label})" if label else ""
-    logger.info(f"Uploading {len(file_paths)} files to OpenLibing{label_info}")
-    
+    logger.info("Uploading %s files to OpenLibing%s", len(file_paths), label_info)
+
     if not file_paths:
         raise FileNotFoundError("No files to upload")
 
@@ -120,126 +119,91 @@ def upload_data_to_openlibing(
     if archive_config:
         form_data["archiveConfig"] = json.dumps(archive_config)
 
-    opened_files = []
-    files_for_upload = []
-
     try:
-        for file_path in file_paths:
-            if not file_path.exists():
-                logger.warning(f"File not found, skipping: {file_path}")
-                continue
+        with ExitStack() as stack:
+            files_for_upload = []
+            for file_path in file_paths:
+                if not file_path.exists():
+                    logger.warning("File not found, skipping: %s", file_path)
+                    continue
 
-            f = open(file_path, 'rb')
-            opened_files.append(f)
+                f = stack.enter_context(open(file_path, "rb"))
+                mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                files_for_upload.append(("files", (file_path.name, f, mime_type)))
 
-            mime_type = mimetypes.guess_type(file_path.name)[0] or 'application/octet-stream'
+            if not files_for_upload:
+                raise FileNotFoundError("No valid files to upload")
 
-            files_for_upload.append((
-                'files',
-                (file_path.name, f, mime_type)
-            ))
+            logger.info("Uploading %s files to %s", len(files_for_upload), url)
 
-        if not files_for_upload:
-            raise FileNotFoundError("No valid files to upload")
+            response = requests.post(
+                url=url,
+                headers=headers,
+                data=form_data,
+                files=files_for_upload,
+                verify=False,
+            )
 
-        logger.info(f"Uploading {len(files_for_upload)} files to {url}")
-        
-        response = requests.post(
-            url=url,
-            headers=headers,
-            data=form_data,
-            files=files_for_upload,
-            verify=False,
-        )
+            logger.info("Upload response status: %s", response.status_code)
+            logger.info("Upload response text: %s", response.text)
 
-        logger.info(f"Upload response status: {response.status_code}")
-        logger.info(f"Upload response text: {response.text}")
+            response.raise_for_status()
 
-        response.raise_for_status()
-        
-        logger.info("Successfully uploaded files to OpenLibing")
-        
-        return response
+            logger.info("Successfully uploaded files to OpenLibing")
 
-    except Exception as e:
-        logger.error(f"Failed to upload files to OpenLibing: {e}", exc_info=True)
+            return response
+
+    except Exception:
+        logger.exception("Failed to upload files to OpenLibing")
         raise
-
-    finally:
-        for f in opened_files:
-            try:
-                f.close()
-            except Exception as close_err:
-                logger.warning(f"Failed to close file: {close_err}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Upload files to OpenLibing OBS bucket",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description="Upload files to OpenLibing OBS bucket", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    
+
     parser.add_argument(
-        "--files",
-        nargs='+',
-        required=True,
-        type=Path,
-        help="List of file paths to upload (supports any file type)"
+        "--files", nargs="+", required=True, type=Path, help="List of file paths to upload (supports any file type)"
     )
-    
-    parser.add_argument(
-        "--pipeline-id",
-        default="",
-        help="Pipeline ID (optional)"
-    )
-    
-    parser.add_argument(
-        "--pipeline-run-id",
-        default="",
-        help="Pipeline run ID (optional)"
-    )
-    
-    parser.add_argument(
-        "--job-id",
-        default="",
-        help="Job ID (optional)"
-    )
-    
+
+    parser.add_argument("--pipeline-id", default="", help="Pipeline ID (optional)")
+
+    parser.add_argument("--pipeline-run-id", default="", help="Pipeline run ID (optional)")
+
+    parser.add_argument("--job-id", default="", help="Job ID (optional)")
+
     parser.add_argument(
         "--label",
         default="",
         help="Label string. Can be used alone (archive path: /{label}/{filename}) "
-             "or with --archive-path (archive path: /{label}/{archive_path}/{filename})."
+        "or with --archive-path (archive path: /{label}/{archive_path}/{filename}).",
     )
-    
+
     parser.add_argument(
         "--archive-path",
         default="",
         help="Custom archive path, must be used with --label. "
-             "Archive path becomes /{label}/{archive_path}/{filename}. "
-             "Can be used together with --pipeline-id/--pipeline-run-id/--job-id, "
-             "in which case --archive-path takes precedence. "
-             "Must provide at least --label or pipeline params."
+        "Archive path becomes /{label}/{archive_path}/{filename}. "
+        "Can be used together with --pipeline-id/--pipeline-run-id/--job-id, "
+        "in which case --archive-path takes precedence. "
+        "Must provide at least --label or pipeline params.",
     )
-    
+
     parser.add_argument(
         "--openlibing-secret",
         default="",
         help="JSON string containing apig_code, apig_key, apig_secret. "
-             "Supports both standard JSON format {\"key\": \"value\"} and "
-             "simplified format {key: value} without quotes. "
-             "If not provided, reads from environment variable OPENLIBING_SECRET. "
-             "Errors if neither is available."
+        'Supports both standard JSON format {"key": "value"} and '
+        "simplified format {key: value} without quotes. "
+        "If not provided, reads from environment variable OPENLIBING_SECRET. "
+        "Errors if neither is available.",
     )
-    
-    parser.add_argument(
-        "--url",
-        default=DEFAULT_UPLOAD_URL,
-        help=f"Upload URL (default: {DEFAULT_UPLOAD_URL})"
-    )
-    
+
+    parser.add_argument("--url", default=DEFAULT_UPLOAD_URL, help=f"Upload URL (default: {DEFAULT_UPLOAD_URL})")
+
     args = parser.parse_args()
-    
+
     try:
         has_archive_path = bool(args.archive_path)
         has_label = bool(args.label)
@@ -256,11 +220,11 @@ def main():
             exit(1)
 
         openlibing_secret = _process_json_param(secret_raw)
-        
+
         if not openlibing_secret:
             logger.error("Failed to parse openlibing-secret")
             exit(1)
-            
+
         response = upload_data_to_openlibing(
             file_paths=args.files,
             openlibing_secret=openlibing_secret,
@@ -270,18 +234,18 @@ def main():
                 "job_id": args.job_id,
                 "url": args.url,
                 "label": args.label,
-                "archive_path": args.archive_path
-            }
+                "archive_path": args.archive_path,
+            },
         )
-        
+
         logger.info("=== Upload Response Details ===")
-        logger.info(f"Status Code: {response.status_code}")
-        logger.info(f"Content-Type: {response.headers.get('Content-Type', 'N/A')}")
-        logger.info(f"Response Text: {response.text}")
+        logger.info("Status Code: %s", response.status_code)
+        logger.info("Content-Type: %s", response.headers.get("Content-Type", "N/A"))
+        logger.info("Response Text: %s", response.text)
         logger.info("===============================")
-        
+
     except Exception as e:
-        logger.error(f"Upload failed: {e}")
+        logger.error("Upload failed: %s", e)
         exit(1)
 
 
