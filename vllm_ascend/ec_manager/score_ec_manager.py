@@ -1,11 +1,15 @@
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
 
-from vllm_ascend.ascend_config import get_ascend_config, get_score_encoder_cache_config
+from vllm_ascend.ascend_config import ScoreEncoderCacheConfig
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -43,18 +47,26 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
        from occupying the cache for too long
     """
 
-    def __init__(self, cache_size: int):
+    @classmethod
+    def from_vllm_config(
+        cls,
+        *,
+        cache_size: int,
+        vllm_config: "VllmConfig",
+    ) -> "ScoreEncoderCacheManager":
+        return cls(cache_size=cache_size, vllm_config=vllm_config)
+
+    def __init__(self, cache_size: int, vllm_config: "VllmConfig"):
         super().__init__(cache_size)
 
-        vllm_config = get_ascend_config().vllm_config
-        score_encoder_cache_config = get_score_encoder_cache_config(vllm_config)
+        config = ScoreEncoderCacheConfig.from_dict(vllm_config.ec_manager_config.manager_config)
         # ---------------- NPU cache ----------------
         self.cache_size = cache_size
         self.npu_num_free_slots = cache_size  # Empty slots
         self.npu_num_freeable_slots = cache_size  # Reclaimable capacity: reclaimable slots + empty slots
 
         # ---------------- CPU cache ----------------
-        self.cpu_cache_size = score_encoder_cache_config.cpu_cache_slots
+        self.cpu_cache_size = config.cpu_cache_slots
         self.cpu_num_free_slots = self.cpu_cache_size
         self.cpu_num_freeable_slots = self.cpu_cache_size
 
@@ -75,10 +87,10 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         self.req_cnt = 0
 
-        self.watermark = score_encoder_cache_config.watermark
-        self.promote_percentile = score_encoder_cache_config.promote_percentile
-        self.max_clock = score_encoder_cache_config.max_clock
-        self.clock_decay_every = score_encoder_cache_config.clock_decay_every
+        self.watermark = config.watermark
+        self.promote_percentile = config.promote_percentile
+        self.max_clock = config.max_clock
+        self.clock_decay_every = config.clock_decay_every
 
         # Actions to execute in the current round
         self.promoting: list[str] = []  # mm_hashes to be promoted from CPU -> NPU
@@ -249,7 +261,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         if num_embeds > self.cpu_cache_size:
             raise ValueError(
                 f"Encoder output requires {num_embeds} cache slots, but "
-                "score_encoder_cache_config.cpu_cache_slots is "
+                "manager_config.cpu_cache_slots is "
                 f"{self.cpu_cache_size}."
             )
 

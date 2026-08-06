@@ -3,11 +3,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.config import EncoderCacheManagerConfig
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
+from vllm_ascend.ascend_config import is_score_encoder_cache_manager
 from vllm_ascend.ec_manager.score_ec_manager import (
     CacheEntry,
     ScoreEncoderCacheManager,
+)
+
+
+SCORE_MANAGER_CLS = (
+    "vllm_ascend.ec_manager.score_ec_manager.ScoreEncoderCacheManager"
 )
 
 
@@ -48,6 +55,60 @@ def _build_request(request_id: str, mm_hash: str, num_embeds: int):
     request.mm_features = [SimpleNamespace(identifier=mm_hash)]
     request.get_num_encoder_embeds.return_value = num_embeds
     return request
+
+
+def test_qualified_class_name_resolves_score_manager():
+    config = EncoderCacheManagerConfig(
+        encoder_cache_manager_cls=SCORE_MANAGER_CLS
+    )
+
+    assert config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager
+    assert is_score_encoder_cache_manager(SimpleNamespace(ec_manager_config=config))
+
+
+def test_other_managers_do_not_enable_score_cache():
+    vllm_config = SimpleNamespace(
+        ec_manager_config=SimpleNamespace(
+            get_encoder_cache_manager_obj=lambda: EncoderCacheManager
+        )
+    )
+
+    assert not is_score_encoder_cache_manager(vllm_config)
+
+
+def test_factory_reads_score_parameters_from_vllm_config():
+    manager_config = {
+        "cpu_cache_slots": 12,
+        "max_clock": 7,
+        "clock_decay_every": 8,
+        "watermark": 0.3,
+        "promote_percentile": 0.4,
+    }
+    vision_config = SimpleNamespace(
+        num_heads=2,
+        hidden_size=4,
+        intermediate_size=8,
+    )
+    vllm_config = SimpleNamespace(
+        ec_manager_config=EncoderCacheManagerConfig(
+            encoder_cache_manager_cls=SCORE_MANAGER_CLS,
+            manager_config=manager_config,
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(vision_config=vision_config)
+        ),
+    )
+
+    manager = ScoreEncoderCacheManager.from_vllm_config(
+        cache_size=10,
+        vllm_config=vllm_config,
+    )
+
+    assert manager.cpu_cache_size == 12
+    assert manager.max_clock == 7
+    assert manager.clock_decay_every == 8
+    assert manager.watermark == 0.3
+    assert manager.promote_percentile == 0.4
 
 
 def test_cpu_evict_preserves_npu_residency():
@@ -113,7 +174,7 @@ def test_rejects_encoder_output_larger_than_cpu_cache():
 
     with pytest.raises(
         ValueError,
-        match="score_encoder_cache_config.cpu_cache_slots",
+        match="manager_config.cpu_cache_slots",
     ):
         manager.can_allocate(request, 0, 3, 0)
 

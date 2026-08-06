@@ -69,10 +69,6 @@ def register_service_profiling():
     generate_service_profiling_config()
 
 
-def register_ec_manager():
-    return "vllm_ascend.ec_manager.score_ec_manager.ScoreEncoderCacheManager"
-
-
 def register_model():
     from vllm_ascend.patch.hunyuan_vl_processor_compat import (
         install_hunyuan_vl_processor_compat,

@@ -593,6 +593,7 @@ class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
             "legacy-freed": object(),
         }
         runner.tmp_encoder_cache = {}
+        runner.use_score_encoder_cache = True
         runner._clear_finished_encoder_cache_copies = MagicMock()
         metadata = SimpleNamespace(
             promoting_mm_hashes=[],

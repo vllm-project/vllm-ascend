@@ -101,7 +101,10 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
-from vllm_ascend.ascend_config import get_ascend_config, get_score_encoder_cache_config
+from vllm_ascend.ascend_config import (
+    get_ascend_config,
+    is_score_encoder_cache_manager,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
@@ -344,6 +347,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -867,8 +871,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> None:
-        score_encoder_cache_config = get_ascend_config().score_encoder_cache_config
-        if not score_encoder_cache_config.enabled:
+        if not self.use_score_encoder_cache:
             return
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -879,8 +882,7 @@ class NPUModelRunner(GPUModelRunner):
     def free_tmp_cache(self, req_id, request):
         if request is None:
             return
-        score_encoder_cache_config = get_ascend_config().score_encoder_cache_config
-        if not score_encoder_cache_config.enabled:
+        if not self.use_score_encoder_cache:
             self.cached.clear()
             return
         free_mm_hashes = set()
@@ -916,7 +918,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
     ) -> None:
         self._clear_finished_encoder_cache_copies()
-        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+        if not self.use_score_encoder_cache:
             super()._process_encoder_cache_scheduler_output(scheduler_output)
             return
 
@@ -963,7 +965,7 @@ class NPUModelRunner(GPUModelRunner):
         if encoder_output is not None:
             return encoder_output
 
-        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+        if not self.use_score_encoder_cache:
             return None
 
         cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
@@ -983,10 +985,7 @@ class NPUModelRunner(GPUModelRunner):
     def _has_encoder_output_in_cache(self, mm_hash: str) -> bool:
         if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
             return True
-        return (
-            get_score_encoder_cache_config(self.vllm_config).enabled
-            and mm_hash in self.cpu_encoder_cache
-        )
+        return self.use_score_encoder_cache and mm_hash in self.cpu_encoder_cache
 
     def _get_encoder_cache_view(self) -> _EncoderCacheView:
         return _EncoderCacheView(
@@ -1028,7 +1027,7 @@ class NPUModelRunner(GPUModelRunner):
         ec_manager_metadata: Any | None,
         free_encoder_mm_hashes: list[str],
     ) -> None:
-        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+        if not self.use_score_encoder_cache:
             super()._cache_encoder_output(
                 mm_hash,
                 output,

@@ -481,19 +481,16 @@ class TestAscendConfig(TestBase):
 
 class TestScoreEncoderCacheConfig(TestBase):
     def test_accepts_valid_boundary_values(self):
-        config = ScoreEncoderCacheConfig(
+        config = ScoreEncoderCacheConfig.from_dict(
             {
-                "enabled": True,
                 "cpu_cache_slots": 1,
                 "max_clock": 0,
                 "clock_decay_every": 1,
                 "watermark": 0,
                 "promote_percentile": 1,
-            },
-            SimpleNamespace(),
+            }
         )
 
-        self.assertTrue(config.enabled)
         self.assertEqual(config.cpu_cache_slots, 1)
         self.assertEqual(config.max_clock, 0)
         self.assertEqual(config.clock_decay_every, 1)
@@ -502,7 +499,6 @@ class TestScoreEncoderCacheConfig(TestBase):
 
     def test_rejects_invalid_values(self):
         invalid_configs: list[tuple[str, dict[str, object]]] = [
-            ("enabled", {"enabled": 1}),
             ("cpu_cache_slots", {"cpu_cache_slots": 0}),
             ("cpu_cache_slots", {"cpu_cache_slots": 1.5}),
             ("cpu_cache_slots", {"cpu_cache_slots": True}),
@@ -526,14 +522,18 @@ class TestScoreEncoderCacheConfig(TestBase):
                 self.subTest(field=field, value=user_config[field]),
                 self.assertRaisesRegex(ValueError, field),
             ):
-                ScoreEncoderCacheConfig(user_config, SimpleNamespace())
+                ScoreEncoderCacheConfig.from_dict(user_config)
+
+    def test_rejects_unknown_fields(self):
+        with self.assertRaisesRegex(ValueError, "enabled"):
+            ScoreEncoderCacheConfig.from_dict({"enabled": False})
 
     def test_rejects_non_dict_config(self):
         with self.assertRaisesRegex(
             ValueError,
-            "score_encoder_cache_config must be a dict",
+            "manager_config must be a dict",
         ):
-            ScoreEncoderCacheConfig([], SimpleNamespace())
+            ScoreEncoderCacheConfig.from_dict([])
 
 
 class TestShortRequestFirstConfig(TestBase):
