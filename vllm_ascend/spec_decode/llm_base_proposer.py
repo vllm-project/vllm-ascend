@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import dataclasses
+import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
@@ -1358,6 +1359,39 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             if self.method == "dspark":
                 if draft_probs_step0 is not None:
+                    # Diagnostic: verify draft_token_ids align with draft_probs
+                    # and the sampled token's prob is positive.
+                    if logger.isEnabledFor(logging.DEBUG):
+                        ret_tokens = draft_token_ids[:, 1:]  # [num_blk, K]
+                        probs_view = draft_probs_step0.view(
+                            -1, self.num_speculative_tokens, draft_probs_step0.shape[-1]
+                        )  # [num_blk, K, V]
+                        # Gather prob at each sampled token position.
+                        # ret_tokens[b, k] should have been sampled from
+                        # probs_view[b, k, :].
+                        gathered = torch.gather(
+                            probs_view, dim=2,
+                            index=ret_tokens.unsqueeze(-1).long(),
+                        ).squeeze(-1)  # [num_blk, K]
+                        num_zero = (gathered <= 0).sum().item()
+                        num_total = gathered.numel()
+                        logger.debug(
+                            "[dspark_diag] draft_probs_step0: shape=%s, "
+                            "min=%.3e, max=%.3e, has_zero=%s; "
+                            "gathered (prob at sampled token): "
+                            "min=%.3e, max=%.3e, zero_count=%d/%d; "
+                            "ret_tokens: shape=%s, min=%d, max=%d",
+                            tuple(draft_probs_step0.shape),
+                            draft_probs_step0.min().item(),
+                            draft_probs_step0.max().item(),
+                            bool((draft_probs_step0 <= 0).any().item()),
+                            gathered.min().item(),
+                            gathered.max().item(),
+                            num_zero, num_total,
+                            tuple(ret_tokens.shape),
+                            int(ret_tokens.min().item()),
+                            int(ret_tokens.max().item()),
+                        )
                     self._last_draft_probs = draft_probs_step0.view(
                         -1, self.num_speculative_tokens, draft_probs_step0.shape[-1]
                     ).contiguous()
