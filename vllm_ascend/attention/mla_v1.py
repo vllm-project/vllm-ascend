@@ -52,7 +52,6 @@ from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
-    ACL_FORMAT_FRACTAL_NZ,
     AscendDeviceType,
     get_ascend_device_type,
     maybe_trans_nz,
@@ -1388,16 +1387,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         head_dim: int,
         nz_width: int,
     ) -> torch.Tensor:
-        """Temporarily expose one referenced PA-NZ cache segment to Gather."""
-        compact_cache = cache.index_select(0, block_ids)
-        block_size = compact_cache.shape[1]
-        pa_nz_view = compact_cache.view(
-            -1,
-            num_kv_heads * head_dim // nz_width,
+        """Convert referenced PA-NZ cache blocks back to logical ND for Gather.
+
+        A3 C8 Scatter writes PA-NZ bytes through a 5-D view of the shared ND
+        cache allocation.  Selecting from the registered 4-D tensor directly
+        therefore treats physical PA-NZ bytes as logical ND values.  Reinterpret
+        the storage with the same PA-NZ view used by Scatter before compacting,
+        then transpose it back to the Normal-cache layout expected by Gather.
+        """
+        block_size = cache.shape[1]
+        physical_pa_nz = cache.view(
+            cache.shape[0],
+            num_kv_heads,
+            head_dim // nz_width,
             block_size,
             nz_width,
         )
-        return torch_npu.npu_format_cast(pa_nz_view, ACL_FORMAT_FRACTAL_NZ)
+        compact_pa_nz = physical_pa_nz.index_select(0, block_ids)
+        return (
+            compact_pa_nz.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(block_ids.numel(), block_size, num_kv_heads, head_dim)
+        )
 
     def _compute_prefill_context(
         self,
@@ -1480,18 +1491,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
             if is_a3_c8_cache:
-                # PA-NZ Gather emits flattened ND output. The two loads must
-                # remain separate because latent and RoPE caches have
-                # different dtypes and tile widths.
+                # The compact caches were converted back to Normal layout, so
+                # Gather uses the standard 3-D [tokens, heads, dim] outputs.
+                # Load the two caches separately because their dtypes differ.
                 kv_c_normed = torch.empty(
                     toks,
-                    num_heads * latent_kv_dim,
+                    num_heads,
+                    latent_kv_dim,
                     dtype=cache_kv_c.dtype,
                     device=cache_kv_c.device,
                 )
                 k_pe = torch.empty(
                     toks,
-                    num_heads * rope_dim,
+                    num_heads,
+                    rope_dim,
                     dtype=q_pe.dtype,
                     device=q_pe.device,
                 )
@@ -1510,13 +1523,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             if is_a3_c8_cache:
                 # npu_gather_pa_kv_cache requires matching dtypes for the
                 # key/value cache pair. A3 C8 stores latent cache in INT8 and
-                # RoPE cache in BF16, so gather the two NZ-tagged compact
-                # caches separately through the original Gather path.
-                # Gather's seq_offset addresses a block-table column, whereas
-                # chunked_context.starts is expressed in tokens. Chunk starts
-                # are block-aligned, so convert using the cache's runtime
-                # block size instead of assuming a fixed value.
-                chunk_block_offset = prefill_metadata.chunked_context.starts[i] // cache_kv_c.shape[1]
+                # RoPE cache in BF16, so gather the two Normal compact caches
+                # separately. Normal Gather consumes the token offset directly.
+                chunk_token_offset = prefill_metadata.chunked_context.starts[i]
                 kv_c_unused = torch.empty_like(kv_c_normed)
                 k_pe_unused = torch.empty_like(k_pe)
                 DeviceOperator.kv_cache_load(
@@ -1524,7 +1533,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     cache_kv_c_for_load,
                     gather_block_table,
                     context_seq_len_npu,
-                    chunk_block_offset,
+                    chunk_token_offset,
                     key=kv_c_normed,
                     value=kv_c_unused,
                 )
@@ -1533,7 +1542,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     cache_k_pe_for_load,
                     gather_block_table,
                     context_seq_len_npu,
-                    chunk_block_offset,
+                    chunk_token_offset,
                     key=k_pe,
                     value=k_pe_unused,
                 )
@@ -1547,9 +1556,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     key=kv_c_normed,
                     value=k_pe,
                 )
-            if is_a3_c8_cache:
-                kv_c_normed = kv_c_normed.view(toks, num_heads, latent_kv_dim)
-                k_pe = k_pe.view(toks, num_heads, rope_dim)
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
