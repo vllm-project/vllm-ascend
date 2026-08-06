@@ -89,13 +89,27 @@ class TestProfilingChunkConfig(TestBase):
 
     def test_invalid_smooth_factor_raises(self):
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig({"smooth_factor": 0.0})
+            ProfilingChunkConfig(**{"smooth_factor": 0.0})
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig({"smooth_factor": 1.5})
+            ProfilingChunkConfig(**{"smooth_factor": 1.5})
 
     def test_invalid_min_chunk_raises(self):
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig({"min_chunk": 0})
+            ProfilingChunkConfig(**{"min_chunk": 0})
+
+    def test_need_timing_defaults_to_enabled(self):
+        # When need_timing is not provided, it defaults to enabled.
+        cfg = ProfilingChunkConfig(enabled=True)
+        self.assertTrue(cfg.need_timing)
+        cfg = ProfilingChunkConfig(enabled=False)
+        self.assertFalse(cfg.need_timing)
+
+    def test_need_timing_explicit_false_is_preserved(self):
+        # Regression: previously `need_timing if need_timing else enabled`
+        # turned explicit False back into enabled. The None sentinel must
+        # distinguish "not provided" from "explicitly False".
+        cfg = ProfilingChunkConfig(enabled=True, need_timing=False)
+        self.assertFalse(cfg.need_timing)
 
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())

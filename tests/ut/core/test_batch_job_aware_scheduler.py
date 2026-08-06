@@ -185,7 +185,7 @@ class TestJobDecodeEstimator(TestBase):
         self.assertEqual(result, 100)
 
     def test_observe_max_jobs_exceeded_raises(self):
-        cfg = BatchJobSchedConfig({"max_jobs": 2})
+        cfg = BatchJobSchedConfig(**{"max_jobs": 2})
         estimator = JobDecodeEstimator(cfg)
         estimator.observe("job1", 100)
         estimator.observe("job2", 100)
@@ -194,7 +194,7 @@ class TestJobDecodeEstimator(TestBase):
         self.assertIn("Maximum number of jobs", str(ctx.exception))
 
     def test_observe_max_jobs_zero_allows_unlimited(self):
-        cfg = BatchJobSchedConfig({"max_jobs": 51})
+        cfg = BatchJobSchedConfig(**{"max_jobs": 51})
         estimator = JobDecodeEstimator(cfg)
         for i in range(50):
             estimator.observe(f"job{i}", 100)
@@ -751,7 +751,7 @@ class TestBatchJobAwareRequestQueue(TestBase):
         self.assertTrue(self.queue)
 
     def test_max_jobs_exceeded_raises_in_get_or_create(self):
-        cfg = BatchJobSchedConfig({"max_jobs": 1})
+        cfg = BatchJobSchedConfig(**{"max_jobs": 1})
         with patch(
             "vllm.v1.core.sched.request_queue.RequestQueue.__init__",
             MagicMock(return_value=None),
