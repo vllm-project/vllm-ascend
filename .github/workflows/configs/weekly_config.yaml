@@ -200,3 +200,15 @@ a3:
         os: linux-aarch64-310p-4
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
 
+a5:
+#   multi_node:
+#     test_config:
+#       - name: Qwen3-235B-W8A8-EPLB
+#         size: 2
+#         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+  single_node:
+    test_config:
+      - name: Qwen3_235b_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_235b_w8a8_A5.yaml
+
