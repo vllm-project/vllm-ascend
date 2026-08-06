@@ -84,6 +84,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     resolve_remote_layer_idx,
     split_if_not_byte_contiguous,
     string_to_int64_hash,
+    transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
 
@@ -386,17 +387,33 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
         worker.vllm_config.model_config.is_deepseek_mla = False
+        worker.num_key_value_heads = 4
         worker.block_size_scale = [[] for _ in range(64)]
         worker.block_size_scale[3] = [2]
         worker.block_size_scale[63] = [1]
         index_group = {
             "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
+            "kv_cache_group_id": 0,
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 1},
             "layer_names": ["model.layers.3.attn.index_cache"],
+        }
+        main_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_group_id": 0,
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 4},
+            "layer_names": ["model.layers.3.attn"],
         }
 
         self.assertEqual(worker._get_kernel_block_scale([63]), 1)
         self.assertFalse(worker._group_use_mla_rank_routing(index_group))
         self.assertTrue(worker._group_skip_kv_reformat(index_group))
+        self.assertEqual(worker._get_attention_group_num_key_value_heads(index_group), 4)
+        self.assertTrue(
+            transfer_groups_need_independent_block_ids(
+                {0: (main_group, [3]), 1: (index_group, [63])},
+                worker.block_size_scale,
+            )
+        )
 
     def test_attention_group_uses_explicit_total_heads_for_unequal_pd_tp(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
