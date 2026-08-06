@@ -11,7 +11,7 @@ The documentation uses [MkDocs](https://www.mkdocs.org/) with the
 
 ```bash
 # Install documentation dependencies.
-pip install -r requirements-docs.txt
+pip install -r docs/requirements-docs.txt
 ```
 
 ### Build and serve (English)
