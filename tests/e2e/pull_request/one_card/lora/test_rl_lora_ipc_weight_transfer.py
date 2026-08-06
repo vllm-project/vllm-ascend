@@ -234,7 +234,7 @@ def _load_trainer_lora(source_adapter: Path) -> dict[str, torch.Tensor]:
 
     tensors: dict[str, torch.Tensor] = {}
     with safetensors.safe_open(source_weights, framework="pt") as source_file:
-        for tensor_name in source_file.keys():
+        for tensor_name in source_file:
             tensors[tensor_name] = source_file.get_tensor(tensor_name).to(device=trainer_device).contiguous()
     _log(f"loaded {len(tensors)} live LoRA tensors from {source_adapter.name}")
     return tensors
