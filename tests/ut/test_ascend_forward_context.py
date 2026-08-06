@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -80,6 +81,51 @@ def _patch_select_moe_comm_method_deps(
         "get_ascend_config",
         lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
     )
+
+
+def test_deepseek_v4_forward_publishes_input_ids_to_mrv2_context(monkeypatch):
+    from vllm.forward_context import ForwardContext, override_forward_context
+
+    from vllm_ascend.models import deepseek_v4
+
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(
+        deepseek_v4,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    model = SimpleNamespace(
+        hc_mult=1,
+        layers=[],
+        start_layer=0,
+        end_layer=0,
+        aux_hidden_state_layers=set(),
+        _mtp_hidden_buffer=torch.empty(3, 4),
+        hc_head=lambda hidden_states, *_: hidden_states.squeeze(1),
+        hc_head_fn=None,
+        hc_head_scale=None,
+        hc_head_base=None,
+        norm=lambda hidden_states: hidden_states,
+    )
+    input_ids = torch.tensor([11, 22, 33])
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        additional_kwargs={"flash_comm_v1_enabled": False},
+    )
+
+    with override_forward_context(forward_context):
+        deepseek_v4.DeepseekV4Model.forward(
+            model,
+            input_ids,
+            positions=torch.arange(input_ids.numel()),
+            intermediate_tensors=None,
+            inputs_embeds=torch.randn(input_ids.numel(), 4),
+        )
+
+    assert forward_context.additional_kwargs["input_ids"] is input_ids
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
