@@ -1112,6 +1112,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         is None (e.g. during ``dummy_run`` / profile run), greedy argmax is
         used and ``draft_probs`` is None.
         """
+        logger.info(
+            "[_sample_draft_from_logits] enable_prob=%s, sampling_md=%s, all_greedy=%s, logits=%s",
+            self._enable_probabilistic_draft_probs,
+            sampling_metadata is not None,
+            sampling_metadata.all_greedy if sampling_metadata is not None else "N/A",
+            logits.shape,
+        )
         if (
             sampling_metadata is None
             or not self._enable_probabilistic_draft_probs
@@ -1314,6 +1321,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
+            logger.info(
+                "[early_exit] method=%s, parallel_drafting=%s, num_spec=%d, "
+                "draft_probs_step0=%s, draft_token_ids=%s",
+                self.method,
+                self.parallel_drafting,
+                self.num_speculative_tokens,
+                draft_probs_step0.shape if draft_probs_step0 is not None else None,
+                draft_token_ids.shape,
+            )
             if self.method == "dspark":
                 if draft_probs_step0 is not None:
                     self._last_draft_probs = draft_probs_step0.view(

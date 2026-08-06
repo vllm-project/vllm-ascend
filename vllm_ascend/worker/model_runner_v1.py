@@ -1632,6 +1632,12 @@ class NPUModelRunner(GPUModelRunner):
             )
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
+                logger.info(
+                    "[propose_draft_token_ids] take_last_draft_probs=%s, "
+                    "shape=%s",
+                    draft_probs is not None,
+                    draft_probs.shape if draft_probs is not None else None,
+                )
                 if draft_probs is not None:
                     self._draft_probs = draft_probs
                     self._draft_prob_req_ids = self.input_batch.req_ids.copy()
