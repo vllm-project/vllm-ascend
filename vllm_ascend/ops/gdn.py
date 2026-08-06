@@ -58,7 +58,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             cls._fused_chunk_available = False
             return False
 
-        # TODO(2026/8/6): Remove this section of judgment once the new A5 CANN package is released.
+        # TODO(2026/8/6): The A5‑specific implementation is not available in the official release.
+        # Invoking npu_chunk_gated_delta_rule will result in errors.
+        # Remove this conditional block after the new A5 CANN package is released.
         try:
             # Minimal smoke call matching the op constraints (Dk == Dv == 128,
             # Nv % Nk == 0). B=1, one short sequence.
