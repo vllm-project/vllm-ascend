@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -153,6 +154,56 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
         worker.token_database.process_tokens.assert_not_called()
+
+    def test_layerwise_multi_group_layout_includes_mtp(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 4
+        worker.num_kv_cache_groups = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {"layerwise_num_shared_buffers": 2}
+        main_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        indexer_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+        )
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[
+                        *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
+                        "model.mtp.0.self_attn.attn",
+                    ],
+                    kv_cache_spec=main_spec,
+                ),
+                SimpleNamespace(
+                    layer_names=[
+                        *(f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in range(4)),
+                    ],
+                    kv_cache_spec=indexer_spec,
+                ),
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertEqual(worker.num_layers, 5)
+        self.assertEqual(worker.physical_layer_to_group_layers[4], [(0, 4)])
+        self.assertTrue(worker.layerwise_offload)
+        self.assertEqual(worker.independent_layers, [0])
+        self.assertEqual(len(worker.layer_load_tasks), 5)
+        self.assertEqual(len(worker.layer_save_tasks), 5)
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -1634,7 +1685,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         assert save_request.save_keys is not None
         partial_key = save_request.save_keys[0]
         self.assertIn("@partial@r1@0@1@20@", partial_key)
-        self.assertEqual(save_request.partial_save_gvas_by_group, [101])
+        self.assertEqual(save_request.partial_save_gva_per_group, [101])
         save_range = worker.layer_save_tasks[1][0].block_ranges[0]
         self.assertEqual(save_range.partial_block_index, 1)
 
@@ -1672,7 +1723,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertIn(partial_key, queried_keys)
         self.assertNotIn(partial_key, worker._allocated_gvas)
-        self.assertEqual(load_request.partial_load_gvas_by_group, [202])
+        self.assertEqual(load_request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.layer_load_tasks[0], [])
         block_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual(
@@ -1704,6 +1755,91 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+
+    def test_partial_lease_retries_until_snapshot_is_readable(self):
+        worker = self._make_gva_worker()
+        full_info = MagicMock()
+        full_info.size.return_value = 64
+        full_info.gva_list.return_value = [201]
+        partial_info = MagicMock()
+        partial_info.size.return_value = 64
+        partial_info.gva_list.return_value = [202]
+        worker.m_store.batch_get_key_info.return_value = [
+            full_info,
+            partial_info,
+        ]
+        worker.m_store.batch_add_lease.side_effect = [
+            [0, -3101],
+            [0],
+        ]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            target_token_len=24,
+            block_ids=[7, 8],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=20,
+                kvpool_cached_tokens=20,
+                can_load=True,
+            ),
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep") as sleep:
+            worker._prepare_load_gvas([request])
+
+        partial_key = worker._make_layerwise_partial_key(request, 0, 1, 20)
+        self.assertEqual(
+            worker.m_store.batch_add_lease.call_args_list[1].args[0],
+            [partial_key],
+        )
+        sleep.assert_called_once()
+        self.assertEqual(request.load_keys, [worker._make_layerwise_gva_key(0, "h0"), partial_key])
+        self.assertEqual(request.partial_load_gva_per_group, [202])
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
+    def test_multi_group_load_failure_stops_before_forward(self):
+        worker = self._make_gva_worker(2)
+        valid_info = MagicMock()
+        valid_info.size.return_value = 64
+        valid_info.gva_list.return_value = [201]
+        missing_info = MagicMock()
+        missing_info.size.return_value = 0
+        missing_info.gva_list.return_value = []
+        worker.m_store.batch_get_key_info.side_effect = [
+            [valid_info],
+            [missing_info],
+        ]
+        worker.m_store.batch_add_lease.return_value = [0]
+        request = self._make_gva_request(
+            num_groups=2,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "multi-group KV load failed",
+        ):
+            worker._prepare_load_gvas([request])
+
+        group0_key = worker._make_layerwise_gva_key(0, "h0")
+        worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
+
+    def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
+        worker = self._make_worker()
+
+        self.assertEqual(
+            worker._extract_physical_layer_index(
+                "mtp.layers.0.self_attn",
+            ),
+            worker.num_layers,
+        )
 
     def test_evicted_allocated_gva_is_reallocated(self):
         worker = self._make_gva_worker()
@@ -1738,8 +1874,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 kvpool_cached_tokens=33,
                 can_load=True,
             ),
-            partial_save_gvas_by_group=[301],
-            partial_load_gvas_by_group=[302],
+            partial_save_gva_per_group=[301],
+            partial_load_gva_per_group=[302],
         )
 
         worker._process_save_for_layer_batch([request], 1)
