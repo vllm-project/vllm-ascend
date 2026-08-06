@@ -107,12 +107,12 @@ class MooncakePPTransferMetadata:
 
 @dataclass(frozen=True)
 class MooncakeTransferMetadataGroups:
-    """All worker transfer metadata exposed by one DP scheduler."""
+    """PP-grouped worker transfer metadata exposed by one DP scheduler."""
 
     engine_id: str
     scheduler_host: str
     scheduler_port: int
-    metadata_by_tp_rank: dict[int, dict[int, MooncakeTransferMetadata]]
+    metadata_by_pp_rank: dict[int, MooncakePPTransferMetadata]
 
 
 @dataclass
