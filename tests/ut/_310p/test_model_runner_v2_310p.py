@@ -9,7 +9,9 @@ import pytest
 import torch
 from vllm.model_executor.triton_dispatcher import _get_kernel_impl
 from vllm.sampling_params import SamplingParams
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
@@ -133,6 +135,47 @@ def test_first_release_config_rejects_expert_parallelism() -> None:
 
     with pytest.raises(NotImplementedError, match="Expert parallelism"):
         NPUModelRunner310V2._validate_first_release_config(config)
+
+
+def test_v2_allocates_attention_kv_cache_directly_as_nz() -> None:
+    spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    num_blocks = 2
+    layer_name = "model.layers.0.self_attn.attn"
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=num_blocks * spec.page_size_bytes,
+                shared_by=[layer_name],
+            )
+        ],
+        num_blocks=num_blocks,
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.attn_groups = [[SimpleNamespace(backend=AscendAttentionBackend310, layer_names=[layer_name])]]
+    runner.kernel_block_sizes = [128]
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.device = torch.device("cpu")
+    k_cache = MagicMock()
+    v_cache = MagicMock()
+
+    with patch("torch_npu.empty_with_format", side_effect=[k_cache, v_cache]) as empty_with_format:
+        caches = runner._allocate_kv_cache_tensors_310p(kv_cache_config, {})
+
+    expected_shape = (num_blocks, 64, 128, 16)
+    assert caches[layer_name] == (k_cache, v_cache)
+    assert empty_with_format.call_count == 2
+    empty_with_format.assert_any_call(
+        size=expected_shape,
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+        acl_format=29,
+    )
 
 
 def test_first_release_sampler_accepts_only_greedy() -> None:

@@ -3,20 +3,43 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from typing import Any
+
 import numpy as np
 import torch
+import torch_npu
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_ssu_backend
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers, init_attn_backend
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.kv_connector import get_kv_connector
+from vllm.v1.worker.utils import bind_kv_cache
+
+from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 
 # Register 310P kernel implementations only when the V2 runner is imported.
 from vllm_ascend._310p.worker.v2 import kernel_registry as kernel_registry
 from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
+from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 
 
 class NPUModelRunner310V2(NPUModelRunner):
@@ -63,6 +86,191 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Async scheduling is outside the 310P Model Runner V2 first-release scope.")
         if getattr(vllm_config.model_config, "enable_sleep_mode", False):
             raise NotImplementedError("Sleep mode is outside the 310P Model Runner V2 first-release scope.")
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """Initialize 310P V2 KV cache directly in its required formats."""
+        kv_cache_config = deepcopy(kv_cache_config)
+        self.kv_cache_config = kv_cache_config
+
+        block_table_max_model_len = self.max_model_len
+        if self.is_encoder_decoder:
+            block_table_max_model_len = max(
+                block_table_max_model_len,
+                getattr(self.model_config.hf_config, "max_source_positions", 0),
+            )
+
+        block_sizes = []
+        max_num_blocks_per_group = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            block_sizes.append(spec.block_size)
+            max_num_blocks = cdiv(block_table_max_model_len, spec.block_size * self.dcp_size)
+            if spec.block_size <= 128:
+                alignment = 128 // spec.block_size
+                max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
+            if isinstance(spec, MambaSpec):
+                max_num_blocks = (
+                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
+                ) + spec.num_speculative_blocks
+            max_num_blocks_per_group.append(max_num_blocks)
+
+        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
+            self.kv_cache_config,
+            self.vllm_config,
+            self.device,
+        )
+        self.block_tables = Ascend310PBlockTables(
+            block_sizes=block_sizes,
+            max_num_reqs=self.max_num_reqs,
+            max_num_batched_tokens=self.max_num_tokens,
+            max_num_blocks_per_group=max_num_blocks_per_group,
+            device=self.device,
+            kernel_block_sizes=self.kernel_block_sizes,
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
+            cp_interleave=self.cp_interleave,
+        )
+        initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
+
+        cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+            attn_cg_support.min_cg_support,
+            attn_cg_support.min_cg_attn_backend,
+            self.uniform_decode_query_len,
+            self.parallel_config.tensor_parallel_size,
+            self.kv_cache_config,
+            self.max_num_reqs,
+        )
+        self.cudagraph_manager = self.aclgraph_manager_cls(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            self.decode_query_len,
+            self,
+        )
+        if self.speculator is not None:
+            self.speculator.init_cudagraph_manager(cudagraph_mode)
+        check_attention_cp_compatibility(self.vllm_config)
+
+        shared_layers = get_shared_kv_cache_layers(self.vllm_config)
+        kv_caches_dict = self._allocate_kv_cache_tensors_310p(kv_cache_config, shared_layers)
+        self.kv_caches: list[torch.Tensor | list[torch.Tensor]] = []
+        bind_kv_cache(
+            kv_caches_dict,
+            self.compilation_config.static_forward_context,
+            self.kv_caches,
+        )
+        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self.pcp_manager = maybe_build_ascend_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            self.req_states,
+            self.block_tables,
+        )
+
+    def _allocate_kv_cache_tensors_310p(
+        self,
+        kv_cache_config: KVCacheConfig,
+        shared_layers: dict[str, str],
+    ) -> dict[str, Any]:
+        """Allocate attention caches as NZ and hybrid state caches as ND."""
+        layer_specs: dict[str, KVCacheSpec] = {}
+        layer_group_ids: dict[str, int] = {}
+        for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_specs[layer_name] = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_specs[layer_name] = group_spec
+                layer_group_ids[layer_name] = group_id
+
+        layer_backends = {
+            layer_name: group.backend
+            for groups in self.attn_groups
+            for group in groups
+            for layer_name in group.layer_names
+        }
+        kv_caches: dict[str, Any] = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            layer_names = [name for name in kv_cache_tensor.shared_by if name not in shared_layers]
+            if not layer_names:
+                continue
+            layer_name = layer_names[0]
+            kv_cache_spec = layer_specs[layer_name]
+            assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+            num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+            assert num_blocks >= kv_cache_config.num_blocks
+
+            if isinstance(kv_cache_spec, AttentionSpec):
+                backend = layer_backends[layer_name]
+                if not issubclass(backend, AscendAttentionBackend310):
+                    raise TypeError(f"310P attention layer {layer_name} selected unexpected backend {backend}.")
+                group_id = layer_group_ids[layer_name]
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    kernel_block_size = kv_cache_spec.storage_block_size
+                else:
+                    kernel_block_size = self.kernel_block_sizes[group_id]
+                blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+                kv_cache_shape = backend.get_kv_cache_shape(
+                    num_blocks * blocks_per_kv_block,
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    self.cache_config.cache_dtype,
+                )
+                head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
+                if head_size_v != kv_cache_spec.head_size:
+                    raise NotImplementedError("310P V2 does not support asymmetric K/V head sizes.")
+                k_shape = v_shape = kv_cache_shape[1:]
+                k_cache = torch_npu.empty_with_format(
+                    size=k_shape,
+                    dtype=kv_cache_spec.dtype,
+                    device=self.device,
+                    acl_format=ACL_FORMAT_FRACTAL_NZ,
+                )
+                v_cache = torch_npu.empty_with_format(
+                    size=v_shape,
+                    dtype=kv_cache_spec.dtype,
+                    device=self.device,
+                    acl_format=ACL_FORMAT_FRACTAL_NZ,
+                )
+                cache = (k_cache, v_cache)
+            elif isinstance(kv_cache_spec, MambaSpec):
+                raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                state_tensors = []
+                storage_offset_bytes = 0
+                for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    dtype_size = get_dtype_size(dtype)
+                    elements_per_page = kv_cache_spec.page_size_bytes // dtype_size
+                    target_shape = (num_blocks, *shape)
+                    stride = torch.empty(target_shape).stride()
+                    state_tensors.append(
+                        torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=(elements_per_page, *stride[1:]),
+                            storage_offset=storage_offset_bytes // dtype_size,
+                        )
+                    )
+                    storage_offset_bytes += stride[0] * dtype_size
+                cache = state_tensors
+            else:
+                raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}")
+
+            for name in layer_names:
+                kv_caches[name] = cache
+
+        for layer_name, target_layer_name in shared_layers.items():
+            kv_caches[layer_name] = kv_caches[target_layer_name]
+
+        expected_layers = {
+            layer_name
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+            for layer_name in kv_cache_group.layer_names
+        }
+        assert expected_layers == set(kv_caches), "Some 310P KV cache layers were not initialized."
+        return kv_caches
 
     def _prepare_prefill_inputs(
         self,
