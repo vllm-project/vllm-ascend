@@ -124,10 +124,10 @@ def build_attn_metadata(
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
-    # Keep the MRv1 distinction between the tokens scheduled by the scheduler
-    # and the (possibly padded) model input. Upstream speculative-decoding
-    # callers do not provide these Ascend-specific fields, where both values
-    # correctly fall back to ``num_tokens``.
+    # Upstream speculative-decoding callers do not provide Ascend's separate
+    # scheduled-token and padded-input-token counts. Without these fields,
+    # ``num_tokens`` is the only available count and correctly serves as both
+    # the actual token count and the model input token count.
     if num_actual_tokens is None:
         num_actual_tokens = num_tokens
     if num_input_tokens is None:
@@ -135,7 +135,7 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     # DSA metadata is shared by the ratio-specific cache groups for one model
-    # execution. Keep the cache at the batch-builder scope, just as MRV1 does,
+    # execution. Keep the cache at the batch-builder scope,
     # so each DSA builder can reuse the split results and SAS metadata produced
     # by earlier groups in this invocation.
     prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
@@ -264,7 +264,6 @@ def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCac
 
 
 def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
-    """Return whether MRV2 needs the DeepSeek V4 DSA cache layout."""
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None) if model_config else None
     return hf_config is not None and hasattr(hf_config, "compress_ratios")
@@ -292,7 +291,6 @@ def _adjust_dsv4_kv_layout(
     page_size_bytes: int,
     overlap_full_kv_cache: bool = False,
 ) -> list[torch.Tensor]:
-    """Build the DSA views using MRV1's per-page physical layout."""
     caches = []
     base_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size()
     offset_bytes = base_offset_bytes
@@ -382,9 +380,8 @@ def _allocate_kv_cache(
     shared_layers: dict[str, str],
     device: torch.device,
 ) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
-    """Allocate raw KV cache buffers for MRV2."""
     vllm_config = get_current_vllm_config()
-    use_dsv4_layout = _is_dsv4_model(vllm_config)
+    is_dsv4_model = _is_dsv4_model(vllm_config)
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
@@ -393,9 +390,8 @@ def _allocate_kv_cache(
         if not kv_cache_tensor.shared_by:
             continue
 
-        if use_dsv4_layout:
-            # Preserve MRV1's DSA ownership: one physical tensor per cache
-            # group. DSA reshapes it with its own page-strided layout below.
+        if is_dsv4_model:
+            # DSA reshapes it with its own page-strided layout below.
             if vllm_config.kv_transfer_config is None:
                 raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
             else:
@@ -413,7 +409,7 @@ def _allocate_kv_cache(
         example_spec = layer_kv_cache_spec[example_layer_name]
         assert isinstance(example_spec, AttentionSpec)
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
-        if enable_fa_quant(vllm_config, example_layer_name):
+        if enable_fa_quant(vllm_config):
             k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(example_layer_name, [k_dim, v_dim])
         else:
             k_factor, v_factor = calc_split_factor([k_dim, v_dim])
@@ -448,12 +444,11 @@ def _reshape_kv_cache_v2(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, Any]:
-    """Reshape MRV2 caches, preserving MRV1's DSA-specific path."""
     if kv_cache_config is None:
-        raise ValueError("MRV2 DSA cache reshaping requires KVCacheConfig.")
+        raise ValueError("Reshape KV cache requires KVCacheConfig.")
 
     vllm_config = get_current_vllm_config()
-    use_dsv4_layout = _is_dsv4_model(vllm_config)
+    is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
 
@@ -474,7 +469,7 @@ def _reshape_kv_cache_v2(
             assert isinstance(kv_cache_spec, AttentionSpec)
 
             raw_cache = kv_cache_raw_tensors[layer_name]
-            if use_dsv4_layout and isinstance(
+            if is_dsv4_model and isinstance(
                 kv_cache_spec,
                 (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
             ):
@@ -518,7 +513,7 @@ def _reshape_kv_cache_v2(
                 )
 
             k_dtype = v_dtype = kv_cache_spec.dtype
-            if enable_fa_quant(vllm_config, layer_name):
+            if enable_fa_quant(vllm_config):
                 k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
                     layer_name,
                     kv_cache_spec.dtype,
