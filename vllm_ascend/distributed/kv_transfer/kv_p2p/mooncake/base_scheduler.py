@@ -47,13 +47,9 @@ class MooncakeBaseConnectorScheduler:
 
         self.vllm_config = vllm_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            self.kv_transfer_config.is_kv_consumer
-            == self.kv_transfer_config.is_kv_producer
-        ):
+        if self.kv_transfer_config.is_kv_consumer == self.kv_transfer_config.is_kv_producer:
             raise ValueError(
-                "Mooncake scheduler requires exactly one KV transfer role, "
-                f"got {self.kv_transfer_config.kv_role!r}"
+                f"Mooncake scheduler requires exactly one KV transfer role, got {self.kv_transfer_config.kv_role!r}"
             )
         self.kv_cache_config = kv_cache_config
         self.engine_id = engine_id
@@ -70,10 +66,7 @@ class MooncakeBaseConnectorScheduler:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        assert self.pcp_size == 1, (
-            "Mooncake temporarily requires prefill context parallel size 1, "
-            f"got {self.pcp_size}"
-        )
+        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.max_device_id = (
             self.tp_size
@@ -87,9 +80,7 @@ class MooncakeBaseConnectorScheduler:
         # Keep one scheduler control port per DP rank immediately after that
         # range so it cannot collide with a worker handshake socket.
         self.side_channel_port = (
-            self.kv_transfer_config.kv_port
-            + self.max_device_id
-            + vllm_config.parallel_config.data_parallel_rank
+            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_rank
         )
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -218,5 +209,6 @@ class MooncakeBaseConnectorScheduler:
     ) -> None:
         """Handle the legacy port-offset-keyed handshake entry point."""
         self.set_xfer_handshake_metadata_from_workers(metadata)
+
 
 __all__ = ["MooncakeBaseConnectorScheduler"]

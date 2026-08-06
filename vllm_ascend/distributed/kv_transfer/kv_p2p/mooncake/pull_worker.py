@@ -88,15 +88,9 @@ class MooncakePullRecvingThread(threading.Thread):
 
         self.use_mla = self.model_config.is_deepseek_mla
         hf_text_config = self.model_config.hf_text_config
-        self.num_key_value_heads = getattr(
-            hf_text_config, "num_key_value_heads", 0
-        )
+        self.num_key_value_heads = getattr(hf_text_config, "num_key_value_heads", 0)
         speculative_config = vllm_config.speculative_config
-        self.num_speculative_tokens = (
-            speculative_config.num_speculative_tokens
-            if speculative_config is not None
-            else 0
-        )
+        self.num_speculative_tokens = speculative_config.num_speculative_tokens if speculative_config is not None else 0
 
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -108,17 +102,12 @@ class MooncakePullRecvingThread(threading.Thread):
         self.pcp_size = pcp_size
         self.dcp_rank = dcp_rank
         self.dcp_size = dcp_size
-        assert self.pcp_size == 1, (
-            "Mooncake pull worker temporarily requires pcp_size=1, "
-            f"got {self.pcp_size}"
-        )
+        assert self.pcp_size == 1, f"Mooncake pull worker temporarily requires pcp_size=1, got {self.pcp_size}"
         self.device = device
         self.ready_event = ready_event
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
-        self.remote_metadata: SizedDict[
-            str, dict[int, MooncakePPTransferMetadata]
-        ] = SizedDict()
+        self.remote_metadata: SizedDict[str, dict[int, MooncakePPTransferMetadata]] = SizedDict()
         self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
@@ -156,14 +145,9 @@ class MooncakePullRecvingThread(threading.Thread):
         self.ready_event.set()
         while True:
             remote_engine_id, requests = self.request_queue.get()
-            request_endpoints = {
-                (request.remote_host, request.remote_port)
-                for request in requests.values()
-            }
+            request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
-                remote_host, remote_port = self._get_remote_endpoint(
-                    request_endpoints
-                )
+                remote_host, remote_port = self._get_remote_endpoint(request_endpoints)
                 self._handle_requests(
                     remote_engine_id,
                     remote_host,
@@ -195,8 +179,7 @@ class MooncakePullRecvingThread(threading.Thread):
     ) -> tuple[str, int]:
         if len(endpoints) != 1:
             raise ValueError(
-                "Requests for one remote engine must share one scheduler "
-                f"endpoint, got {sorted(endpoints)}"
+                f"Requests for one remote engine must share one scheduler endpoint, got {sorted(endpoints)}"
             )
         return next(iter(endpoints))
 
@@ -223,9 +206,7 @@ class MooncakePullRecvingThread(threading.Thread):
                 f"{expected_engine_id!r}, got {metadata.engine_id!r}"
             )
         if not metadata.metadata_by_pp_rank:
-            raise ValueError(
-                "Mooncake producer scheduler returned no PP metadata"
-            )
+            raise ValueError("Mooncake producer scheduler returned no PP metadata")
 
         empty_pp_ranks = [
             pp_rank
@@ -234,8 +215,7 @@ class MooncakePullRecvingThread(threading.Thread):
         ]
         if empty_pp_ranks:
             raise ValueError(
-                "Mooncake producer scheduler returned no TP metadata for "
-                f"PP ranks {sorted(empty_pp_ranks)}"
+                f"Mooncake producer scheduler returned no TP metadata for PP ranks {sorted(empty_pp_ranks)}"
             )
 
         invalid_tp_ranks = {
@@ -245,10 +225,8 @@ class MooncakePullRecvingThread(threading.Thread):
             if tp_rank < 0 or tp_rank >= pp_metadata.tp_size
         }
         if invalid_tp_ranks:
-            raise ValueError(
-                "Mooncake producer scheduler returned invalid TP ranks "
-                f"{sorted(invalid_tp_ranks)}"
-            )
+            raise ValueError(f"Mooncake producer scheduler returned invalid TP ranks {sorted(invalid_tp_ranks)}")
+
     def _get_remote_metadata(
         self,
         remote_engine_id: str,
@@ -272,8 +250,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
         if not metadata_bytes:
             raise RuntimeError(
-                "Mooncake producer scheduler returned no transfer metadata "
-                f"for engine {remote_engine_id!r} from {path}"
+                f"Mooncake producer scheduler returned no transfer metadata for engine {remote_engine_id!r} from {path}"
             )
 
         transfer_metadata = self.decoder.decode(metadata_bytes)
@@ -338,9 +315,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             assert self._recving_thread is not None
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
-                requests = request_groups.setdefault(
-                    request_metadata.remote_engine_id, {}
-                )
+                requests = request_groups.setdefault(request_metadata.remote_engine_id, {})
                 requests[request_id] = request_metadata
 
             for remote_engine_id, requests in request_groups.items():
@@ -349,9 +324,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Return requests with completed receive and send operations."""
         finished_recving = (
-            self._recving_thread.get_and_clear_finished_requests()
-            if self._recving_thread is not None
-            else set()
+            self._recving_thread.get_and_clear_finished_requests() if self._recving_thread is not None else set()
         )
         return set(), finished_recving
 

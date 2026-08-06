@@ -101,8 +101,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 pp_rank, tp_rank = metadata_key
             else:
                 raise ValueError(
-                    "Mooncake handshake metadata key must be tp_rank or "
-                    f"(pp_rank, tp_rank), got {metadata_key!r}"
+                    f"Mooncake handshake metadata key must be tp_rank or (pp_rank, tp_rank), got {metadata_key!r}"
                 )
 
             if not isinstance(rank_metadata, MooncakeTransferMetadata):
@@ -118,10 +117,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
             workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {})
             if tp_rank in workers_by_tp_rank:
-                raise ValueError(
-                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, "
-                    f"TP rank {tp_rank}"
-                )
+                raise ValueError(f"Duplicate Mooncake metadata for PP rank {pp_rank}, TP rank {tp_rank}")
             workers_by_tp_rank[tp_rank] = rank_metadata
 
         expected_pp_ranks = set(range(self.pp_size))
@@ -150,9 +146,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         )
         expected_tp_ranks = set(range(self.tp_size))
         merged: dict[int, MooncakePPTransferMetadata] = {}
-        for pp_rank, workers_by_tp_rank in sorted(
-            workers_by_pp_rank.items()
-        ):
+        for pp_rank, workers_by_tp_rank in sorted(workers_by_pp_rank.items()):
             if set(workers_by_tp_rank) != expected_tp_ranks:
                 raise ValueError(
                     "Mooncake worker metadata has incomplete TP ranks for "
@@ -173,8 +167,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 mismatched_fields = [
                     field_name
                     for field_name in common_fields
-                    if getattr(worker_metadata, field_name)
-                    != getattr(reference, field_name)
+                    if getattr(worker_metadata, field_name) != getattr(reference, field_name)
                 ]
                 if mismatched_fields:
                     raise ValueError(
@@ -201,15 +194,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 metadata_by_tp_rank={
                     tp_rank: MooncakeTPTransferMetadata(
                         te_rpc_port=worker_metadata.te_rpc_port,
-                        kv_caches_base_addr=(
-                            worker_metadata.kv_caches_base_addr
-                        ),
+                        kv_caches_base_addr=(worker_metadata.kv_caches_base_addr),
                         local_ip=worker_metadata.local_ip,
                         handshake_port=worker_metadata.handshake_port,
                     )
-                    for tp_rank, worker_metadata in sorted(
-                        workers_by_tp_rank.items()
-                    )
+                    for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items())
                 },
             )
         return merged
@@ -260,9 +249,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             try:
                 msg = decoder.decode(payload[0])
                 if msg and msg[0] == GET_META_MSG:
-                    sock.send_multipart(
-                        (identity, b"", self.encoded_metadata)
-                    )
+                    sock.send_multipart((identity, b"", self.encoded_metadata))
                 elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
                     self._handle_finished_request(str(msg[1]))
                     sock.send_multipart((identity, b"", ACK_MSG))
@@ -377,11 +364,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
-        if (
-            not self.kv_transfer_config.is_kv_producer
-            or not metadata
-            or self._sending_thread is not None
-        ):
+        if not self.kv_transfer_config.is_kv_producer or not metadata or self._sending_thread is not None:
             return
 
         ready_event = threading.Event()
@@ -560,9 +543,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             remote = self._reqs_recv_info.pop(req_id, None)
             if remote is not None:
                 if self._recving_thread is None:
-                    raise RuntimeError(
-                        "Producer Mooncake scheduler received a receive-completion event"
-                    )
+                    raise RuntimeError("Producer Mooncake scheduler received a receive-completion event")
                 self._recving_thread.add_request(*remote)
 
         # P side: feed scheduler-received ACKs into vLLM's standard delayed
