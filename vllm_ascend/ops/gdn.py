@@ -35,58 +35,10 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
-    # Cached fused-op availability probe result, shared across all layers so the
-    # smoke call runs at most once per process. None = not probed yet.
-    _fused_chunk_available: bool | None = None
-
-    @classmethod
-    def _probe_fused_chunk(cls) -> bool:
-        """Whether ``torch_npu.npu_chunk_gated_delta_rule`` can actually be used.
-
-        The interface must exist AND a minimal smoke call must succeed (the op is
-        unavailable on some CANN builds / devices). Any failure disables the
-        fused path so we fall back to the Triton pipeline. The result is cached
-        on the class, so only the first layer runs the smoke call.
-        """
-        if cls._fused_chunk_available is not None:
-            return cls._fused_chunk_available
-
-        if not hasattr(torch_npu, "npu_chunk_gated_delta_rule"):
-            cls._fused_chunk_available = False
-            return False
-
-        try:
-            # Minimal smoke call matching the op constraints (Dk == Dv == 128,
-            # Nv % Nk == 0). B=1, one short sequence.
-            device = torch.npu.current_device()
-            dk = dv = 128
-            nk, nv, seqlen = 1, 1, 64
-            q = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
-            k = torch.zeros((seqlen, nk, dk), dtype=torch.bfloat16, device=device)
-            v = torch.zeros((seqlen, nv, dv), dtype=torch.bfloat16, device=device)
-            beta = torch.full((seqlen, nv), 0.5, dtype=torch.bfloat16, device=device)
-            g = torch.full((seqlen, nv), -0.1, dtype=torch.float32, device=device)
-            initial_state = torch.zeros((1, nv, dv, dk), dtype=torch.bfloat16, device=device)
-            actual_seq_lengths = torch.tensor([seqlen], dtype=torch.int32, device=device)
-            torch_npu.npu_chunk_gated_delta_rule(
-                q,
-                k,
-                v,
-                beta=beta,
-                initial_state=initial_state,
-                actual_seq_lengths=actual_seq_lengths,
-                scale=dk**-0.5,
-                g=g,
-            )
-            torch.npu.synchronize()
-            cls._fused_chunk_available = True
-        except Exception:
-            cls._fused_chunk_available = False
-        return cls._fused_chunk_available
-
     @staticmethod
     def _chunk_gated_delta_rule_fused(
         q: torch.Tensor,
@@ -506,10 +458,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            # Use the fused CANN operator when available (probed once, cached on
-            # the class) and applicable. It only supports the non-PCP case; fall
+            # Use the fused CANN operator when available. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
-            use_fused_chunk = AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1
+            use_fused_chunk = False
+            if hasattr(torch_npu, "npu_chunk_gated_delta_rule") and get_pcp_group().world_size == 1:
+                use_fused_chunk = True
+
+            # TODO(2026/8/6): Remove this section of judgment once the new A5 CANN package is released.
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                use_fused_chunk = False
+
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
