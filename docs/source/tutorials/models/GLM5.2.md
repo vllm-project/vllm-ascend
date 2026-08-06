@@ -308,7 +308,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#single-node
 **Notice:**
 This scenario enables `VLLM_ASCEND_ENABLE_FUSED_MC2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
-##### Prefill-Decode Disaggregation(A3)
+##### Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with 1P1D for better performance.
 
@@ -936,7 +936,7 @@ The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
 
-##### Prefill-Decode Disaggregation (A2)
+##### Prefill-Decode Disaggregation
 
 On Atlas 800 A2, where each node exposes 8 cards, the same global P/D topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode nodes hosting 2 DP ranks each (4 cards per rank). The `launch_online_dp.py` above is reused as-is. The prefill side enables FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP (`num_speculative_tokens=1` on prefill, `3` on decode). All IPs, NIC names, ports and weight paths below are placeholders.
 
