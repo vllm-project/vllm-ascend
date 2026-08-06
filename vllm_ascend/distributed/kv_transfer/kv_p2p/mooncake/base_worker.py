@@ -22,7 +22,10 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
     KVCacheSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -158,6 +161,24 @@ class MooncakeBaseConnectorWorker:
                 self.layer_name_to_group_index[layer_name] = group_index
                 self.layer_name_to_spec_index[layer_name] = spec_index
 
+    @staticmethod
+    def _get_spec_transfer_properties(
+        spec: KVCacheSpec,
+    ) -> tuple[int, int | None]:
+        """Return the block size and head size required for KV transfer."""
+        if not isinstance(spec, AttentionSpec):
+            return spec.block_size, None
+
+        if isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            head_size_v = getattr(spec, "head_size_v", spec.head_size)
+            if spec.head_size != head_size_v:
+                raise NotImplementedError(
+                    "Mooncake does not support different K/V head sizes for "
+                    f"{type(spec).__name__}: K={spec.head_size}, V={head_size_v}"
+                )
+
+        return spec.block_size, spec.head_size
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -167,6 +188,12 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
+        spec_properties = [
+            self._get_spec_transfer_properties(spec)
+            for spec in self.kv_cache_specs
+        ]
+        spec_block_sizes = [properties[0] for properties in spec_properties]
+        spec_head_sizes = [properties[1] for properties in spec_properties]
 
         layer_names: list[str] = []
         group_indices: list[int] = []
@@ -228,6 +255,8 @@ class MooncakeBaseConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             block_size=self.block_size,
             num_blocks=self.num_blocks,
+            spec_block_sizes=spec_block_sizes,
+            spec_head_sizes=spec_head_sizes,
             layer_names=layer_names,
             group_indices=group_indices,
             spec_indices=spec_indices,

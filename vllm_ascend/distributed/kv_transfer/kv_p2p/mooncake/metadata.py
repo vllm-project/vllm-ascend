@@ -24,6 +24,8 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     te_rpc_port: int
     block_size: int
     num_blocks: int
+    spec_block_sizes: list[int]
+    spec_head_sizes: list[int | None]
     layer_names: list[str]
     group_indices: list[int]
     spec_indices: list[int]
@@ -70,6 +72,37 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
                         f"Mooncake transfer metadata for layer {layer_name!r} "
                         f"has {len(values)} {field_name}, expected {num_addrs}."
                     )
+
+
+@dataclass(frozen=True)
+class MooncakeTPTransferMetadata:
+    """TP-private connection and KV-cache address information."""
+
+    te_rpc_port: int
+    kv_caches_base_addr: list[list[int]]
+    local_ip: str
+    handshake_port: int
+
+
+@dataclass(frozen=True)
+class MooncakePPTransferMetadata:
+    """Metadata shared by all TP workers belonging to one PP rank."""
+
+    block_size: int
+    num_blocks: int
+    spec_block_sizes: list[int]
+    spec_head_sizes: list[int | None]
+    layer_names: list[str]
+    group_indices: list[int]
+    spec_indices: list[int]
+    block_strides: list[list[int]]
+    block_lens: list[list[int]]
+    block_shapes: list[list[tuple[int, ...]]]
+    block_size_scales: list[list[int]]
+    pcp_size: int
+    dcp_size: int
+    tp_size: int
+    metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata]
 
 
 @dataclass(frozen=True)
@@ -130,6 +163,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 __all__ = [
     "MooncakeConnectorMetadata",
+    "MooncakePPTransferMetadata",
+    "MooncakeTPTransferMetadata",
     "MooncakeTransferMetadata",
     "MooncakeTransferMetadataGroups",
     "ReqMeta",

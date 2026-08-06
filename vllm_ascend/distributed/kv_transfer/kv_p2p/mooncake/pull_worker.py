@@ -12,14 +12,15 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
-from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakePPTransferMetadata,
+    MooncakeTPTransferMetadata,
     MooncakeTransferMetadata,
     MooncakeTransferMetadataGroups,
     ReqMeta,
@@ -30,7 +31,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
-from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer
 
 logger = init_logger(__name__)
 
@@ -74,6 +74,8 @@ class MooncakePullRecvingThread(threading.Thread):
         self.local_metadata = local_metadata
 
         self.block_size = local_metadata.block_size
+        self.spec_block_sizes = local_metadata.spec_block_sizes
+        self.spec_head_sizes = local_metadata.spec_head_sizes
         self.layer_names = local_metadata.layer_names
         self.group_indices = local_metadata.group_indices
         self.spec_indices = local_metadata.spec_indices
@@ -111,7 +113,9 @@ class MooncakePullRecvingThread(threading.Thread):
         self.ready_event = ready_event
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
-        self.remote_metadata: SizedDict = SizedDict()
+        self.remote_metadata: SizedDict[
+            str, dict[int, MooncakePPTransferMetadata]
+        ] = SizedDict()
         self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
@@ -243,12 +247,91 @@ class MooncakePullRecvingThread(threading.Thread):
                 f"{expected_engine_id!r}, got {sorted(unexpected_engine_ids)!r}"
             )
 
+    @staticmethod
+    def _aggregate_remote_metadata(
+        metadata: MooncakeTransferMetadataGroups,
+    ) -> dict[int, MooncakePPTransferMetadata]:
+        """Deduplicate TP-invariant metadata and group worker endpoints by PP."""
+        workers_by_pp_rank: dict[int, dict[int, MooncakeTransferMetadata]] = {}
+        for tp_rank, workers_by_pp_rank_for_tp in metadata.metadata_by_tp_rank.items():
+            for pp_rank, worker_metadata in workers_by_pp_rank_for_tp.items():
+                workers_by_pp_rank.setdefault(pp_rank, {})[tp_rank] = worker_metadata
+
+        common_fields = (
+            "block_size",
+            "num_blocks",
+            "spec_block_sizes",
+            "spec_head_sizes",
+            "layer_names",
+            "group_indices",
+            "spec_indices",
+            "block_strides",
+            "block_lens",
+            "block_shapes",
+            "block_size_scales",
+            "pcp_size",
+            "dcp_size",
+            "tp_size",
+        )
+        expected_tp_ranks = set(metadata.metadata_by_tp_rank)
+        aggregated: dict[int, MooncakePPTransferMetadata] = {}
+        for pp_rank, workers_by_tp_rank in workers_by_pp_rank.items():
+            actual_tp_ranks = set(workers_by_tp_rank)
+            if actual_tp_ranks != expected_tp_ranks:
+                raise ValueError(
+                    "Mooncake producer metadata has incomplete TP workers for "
+                    f"PP rank {pp_rank}: expected {sorted(expected_tp_ranks)}, "
+                    f"got {sorted(actual_tp_ranks)}"
+                )
+
+            reference_tp_rank = min(workers_by_tp_rank)
+            reference = workers_by_tp_rank[reference_tp_rank]
+            for tp_rank, worker_metadata in workers_by_tp_rank.items():
+                mismatched_fields = [
+                    field_name
+                    for field_name in common_fields
+                    if getattr(worker_metadata, field_name) != getattr(reference, field_name)
+                ]
+                if mismatched_fields:
+                    raise ValueError(
+                        "Mooncake producer metadata differs across TP ranks "
+                        f"for PP rank {pp_rank}: TP {reference_tp_rank} and "
+                        f"TP {tp_rank} mismatch in {mismatched_fields}"
+                    )
+
+            aggregated[pp_rank] = MooncakePPTransferMetadata(
+                block_size=reference.block_size,
+                num_blocks=reference.num_blocks,
+                spec_block_sizes=reference.spec_block_sizes,
+                spec_head_sizes=reference.spec_head_sizes,
+                layer_names=reference.layer_names,
+                group_indices=reference.group_indices,
+                spec_indices=reference.spec_indices,
+                block_strides=reference.block_strides,
+                block_lens=reference.block_lens,
+                block_shapes=reference.block_shapes,
+                block_size_scales=reference.block_size_scales,
+                pcp_size=reference.pcp_size,
+                dcp_size=reference.dcp_size,
+                tp_size=reference.tp_size,
+                metadata_by_tp_rank={
+                    tp_rank: MooncakeTPTransferMetadata(
+                        te_rpc_port=worker_metadata.te_rpc_port,
+                        kv_caches_base_addr=(worker_metadata.kv_caches_base_addr),
+                        local_ip=worker_metadata.local_ip,
+                        handshake_port=worker_metadata.handshake_port,
+                    )
+                    for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items())
+                },
+            )
+        return aggregated
+
     def _get_remote_metadata(
         self,
         remote_engine_id: str,
         remote_host: str,
         remote_port: int,
-    ) -> MooncakeTransferMetadataGroups:
+    ) -> dict[int, MooncakePPTransferMetadata]:
         cached_metadata = self.remote_metadata.get(remote_engine_id)
         if cached_metadata is not None:
             return cached_metadata
@@ -270,8 +353,9 @@ class MooncakePullRecvingThread(threading.Thread):
                 f"for engine {remote_engine_id!r} from {path}"
             )
 
-        remote_metadata = self.decoder.decode(metadata_bytes)
-        self._validate_remote_metadata(remote_metadata, remote_engine_id)
+        transfer_metadata = self.decoder.decode(metadata_bytes)
+        self._validate_remote_metadata(transfer_metadata, remote_engine_id)
+        remote_metadata = self._aggregate_remote_metadata(transfer_metadata)
         self.remote_metadata[remote_engine_id] = remote_metadata
         return remote_metadata
 
@@ -299,12 +383,10 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             self._recving_thread = MooncakePullRecvingThread(
                 engine=self.engine,
                 vllm_config=self.vllm_config,
-                ascend_config=self.ascend_config,
                 kv_cache_config=self.kv_cache_config,
                 kv_cache_specs=self.kv_cache_specs,
                 layer_name_to_group_index=self.layer_name_to_group_index,
                 layer_name_to_spec_index=self.layer_name_to_spec_index,
-                kv_caches=self.kv_caches,
                 local_metadata=self.xfer_handshake_metadata,
                 tp_rank=self.tp_rank,
                 tp_size=self.tp_size,
