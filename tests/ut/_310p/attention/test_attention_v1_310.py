@@ -231,6 +231,22 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
 
 class TestAscendAttentionMetadataBuilder310(TestBase):
+    def test_build_keeps_host_seq_lens_for_prefill(self):
+        builder = object.__new__(AscendMetadataBuilder310Direct)
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.num_reqs = 2
+        common_attn_metadata.seq_lens = torch.tensor([3, 5, 0], dtype=torch.int32)
+
+        host_seq_lens = torch.tensor([3, 5], dtype=torch.int32)
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.seq_lens = host_seq_lens
+
+        with patch.object(AscendMetadataBuilder310Direct.__bases__[0], "build", return_value=metadata):
+            result = builder.build(0, common_attn_metadata)
+
+        assert result.seq_lens is host_seq_lens
+
     def test_build_binds_device_metadata_for_decode(self):
         builder = object.__new__(AscendMetadataBuilder310Direct)
         common_attn_metadata = MagicMock()

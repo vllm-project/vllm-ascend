@@ -1,6 +1,17 @@
 # 310P Model Runner V2 代码改动说明
 
-本文仅说明 310P Model Runner V2 第一版重构涉及的代码文件、改动内容和改动原因。
+本文说明 310P Model Runner V2 第一版重构及后续联调修复涉及的代码文件、改动内容和改动原因。
+
+## 问题与修复总览
+
+| 阶段 | 报错或问题 | 根因 | 修复位置 |
+| --- | --- | --- | --- |
+| 配置创建 | `Model Runner V2 requires Triton` | 上游在 Worker 创建前执行全局 `HAS_TRITON` 门禁 | `patch_use_v2_model_runner.py` |
+| KV Cache reshape | `shape ... is invalid for input of size ...` | 公共 reshape 逻辑把 NZ 尾部物理分形维度 `16` 误替换为逻辑 `head_size_v` | `worker/v2/attn_utils.py` |
+| KV Cache 算子 | `ReshapeAndCacheOperation CheckIniMatch Failed`，cache 实际为 ND | 对 raw tensor 执行 `view()` 只能改变逻辑 shape，不能生成 FRACTAL_NZ 物理格式 | `_310p/worker/v2/model_runner.py` |
+| ACLGraph 初始化 | `NPUModelRunner310V2` 缺少 `uniform_decode_query_len` | 当前配套 vLLM V2 接口版本只保证存在 `decode_query_len` | `_310p/worker/v2/model_runner.py` |
+| ACLGraph capture | `The pageable memory copy task does not support graph capture` | Decode metadata 使用 pageable CPU `seq_lens`，attention 在图内执行 H2D | `_310p/attention/metadata_builder.py` |
+| Eager prefill | `tensor.hostData is null` | 前一版 ACLGraph 修复无条件把 PrefillNoCache 的 host `seq_lens` 替换成了 NPU tensor | `_310p/attention/metadata_builder.py` |
 
 ## 1. 310P Worker 入口
 
@@ -325,3 +336,252 @@
   dispatcher 替换。
 - 310P 需要使用 scheduler CPU mirror 准备输入，不能从 device Tensor 反向 D2H。
 - 非 310P 默认实现仍调用原来的上游函数，保持原有调用语义。
+
+## 13. 非 MLA KV Cache 的 NZ shape 修复
+
+### `vllm_ascend/worker/v2/attn_utils.py`
+
+报错现象：
+
+```text
+RuntimeError: shape '[572, 64, 128, 128]' is invalid for input of size 74973184
+```
+
+错误发生在 `_reshape_kv_cache_v2()` 创建 `v_cache` view 时。
+
+改动内容：
+
+- 新增 `_get_non_mla_kv_cache_shapes()`，统一计算非 MLA K/V Cache shape。
+- 当 `head_size_v == head_size` 时，K/V 完整复用 backend 返回的物理 shape。
+- 只有 V 的逻辑 head size 确实与 K 不同时，才调整 V Cache 的最后一维。
+- `_reshape_kv_cache()` 和 `_reshape_kv_cache_v2()` 共同使用该 helper。
+
+改动原因：
+
+- 310P backend 返回的 KV Cache shape 为：
+
+  ```text
+  [2, num_blocks, num_kv_heads * head_size / 16, block_size, 16]
+  ```
+
+- 最后一维 `16` 是 FRACTAL_NZ 的物理分形维度，不是逻辑 `head_size`。
+- 原逻辑只要检测到 `head_size_v` 属性，就将最后一维 `16` 替换为
+  `head_size_v`。对于 K/V head size 相同的 Qwen 模型，这会无故扩大 V Cache
+  shape，导致目标 shape 的元素数与 raw storage 不一致。
+- 该修复保留所有 backend-specific 物理维度，同时继续兼容真正的非对称 K/V
+  head-size 模型。
+
+### `tests/ut/worker/test_attn_utils_v2.py`
+
+改动内容：
+
+- 增加 310P 风格 NZ shape 的回归测试。
+- 验证 K/V head size 相同时，尾部物理维度 `16` 不会被覆盖。
+- 验证 K/V head size 不同时仍生成独立的 V Cache shape。
+
+改动原因：
+
+- 防止公共 KV Cache reshape 后续再次将 backend 物理布局误判为逻辑布局。
+
+## 14. 310P V2 完整 KV Cache 初始化和 FRACTAL_NZ 分配
+
+### `vllm_ascend/_310p/worker/v2/model_runner.py`
+
+报错现象：
+
+```text
+ReshapeAndCacheOperation CheckIniMatch Failed
+Actual Inputs: key_cache(float16, nd), value_cache(float16, nd)
+Supported Combs: key_cache(float16, fractal_nz),
+                 value_cache(float16, fractal_nz)
+```
+
+随后出现的 ATB setup failure 和 Segmentation Fault 是算子参数校验失败后的次生错误，
+首要问题是传入的 KV Cache 格式为 ND，而不是 FRACTAL_NZ。
+
+改动内容：
+
+- 在 `NPUModelRunner310V2` 中完整覆盖 `initialize_kv_cache()`。
+- 深拷贝并保存 `KVCacheConfig`，避免修改 Engine 侧传入的配置对象。
+- 根据每个 KV Cache group 计算 block size 和最大 block 数。
+- 初始化 310P attention backend、kernel block size、310P BlockTables 和
+  ACLGraph manager。
+- 新增 `_allocate_kv_cache_tensors_310p()`：
+  - Attention KV Cache 使用 `torch_npu.empty_with_format()` 分别分配 K/V；
+  - ACL format 显式指定为 `ACL_FORMAT_FRACTAL_NZ`；
+  - shape 使用 `AscendAttentionBackend310.get_kv_cache_shape()` 的物理布局；
+  - Mamba/SSM state cache 保持 ND，并按 page storage 建立 `as_strided` view；
+  - 处理 shared KV Cache layer，确保共享层引用同一份 cache；
+  - 校验所有预期 layer 均已完成初始化。
+- 分配完成后继续执行 `bind_kv_cache()`、KV connector 初始化和 PCP manager
+  初始化，保持 V2 KV Cache 的完整生命周期。
+- 第一版明确拒绝 asymmetric K/V head size，避免在没有验证 310P NZ V Cache
+  布局前静默生成错误格式。
+
+改动原因：
+
+- `tensor.view()` 和 `reshape()` 只能改变逻辑 shape，不能将底层 ND storage
+  转换成 FRACTAL_NZ。
+- 310P `ReshapeAndCacheOperation` 的输入 key/value 是 ND，但目标 cache 和输出
+  cache 必须是 FRACTAL_NZ。
+- MRV1 在 KV Cache 初始化阶段直接按 NZ 格式分配；MRV2 若继续使用公共 raw
+  tensor reshape 路径，最终得到的仍然是 ND cache。
+- 因此不能只修正 shape，必须由 310P V2 runner 接管完整 KV Cache 初始化和
+  物理格式分配。
+
+### `tests/ut/_310p/test_model_runner_v2_310p.py`
+
+改动内容：
+
+- 增加 310P attention KV Cache 使用 FRACTAL_NZ 分配的测试。
+- 验证 K/V 分别通过 `torch_npu.empty_with_format()` 分配。
+- 验证传入的 shape 保留 NZ 尾部物理分形维度 `16`，并显式使用 ACL format 29。
+
+改动原因：
+
+- 防止后续重构重新退回 raw ND tensor 加 `view()` 的分配方式。
+- Mamba state、共享层、完整初始化生命周期仍需要在后续补充独立 UT，并在真实
+  310P 环境通过启动和请求验证。
+
+## 15. `uniform_decode_query_len` 上游版本兼容
+
+### `vllm_ascend/_310p/worker/v2/model_runner.py`
+
+报错现象：
+
+```text
+AttributeError: 'NPUModelRunner310V2' object has no attribute
+'uniform_decode_query_len'
+```
+
+错误发生在 `initialize_kv_cache()` 调用
+`resolve_cudagraph_mode_and_sizes()` 时。
+
+改动内容：
+
+- 新增 `_get_uniform_decode_query_len()`：
+
+  ```python
+  return getattr(self, "uniform_decode_query_len", self.decode_query_len)
+  ```
+
+- ACLGraph mode/size 解析统一调用该兼容方法。
+
+改动原因：
+
+- 不同 vLLM V2 开发版本对 uniform decode query length 的属性暴露存在差异。
+- 310P 代码最初参考了包含 `uniform_decode_query_len` 的版本，但实际配套版本只保证
+  `decode_query_len` 存在。
+- 对普通首版 decode，两者表达的都是图捕获使用的固定 decode query length，因此可在
+  属性不存在时安全回退。
+- 使用局部兼容 helper，不修改公共 MRV2，也不向 MRV1 注入新属性。
+
+### `tests/ut/_310p/test_model_runner_v2_310p.py`
+
+改动内容：
+
+- 验证存在 `uniform_decode_query_len` 时优先使用该值。
+- 验证属性不存在时回退到 `decode_query_len`。
+
+改动原因：
+
+- 同时覆盖新旧上游接口，防止后续升级 vLLM 时再次出现启动期属性错误。
+
+## 16. ACLGraph 内 pageable `seq_lens` H2D 修复
+
+### `vllm_ascend/_310p/attention/metadata_builder.py`
+
+报错现象：
+
+```text
+aclrtAllocatorGetByStream failed. Parameter stream is invalid.
+Asynchronous copy task failed.
+The pageable memory copy task does not support graph capture.
+```
+
+Python 栈指向：
+
+```python
+attn_metadata.seq_lens = attn_metadata.seq_lens.to(
+    device=query.device,
+    non_blocking=True,
+)
+```
+
+改动内容：
+
+- 在调用公共 builder 后，仅对 DecodeOnly、ChunkedPrefill、PrefillCacheHit 和
+  SpecDecoding 将以下字段绑定到 `AscendCommonAttentionMetadata` 的设备侧常驻
+  view：
+
+  ```python
+  attn_metadata.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+  attn_metadata.query_start_loc = (
+      common_attn_metadata.query_start_loc[: num_reqs + 1]
+  )
+  ```
+
+- DecodeOnly、ChunkedPrefill、PrefillCacheHit 和 SpecDecoding 使用相同的设备侧
+  输入 buffer。
+- PrefillNoCache 保留公共 builder 生成的 host `seq_lens`。
+- ChunkedPrefill 需要的 pinned host `query_lens_cpu` 逻辑保持不变。
+
+改动原因：
+
+- MRV2 已经在 `_prepare_pos_seq_lens()` 中把 CPU 长度写入预分配的
+  `input_buffers.seq_lens` NPU tensor。
+- 公共 Ascend metadata builder 为了 CPU metadata 计算，优先选择
+  `seq_lens_cpu`，而 MRV2 的该 tensor 来自普通 CPU/NumPy 共享内存，属于
+  pageable memory。
+- 修复前 310P builder 只在 ChunkedPrefill 和 SpecDecoding 中重新绑定设备
+  `seq_lens`；DecodeOnly 提前返回，导致 paged attention 在图内才执行
+  pageable CPU 到 NPU 的 `.to()`。
+- ACL Graph 不允许捕获 pageable H2D copy。应复用 graph capture 前已经更新的
+  NPU 常驻 buffer，而不是在 attention forward 内临时转换。
+- 不能对所有 attention state 无条件绑定设备 tensor。310P PrefillNoCache 进入
+  ATB SelfAttention encoder 路径，`seq_lens` 用于构造 host 参数；传入 NPU tensor
+  会使 ATB 报 `tensor.hostData is null`，并导致 eager prefill 失败。
+- 因此 metadata 必须保持分阶段契约：PrefillNoCache 使用 host `seq_lens`，paged
+  和 splitfuse 路径使用常驻 NPU `seq_lens`。
+- MRV1 的长度准备使用 pinned CPU mirror 和常驻 NPU `self.seq_lens`；本次修改让
+  MRV2 明确采用相同的 graph-safe 数据流。
+
+影响范围：
+
+- 代码位于 310P metadata builder，不改变其他 Ascend 机型的 builder。
+- 该 builder 也可能被 310P MRV1 使用；绑定到已存在的设备侧
+  `common_attn_metadata.seq_lens` 与原有算子输入语义一致，并减少一次潜在 H2D，
+  不改变 MRV1 的长度值和 KV Cache 行为。
+
+### `tests/ut/_310p/attention/test_attention_v1_310.py`
+
+改动内容：
+
+- 增加 DecodeOnly metadata 回归测试。
+- 验证 `seq_lens` 和 `query_start_loc` 与 common metadata 的设备侧 view
+  共享 storage，而不是使用父类构造的 CPU tensor。
+- 增加 PrefillNoCache 回归测试，验证其继续使用父类生成的 host `seq_lens`。
+
+改动原因：
+
+- 防止未来调整 splitfuse 分支时再次让 DecodeOnly 绕过设备 buffer 绑定，或把
+  PrefillNoCache 错误切换成设备 tensor。
+
+## 17. 联调后的数据流约束
+
+后续修改必须保持以下约束：
+
+1. 310P Attention KV Cache 必须在创建时就是 FRACTAL_NZ；不能依赖
+   `view()`、`reshape()` 或算子 forward 中的临时格式转换。
+2. K/V Cache shape 必须保留 backend 返回的物理分形维度；逻辑 head size
+   不能直接覆盖物理维度。
+3. ACLGraph capture/replay 使用的 `seq_lens`、`query_start_loc`、block table、
+   slot mapping 必须来自预分配的常驻 NPU buffer，并在进入图前原地更新。
+4. 图内不得出现 pageable CPU 到 NPU 的拷贝、临时设备 tensor 分配或依赖动态
+   Python 值的数据准备。
+5. 310P V2 的上游接口兼容应集中在 `_310p` 专用类中，避免改变其他设备和
+   310P MRV1 的执行路径。
+6. 每个运行时问题都必须补充对应 UT；NPU 环境还需分别验证 eager 和 ACLGraph
+   的真实请求，不能只以服务启动成功作为通过标准。
+7. 本任务后续每次代码修改都必须在同一轮同步更新本文档，记录改动文件、问题现象、
+   根因、实现方式、影响范围、测试结果和仍未验证的内容。
