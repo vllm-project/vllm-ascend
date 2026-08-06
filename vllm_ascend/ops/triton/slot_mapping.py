@@ -48,28 +48,25 @@ from vllm_ascend.ops.triton.compute_slot_mapping import _next_power_of_2
 @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
 def compute_slot_mapping_fused_kernel(
     # ---- scalar inputs (same for every program) -----------------------
-    num_tokens,                # int: actual number of tokens in the batch
-    max_num_tokens,            # int: max buffer size for padding
-
+    num_tokens,  # int: actual number of tokens in the batch
+    max_num_tokens,  # int: max buffer size for padding
     # ---- tensor inputs (shared across all groups / requests) ----------
-    query_start_loc_ptr,       # [num_reqs + 1], int32
-    positions_ptr,             # [num_tokens], int64
-
+    query_start_loc_ptr,  # [num_reqs + 1], int32
+    positions_ptr,  # [num_tokens], int64
     # ---- per-group parameter arrays [num_groups] (pre-built, cached) --
-    group_block_table_ptrs,    # [num_groups], int64  (raw data_ptr values)
-    group_block_table_strides, # [num_groups], int32
-    group_block_sizes,         # [num_groups], int32
-    group_slot_mapping_ptrs,   # [num_groups], int64  (raw data_ptr values)
-    group_kv_cache_block_sizes,# [num_groups], int32
-    group_blocks_per_kv,       # [num_groups], int32
-
+    group_block_table_ptrs,  # [num_groups], int64  (raw data_ptr values)
+    group_block_table_strides,  # [num_groups], int32
+    group_block_sizes,  # [num_groups], int32
+    group_slot_mapping_ptrs,  # [num_groups], int64  (raw data_ptr values)
+    group_kv_cache_block_sizes,  # [num_groups], int32
+    group_blocks_per_kv,  # [num_groups], int32
     # ---- compile-time constants ---------------------------------------
     TOTAL_CP_WORLD_SIZE: tl.constexpr,
     TOTAL_CP_RANK: tl.constexpr,
     CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
     PAD_ID: tl.constexpr,
-    TILE_BLOCK_SIZE: tl.constexpr,           # positions tile size (1024)
-    BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,   # window for block-table load
+    TILE_BLOCK_SIZE: tl.constexpr,  # positions tile size (1024)
+    BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,  # window for block-table load
 ):
     """
     2D-grid fused slot-mapping kernel.
@@ -92,16 +89,12 @@ def compute_slot_mapping_fused_kernel(
     num_reqs_plus_one = tl.num_programs(axis=0)
 
     # ---- load per-group parameters ------------------------------------
-    block_table_ptr = (
-        tl.load(group_block_table_ptrs + group_idx)
-        .to(tl.pointer_type(tl.int32))
-    )
+    block_table_ptr = (tl.load(group_block_table_ptrs + group_idx)
+                       .to(tl.pointer_type(tl.int32)))
     block_table_stride = tl.load(group_block_table_strides + group_idx)
     block_size = tl.load(group_block_sizes + group_idx)
-    slot_mapping_ptr = (
-        tl.load(group_slot_mapping_ptrs + group_idx)
-        .to(tl.pointer_type(tl.int32))
-    )
+    slot_mapping_ptr = (tl.load(group_slot_mapping_ptrs + group_idx)
+                        .to(tl.pointer_type(tl.int32)))
     kv_cache_block_size = tl.load(group_kv_cache_block_sizes + group_idx)
     blocks_per_kv_block = tl.load(group_blocks_per_kv + group_idx)
 
@@ -109,11 +102,8 @@ def compute_slot_mapping_fused_kernel(
     if req_idx == num_reqs_plus_one - 1:
         for p in range(num_tokens, max_num_tokens, TILE_BLOCK_SIZE):
             pad_offs = p + tl.arange(0, TILE_BLOCK_SIZE)
-            tl.store(
-                slot_mapping_ptr + pad_offs,
-                PAD_ID,
-                mask=pad_offs < max_num_tokens,
-            )
+            tl.store(slot_mapping_ptr + pad_offs, PAD_ID, mask=pad_offs <
+                                                               max_num_tokens)
         return
 
     # ---- normal request -----------------------------------------------
@@ -139,22 +129,16 @@ def compute_slot_mapping_fused_kernel(
         else:
             virtual_block_size = kv_cache_block_size * TOTAL_CP_WORLD_SIZE
             virtual_block_indices = pos // virtual_block_size
-            virtual_block_offsets = (
-                pos - virtual_block_indices * virtual_block_size
-            )
-            is_local = (
-                virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
-            ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+            virtual_block_offsets = pos - virtual_block_indices * virtual_block_size
+            is_local = ((virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE) %
+                        TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK)
             local_block_offsets = (
-                virtual_block_offsets
-                // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
-                virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            block_indices = (
-                virtual_block_indices * blocks_per_kv_block
-                + local_block_offsets // block_size
-            )
+                virtual_block_offsets // (TOTAL_CP_WORLD_SIZE *
+                                          CP_KV_CACHE_INTERLEAVE_SIZE)
+            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (virtual_block_offsets %
+                                               CP_KV_CACHE_INTERLEAVE_SIZE)
+            block_indices = (virtual_block_indices * blocks_per_kv_block +
+                             local_block_offsets // block_size)
             slot_offsets = local_block_offsets % block_size
 
         # Windowed block-table load (fixes non-contiguous access):
@@ -169,16 +153,12 @@ def compute_slot_mapping_fused_kernel(
         ).to(tl.float32)
 
         if TOTAL_CP_WORLD_SIZE == 1:
-            relative_block_indices = tl.where(
-                mask, block_indices - block_idx_base, 0
-            )
+            relative_block_indices = tl.where(mask, block_indices - block_idx_base, 0)
         else:
-            relative_block_indices = tl.where(
-                mask & is_local, block_indices - block_idx_base, 0
-            )
-        block_numbers = tl.gather(
-            block_table_window, relative_block_indices, 0
-        ).to(tl.int32)
+            relative_block_indices = tl.where(mask & is_local, block_indices -
+                                              block_idx_base, 0)
+        block_numbers = (tl.gather(block_table_window, relative_block_indices, 0)
+                         .to(tl.int32))
 
         slot_ids = block_numbers * block_size + slot_offsets
         if TOTAL_CP_WORLD_SIZE != 1:
@@ -190,6 +170,7 @@ def compute_slot_mapping_fused_kernel(
 # ---------------------------------------------------------------------------
 # Convenience wrapper  (kept for standalone testing / external callers)
 # ---------------------------------------------------------------------------
+
 
 def launch_slot_mapping_fused(
     block_tables: list[Any],
@@ -213,9 +194,7 @@ def launch_slot_mapping_fused(
     num_groups = len(block_tables)
     if num_groups <= 1:
         if num_groups == 1:
-            block_tables[0].compute_slot_mapping(
-                num_reqs, query_start_loc, positions
-            )
+            block_tables[0].compute_slot_mapping(num_reqs, query_start_loc, positions)
         return
 
     device = query_start_loc.device
@@ -225,27 +204,33 @@ def launch_slot_mapping_fused(
     # ---- build per-group parameter arrays (costly — done here only) ---
     group_block_table_ptrs = torch.tensor(
         [bt.block_table.gpu.data_ptr() for bt in block_tables],
-        dtype=torch.int64, device=device,
+        dtype=torch.int64,
+        device=device,
     )
     group_block_table_strides = torch.tensor(
         [bt.block_table.gpu.stride(0) for bt in block_tables],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     group_block_sizes = torch.tensor(
         [bt.block_size for bt in block_tables],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     group_slot_mapping_ptrs = torch.tensor(
         [bt.slot_mapping.gpu.data_ptr() for bt in block_tables],
-        dtype=torch.int64, device=device,
+        dtype=torch.int64,
+        device=device,
     )
     group_kv_cache_block_sizes = torch.tensor(
         [bt.physical_block_size for bt in block_tables],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
     group_blocks_per_kv = torch.tensor(
         [bt.blocks_per_phys_block for bt in block_tables],
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
 
     # ---- CP parameters & compile-time constants -----------------------
@@ -255,9 +240,8 @@ def launch_slot_mapping_fused(
 
     tile_block_size = 1024
     min_block_size = min(bt.block_size for bt in block_tables)
-    window_size = _next_power_of_2(
-        ((tile_block_size + min_block_size - 1) // min_block_size) + 1
-    )
+    window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) //
+                                    min_block_size) + 1)
 
     # ---- launch -------------------------------------------------------
     compute_slot_mapping_fused_kernel[(num_reqs_plus_one, num_groups)](
