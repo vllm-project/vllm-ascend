@@ -820,7 +820,7 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
 
 #### 5.1.2 Atlas 800 A2
 
-##### 5.1.2.1 Multi-Node Co-Located Deployment (A2)
+##### 5.1.2.1 Multi-Node Co-Located Deployment
 
 - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 8). A single Atlas 800 A2 node (8 × 64GB) cannot fit the w4a8c8 weights, so the 2-node deployment is the minimum configuration for the A2 series.
 
