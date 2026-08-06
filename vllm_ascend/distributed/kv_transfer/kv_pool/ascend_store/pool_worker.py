@@ -1692,6 +1692,9 @@ class KVPoolWorker:
             send_thread.add_stored_request(request.req_id)
             send_thread.add_request(request)
 
+        if current_event is not None:
+            send_thread.request_queue.join()
+
     def retrieve_layer(
         self,
         request: ReqMeta,
