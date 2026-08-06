@@ -54,6 +54,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import enable_sp
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
 from vllm_ascend.worker.v2.sp_utils import (
@@ -120,9 +121,10 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         # The following features are not yet supported in Ascend NPU model runner v2:
-        # - Dynamic EPLB
-        if self.ascend_config.eplb_config.dynamic_eplb:
-            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
+        # - Context parallelism (prefill or decode)
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -131,6 +133,12 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
+        )
+        load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
+        self.eplb = AscendEPLBController(
+            parallel_config,
+            device,
+            load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
         )
 
         # because we will override these attribute, delete these attribute to
@@ -259,7 +267,7 @@ class NPUModelRunner(GPUModelRunner):
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
-                self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
+                self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
     def prepare_inputs(
@@ -364,9 +372,11 @@ class NPUModelRunner(GPUModelRunner):
         prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
         num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        batch_has_prefill = bool(np.any(is_prefilling_np))
+        self.eplb.set_batch_phase(batch_has_prefill)
 
         # Get prefill tokens if any.
-        if np.any(is_prefilling_np):
+        if batch_has_prefill:
             prepare_prefill_inputs(
                 self.input_buffers.input_ids,
                 self.req_states.next_prefill_tokens,
@@ -533,11 +543,6 @@ class NPUModelRunner(GPUModelRunner):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
             self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
-
-    def eplb_warmup(self):
-        # TODO(Ronald1995): just define the method in case calling error in
-        # worker, implement it in the future.
-        pass
 
     def _pad_query_start_loc_for_fia(
         self,

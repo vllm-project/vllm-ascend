@@ -282,7 +282,26 @@ class AscendConfig:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # Enable optimized reduce sampling scheme
+        # NOTE: reduce sample is an experimental feature. It is incompatible with
+        # lmhead TP and PD-disaggregated P nodes (kv_role='kv_producer'); raising
+        # ValueError on those to avoid silent correctness issues. PD-disaggregated
+        # D nodes (kv_role='kv_consumer') are allowed for backward compatibility.
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+        if self.enable_reduce_sample:
+            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+                raise ValueError(
+                    "enable_reduce_sample is incompatible with "
+                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_role == "kv_producer":
+                raise ValueError(
+                    "enable_reduce_sample is not supported on PD-disaggregated "
+                    "scenarios. Please disable enable_reduce_sample."
+                )
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
@@ -800,6 +819,10 @@ class EplbConfig:
         "num_redundant_experts": 0,
         "eplb_policy_type": 2,
         "eplb_heat_collection_stage": "all",
+        # Model Runner V2 only. Restricts which batch phase contributes to the
+        # upstream EPLB expert-load window; any prefill request marks the batch
+        # as prefill.
+        "load_collection_phase": "all",
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -847,6 +870,8 @@ class EplbConfig:
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
+        if self.load_collection_phase not in ["all", "prefill", "decode"]:
+            raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])

@@ -6,16 +6,19 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionImplBase,
+    AttentionMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
@@ -193,10 +196,7 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
-        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
-        # rectify this when vllm disable the assertion.
-        return "ASCEND_DSA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
+        return "ASCEND_DSA"
 
     @staticmethod
     def get_builder_cls():
@@ -217,7 +217,7 @@ class AscendDSABackend(AttentionBackend):
         return num_blocks, block_size, scale_size
 
     @staticmethod
-    def get_impl_cls() -> type["DSAAttentionImpl"]:
+    def get_impl_cls() -> type[AttentionImplBase[Any]]:
         from vllm_ascend.utils import enable_dsa_cp
 
         if enable_dsa_cp():
@@ -1454,7 +1454,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return attn_metadata
 
 
-class AscendDSAImpl(DSAAttentionImpl):
+class AscendDSAImpl(AttentionImplBase[Any]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1758,7 +1758,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn

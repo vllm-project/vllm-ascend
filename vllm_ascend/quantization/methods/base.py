@@ -253,6 +253,10 @@ class AscendMoEScheme(ABC):
         """
         ...
 
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        """Return expert-first weight views consumed by upstream EPLB."""
+        return []
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing for MoE layer.
 
