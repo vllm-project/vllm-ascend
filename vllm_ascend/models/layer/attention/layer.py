@@ -30,11 +30,12 @@ from vllm_ascend.utils import (
 
 
 def get_dsv4_block_sizes():
-    # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
+    # cache_config.block_size: [mla, swa, c4 state, c128 state],
+    # [page_size_padded_t1, page_size_padded_t2]
     _DSV4_BLOCK_SIZES = {
-        128: [[128, 128, 8, 32], [16640, 131072]],
-        64: [[64, 64, 4, 16], [8320, 65536]],
-        32: [[32, 32, 2, 8], [4160, 32768]],
+        128: [[128, 128, 16, 32], [16640 + 16 * 1024, 131072]],
+        64: [[64, 64, 8, 16], [8320 + 8 * 1024, 65536]],
+        32: [[32, 32, 4, 8], [4160 + 4 * 1024, 32768]],
     }
     _DSV4_BLOCK_SIZES_A5 = {
         128: [[128, 128, 8, 16], [16896, 81920]],
