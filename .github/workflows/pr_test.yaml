@@ -658,7 +658,7 @@ jobs:
             --test-list-file "$LIST_FILE"
 
   run-recommended-tests:
-    name: Run recommended tests (${{ matrix.vllm_version }})
+    name: Run recommended tests
     needs:
       - pre-commit
       - route-recommended-tests
