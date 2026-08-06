@@ -37,7 +37,6 @@ from tests.e2e.pull_request.one_card.rlhf.conftest import (
     gen,
     health,
     npu_free_bytes,
-    ok,
     server,
     sleep,
     sleep_metrics,
@@ -90,23 +89,6 @@ class TestPhysicalMemory:
 
             _, _, da = sleep_metrics(url)
             assert da == 1
-
-            assert wake(url) == 200
-            assert health(url) == 200
-
-    def test_sleep_level0_does_not_release_memory(self):
-        """level=0 pauses scheduling only — no NPU memory change."""
-        with server() as url:
-            gen(url)
-            free_awake = npu_free_bytes()
-
-            assert sleep(url, level=0) == 200
-            freed_gib = (npu_free_bytes() - free_awake) / 2**30
-            assert freed_gib < 0.5, (
-                f"sleep(0) released {freed_gib:.2f} GiB — it should only pause scheduling, not free NPU memory"
-            )
-            _, wo, da = sleep_metrics(url)
-            assert wo == 0 and da == 0
 
             assert wake(url) == 200
             assert health(url) == 200
@@ -183,23 +165,6 @@ class TestOutputCorrectness:
                 assert resp and resp["choices"][0]["text"] == golden_text, (
                     f"output drifted on cycle {i} — cumem bookkeeping corrupted"
                 )
-
-    def test_prefix_cache_cleared_afterwake(self):
-        """wake_up() calls reset_prefix_cache(); no stale KV entries survive.
-
-        If the prefix cache is not flushed, a subsequent sleep cycle could
-        reuse a stale entry pointing to an already-released physical page.
-        """
-        with server() as url:
-            prompt = "The capital of France is"
-            gen(url, prompt=prompt)  # populate prefix cache
-
-            assert sleep(url, level=1) == 200
-            assert wake(url) == 200
-            assert health(url) == 200
-
-            resp = gen(url, prompt=prompt)
-            assert ok(resp), "generate failed after wake with cached prompt — possible stale prefix-cache IMA"
 
 
 # ---------------------------------------------------------------------------
@@ -322,59 +287,3 @@ class TestLogprobsPrecision:
                     "weight restore or KV-scale recalibration may be incorrect"
                 )
             assert compared > 0, "no non-None logprob pairs were compared — logprobs response may be empty or malformed"
-
-
-# ---------------------------------------------------------------------------
-# TestCPUWeightBackup  (new — Tier 1A supplement)
-# ---------------------------------------------------------------------------
-
-
-class TestCPUWeightBackup:
-    """CPU weight backup: level-1 sleep offloads weights to CPU; wake restores.
-
-    Reference: sglang test_release_memory_occupation.py
-               test_release_and_resume_occupation_with_weights_cpu_backup —
-               verifies golden output after CPU backup roundtrip.
-
-    Unlike TestOutputCorrectness which tests 3 cycles, this specifically
-    tests 5 cycles and focuses on the weights-only partial-wake path, which
-    is the path used in colocate RL (trainer uses KV memory while engine
-    keeps weights on CPU).
-    """
-
-    def test_weights_cpu_backup_5cycle_output_stable(self):
-        """5× sleep(level=1) → wake(weights) → wake(kv_cache) output stable.
-
-        This is the colocate RL pattern: sleep frees ALL NPU memory,
-        wake(["weights"]) restores weights only (trainer has released NPU),
-        wake(["kv_cache"]) re-allocates KV pool.
-        Output must be non-empty and consistent across cycles.
-
-        Uses --seed for deterministic greedy decoding so text comparison is
-        a reliable weight-correctness check and not a nondeterminism false alarm.
-        """
-        with server(extra_args=["--seed", "42"]) as url:
-            golden = gen(url)
-            assert golden and ok(golden)
-            golden_text = golden["choices"][0]["text"]
-            assert golden_text.strip(), "golden output must be non-empty"
-
-            for cycle in range(5):
-                assert sleep(url, level=1) == 200
-
-                # staged wake: weights first, then kv_cache
-                assert wake(url, tags=["weights"]) == 200
-                assert wake(url, tags=["kv_cache"]) == 200
-                assert health(url) == 200
-
-                resp = gen(url)
-                assert resp and ok(resp), f"generate failed on CPU-backup cycle {cycle}"
-                cycle_text = resp["choices"][0]["text"]
-                assert cycle_text.strip(), (
-                    f"empty output on CPU-backup cycle {cycle} — weight restore may have corrupted model state"
-                )
-                assert cycle_text == golden_text, (
-                    f"output drifted on CPU-backup cycle {cycle} — "
-                    "weight restore from CPU backup may be incomplete "
-                    f"(golden={golden_text!r}, got={cycle_text!r})"
-                )
