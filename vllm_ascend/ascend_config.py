@@ -218,7 +218,7 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
 
     # ---- sub-configs (need vllm_config / special): factory pre-constructs, kw_only ----
-    xlite_graph_config: Any = dataclasses.field(kw_only=True)
+    xlite_graph_config: XliteGraphConfig = dataclasses.field(kw_only=True)
     finegrained_tp_config: Any = dataclasses.field(kw_only=True)
     scheduler_config: Any = dataclasses.field(kw_only=True)
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
@@ -627,28 +627,39 @@ class FinegrainedTPConfig:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
 
+@config
 class XliteGraphConfig:
-    """
-    Configuration Object for xlite_graph_config from additional_config
+    """Configuration Object for ``additional_config["xlite_graph_config"]``.
+
+    Migrated to ``@config`` (pydantic dataclass). The vllm_config-dependent
+    preconditions (speculative decoding / pipeline parallelism / cache block
+    size) are applied in an ``after`` model_validator. ``vllm_config`` is
+    injected as a ``kw_only`` field with ``arbitrary_types_allowed`` so pydantic
+    does not recursively validate the heavy upstream object.
     """
 
-    def __init__(self, xlite_graph_config, vllm_config):
-        self.enabled = xlite_graph_config.get("enabled", False)
-        self.full_mode = xlite_graph_config.get("full_mode", False)
+    enabled: bool = False
+    full_mode: bool = False
+    vllm_config: Any = dataclasses.field(kw_only=True, repr=False)
+
+    @model_validator(mode="after")
+    def _validate_preconditions(self):
         if self.enabled:
-            if bool(vllm_config.speculative_config) and vllm_config.speculative_config.num_speculative_tokens != 1:
+            vc = self.vllm_config
+            if bool(vc.speculative_config) and vc.speculative_config.num_speculative_tokens != 1:
                 raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
-            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+            if vc.parallel_config.pipeline_parallel_size > 1:
                 raise RuntimeError(
                     "Xlite graph mode is not compatible with pipeline parallelism. "
                     "Please set pipeline_parallel_size to 1."
                 )
-            if vllm_config.cache_config.block_size != 128:
+            if vc.cache_config.block_size != 128:
                 logger.warning(
                     "Current cache block size may not be optimal for xlite graph mode. "
                     "current_block_size=%d, recommended_block_size=128.",
-                    vllm_config.cache_config.block_size,
+                    vc.cache_config.block_size,
                 )
+        return self
 
 
 @config
@@ -901,7 +912,7 @@ def init_ascend_config(vllm_config):
     # Pre-construct sub-configs that need vllm_config or special injection.
     from vllm_ascend import envs as ascend_envs
 
-    xlite = XliteGraphConfig(additional_config.get("xlite_graph_config", {}), vllm_config)
+    xlite = XliteGraphConfig(vllm_config=vllm_config, **additional_config.get("xlite_graph_config", {}))
     finegrained = FinegrainedTPConfig(additional_config.get("finegrained_tp_config", {}), vllm_config)
     sched = SchedulerConfig(additional_config, balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING)
     sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
@@ -919,7 +930,6 @@ def init_ascend_config(vllm_config):
     fields = AscendConfig.__pydantic_fields__
     _BYPASS_KEYS = {
         "refresh",
-        "dump_config",
         "dump_config_path",  # passed explicitly below
         "enable_balance_scheduling",  # SchedulerConfig internal (top-level legacy)
         "xlite_graph_config",  # pre-constructed above
