@@ -39,7 +39,6 @@ from vllm_ascend.models.deepseek_v4 import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
 
 
 def _apply_dsv4_rope(
@@ -276,7 +275,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
+
+        from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+
         self.model = DeepseekV4DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
