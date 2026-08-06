@@ -31,14 +31,15 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
-        empty_blocks = blocks.new_empty()
-        for i, c in enumerate(self._connectors):
-            if i == chosen_connector or isinstance(c, MooncakeLayerwiseConnector):
-                # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks, num_external_tokens)
+        for i, connector in enumerate(self._connectors):
+            if i == chosen_connector or isinstance(connector, MooncakeLayerwiseConnector):
+                # Mooncake layerwise must participate in P/D transfer even
+                # when another connector supplied the cache hit.
+                connector.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
-                # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                # Other connectors still need the real allocated blocks to
+                # track or store newly computed KV cache for the request.
+                connector.update_state_after_alloc(request, blocks, 0)
 
     def get_num_new_matched_tokens(
         self,
