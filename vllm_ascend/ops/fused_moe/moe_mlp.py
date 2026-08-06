@@ -23,10 +23,6 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    ensure_mxfp8_moe_available,
-)
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -138,8 +134,6 @@ def quant_apply_mlp(
     is_swigluoai_uninterleave = act_name == "swigluoai_uninterleave"
 
     if use_mxfp_quant:
-        ensure_mxfp8_moe_available("MXFP MoE MLP path")
-
         if w1_scale_bias is not None or w2_scale_bias is not None:
             raise NotImplementedError("MXFP path does not support scale_bias yet.")
         if w1_offset is not None or w2_offset is not None:
@@ -216,8 +210,8 @@ def quant_apply_mlp(
             if use_mxfp_quant:
                 gmm1_kwargs.update(
                     {
-                        "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
-                        "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+                        "scale_dtype": torch_npu.float8_e8m0fnu,
+                        "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
                     }
                 )
             hidden_states = torch_npu.npu_grouped_matmul(**gmm1_kwargs)[0]
@@ -402,8 +396,8 @@ def quant_apply_mlp(
             if use_mxfp_quant:
                 gmm1_kwargs.update(
                     {
-                        "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
-                        "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+                        "scale_dtype": torch_npu.float8_e8m0fnu,
+                        "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
                         "output_dtype": torch.bfloat16,
                     }
                 )

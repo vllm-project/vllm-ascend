@@ -22,7 +22,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        runner: [linux-aarch64-a2b3-0, linux-aarch64-a3-0]
+        runner: [linux-aarch64-a2b3-0, linux-aarch64-a3-0, linux-aarch64-a5-0]
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
 

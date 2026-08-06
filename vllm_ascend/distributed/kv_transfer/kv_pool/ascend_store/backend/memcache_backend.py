@@ -165,7 +165,11 @@ class MemcacheBackend(Backend):
 
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
-        return self.store.batch_write_finish(keys, results)
+        finish = getattr(self.store, "batch_write_finish", None)
+        if finish is None:
+            # Older MemCache releases publish writes directly in batch_copy.
+            return [0] * len(keys)
+        return finish(keys, results)
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
