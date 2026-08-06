@@ -19,7 +19,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
