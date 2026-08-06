@@ -69,15 +69,25 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
                 #     img["url"] = f"data:image/jpeg;base64,{image_data}"
                 # else:
                 #     img["url"] = url.replace(placeholder, image_data)
+                # #1
+                # if url:
+                #     has_placeholder = any(f"{{IMAGE_{i}}}" in url for i in range(len(image_data_list)))
+                #     if has_placeholder:
+                #         for i, data in enumerate(image_data_list):
+                #             url = url.replace(f"{{IMAGE_{i}}}", f"data:image/jpeg;base64,{data}")
+                #     elif url.startswith(("http://", "https://")):
+                #         pass
+                #     else:
+                #         url = f"data:image/jpeg;base64,{_load_image_data(url)}"
+                # elif image_data_list:
+                #     url = f"data:image/jpeg;base64,{image_data_list[0]}"
+                # img["url"] = url
+
                 if url:
-                    has_placeholder = any(f"{{IMAGE_{i}}}" in url for i in range(len(image_data_list)))
-                    if has_placeholder:
-                        for i, data in enumerate(image_data_list):
-                            url = url.replace(f"{{IMAGE_{i}}}", f"data:image/jpeg;base64,{data}")
-                    elif url.startswith(("http://", "https://")):
-                        pass
-                    else:
-                        url = f"data:image/jpeg;base64,{_load_image_data(url)}"
+                    for i, data in enumerate(image_data_list):
+                        url = url.replace(f"{{IMAGE_{i}}}", f"data:image/jpeg;base64,{data}")
+                    if f"{{IMAGE_{len(image_data_list)}}}" in url:
+                        url = f"data:image/jpeg;base64,{image_data_list[0]}" if image_data_list else ""
                 elif image_data_list:
                     url = f"data:image/jpeg;base64,{image_data_list[0]}"
                 img["url"] = url
