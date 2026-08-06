@@ -734,15 +734,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_bypass_key_not_stripped_silently_when_unknown(self, mock_fix):
-        # A typo'd top-level key (not a declared field, not a known bypass key)
-        # is stripped by the factory __pydantic_fields__ filter, so extra=forbid
-        # does NOT catch it. This documents the Phase-1 limitation: top-level
-        # typo detection requires the future "Did you mean?" registry (PR-3),
-        # not forbid alone. The test asserts the current (lenient) behavior so
-        # the future tightening is a conscious change.
+    def test_unknown_top_level_key_is_rejected(self, mock_fix):
+        # A typo'd top-level key (not a declared field, not a bypass key) flows
+        # into kwargs and extra="forbid" catches it. Previously the factory
+        # filtered by __pydantic_fields__ which stripped typos silently; now
+        # only _BYPASS_KEYS is stripped, so typos reach pydantic and are rejected.
         vc = VllmConfig()
         vc.additional_config = {"enable_cpu_bindng": True}  # typo: bindng
-        # No raise: factory strips the unknown key; AscendConfig never sees it.
-        cfg = init_ascend_config(vc)
-        self.assertTrue(cfg.enable_cpu_binding)  # default True, typo ignored
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
