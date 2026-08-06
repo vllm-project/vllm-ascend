@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -5039,6 +5040,16 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        # E6 diagnostic: capture FULL graphs ascending (decode first, prefill
+        # last) so the FA3 decode graph captures happen BEFORE the prefill
+        # graphs.  Set VLLM_ASCEND_DEBUG_FA3_REORDER_CAPTURE=1 to enable.
+        if os.environ.get("VLLM_ASCEND_DEBUG_FA3_REORDER_CAPTURE") == "1":
+            mgr = getattr(self, "cudagraph_manager", None)
+            if mgr is not None and getattr(mgr, "_capture_descs", None):
+                descs = mgr._capture_descs.get(CUDAGraphMode.FULL)
+                if descs:
+                    # ascending num_tokens: decode (small) first, prefill (large) last
+                    descs.sort(key=lambda d: d.num_tokens)
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
