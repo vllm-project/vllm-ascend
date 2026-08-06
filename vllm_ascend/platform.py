@@ -1214,13 +1214,22 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if speculative_config is None:
         return
 
-    draft_model_config = speculative_config.draft_model_config
-    if draft_model_config is None:
-        return
-
     parallel_config = vllm_config.parallel_config
     decode_context_parallel_size = parallel_config.decode_context_parallel_size
     if decode_context_parallel_size <= 1:
+        return
+
+    if speculative_config.num_speculative_tokens_per_batch_size:
+        raise ValueError(
+            "Dynamic speculative decoding and decode context "
+            "parallelism is not supported by vLLM Ascend. Please set "
+            "--decode-context-parallel-size to 1 or remove "
+            "num_speculative_tokens_per_batch_size from "
+            "--speculative-config."
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    if draft_model_config is None:
         return
 
     # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
