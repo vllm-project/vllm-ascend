@@ -153,6 +153,27 @@ def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: fl
         time.sleep(1)
 
 
+def wait_npu_memory_free(target_free_percentage: float = 0.5, max_wait_seconds: float = 50) -> None:
+    """Wait until the NPU free memory is above target_free_percentage.
+
+    Cleans up distributed resources in the current process, then polls NPU
+    memory in a spawned subprocess to avoid initializing NPU in the main
+    process (which would break subsequent spawn-based server processes).
+    """
+    cleanup_dist_env_and_memory()
+
+    ctx = multiprocessing.get_context("spawn")
+    p = ctx.Process(target=_check_npu_memory_worker, args=(target_free_percentage, max_wait_seconds))
+    p.start()
+    p.join()
+
+    if p.exitcode != 0:
+        raise TimeoutError(
+            f"Timeout: NPU memory free size did not reach "
+            f"{target_free_percentage} of total npu memory within {max_wait_seconds} seconds."
+        )
+
+
 def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_seconds: float = 50):
     """Decorator to wait until the NPU memory free size is above target_free_percentage.
 
@@ -164,21 +185,7 @@ def wait_until_npu_memory_free(target_free_percentage: float = 0.5, max_wait_sec
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # Clean up non-NPU resources in the main process
-            cleanup_dist_env_and_memory()
-
-            # Use a spawned subprocess to check NPU memory to avoid initializing NPU in the main process
-            ctx = multiprocessing.get_context("spawn")
-            p = ctx.Process(target=_check_npu_memory_worker, args=(target_free_percentage, max_wait_seconds))
-            p.start()
-            p.join()
-
-            if p.exitcode != 0:
-                raise TimeoutError(
-                    f"Timeout: NPU memory free size did not reach "
-                    f"{target_free_percentage} of total npu memory within {max_wait_seconds} seconds."
-                )
-
+            wait_npu_memory_free(target_free_percentage, max_wait_seconds)
             return func(*args, **kwargs)
 
         return wrapper

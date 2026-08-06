@@ -44,7 +44,6 @@ import json
 import os
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +51,7 @@ import pytest
 
 from tests.e2e.conftest import (
     RemotePDServer,
-    cleanup_dist_env_and_memory,
+    wait_npu_memory_free,
     wait_until_npu_memory_free,
 )
 from vllm.utils.network_utils import get_open_port
@@ -226,8 +225,7 @@ def _assert_v2_not_slower(v1: dict[str, Any], v2: dict[str, Any], case: str) -> 
 def _benchmark_pair(bench_args: list[str], case: str) -> dict[str, Any]:
     """Run the same scenario on V1 then V2 and assert V2 >= V1 * 0.97."""
     v1 = _run_server_and_bench(use_v2=False, bench_args=bench_args)
-    cleanup_dist_env_and_memory()
-    time.sleep(10)  # allow the previous NPU processes to fully release memory
+    wait_npu_memory_free(max_wait_seconds=120)
     v2 = _run_server_and_bench(use_v2=True, bench_args=bench_args)
     _assert_v2_not_slower(v1, v2, case)
     return v2
