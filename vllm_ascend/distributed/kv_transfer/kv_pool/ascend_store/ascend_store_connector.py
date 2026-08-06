@@ -48,11 +48,16 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
     def aggregate(self) -> "AscendStoreKVEvents":
         """
-        Aggregate KV events and retain only common events.
+        Aggregate KV events across TP workers.
+
+        AscendStore shards puts via ``put_step`` (especially MLA where
+        ``put_step == tp_size``), so each ``BlockStored`` is emitted by
+        exactly one worker. Retain the unique union rather than the
+        intersection required by ``get_common_events``.
         """
-        common_events = self._aggregator.get_common_events()
+        unique_events = list(dict.fromkeys(self._aggregator.get_all_events()))
         self._aggregator.clear_events()
-        self._aggregator.add_events(common_events)
+        self._aggregator.add_events(unique_events)
         self._aggregator.reset_workers()
         return self
 
