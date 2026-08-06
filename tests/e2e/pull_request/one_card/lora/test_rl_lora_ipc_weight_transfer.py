@@ -183,7 +183,7 @@ EXPECTED_BOB_NAME = "bob"
 SERVER_START_TIMEOUT = 2800
 CONTROL_TIMEOUT = 300
 WORKER_EXTENSION = (
-    "tests.e2e.pull_request.two_card.test_rl_lora_ipc_weight_transfer."
+    "tests.e2e.pull_request.one_card.lora.test_rl_lora_ipc_weight_transfer."
     "LoRAIPCWorkerExtension"
 )
 
