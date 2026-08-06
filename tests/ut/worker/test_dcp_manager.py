@@ -150,6 +150,78 @@ def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
     manager.query_start_loc_full.copy_to_gpu.assert_called_once_with()
 
 
+def test_generate_dcp_mtp_input_uses_per_step_num_spec_tokens() -> None:
+    """DSD: extra draft slots must follow the per-step K, not the static max.
+
+    With DSD the scheduler may pick a K smaller than the configured maximum.
+    ``extra_tokens`` must equal ``num_spec_tokens - 1`` so the built
+    ``mtp_slot_mapping`` layout matches the proposer's
+    ``_get_spec_decode_mtp_slot_outputs`` indexing (which uses the same per-step
+    K). Here max K is 5 (decode_threshold 6) but the per-step K is 2, so exactly
+    one extra slot per request is appended.
+    """
+    manager = object.__new__(DCPManager)
+    manager.num_reqs = 1
+    manager.use_async_scheduling = False
+    manager.decode_threshold = 6  # configured max K == 5
+    manager.device = torch.device("cpu")
+    manager.query_start_loc_full = MagicMock()
+    manager.query_start_loc_full.np = np.zeros(3, dtype=np.int32)
+    input_batch = MagicMock()
+    input_batch.req_ids = ["request-0"]
+    captured: dict = {}
+
+    def fake_compute(req_indices_mtp: np.ndarray, positions_mtp: np.ndarray) -> None:
+        captured["req_indices"] = req_indices_mtp
+        captured["positions"] = positions_mtp
+
+    input_batch.block_table.compute_slot_mapping_draft = fake_compute
+
+    manager.generate_dcp_mtp_input(
+        total_num_scheduled_tokens=1,
+        num_scheduled_tokens={"request-0": 1},
+        input_batch=input_batch,
+        req_indices=np.array([0], dtype=np.int32),
+        positions_np=np.array([10], dtype=np.int64),
+        cu_num_tokens=np.array([1], dtype=np.int32),
+        num_spec_tokens=2,  # per-step K
+    )
+
+    # extra_tokens = num_spec_tokens - 1 = 1, not decode_threshold - 2 = 4.
+    np.testing.assert_array_equal(captured["req_indices"], np.array([0, 0]))
+    np.testing.assert_array_equal(captured["positions"], np.array([10, 11]))
+
+
+def test_generate_dcp_mtp_input_skips_extra_slots_when_k_le_one() -> None:
+    """DSD: when the per-step K <= 1 there are no draft slots to map."""
+    manager = object.__new__(DCPManager)
+    manager.num_reqs = 1
+    manager.use_async_scheduling = False
+    manager.decode_threshold = 6  # configured max K == 5
+    manager.query_start_loc_full = MagicMock()
+    manager.query_start_loc_full.np = np.zeros(3, dtype=np.int32)
+    input_batch = MagicMock()
+    input_batch.req_ids = ["request-0"]
+    call_count = {"n": 0}
+
+    def fake_compute(*args, **kwargs) -> None:  # noqa: ANN002
+        call_count["n"] += 1
+
+    input_batch.block_table.compute_slot_mapping_draft = fake_compute
+
+    manager.generate_dcp_mtp_input(
+        total_num_scheduled_tokens=1,
+        num_scheduled_tokens={"request-0": 1},
+        input_batch=input_batch,
+        req_indices=np.array([0], dtype=np.int32),
+        positions_np=np.array([10], dtype=np.int64),
+        cu_num_tokens=np.array([1], dtype=np.int32),
+        num_spec_tokens=1,  # K == 1 -> no draft slots
+    )
+
+    assert call_count["n"] == 0
+
+
 def test_update_spec_decode_drafting_metadata_skips_prefill() -> None:
     manager = object.__new__(DCPManager)
     manager.dcp_world_rank = 0

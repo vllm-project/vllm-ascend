@@ -302,7 +302,13 @@ class DCPManager:
             positions_gpu = num_computed_tokens[req_indices_gpu].to(torch.int64) + position_offsets
             positions[:total_num_scheduled_tokens].copy_(positions_gpu)
 
-            extra_tokens = self.decode_threshold - 2
+            # DSD: use the per-step K (``num_spec_tokens``) for the extra draft
+            # slots so the rebuilt ``mtp_slot_mapping`` layout matches the
+            # proposer's ``_get_spec_decode_mtp_slot_outputs`` indexing (which
+            # uses the same per-step K). ``self.decode_threshold`` is kept as the
+            # static configured maximum (see generate_dcp_mtp_input).
+            num_spec_tokens = self.decode_threshold - 1 if num_spec_tokens is None else num_spec_tokens
+            extra_tokens = num_spec_tokens - 1
             if extra_tokens > 0 and not with_prefill:
                 query_start_loc = self.query_start_loc_full.gpu[: num_reqs + 1]
                 query_lens = (query_start_loc[1:] - query_start_loc[:-1]).to(torch.int64)
@@ -406,7 +412,6 @@ class DCPManager:
             arange_np,
             draft_token_ids,
             scheduler_output,
-            num_spec_tokens,
             precomputed_positions_np,
             prev_positions,
         )
@@ -430,9 +435,20 @@ class DCPManager:
             self.async_rebuild_cu_num_tokens = cu_num_tokens.copy()
             self.async_rebuild_num_tokens = int(cumulative[-1])
 
-        if self.decode_threshold <= 2:
+        # DSD: derive the number of extra draft slots from the per-step K
+        # (``num_spec_tokens``) instead of the static ``self.decode_threshold``.
+        # The latter is sized to the configured *maximum* K so the MTP attention
+        # mask buffer (allocated from it) stays large enough for any step, and
+        # is intentionally left untouched here. With DSD the scheduler may pick
+        # a smaller K (including 0/1) for the current batch; when K <= 1 there
+        # are no draft slots to map, so skip the extra slot-mapping work and the
+        # per-request slot allocation entirely. ``extra_tokens`` must equal
+        # ``num_speculative_tokens - 1`` used to index this layout in
+        # ``_get_spec_decode_mtp_slot_outputs``, hence the per-step K.
+        num_spec_tokens = self.decode_threshold - 1 if num_spec_tokens is None else num_spec_tokens
+        extra_tokens = num_spec_tokens - 1
+        if extra_tokens <= 0:
             return
-        extra_tokens = self.decode_threshold - 2
         req_indices_split = np.array_split(req_indices, cu_num_tokens)[: self.num_reqs]
         positions_split = np.array_split(positions_np, cu_num_tokens)[: self.num_reqs]
         for req_idx in range(self.num_reqs):
