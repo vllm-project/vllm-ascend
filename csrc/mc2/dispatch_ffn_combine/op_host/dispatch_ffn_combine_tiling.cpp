@@ -44,9 +44,14 @@ namespace {
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
     constexpr uint32_t X_ACTIVE_MASK_INDEX = 7;
-    constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
     constexpr uint64_t MB_SIZE = 1024 * 1024UL;
+    // Bytes reserved from the total UB when sizing init-routing tiling.
+    // On a standard 910C/A3 (192 KiB UB) this yields 196608 - 256 = 196352,
+    // identical to the previous hardcoded value, while adapting to SKUs whose
+    // GetCoreMemSize(UB) differs.
+    constexpr int64_t INIT_ROUTING_UB_RESERVED_BYTES = 256;
+    constexpr int64_t INIT_ROUTING_UB_FALLBACK_BYTES = 196352;
 }
 
 namespace optiling {
@@ -258,7 +263,14 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     optiling::MoeInitRoutingQuantV2TilingBase moeInitRoutingQuantV2TilingBase;
     int64_t inuptXDtypeSize = sizeof(int16_t);
     int64_t scaleDim0 = 0;
-    int64_t ubSize = 196352;
+    // Derive the init-routing UB budget from the runtime UB size queried via
+    // GetCoreMemSize(UB), keeping the 256 B reservation. Falls back to the
+    // previous constant if the platform query is unavailable/too small so the
+    // value never exceeds what the standard 910C path used.
+    int64_t ubSize = INIT_ROUTING_UB_FALLBACK_BYTES;
+    if (static_cast<int64_t>(info.totalUbSize) > INIT_ROUTING_UB_RESERVED_BYTES) {
+        ubSize = static_cast<int64_t>(info.totalUbSize) - INIT_ROUTING_UB_RESERVED_BYTES;
+    }
     int64_t expertCapacity = 0;
     int64_t expertNum = info.expertPerRank * info.worldSize + 1;    // enable expertId == expertNum
     int64_t activeNum = 0;
@@ -266,7 +278,7 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
      int64_t expertTokensCountOrCumsumFlag = 2;
      bool expertTokensBeforeCapacityFlag = false;
      int64_t quantMode = 1;
-     uint32_t aivNumInitRouting = 2 * BLOCK_NUM;
+     uint32_t aivNumInitRouting = info.aivNum;
     moeInitRoutingQuantV2TilingBase.DoTiling(info.M, info.K, info.topK, expertCapacity, expertNum, activeNum, dropPadMode, 
         expertTokensCountOrCumsumFlag, expertTokensBeforeCapacityFlag, inuptXDtypeSize, quantMode, scaleDim0, aivNumInitRouting, ubSize);
     uint64_t initRoutingQuantTilingKey = moeInitRoutingQuantV2TilingBase.tilingKey_;
