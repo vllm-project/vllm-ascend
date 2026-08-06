@@ -263,7 +263,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
 
     from safetensors import safe_open
 
-    os.system("ls -lah /data1/models/Qwen3-VL-4B-Instruct")
+    os.system("ls -lah /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct")
 
     roots = [
         Path("/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct"),
