@@ -1390,17 +1390,6 @@ The tables below provide recommended parameter configurations for different depl
 |`VLLM_ASCEND_ENABLE_MLAPO`|1 (w8a8)|1 (w8a8)|0 or 1|Enables MLA fusion on w8a8 models. Improves decode performance but consumes more NPU memory. Disable for long-context if memory is insufficient.|
 |`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1|1|Communication optimization. Recommended in all scenarios unless layer_sharding includes o_proj.|
 
-#### Common Parameters
-
-Common parameters used across all deployment scenarios are described here once:
-
-- `HCCL_BUFFSIZE`: HCCL communication buffer size. Larger values improve communication throughput at the cost of additional memory: `200` (single-node), `256` (multi-node / PD prefill).
-- `OMP_NUM_THREADS` / `OMP_PROC_BIND`: CPU thread settings to avoid thread oversubscription.
-- `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`: Reduces NPU memory fragmentation.
-- `TASK_QUEUE_ENABLE=1`: Enables the task queue for more efficient batch scheduling (decode nodes in PD scenarios).
-- `--enforce-eager`: Disables graph capture. Required on prefill nodes in PD scenarios (PD separation with MTP requires eager mode on the prefill path).
-- `--api-server-count 1` / `--safetensors-load-strategy 'prefetch'` / `--seed 1024` / `--trust-remote-code`: Number of OpenAI-compatible API server instances, weight prefetching for faster startup, fixed seed, and remote code loading.
-
 ### Tuning Guidelines
 
 For general performance tuning methods, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).

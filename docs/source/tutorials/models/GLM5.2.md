@@ -1603,18 +1603,6 @@ The tables below provide recommended parameter configurations for different depl
 |`VLLM_ASCEND_ENABLE_MLAPO`|—|1 (A2 P/D nodes)|—|Fusion operator that significantly improves performance but consumes more NPU memory. On A3 used on decode nodes only.|
 |`cudagraph_mode`|FULL_DECODE_ONLY|FULL_DECODE_ONLY (decode)|FULL_DECODE_ONLY (decode)|Graph capture for the decode phase only. Prefill nodes in PD mode use `--enforce-eager` instead.|
 
-#### Common Parameters
-
-Common parameters used across all deployment scenarios are described here once:
-
-- `--enable-chunked-prefill` / `--enable-prefix-caching`: Recommended for long-context and multi-user scenarios — chunked prefill splits long prompts to improve TTFT; prefix caching reuses KV cache for shared prefixes and reduces KV transfer volume in PD scenarios.
-- `--enforce-eager`: Disables graph capture. Required on prefill nodes in PD scenarios (PD separation with MTP requires eager mode on the prefill path).
-- `HCCL_BUFFSIZE`: HCCL communication buffer size. Larger values improve communication throughput at the cost of additional memory: `200` (single-node), `400` (multi-node A3), `256`–`2560` (A2), `768` (1M context).
-- `OMP_NUM_THREADS` / `OMP_PROC_BIND`: CPU thread settings to avoid thread oversubscription — `1` by default, `10` on A2, `20` for the 1M context workload.
-- `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`: Reduces NPU memory fragmentation.
-- `TASK_QUEUE_ENABLE=1`: Enables the task queue for more efficient batch scheduling (used on decode nodes, A2, and 1M scenarios).
-- `--api-server-count 1` / `--safetensors-load-strategy 'prefetch'` / `--seed 1024` / `--trust-remote-code`: Number of OpenAI-compatible API server instances, weight prefetching for faster startup, fixed seed, and remote code loading.
-
 ### Tuning Guidelines
 
 For general performance tuning methods, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
