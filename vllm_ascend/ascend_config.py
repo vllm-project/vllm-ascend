@@ -282,7 +282,26 @@ class AscendConfig:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # Enable optimized reduce sampling scheme
+        # NOTE: reduce sample is an experimental feature. It is incompatible with
+        # lmhead TP and PD-disaggregated P nodes (kv_role='kv_producer'); raising
+        # ValueError on those to avoid silent correctness issues. PD-disaggregated
+        # D nodes (kv_role='kv_consumer') are allowed for backward compatibility.
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+        if self.enable_reduce_sample:
+            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+                raise ValueError(
+                    "enable_reduce_sample is incompatible with "
+                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_role == "kv_producer":
+                raise ValueError(
+                    "enable_reduce_sample is not supported on PD-disaggregated "
+                    "scenarios. Please disable enable_reduce_sample."
+                )
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()

@@ -265,7 +265,7 @@ class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
             add_ = x + deepstack_input_embeds
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            residual = torch.ops.vllm.maybe_chunk_residual(add_, residual)
             result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
 
             return result, residual
@@ -279,7 +279,7 @@ class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             reduce_scatter = self._reduce_scatter(input)
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = reduce_scatter + chunk
-            residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
+            residual = torch.ops.vllm.maybe_chunk_residual(add_, residual)
             result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather, residual
@@ -295,7 +295,7 @@ class Qwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             x = self._maybe_all_reduce(input)
             x = torch.ops.aten.alias(x)
             add_ = x + deepstack_input_embeds
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            residual = torch.ops.vllm.maybe_chunk_residual(add_, residual)
             result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
             return result, residual
 
