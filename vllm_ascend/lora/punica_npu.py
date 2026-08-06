@@ -19,38 +19,53 @@ def _lora_bmm_expand_slice_op(
     y_slice_size: int,
     add_inputs: bool,
 ) -> None:
-    rows = x.shape[0]
-    if indices.shape[0] != rows:
-        indices = indices[:rows]
-    safe_indices = indices.clamp(min=0).to(torch.long)
-    # w_t_all is (max_loras+1, 1, output_size_i, active_rank); [safe_indices, 0]
-    # collapses the legacy stacking dim 1. Cast to y.dtype to match upstream
-    # torch_ops.bgmv_expand_slice.
-    gathered = w_t_all[safe_indices, 0].to(y.dtype)
+    if x.ndim != 2:
+        raise ValueError(f"Expected 2D LoRA shrink input, got shape {tuple(x.shape)}")
+    if y.ndim != 2:
+        raise ValueError(f"Expected 2D LoRA output, got shape {tuple(y.shape)}")
+    if w_t_all.ndim != 4 or w_t_all.shape[1] != 1:
+        raise ValueError(f"Expected LoRA-B shape [slots, 1, output_size, rank], got {tuple(w_t_all.shape)}")
+    if indices.ndim != 1 or indices.shape[0] != x.shape[0]:
+        raise ValueError(
+            "LoRA indices and shrink input must have the same row count, "
+            f"got indices={tuple(indices.shape)} and x={tuple(x.shape)}"
+        )
+    if y.shape[0] != x.shape[0]:
+        raise ValueError(
+            f"LoRA output and shrink input must have the same row count, got y={tuple(y.shape)} and x={tuple(x.shape)}"
+        )
+    if x.shape[-1] != w_t_all.shape[-1]:
+        raise ValueError(
+            "LoRA shrink rank must match LoRA-B input rank, "
+            f"got x rank={x.shape[-1]} and LoRA-B rank={w_t_all.shape[-1]}"
+        )
+    if w_t_all.shape[-2] != y_slice_size:
+        raise ValueError(
+            "LoRA-B output size must match the destination slice, "
+            f"got LoRA-B output={w_t_all.shape[-2]} and slice={y_slice_size}"
+        )
+    if y_offset < 0 or y_offset + y_slice_size > y.shape[-1]:
+        raise ValueError(
+            "LoRA destination slice is outside the output tensor, "
+            f"got offset={y_offset}, size={y_slice_size}, output={y.shape[-1]}"
+        )
 
-    # The shrink buffer can be padded to the rank bucket while lora_b only
-    # carries the active rank. Slice x, not gathered, to preserve the loaded
-    # weight layout.
-    active_rank = gathered.shape[-1]
-    if x.shape[-1] != active_rank:
-        x_active = x[..., :active_rank].to(y.dtype).contiguous()
-    else:
-        x_active = x.to(y.dtype)
+    safe_indices = indices.clamp(min=0).to(torch.long)
+    # Collapse the legacy stacking dimension after selecting one adapter per row.
+    gathered = w_t_all[safe_indices, 0].to(y.dtype)
 
     # profile_run / dummy_run can hand us empty tensors; downstream NPU ops
     # trip index errors in that case.
-    if x_active.shape[0] == 0 or gathered.shape[1] == 0:
+    if x.shape[0] == 0 or gathered.shape[1] == 0:
         return
 
-    # Equivalent to einsum("br, bor -> bo"), rewritten to avoid the
-    # aclnnBatchMatMul path on NPU.
-    delta = (x_active.unsqueeze(1) * gathered).sum(dim=-1)
+    # Equivalent to einsum("br, bor -> bo") without allocating the broadcasted
+    # [rows, output_size, rank] intermediate.
+    delta = torch.bmm(gathered, x.to(y.dtype).unsqueeze(-1)).squeeze(-1)
     valid_mask = (indices >= 0).unsqueeze(-1)
     delta = torch.where(valid_mask, delta, torch.zeros_like(delta))
 
     y_slice = y.narrow(1, y_offset, y_slice_size)
-    if y_slice.shape[0] != delta.shape[0]:
-        y_slice = y_slice[: delta.shape[0]]
     if add_inputs:
         y_slice.add_(delta)
     else:
@@ -109,18 +124,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
-        self._force_lora_bmm_expand_slice = False
-
-    def enable_compatible_lora_bmm_expand_slice(self) -> None:
-        """Use the compatible expand-slice path for shared-expert models."""
-        self._force_lora_bmm_expand_slice = True
 
     def _requires_bmm_expand_slice(self, x: torch.Tensor, y_slice_size: int) -> bool:
         # The fused Ascend expand op requires rank <= output slice size. Packed
         # Qwen3.5 projections can contain narrower slices, so select the
         # compatible implementation from the static tensor shape instead of a
         # model-specific environment switch.
-        return self._force_lora_bmm_expand_slice or x.shape[-1] > y_slice_size
+        return x.shape[-1] > y_slice_size
 
     def _shrink_prefill(
         self,
@@ -232,12 +242,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        """Drop-in replacement for incompatible packed LoRA-B layouts.
+        """Fallback for shapes unsupported by the fused Ascend expand op.
 
-        It replaces sgmv_expand_slice and bgmv_expand_slice for shared-expert
-        models or tensor shapes unsupported by the fused Ascend op. Dispatching
-        through a mutating custom op keeps Dynamo fullgraph from tracing the
-        dynamic size nodes that trip vLLM graph splitting.
+        Dispatching through a mutating custom op keeps Dynamo fullgraph from
+        tracing the dynamic size nodes that trip vLLM graph splitting. The
+        custom op validates the exact LoRA matrix contract and never pads or
+        truncates tensors to make incompatible shapes multiply.
         """
         _lora_bmm_expand_slice_op(
             y,

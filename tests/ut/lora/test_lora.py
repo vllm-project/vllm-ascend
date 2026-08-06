@@ -42,7 +42,9 @@ def test_ascend_fused_moe_3d_initializes_upstream_weight_state() -> None:
 
 
 @pytest.mark.parametrize("shared_experts", [None, object()])
-def test_shared_experts_select_compatible_expand_slice(shared_experts) -> None:
+def test_shared_experts_keep_shape_driven_expand_dispatch(shared_experts) -> None:
+    assert not hasattr(PunicaWrapperNPU, "enable_compatible_lora_bmm_expand_slice")
+
     base_layer = SimpleNamespace(
         _shared_experts=shared_experts,
         set_lora_context=Mock(),
@@ -56,30 +58,24 @@ def test_shared_experts_select_compatible_expand_slice(shared_experts) -> None:
     with patch.object(BaseLayerWithLoRA, "set_mapping"):
         AscendFusedMoEWithLoRA.set_mapping(wrapper, punica_wrapper)
 
-    if shared_experts is None:
-        punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_not_called()
-    else:
-        punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_called_once_with()
+    punica_wrapper.enable_compatible_lora_bmm_expand_slice.assert_not_called()
     base_layer.set_lora_context.assert_called_once_with("context")
 
 
 @pytest.mark.parametrize(
-    ("force_compatible_path", "rank", "slice_size", "expect_compatible_path"),
+    ("rank", "slice_size", "expect_compatible_path"),
     [
-        (False, 4, 8, False),
-        (False, 16, 8, True),
-        (True, 4, 8, True),
+        (4, 8, False),
+        (16, 8, True),
     ],
 )
 def test_expand_slice_path_follows_model_structure_and_tensor_shape(
-    force_compatible_path: bool,
     rank: int,
     slice_size: int,
     expect_compatible_path: bool,
 ) -> None:
     wrapper: Any = SimpleNamespace(
         no_lora=False,
-        _force_lora_bmm_expand_slice=force_compatible_path,
         _bmm_expand_slice=Mock(),
         sgmv_expand_slice=Mock(),
         prefill_metadata=("batches", "tokens", "indices"),
@@ -139,3 +135,24 @@ def test_compatible_lora_bmm_expand_slice_matches_reference(add_inputs: bool) ->
     expected = torch.ones((3, 5))
     expected[:, 1:4] = expected[:, 1:4] + delta if add_inputs else delta
     torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize(
+    ("x_shape", "weight_shape", "indices_shape", "y_shape", "slice_size", "message"),
+    [
+        ((3, 4), (2, 1, 5, 2), (3,), (3, 8), 5, "shrink rank"),
+        ((3, 2), (2, 1, 5, 2), (2,), (3, 8), 5, "same row count"),
+        ((3, 2), (2, 1, 5, 2), (3,), (2, 8), 5, "same row count"),
+        ((3, 2), (2, 1, 4, 2), (3,), (3, 8), 5, "destination slice"),
+    ],
+)
+def test_lora_bmm_expand_slice_rejects_incompatible_shapes(
+    x_shape, weight_shape, indices_shape, y_shape, slice_size, message
+) -> None:
+    x = torch.zeros(x_shape)
+    weights = torch.zeros(weight_shape)
+    indices = torch.zeros(indices_shape, dtype=torch.long)
+    y = torch.zeros(y_shape)
+
+    with pytest.raises(ValueError, match=message):
+        _lora_bmm_expand_slice_op(y, x, weights, indices, 1, slice_size, True)

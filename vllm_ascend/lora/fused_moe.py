@@ -32,9 +32,9 @@ Design (see plan in conversation history):
     inside `apply_wrapper` so only the active layer is in effect.
 
   - v1 deliberately limits scope to: unquant + AllGather + TP-only +
-    no FusedMC2 + no dynamic EPLB. Models with shared experts automatically
-    enable the compatible expand-slice path. Other unsupported paths assert
-    early so users get a clear error rather than silently wrong outputs.
+    no FusedMC2 + no dynamic EPLB. Shared experts use vLLM's standard dense
+    LoRA wrappers. Other unsupported paths assert early so users get a clear
+    error rather than silently wrong outputs.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 from vllm import envs
-from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
@@ -183,19 +182,6 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Ascend MoE LoRA cannot patch FusedMC2 path "
             "(dispatch_ffn_combine/mega_moe is a single fused C++ op). "
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
-        )
-    if getattr(base_layer, "_shared_experts", None) is not None:
-        # Models with shared experts (e.g. Qwen3.5-MoE, DeepSeek-V3) run the
-        # shared-experts LoRA through vLLM's standard dense wrappers, whose
-        # expand-slice path does not match the _C_ascend.sgmv_expand stacked
-        # lora_b layout (and vLLM's torch_ops einsum fallback fails on the
-        # same layout). The model wrapper enables PunicaWrapperNPU's
-        # compatible per-token gather + bmm path automatically in set_mapping.
-        logger.warning_once(
-            "Ascend MoE LoRA: shared_experts detected. The compatible "
-            "expand-slice path will be enabled automatically; routed-experts "
-            "LoRA is applied by this wrapper while shared-experts/dense LoRA "
-            "is handled by vLLM's standard dense wrappers."
         )
 
 
@@ -371,8 +357,6 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # publish it through the Ascend MoE runner. The runner stores it on
         # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        if getattr(self.base_layer, "_shared_experts", None) is not None:
-            punica_wrapper.enable_compatible_lora_bmm_expand_slice()
         self.base_layer.set_lora_context(self._build_lora_context())
 
 
