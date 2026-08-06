@@ -73,9 +73,7 @@ def _install_tensor_lora_loader() -> None:
 
         model = self._adapter_manager.model
         weights_mapper = getattr(model, "hf_to_vllm_mapper", None)
-        if weights_mapper is not None and hasattr(
-            weights_mapper, "get_unstacked_mapper"
-        ):
+        if weights_mapper is not None and hasattr(weights_mapper, "get_unstacked_mapper"):
             weights_mapper = weights_mapper.get_unstacked_mapper()
 
         lora = self._lora_model_cls.from_lora_tensors(
@@ -88,12 +86,8 @@ def _install_tensor_lora_loader() -> None:
             weights_mapper=weights_mapper,
             skip_prefixes=getattr(model, "lora_skip_prefixes", None),
         )
-        if getattr(lora, "extra_vocab_size", 0) > getattr(
-            self.lora_config, "lora_extra_vocab_size", 0
-        ):
-            raise ValueError(
-                "LoRA added vocab exceeds the configured lora_extra_vocab_size"
-            )
+        if getattr(lora, "extra_vocab_size", 0) > getattr(self.lora_config, "lora_extra_vocab_size", 0):
+            raise ValueError("LoRA added vocab exceeds the configured lora_extra_vocab_size")
         return lora
 
     LRUCacheWorkerLoRAManager._load_adapter = load_adapter
@@ -114,9 +108,7 @@ class LoRAIPCWorkerExtension:
         lora_int_id: str,
     ) -> dict:
         self._check_weight_transfer_engine()
-        update_info = self.weight_transfer_engine.parse_update_info(
-            json.loads(update_info_json)
-        )
+        update_info = self.weight_transfer_engine.parse_update_info(json.loads(update_info_json))
         peft_config = json.loads(peft_config_json)
         adapter_id = int(lora_int_id)
         lora_tensors: dict[str, torch.Tensor] = {}
@@ -142,10 +134,7 @@ class LoRAIPCWorkerExtension:
         if set(lora_tensors) != expected_names:
             missing = sorted(expected_names - set(lora_tensors))
             unexpected = sorted(set(lora_tensors) - expected_names)
-            raise RuntimeError(
-                f"Incomplete LoRA transfer: missing={missing}, "
-                f"unexpected={unexpected}"
-            )
+            raise RuntimeError(f"Incomplete LoRA transfer: missing={missing}, unexpected={unexpected}")
 
         request = TensorLoRARequest(
             lora_name=lora_name,
@@ -182,10 +171,7 @@ EXPECTED_BOB_NAME = "bob"
 
 SERVER_START_TIMEOUT = 2800
 CONTROL_TIMEOUT = 300
-WORKER_EXTENSION = (
-    "tests.e2e.pull_request.one_card.lora.test_rl_lora_ipc_weight_transfer."
-    "LoRAIPCWorkerExtension"
-)
+WORKER_EXTENSION = "tests.e2e.pull_request.one_card.lora.test_rl_lora_ipc_weight_transfer.LoRAIPCWorkerExtension"
 
 CONFIG_COMPATIBILITY_FIELDS = (
     "r",
@@ -215,16 +201,9 @@ def _download_lora_adapter(repo_id: str) -> Path:
         )
     )
     required_files = ("adapter_config.json", "adapter_model.safetensors")
-    missing_files = [
-        file_name
-        for file_name in required_files
-        if not (adapter_path / file_name).is_file()
-    ]
+    missing_files = [file_name for file_name in required_files if not (adapter_path / file_name).is_file()]
     if missing_files:
-        raise FileNotFoundError(
-            f"LoRA repository {repo_id!r} is missing required files: "
-            f"{missing_files}"
-        )
+        raise FileNotFoundError(f"LoRA repository {repo_id!r} is missing required files: {missing_files}")
     return adapter_path
 
 
@@ -244,9 +223,9 @@ def _assert_compatible_configs(alice_config: dict, bob_config: dict) -> None:
             f"{bob_config.get(field_name)!r}"
         )
 
-    assert set(alice_config["target_modules"]) == set(
-        bob_config["target_modules"]
-    ), "Alice and Bob target different base-model modules"
+    assert set(alice_config["target_modules"]) == set(bob_config["target_modules"]), (
+        "Alice and Bob target different base-model modules"
+    )
 
 
 def _load_trainer_lora(source_adapter: Path) -> dict[str, torch.Tensor]:
@@ -256,11 +235,7 @@ def _load_trainer_lora(source_adapter: Path) -> dict[str, torch.Tensor]:
     tensors: dict[str, torch.Tensor] = {}
     with safetensors.safe_open(source_weights, framework="pt") as source_file:
         for tensor_name in source_file.keys():
-            tensors[tensor_name] = (
-                source_file.get_tensor(tensor_name)
-                .to(device=trainer_device)
-                .contiguous()
-            )
+            tensors[tensor_name] = source_file.get_tensor(tensor_name).to(device=trainer_device).contiguous()
     _log(f"loaded {len(tensors)} live LoRA tensors from {source_adapter.name}")
     return tensors
 
@@ -281,9 +256,7 @@ def _serialize_update_info(update_info) -> str:
     update_fields = asdict(update_info)
     ipc_handles = update_fields.pop("ipc_handles")
     update_fields.pop("ipc_handles_pickled", None)
-    update_fields["ipc_handles_pickled"] = base64.b64encode(
-        pickle.dumps(ipc_handles)
-    ).decode("ascii")
+    update_fields["ipc_handles_pickled"] = base64.b64encode(pickle.dumps(ipc_handles)).decode("ascii")
     return json.dumps(update_fields)
 
 
@@ -298,9 +271,7 @@ def _transfer_lora(
     )
 
     tensors = _load_trainer_lora(source_adapter)
-    expected_bytes = sum(
-        tensor.numel() * tensor.element_size() for tensor in tensors.values()
-    )
+    expected_bytes = sum(tensor.numel() * tensor.element_size() for tensor in tensors.values())
     results: list[dict] = []
 
     def send_update(update_info) -> None:
@@ -449,14 +420,9 @@ def test_rl_lora_update_weights_from_ipc_and_hot_update():
         assert bob_result["received_bytes"] == alice_result["received_bytes"]
 
     assert EXPECTED_ALICE_NAME in alice_output.lower(), (
-        "The initial adapter did not identify as Alice: "
-        f"{alice_output!r}"
+        f"The initial adapter did not identify as Alice: {alice_output!r}"
     )
-    assert EXPECTED_BOB_NAME in bob_output.lower(), (
-        "The hot-updated adapter did not identify as Bob: "
-        f"{bob_output!r}"
-    )
+    assert EXPECTED_BOB_NAME in bob_output.lower(), f"The hot-updated adapter did not identify as Bob: {bob_output!r}"
     assert alice_output != bob_output, (
-        "Alice and Bob produced identical outputs; the LoRA hot update may "
-        "not have taken effect."
+        "Alice and Bob produced identical outputs; the LoRA hot update may not have taken effect."
     )
