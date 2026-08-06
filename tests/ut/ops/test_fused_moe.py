@@ -187,6 +187,10 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 ):
     method = _build_unquantized_method()
     layer = _build_weight_layer()
+    w13_loader = MagicMock()
+    w2_loader = MagicMock()
+    layer.w13_weight.weight_loader = w13_loader
+    layer.w2_weight.weight_loader = w2_loader
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
@@ -207,6 +211,8 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
     assert layer.w13_weight.is_contiguous() is True
     assert layer.w2_weight.is_contiguous() is True
+    assert layer.w13_weight.weight_loader is w13_loader
+    assert layer.w2_weight.weight_loader is w2_loader
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])

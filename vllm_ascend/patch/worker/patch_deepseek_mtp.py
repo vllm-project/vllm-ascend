@@ -66,6 +66,11 @@ class AscendDeepSeekMTP(DeepSeekMTP):
         else:
             return f"model.layers.{spec_layer}.rot.weight"
 
+    def load_weights(self, weights):
+        if self.quant_config is not None and (cache_scale_mapper := self.quant_config.get_cache_scale_mapper()):
+            weights = cache_scale_mapper.apply(weights)
+        return super().load_weights(weights)
+
 
 class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
     def load_weights(self, weights):

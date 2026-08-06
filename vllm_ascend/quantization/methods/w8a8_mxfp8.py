@@ -26,11 +26,6 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    ensure_mxfp8_linear_available,
-    ensure_mxfp8_moe_available,
-)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
@@ -49,7 +44,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     model_dtype = None
 
     def __init__(self):
-        ensure_mxfp8_linear_available("W8A8_MXFP8 linear quantization")
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -90,9 +84,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             quantized_x,
             layer.weight,
             layer.weight_scale,
-            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            scale_dtype=torch_npu.float8_e8m0fnu,
             pertoken_scale=pertoken_scale,
-            pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
             group_sizes=[1, 1, self.group_size],
@@ -196,8 +190,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W8A8MXFP
 
     def __init__(self):
-        ensure_mxfp8_moe_available("W8A8_MXFP8 MoE quantization")
-
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
@@ -267,8 +259,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 activation=getattr(layer, "activation", "silu"),
                 mxfp_act_quant_type=torch.float8_e4m3fn,
                 mxfp_weight_quant_type=torch.float8_e4m3fn,
-                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
+                mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,

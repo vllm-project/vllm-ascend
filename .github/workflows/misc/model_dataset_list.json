@@ -302,7 +302,9 @@
       "z-lab/Kimi-K2.5-DFlash",
       "Eco-Tech/Kimi-K2.7-Code-w4a8",
       "Eco-Tech/DeepSeek-R1-0528-w8a8-mtp-QuaRot",
-      "Eco-Tech/Qwen3.6-27B-w8a8"
+      "Eco-Tech/Qwen3.6-27B-w8a8",
+      "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot",
+      "Eco-Tech/MiniMax-M2.7-eagle-model-short"
     ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
@@ -362,4 +364,3 @@
       "vllm-ascend/GSM8K-in2048-bs4000-ds3.2"
     ]
   }
-

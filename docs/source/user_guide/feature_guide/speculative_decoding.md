@@ -505,6 +505,77 @@ This entropy-aware threshold is controlled by two parameters:
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
 
+## Dynamic Speculative Decoding
+
+### Why is Dynamic SD needed?
+
+SD methods need to verify K tokens for each sequence during decoding. As BS increases, the effective BS becomes BS\*K which increases the compute requirement during verification. When this BS\*K goes beyond a critical BS then SD negatively impacts the decode speed (TPOT). DSD helps by tuning the K to an optimal value such that we continue to reap the benefits from SD.
+
+### Use cases
+
+- Variable concurrency workload using same deployment. K would decrease as concurrency increases.
+- During RL rollout where we start off with high BS but then end up with small BS due to very few long tail request which end up generating a lot of tokens stalling the progress of the current rollout. Here K would go up during the end of rollout.
+- Currently supports MTP, eagle3, dflash, ngram, etc, Suffix itself is' per request dynamic ', and the outer dynamic K is redundant/conflicting for it.This is an upstream constraint, and vLLM itself will also collapse, not a unique problem of Ascend. dspark、MTP+DCP+DSD Currently not supported.
+
+### `--speculative-config` schema
+
+To use Dynamic SD, add `num_speculative_tokens_per_batch_size` to the config of an SD method which is a list of list. Here, an entry is `[start_bs, end_bs, optimal_K]` which means when the concurrency is within range `[start_bs, end_bs]` then `optimal_K` number of draft tokens are used. For e.g.,
+
+```bash
+--speculative-config '{
+    "method": "eagle",
+    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 64, 3],
+      [65, 128, 1],
+      [129, 512, 0]
+    ]
+  }'
+```
+
+implies that:
+
+- K=3 will be used when the concurrency is in range [1, 64]
+- K=1 will be used when the concurrency is in range [65, 128]
+- K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
+
+### Online Examples
+
+#### Dynamic SD Eagle Drafter
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --speculative-config '{
+    "method": "eagle",
+    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 64, 3],
+      [65, 128, 1],
+      [129, 512, 0]
+    ]
+  }'
+```
+
+#### Dynamic SD Eagle3 Drafter
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --speculative-config '{
+    "method": "eagle3",
+    "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 16, 5],
+      [17, 32, 4],
+      [33, 64, 3],
+      [65, 128, 1],
+      [129, 512, 0]
+    ]
+  }'
+```
+
 ## Synthetic Rejection Sampling
 
 In addition to the default `standard` rejection sampling (which accepts a draft token when `target_prob / draft_prob >= uniform`), vLLM Ascend supports **synthetic** rejection sampling. In this mode each draft token at position `i` is accepted with a configured probability `rates[i]`, compared against a uniform random draw — **independent of the target/draft probability match**. The first rejected position stops the request and emits a recovered token; if every draft token is accepted, the bonus token is appended.
