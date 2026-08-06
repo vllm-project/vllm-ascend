@@ -3,11 +3,16 @@
 
 """310P-specific Model Runner V2 model state."""
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
@@ -36,6 +41,7 @@ class Ascend310PModelState(AscendModelState):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
         self.dtype = self.model_config.dtype
+        self._capture_seq_lens_by_ptr: dict[int, torch.Tensor] = {}
 
         if self.supports_mm_inputs:
             assert encoder_cache is not None
@@ -63,6 +69,46 @@ class Ascend310PModelState(AscendModelState):
             self.mm_pruner = None
         else:
             self.mm_pruner = maybe_create_mm_pruner(self.model_config, model, self.rope_state, encoder_cache)
+
+    def _record_capture_seq_lens(self, seq_lens: torch.Tensor) -> None:
+        """Keep the largest captured view for each static tensor address."""
+        data_ptr = seq_lens.data_ptr()
+        recorded = self._capture_seq_lens_by_ptr.get(data_ptr)
+        if recorded is None or seq_lens.numel() > recorded.numel():
+            self._capture_seq_lens_by_ptr[data_ptr] = seq_lens
+
+    def _refresh_capture_seq_lens(self, runtime_seq_lens: torch.Tensor) -> None:
+        """Refresh every static seq-lens buffer before a FULL graph replay."""
+        for capture_seq_lens in self._capture_seq_lens_by_ptr.values():
+            num_seq_lens = min(capture_seq_lens.numel(), runtime_seq_lens.numel())
+            capture_seq_lens[:num_seq_lens].copy_(runtime_seq_lens[:num_seq_lens], non_blocking=True)
+            if num_seq_lens < capture_seq_lens.numel():
+                capture_seq_lens[num_seq_lens:].zero_()
+
+    def prepare_attn(
+        self,
+        input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+    ) -> dict[str, Any]:
+        if for_capture:
+            self._record_capture_seq_lens(input_batch.seq_lens)
+        elif cudagraph_mode == CUDAGraphMode.FULL:
+            self._refresh_capture_seq_lens(input_batch.seq_lens)
+
+        return super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+        )
 
     def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
         if self.rope_state is None:

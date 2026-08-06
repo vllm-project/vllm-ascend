@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.triton_dispatcher import _get_kernel_impl
 from vllm.sampling_params import SamplingParams
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -14,8 +15,10 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+from vllm_ascend._310p.worker.v2.model_state import Ascend310PModelState
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
 def test_310p_slot_mapping_kernel_is_registered() -> None:
@@ -145,6 +148,54 @@ def test_uniform_decode_query_len_falls_back_to_decode_query_len() -> None:
 
     runner.uniform_decode_query_len = 2
     assert runner._get_uniform_decode_query_len() == 2
+
+
+def test_310p_model_state_refreshes_all_full_graph_seq_lens_buffers() -> None:
+    model_state = object.__new__(Ascend310PModelState)
+    model_state._capture_seq_lens_by_ptr = {}
+    shared_capture_buffer = torch.full((4,), -1, dtype=torch.int32)
+    second_capture_buffer = torch.full((3,), -1, dtype=torch.int32)
+
+    # The same address may be seen through different bucket-sized views. Keep
+    # the largest one even if capture order changes in a future vLLM version.
+    model_state._record_capture_seq_lens(shared_capture_buffer[:2])
+    model_state._record_capture_seq_lens(shared_capture_buffer)
+    model_state._record_capture_seq_lens(second_capture_buffer)
+
+    runtime_seq_lens = torch.tensor([17, 9], dtype=torch.int32)
+    model_state._refresh_capture_seq_lens(runtime_seq_lens)
+
+    torch.testing.assert_close(shared_capture_buffer, torch.tensor([17, 9, 0, 0], dtype=torch.int32))
+    torch.testing.assert_close(second_capture_buffer, torch.tensor([17, 9, 0], dtype=torch.int32))
+
+
+def test_310p_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
+    model_state = object.__new__(Ascend310PModelState)
+    capture_seq_lens = torch.full((2,), -1, dtype=torch.int32)
+    model_state._capture_seq_lens_by_ptr = {}
+    capture_batch = SimpleNamespace(seq_lens=capture_seq_lens)
+    input_batch = SimpleNamespace(seq_lens=torch.tensor([11, 12], dtype=torch.int32))
+
+    with patch.object(AscendModelState, "prepare_attn", return_value={}) as prepare_attn:
+        model_state.prepare_attn(
+            capture_batch,
+            CUDAGraphMode.NONE,
+            (),
+            MagicMock(),
+            [],
+            MagicMock(),
+            for_capture=True,
+        )
+        model_state.prepare_attn(input_batch, CUDAGraphMode.NONE, (), MagicMock(), [], MagicMock())
+        torch.testing.assert_close(capture_seq_lens, torch.full((2,), -1, dtype=torch.int32))
+
+        model_state.prepare_attn(input_batch, CUDAGraphMode.PIECEWISE, (), MagicMock(), [], MagicMock())
+        torch.testing.assert_close(capture_seq_lens, torch.full((2,), -1, dtype=torch.int32))
+
+        model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), MagicMock(), [], MagicMock())
+        torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
+
+    assert prepare_attn.call_count == 4
 
 
 def test_v2_allocates_attention_kv_cache_directly_as_nz() -> None:

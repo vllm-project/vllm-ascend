@@ -585,3 +585,64 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
    的真实请求，不能只以服务启动成功作为通过标准。
 7. 本任务后续每次代码修改都必须在同一轮同步更新本文档，记录改动文件、问题现象、
    根因、实现方式、影响范围、测试结果和仍未验证的内容。
+
+## 18. FULL_DECODE_ONLY attention 长度 buffer 刷新
+
+问题现象：
+
+- eager 精度正常。
+- `FULL_DECODE_ONLY` 首个生成 token 正常，后续稳定进入乱码或重复符号。
+- 对比定位显示 prefill、首个 decode 的 token、position 和运行时长度元数据一致，但图模式
+  首个 decode 的 attention hidden states 已经与 eager 不同。
+
+根因：
+
+- 310P paged attention 采用 direct-op ACLGraph capture，不注册公共 attention graph task
+  参数更新机制。
+- 图捕获 metadata 绑定 capture-time `seq_lens` tensor 的固定地址；运行时 metadata 可能使用
+  另一块 tensor。只更新 runtime tensor 无法改变图实际读取的 capture tensor，部分 capture
+  bucket 因而继续读取 dummy context length。
+- stream 同步只能保证已有写操作完成，不能解决 capture tensor 与 runtime tensor 地址不同。
+
+### `vllm_ascend/_310p/worker/v2/model_state.py`
+
+改动内容：
+
+- 在 `Ascend310PModelState` 实例中记录 FULL graph 捕获使用的所有 `seq_lens` tensor。
+- 按 `data_ptr()` 管理不同物理地址；同一地址出现不同 bucket view 时保留 `numel()` 最大的
+  view，避免依赖上游 capture bucket 的排序。
+- capture 阶段只登记 buffer；仅在非 capture 的 `CUDAGraphMode.FULL` 准备阶段，将当前
+  runtime padded `seq_lens` 原位复制到全部 capture buffer，并把剩余尾部清零。
+- eager 和 piecewise 不执行刷新。
+
+改动原因：
+
+- ACLGraph replay 只能读取捕获时绑定的固定 tensor 地址，必须在 replay 前刷新这些地址的内容。
+- 状态归属 310P direct-op graph contract，因此放在 `Ascend310PModelState`，不向公共 model
+  state 热路径增加设备判断。
+
+公共路径说明：
+
+- `vllm_ascend/worker/v2/model_states/default.py` 最终保持不变；310P capture buffer
+  状态和刷新逻辑全部收敛在专用 model state 中。
+
+影响范围：
+
+- 仅影响 310P MRV2 默认模型状态的 FULL graph replay。
+- 不修改 310P MRV1，不影响其他 Ascend 机型，也不改变公开 API 和配置。
+
+### `tests/ut/_310p/test_model_runner_v2_310p.py`
+
+改动内容：
+
+- 验证不同地址的 capture buffer 均会刷新，短 runtime batch 后的尾部会清零。
+- 验证同一地址的不同长度 view 始终保留最大 view。
+- 验证 eager 不刷新 capture buffer，FULL runtime 才刷新。
+
+验证状态：
+
+- 服务器原始图请求修复后输出正确；连续 20 次确定性请求结果一致且有效。
+- 服务器目标回归测试结果为 `1 passed, 19 deselected`，并通过 `py_compile` 和
+  `git diff --check`。本次重构后的新增 UT 仍需重新在服务器环境执行。
+- 并发请求在 310P V2 `postprocess_sampled()` 中可能存在 `idx_mapping` 与
+  `query_start_loc` 长度不一致问题；该问题与本次 attention 首次偏差独立，暂未修改。
