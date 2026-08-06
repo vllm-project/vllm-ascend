@@ -482,6 +482,34 @@ def rejection_sample(
         "results will be incorrect."
     )
 
+    # Diagnostic: verify draft_token_ids aligns with draft_probs rows.
+    # The prob at (row i, col draft_token_ids[i]) must be > 0 for
+    # rejection sampling to work. A zero here means the draft token id
+    # and draft_probs row are misaligned (e.g. wrong flatten order).
+    assert draft_probs.shape[0] == num_tokens, (
+        "rejection_sample: draft_probs/draft_token_ids row mismatch - "
+        f"draft_probs.shape[0]={draft_probs.shape[0]} != "
+        f"num_tokens={num_tokens}"
+    )
+    row_idx = torch.arange(num_tokens, device=draft_token_ids.device)
+    gathered = draft_probs[row_idx, draft_token_ids.long()]
+    num_zero = (gathered <= 0).sum().item()
+    logger.debug(
+        "[rej_sample_diag] draft_probs: shape=%s, min=%.3e, max=%.3e; "
+        "draft_token_ids: shape=%s, min=%d, max=%d; "
+        "gathered (prob at draft token): min=%.3e, max=%.3e, "
+        "zero_count=%d/%d",
+        tuple(draft_probs.shape),
+        draft_probs.min().item(),
+        draft_probs.max().item(),
+        tuple(draft_token_ids.shape),
+        int(draft_token_ids.min().item()),
+        int(draft_token_ids.max().item()),
+        gathered.min().item(),
+        gathered.max().item(),
+        num_zero, num_tokens,
+    )
+
     # Block verify requires enable_block_verify config and max_spec_len >= 3.
     using_block_verify = max_spec_len >= 3 and bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
     using_entropy_verify = bool(get_ascend_config().rejection_sampler_config.enable_entropy_verify)
