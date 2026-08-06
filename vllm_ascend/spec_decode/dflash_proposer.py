@@ -3,6 +3,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
@@ -24,6 +25,13 @@ class AscendDflashProposer(AscendEagleProposer):
             device,
             runner=runner,
         )
+
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.max_num_batched_tokens < (self.num_speculative_tokens + 1) * scheduler_config.max_num_seqs:
+            logger.warning(
+                "max_num_batched_tokens must be greater than or equal to "
+                "(num_speculative_tokens + 1) * max_num_seqs when using DFlash."
+            )
 
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         self.max_positions = self.max_num_tokens + self.max_query_tokens
