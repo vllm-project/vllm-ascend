@@ -577,7 +577,7 @@ class KVPoolScheduler:
             can_load=force_layerwise_load,
             kvpool_store_skip_tokens=store_skip_tokens,
         )
-        logger.info(
+        logger.debug(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
             "need_to_allocate=%d load_async=%s use_layerwise=%s",
             request.request_id,
@@ -981,6 +981,9 @@ class KVPoolScheduler:
                 if req_meta is not None:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
+
+        if delayed_free_reqs := len(self._delayed_free_req_ids):
+            logger.info("KV pool put status: delayed_free_reqs=%d", delayed_free_reqs)
 
         return meta
 
