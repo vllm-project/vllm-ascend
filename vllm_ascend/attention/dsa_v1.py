@@ -274,6 +274,7 @@ class AscendDSAMetadata:
 
     start_pos: torch.Tensor | None = None
 
+
 DSAMetadataList: TypeAlias = list[AscendDSAMetadata]
 
 
