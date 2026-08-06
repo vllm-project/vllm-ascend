@@ -105,6 +105,7 @@ auto-enter the worker loop:
 python -m tools.bisect.auto_bisect \
     --scene multi_node \
     --config-yaml Qwen3-235B-W8A8.yaml \
+    --soc a3 \
     --bad-commit "$VLLM_ASCEND_REF" \
     --num-nodes 2 \
     --coord-dir /shared/nightly_bisect/coord

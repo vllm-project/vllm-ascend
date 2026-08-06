@@ -256,6 +256,7 @@ run_tests_with_log() {
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
                 --bad-commit HEAD \
+                --soc "$BISECT_SOC" \
                 --coord-dir "${coord}" \
                 --release-file "${release}"
             while [ ! -f "$release" ]; do sleep 5; done
