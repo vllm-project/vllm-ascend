@@ -954,11 +954,11 @@ def init_ascend_config(vllm_config):
         "sparse_kv_offload_config",
         "dump_config_path",
         # derived fields (after-validator computes; user input would residualize)
-        "enable_shared_expert_dp",
+        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
+        # c8_enable_reshape_optim are NOT here — they are user-input fields that
+        # after-validator *augments* (self.x = self.x and condition), so the user
+        # must be able to pass them. Only pure-derived fields (no user input) are stripped.
         "enable_sp_by_pass",
-        "enable_sparse_sfa_c8",
-        "enable_sparse_li_c8",
-        "c8_enable_reshape_optim",
         "pd_tp_ratio",
         "pd_head_ratio",
         "num_head_replica",

@@ -526,7 +526,7 @@ class TestShortRequestFirstConfig(TestBase):
 
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
-        config = SchedulerConfig({}, balance_env_value=False)
+        config = SchedulerConfig(_additional_config={}, _balance_env_value=False)
 
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
@@ -536,11 +536,11 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_none_config_uses_defaults_and_legacy_fallback(self, mock_warning_once):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "scheduler_config": None,
                 "recompute_scheduler_enable": True,
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -548,11 +548,11 @@ class TestSchedulerConfig(TestBase):
 
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "scheduler_config must be a dict, got list"):
-            SchedulerConfig({"scheduler_config": []}, balance_env_value=False)
+            SchedulerConfig(_additional_config={"scheduler_config": []}, _balance_env_value=False)
 
     def test_nested_config_overrides_all_scheduler_settings(self):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "scheduler_config": {
                     "enable_balance_scheduling": True,
                     "recompute_scheduler_enable": True,
@@ -564,7 +564,7 @@ class TestSchedulerConfig(TestBase):
                     "profiling_chunk_config": {"enabled": True, "need_timing": False},
                 }
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -578,13 +578,13 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True},
                 "profiling_chunk_config": {"enabled": True},
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -596,7 +596,7 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_nested_config_wins_and_legacy_fields_fill_missing_values(self, mock_warning_once):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "scheduler_config": {
                     "recompute_scheduler_enable": True,
                     "short_request_first_config": {"enabled": True},
@@ -605,7 +605,7 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "short_request_first_config": {"enabled": False},
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -616,7 +616,7 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.info_once")
     def test_balance_falls_back_to_environment_default(self, mock_info_once):
         with patch.dict(os.environ, {"VLLM_ASCEND_BALANCE_SCHEDULING": "1"}):
-            config = SchedulerConfig({}, balance_env_value=True)
+            config = SchedulerConfig(_additional_config={}, _balance_env_value=True)
 
         self.assertTrue(config.enable_balance_scheduling)
         mock_info_once.assert_called_once()
