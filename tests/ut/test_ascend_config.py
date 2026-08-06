@@ -22,7 +22,12 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
+    AscendCompilationConfig,
     AscendConfig,
+    AscendFusionConfig,
+    EplbConfig,
+    ProfilingChunkConfig,
+    RejectionSamplerConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -63,7 +68,10 @@ class TestAscendConfig(TestBase):
     @staticmethod
     def _make_sparse_li_c8_config(quant_description):
         quant_config = SimpleNamespace(quant_description=quant_description)
-        config = AscendConfig.__new__(AscendConfig)
+        # Use object.__new__ to bypass pydantic dataclass validation; this
+        # helper only needs a partial AscendConfig to test sparse-li-c8 layer
+        # filtering, not a fully constructed instance.
+        config = object.__new__(AscendConfig)
         config.enable_sparse_li_c8 = True
         (
             config._sparse_li_c8_layer_ids,
@@ -480,14 +488,14 @@ class TestAscendConfig(TestBase):
 
 class TestShortRequestFirstConfig(TestBase):
     def test_default_is_disabled(self):
-        cfg = ShortRequestFirstConfig({})
+        cfg = ShortRequestFirstConfig()
         self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.threshold, 256)
         self.assertEqual(cfg.long_max_wait_ms, 0.0)
 
     def test_explicit_config(self):
         cfg = ShortRequestFirstConfig(
-            {
+            **{
                 "enabled": True,
                 "threshold": 512,
                 "long_max_wait_ms": 2000,
@@ -499,18 +507,18 @@ class TestShortRequestFirstConfig(TestBase):
 
     def test_unknown_key_rejected(self):
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig({"foo": 1})
+            ShortRequestFirstConfig(**{"foo": 1})
 
     def test_validation_rejects_out_of_range(self):
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig({"long_token_reservation": 1.5})
+            ShortRequestFirstConfig(**{"long_token_reservation": 1.5})
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig({"threshold": -1})
+            ShortRequestFirstConfig(**{"threshold": -1})
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig({"long_max_wait_ms": -1})
+            ShortRequestFirstConfig(**{"long_max_wait_ms": -1})
 
     def test_none_config_is_disabled(self):
-        cfg = ShortRequestFirstConfig(None)
+        cfg = ShortRequestFirstConfig()
         self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.threshold, 256)
         self.assertEqual(cfg.long_max_wait_ms, 0.0)
@@ -518,7 +526,7 @@ class TestShortRequestFirstConfig(TestBase):
 
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
-        config = SchedulerConfig({}, balance_env_value=False)
+        config = SchedulerConfig(_additional_config={}, _balance_env_value=False)
 
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
@@ -528,11 +536,11 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_none_config_uses_defaults_and_legacy_fallback(self, mock_warning_once):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "scheduler_config": None,
                 "recompute_scheduler_enable": True,
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -540,11 +548,11 @@ class TestSchedulerConfig(TestBase):
 
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "scheduler_config must be a dict, got list"):
-            SchedulerConfig({"scheduler_config": []}, balance_env_value=False)
+            SchedulerConfig(_additional_config={"scheduler_config": []}, _balance_env_value=False)
 
     def test_nested_config_overrides_all_scheduler_settings(self):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "scheduler_config": {
                     "enable_balance_scheduling": True,
                     "recompute_scheduler_enable": True,
@@ -556,7 +564,7 @@ class TestSchedulerConfig(TestBase):
                     "profiling_chunk_config": {"enabled": True, "need_timing": False},
                 }
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -570,13 +578,13 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True},
                 "profiling_chunk_config": {"enabled": True},
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.enable_balance_scheduling)
@@ -588,7 +596,7 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_nested_config_wins_and_legacy_fields_fill_missing_values(self, mock_warning_once):
         config = SchedulerConfig(
-            {
+            _additional_config={
                 "scheduler_config": {
                     "recompute_scheduler_enable": True,
                     "short_request_first_config": {"enabled": True},
@@ -597,7 +605,7 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "short_request_first_config": {"enabled": False},
             },
-            balance_env_value=False,
+            _balance_env_value=False,
         )
 
         self.assertTrue(config.recompute_scheduler_enable)
@@ -608,7 +616,130 @@ class TestSchedulerConfig(TestBase):
     @patch("vllm_ascend.ascend_config.logger.info_once")
     def test_balance_falls_back_to_environment_default(self, mock_info_once):
         with patch.dict(os.environ, {"VLLM_ASCEND_BALANCE_SCHEDULING": "1"}):
-            config = SchedulerConfig({}, balance_env_value=True)
+            config = SchedulerConfig(_additional_config={}, _balance_env_value=True)
 
         self.assertTrue(config.enable_balance_scheduling)
         mock_info_once.assert_called_once()
+
+
+class TestSubconfigPydanticTypeValidation(TestBase):
+    """Verify @config migration gives sub-configs lax bool/int coercion and forbid.
+
+    These tests construct sub-configs directly (no vllm_config / init_ascend_config)
+    so they run on CPU-only UT runners.
+    """
+
+    def test_ascend_fusion_config_string_false_disables(self):
+        # bool("false") is True in Python; pydantic lax must resolve to False.
+        self.assertFalse(AscendFusionConfig(fusion_ops_gmmswigluquant="false").fusion_ops_gmmswigluquant)
+        self.assertTrue(AscendFusionConfig(fusion_ops_gmmswigluquant="true").fusion_ops_gmmswigluquant)
+
+    def test_ascend_fusion_config_forbids_unknown_key(self):
+        with self.assertRaises(ValueError):
+            AscendFusionConfig(unknown_key=1)
+
+    def test_ascend_compilation_config_bool_lax_and_forbid(self):
+        cfg = AscendCompilationConfig(enable_npugraph_ex="false")
+        self.assertFalse(cfg.enable_npugraph_ex)
+        with self.assertRaises(ValueError):
+            AscendCompilationConfig(unknown_key=1)
+
+    def test_profiling_chunk_config_int_lax_and_range(self):
+        # int string "2" coerces to 2 (fixes "2"==2 silent failure)
+        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")
+        self.assertEqual(cfg.min_chunk, 4096)
+        # range check preserved
+        with self.assertRaises(ValueError):
+            ProfilingChunkConfig(smooth_factor=1.5)
+
+    def test_short_request_first_config_unknown_key_forbidden(self):
+        # Was hand-written unknown-key check; now extra="forbid".
+        with self.assertRaises(ValueError):
+            ShortRequestFirstConfig(foo=1)
+
+    def test_rejection_sampler_config_range_check_preserved(self):
+        with self.assertRaises(ValueError):
+            RejectionSamplerConfig(posterior_threshold=1.5)
+
+    def test_eplb_config_int_field_lax(self):
+        cfg = EplbConfig(eplb_policy_type="2")
+        self.assertEqual(cfg.eplb_policy_type, 2)
+
+
+class TestTopLevelSwitchTypeValidation(TestBase):
+    """Verify @config migration gives top-level AscendConfig switches type validation.
+
+    These tests exercise the full ``init_ascend_config`` path (vllm_config +
+    factory + before/after validators), so they require a constructible
+    VllmConfig. Run on NPU/Linux UT runners (Windows lacks torch_npu).
+    """
+
+    @staticmethod
+    def _clean_up(func):
+        def wrapper(*args, **kwargs):
+            clear_ascend_config()
+            clear_enable_sp()
+            try:
+                func(*args, **kwargs)
+            finally:
+                clear_ascend_config()
+                clear_enable_sp()
+
+        return wrapper
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_cpu_binding_string_false_disables(self, mock_fix):
+        # Core regression: bool("false") is True in Python, so
+        # {"enable_cpu_binding": "false"} previously left CPU binding enabled.
+        # Pydantic lax coercion must resolve "false" to False.
+        vc = VllmConfig()
+        vc.additional_config = {"enable_cpu_binding": "false"}
+        self.assertFalse(init_ascend_config(vc).enable_cpu_binding)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_prefill_mc2_string_false_disables(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_prefill_mc2": "false"}
+        self.assertFalse(init_ascend_config(vc).enable_prefill_mc2)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_mlapo_env_false_no_longer_crashes(self, mock_fix):
+        # Regression: `export VLLM_ASCEND_ENABLE_MLAPO=false` used to crash
+        # startup with ValueError (int("false")). The before-validator reads
+        # os.getenv directly and resolves "false" to False.
+        vc = VllmConfig()
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "false"}):
+            self.assertFalse(init_ascend_config(vc).enable_mlapo)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_cpu_binding_rejects_invalid_int(self, mock_fix):
+        # JSON booleans should be true/false; an int 2 is neither 0 nor 1 and
+        # must fail fast rather than being coerced into unexpected truthiness.
+        vc = VllmConfig()
+        vc.additional_config = {"enable_cpu_binding": 2}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mega_moe_max_tokens_int_lax(self, mock_fix):
+        # int string "131072" coerces to 131072 (fixes str-vs-int silent failure).
+        vc = VllmConfig()
+        vc.additional_config = {"mega_moe_max_tokens": "131072"}
+        self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_unknown_top_level_key_is_rejected(self, mock_fix):
+        # A typo'd top-level key (not a declared field, not a bypass key) flows
+        # into kwargs and extra="forbid" catches it. Previously the factory
+        # filtered by __pydantic_fields__ which stripped typos silently; now
+        # only _NON_USER_INPUT_KEYS is stripped, so typos reach pydantic and are rejected.
+        vc = VllmConfig()
+        vc.additional_config = {"enable_cpu_bindng": True}  # typo: bindng
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
