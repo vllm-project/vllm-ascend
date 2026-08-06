@@ -32,13 +32,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
-from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
+
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
 
 
 def _apply_dsv4_rope(
@@ -122,8 +123,7 @@ class DeepseekV4DSparkModel(nn.Module):
         _model_quant_cfg = getattr(config, "quantization_config", None)
         _main_proj_qconfig = (
             vllm_config.quant_config
-            if _model_quant_cfg is not None
-            and _model_quant_cfg.get("quant_method") == "fp8"
+            if _model_quant_cfg is not None and _model_quant_cfg.get("quant_method") == "fp8"
             else None
         )
         self.main_proj = ReplicatedLinear(
