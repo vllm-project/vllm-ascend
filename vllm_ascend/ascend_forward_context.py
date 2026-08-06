@@ -39,9 +39,8 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "w4a8_dynamic",
     "quanttype.w8a8",
     "quanttype.w4a8",
-    "w4a8_mxfp",
-    "quanttype.w4a8mxfp",
 }
+_CANN_MEGAMOE_W4A8_MXFP_QUANT_NAMES = {"w4a8_mxfp", "quanttype.w4a8mxfp"}
 _CANN_MEGAMOE_W4A8_MXFP_FORMATS = {"mxfp4-pack-quantized"}
 
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
@@ -70,7 +69,11 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
-def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+def _cann_megamoe_supported_by_config(
+    vllm_config: VllmConfig,
+    *,
+    allow_w4a8_mxfp: bool = False,
+) -> bool:
     hf_text_config = vllm_config.model_config.hf_text_config
     hidden_size = getattr(hf_text_config, "hidden_size", None)
     if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
@@ -94,7 +97,9 @@ def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
     if quant_type is None:
         return True
     quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
+    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES or (
+        allow_w4a8_mxfp and quant_name in _CANN_MEGAMOE_W4A8_MXFP_QUANT_NAMES
+    )
 
 
 def _config_value(config: object, name: str, default=None):
@@ -144,7 +149,7 @@ def _cann_megamoe_w4a8_mxfp_by_config(vllm_config: VllmConfig) -> bool:
     )
     if quant_type is not None:
         quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-        return quant_name in {"w4a8_mxfp", "quanttype.w4a8mxfp"}
+        return quant_name in _CANN_MEGAMOE_W4A8_MXFP_QUANT_NAMES
 
     quant_config = getattr(hf_text_config, "quantization_config", None)
     if quant_config is None:
@@ -398,7 +403,7 @@ def _select_a5_moe_comm_method(
         get_ascend_config().enable_fused_mc2 == 1
         and _MEGA_MOE_SUPPORTED
         and _cann_megamoe_w4a8_mxfp_by_config(vllm_config)
-        and _cann_megamoe_supported_by_config(vllm_config)
+        and _cann_megamoe_supported_by_config(vllm_config, allow_w4a8_mxfp=True)
     ):
         return MoECommType.FUSED_MC2
 

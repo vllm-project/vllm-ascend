@@ -379,7 +379,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     [
         ("w4a8", True),
         ("w8a8", True),
-        ("w4a8_mxfp", True),
+        ("w4a8_mxfp", False),
         ("w8a16", False),
     ],
 )
@@ -390,6 +390,12 @@ def test_cann_megamoe_supported_by_config_quant_type(
     vllm_config = _make_vllm_config(quant_type=quant_type)
 
     assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
+
+
+def test_cann_megamoe_allows_w4a8_mxfp_only_when_explicitly_requested_for_a5():
+    vllm_config = _make_vllm_config(quant_type="w4a8_mxfp")
+
+    assert afc._cann_megamoe_supported_by_config(vllm_config, allow_w4a8_mxfp=True)
 
 
 def test_cann_megamoe_recognizes_k3_compressed_tensors_config():

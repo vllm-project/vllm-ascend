@@ -115,13 +115,14 @@ def gather_from_sequence_parallel_region(
     return _gather_along_first_dim(input_, group, output_split_sizes)
 
 
-def load_cann_mega_moe_ops():
-    # Build the communication-context extension while the model is being
-    # initialized. If this is deferred until MegaMoe's first collective, the
-    # per-node JIT lock serializes local workers and the ranks already inside
-    # HCCL can time out waiting for them.
-    comm_context_module = import_module("cann_ops_transformer.ops.comm_context")
-    comm_context_module.comm_context_op_builder.load()
+def load_cann_mega_moe_ops(*, preload_comm_context: bool = False):
+    if preload_comm_context:
+        # A5 multi-node MegaMoe must build the communication-context extension
+        # during model initialization. Deferring it until the first collective
+        # serializes local workers on the JIT lock and can make other ranks time
+        # out in HCCL. Preserve the existing lazy behavior on A2/A3.
+        comm_context_module = import_module("cann_ops_transformer.ops.comm_context")
+        comm_context_module.comm_context_op_builder.load()
     ops_module = import_module("cann_ops_transformer.ops")
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe
     mega_moe = ops_module.mega_moe

@@ -34,9 +34,20 @@ class TestMoECommMethod(TestBase):
         ops_module = MagicMock()
         mock_import_module.side_effect = [comm_context_module, ops_module]
 
-        get_symm_buffer, mega_moe = comm_utils.load_cann_mega_moe_ops()
+        get_symm_buffer, mega_moe = comm_utils.load_cann_mega_moe_ops(preload_comm_context=True)
 
         comm_context_module.comm_context_op_builder.load.assert_called_once_with()
+        self.assertIs(get_symm_buffer, ops_module.get_symm_buffer_for_mega_moe)
+        self.assertIs(mega_moe, ops_module.mega_moe)
+
+    @patch("vllm_ascend.ops.fused_moe.comm_utils.import_module")
+    def test_load_cann_megamoe_ops_keeps_a2_a3_lazy_behavior(self, mock_import_module):
+        ops_module = MagicMock()
+        mock_import_module.return_value = ops_module
+
+        get_symm_buffer, mega_moe = comm_utils.load_cann_mega_moe_ops()
+
+        mock_import_module.assert_called_once_with("cann_ops_transformer.ops")
         self.assertIs(get_symm_buffer, ops_module.get_symm_buffer_for_mega_moe)
         self.assertIs(mega_moe, ops_module.mega_moe)
 
@@ -72,8 +83,9 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
 
-    def test_fused_mc2_situ_falls_back_to_decomposed_mc2_pipeline(self):
+    def test_a3_w4a8_mxfp_situ_falls_back_to_decomposed_mc2_pipeline(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.token_dispatcher = SimpleNamespace(a5_need_extra_args=False)
         fused_input = MoEFusedExpertsInput(
             hidden_states=torch.randn(2, 4),
             topk_weights=torch.ones(2, 1),
@@ -88,7 +100,7 @@ class TestMoECommMethod(TestBase):
                 mc2_mask=None,
                 apply_router_weight_on_input=False,
             ),
-            quant=MoEQuantParams(),
+            quant=MoEQuantParams(quant_type=QuantType.W4A8MXFP),
             activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
         )
         expected = object()
@@ -133,13 +145,14 @@ class TestMoECommMethod(TestBase):
             (4, 292, 296),
         )
 
-    def test_init_megamoe_buffer_covers_prefill_token_shard(self):
+    def test_init_a5_megamoe_buffer_covers_prefill_token_shard(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
         comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
         comm_impl.token_dispatcher.global_bs = 0
         comm_impl.token_dispatcher.max_num_tokens_per_rank = 512
         comm_impl.token_dispatcher.ep_rank_id = 0
         comm_impl.token_dispatcher.ep_world_size = 32
+        comm_impl.token_dispatcher.a5_need_extra_args = True
         comm_impl.moe_config = SimpleNamespace(
             num_experts=896,
             experts_per_token=16,
@@ -162,6 +175,34 @@ class TestMoECommMethod(TestBase):
         call = comm_impl.get_symm_buffer_for_mega_moe.call_args
         self.assertEqual(call.args[1:4], (896, 512, 16))
         self.assertEqual(call.kwargs["max_recv_token_num"], 0)
+
+    def test_init_a3_megamoe_buffer_preserves_receive_token_capacity(self):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.global_bs = 0
+        comm_impl.token_dispatcher.max_num_tokens_per_rank = 512
+        comm_impl.token_dispatcher.ep_rank_id = 0
+        comm_impl.token_dispatcher.ep_world_size = 32
+        comm_impl.token_dispatcher.a5_need_extra_args = False
+        comm_impl.moe_config = SimpleNamespace(
+            num_experts=896,
+            experts_per_token=16,
+            hidden_dim=7168,
+            intermediate_size_per_partition=1024,
+        )
+        comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value=object())
+        fused_input = SimpleNamespace(
+            quant=SimpleNamespace(quant_type=QuantType.W4A8),
+        )
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group",
+            return_value=SimpleNamespace(device_group=object()),
+        ):
+            comm_impl._init_mega_moe_symm_buffer(fused_input)
+
+        call = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call.kwargs["max_recv_token_num"], 512 * 32 * 16)
 
     def test_apply_cann_megamoe_w4a8_mxfp_situ(self):
         comm_impl = object.__new__(FusedMC2CommImpl)

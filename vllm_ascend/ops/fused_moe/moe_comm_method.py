@@ -285,9 +285,12 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._mega_moe_symm_buffer = None
         self._mega_moe_weight_type = None
+        fused_mc2_enabled = get_ascend_config().enable_fused_mc2 == 1
         if _MEGA_MOE_SUPPORTED:
-            self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops()
-        if get_ascend_config().enable_fused_mc2 == 1:
+            self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops(
+                preload_comm_context=(self.token_dispatcher.a5_need_extra_args and fused_mc2_enabled),
+            )
+        if fused_mc2_enabled:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -333,10 +336,19 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
-        # Let CANN derive the SoC-specific receive-token capacity. A2/A3 and
-        # A5 use different semantics, and A5 only accepts this attribute in
-        # [0, 4096]; zero is the operator's documented automatic mode.
-        max_recv_token_num = 0
+        if self.token_dispatcher.a5_need_extra_args:
+            # A5 accepts this attribute only in [0, 4096]. Zero selects the
+            # operator's documented automatic mode.
+            max_recv_token_num = 0
+        else:
+            # Preserve the original A2/A3 receive-token capacity calculation.
+            expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
+            max_recv_token_num = max(
+                1,
+                num_max_tokens_per_rank
+                * int(self.token_dispatcher.ep_world_size)
+                * min(num_topk, expert_per_rank),
+            )
 
         logger.info(
             "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
@@ -472,7 +484,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # CANN MegaMoe supports Kimi's SiTU only for the A5 W4A8 MXFP path.
         # Keep every other SiTU configuration on the decomposed implementation.
         if isinstance(fused_experts_input.activation, SituActivationConfig) and (
-            fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
+            not self.token_dispatcher.a5_need_extra_args
+            or fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
             or fused_experts_input.activation.linear_beta is None
         ):
             return super().fused_experts(fused_experts_input)
