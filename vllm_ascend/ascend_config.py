@@ -219,7 +219,7 @@ class AscendConfig:
 
     # ---- sub-configs (need vllm_config / special): factory pre-constructs, kw_only ----
     xlite_graph_config: XliteGraphConfig = dataclasses.field(kw_only=True)
-    finegrained_tp_config: Any = dataclasses.field(kw_only=True)
+    finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(kw_only=True)
     scheduler_config: Any = dataclasses.field(kw_only=True)
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
 
@@ -553,18 +553,25 @@ class AscendConfig:
         return
 
 
+@config
 class FinegrainedTPConfig:
-    """
-    Configuration Object for finegrained_tp_config from additional_config
+    """Configuration Object for ``additional_config["finegrained_tp_config"]``.
+
+    Migrated to ``@config`` (pydantic dataclass). 5 int fields get lax coercion
+    ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
+    data_parallel divisibility) moved to an ``after`` model_validator.
     """
 
-    def __init__(self, finegrained_tp_config: dict, vllm_config):
-        self.oproj_tensor_parallel_size = finegrained_tp_config.get("oproj_tensor_parallel_size", 0)
-        self.lmhead_tensor_parallel_size = finegrained_tp_config.get("lmhead_tensor_parallel_size", 0)
-        self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
-        self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
-        self.olora_tensor_parallel_size = finegrained_tp_config.get("olora_tensor_parallel_size", 0)
+    oproj_tensor_parallel_size: int = 0
+    lmhead_tensor_parallel_size: int = 0
+    embedding_tensor_parallel_size: int = 0
+    mlp_tensor_parallel_size: int = 0
+    olora_tensor_parallel_size: int = 0
+    vllm_config: Any = dataclasses.field(kw_only=True, repr=False)
 
+    @model_validator(mode="after")
+    def _validate_preconditions(self):
+        vc = self.vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
@@ -574,19 +581,19 @@ class FinegrainedTPConfig:
             # (standard TP). When tp_size > 1 the weight-shard and input-shard
             # operate on different axes of the rank grid and no longer align,
             # so oproj TP currently requires standard tp_size == 1.
-            if vllm_config.parallel_config.tensor_parallel_size > 1:
+            if vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size currently requires "
                     "tensor_parallel_size == 1, got "
-                    f"{vllm_config.parallel_config.tensor_parallel_size}."
+                    f"{vc.parallel_config.tensor_parallel_size}."
                 )
             # The static all_to_all / reduce_scatter exchange buffers used by
             # _forward_o_proj are sized for graph replay and require ACL graph
             # capture; dummy_run does not run the entire attention module in
             # eager mode, so o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
+            if vc.model_config and vc.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
@@ -594,9 +601,9 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_lora tp split can only be used in graph mode.
-            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
+            if vc.model_config and vc.model_config.enforce_eager:
                 raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
@@ -619,12 +626,13 @@ class FinegrainedTPConfig:
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
             # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
-            if module_tp_size > 0 and not vllm_config.model_config.is_moe:
+            if module_tp_size > 0 and not vc.model_config.is_moe:
                 raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
-            if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
+            if module_tp_size > 0 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
+        return self
 
 
 @config
@@ -913,7 +921,7 @@ def init_ascend_config(vllm_config):
     from vllm_ascend import envs as ascend_envs
 
     xlite = XliteGraphConfig(vllm_config=vllm_config, **additional_config.get("xlite_graph_config", {}))
-    finegrained = FinegrainedTPConfig(additional_config.get("finegrained_tp_config", {}), vllm_config)
+    finegrained = FinegrainedTPConfig(vllm_config=vllm_config, **additional_config.get("finegrained_tp_config", {}))
     sched = SchedulerConfig(additional_config, balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING)
     sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
@@ -929,13 +937,13 @@ def init_ascend_config(vllm_config):
     # etc.) are kept in kwargs so pydantic coerces dict→dataclass.
     fields = AscendConfig.__pydantic_fields__
     _BYPASS_KEYS = {
-        "refresh",
+        "refresh",  # control-flow flag (singleton/cache refresh), not a config; not converged
         "dump_config_path",  # passed explicitly below
         "enable_balance_scheduling",  # SchedulerConfig internal (top-level legacy)
-        "xlite_graph_config",  # pre-constructed above
-        "finegrained_tp_config",  # pre-constructed above
-        "scheduler_config",  # pre-constructed above
-        "sparse_kv_offload_config",  # pre-constructed above
+        "xlite_graph_config",  # pre-constructed above (vllm_config dep)
+        "finegrained_tp_config",  # pre-constructed above (vllm_config dep)
+        "scheduler_config",  # pre-constructed above (vllm_config dep)
+        "sparse_kv_offload_config",  # pre-constructed above (vllm_config dep)
     }
     kwargs = {k: v for k, v in additional_config.items() if k in fields and k not in _BYPASS_KEYS}
 
