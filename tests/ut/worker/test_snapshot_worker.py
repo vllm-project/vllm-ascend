@@ -166,9 +166,9 @@ def test_rebuild_kv_transfer_engine_after_resume_delegates_to_connector(worker):
         patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=kv_group),
     ):
-        worker.rebuild_kv_transfer_engine_after_resume("10.0.0.8")
+        worker.rebuild_kv_transfer_engine_after_resume("10.0.0.8", None)
 
-    rebuild.assert_called_once_with("10.0.0.8")
+    rebuild.assert_called_once_with("10.0.0.8", None)
 
 
 def test_rebuild_kv_transfer_engine_after_resume_delegates_to_hybrid_connector(worker):
@@ -181,9 +181,9 @@ def test_rebuild_kv_transfer_engine_after_resume_delegates_to_hybrid_connector(w
         patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=kv_group),
     ):
-        worker.rebuild_kv_transfer_engine_after_resume("10.0.0.8")
+        worker.rebuild_kv_transfer_engine_after_resume("10.0.0.8", None)
 
-    rebuild.assert_called_once_with("10.0.0.8")
+    rebuild.assert_called_once_with("10.0.0.8", None)
 
 
 def test_recapture_graph_clears_and_recaptures(worker):

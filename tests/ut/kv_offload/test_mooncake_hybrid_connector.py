@@ -345,7 +345,7 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             ),
             patch("gc.collect", side_effect=lambda: events.append("gc")),
         ):
-            worker.rebuild_kv_transfer_endpoint("10.0.0.8")
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8", "engine-new")
 
         self.assertEqual(
             events,
@@ -353,3 +353,45 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
         )
         self.assertIs(worker.engine, new_engine)
         self.assertIs(worker.kv_send_thread, new_send)
+        self.assertEqual(worker.engine_id, "engine-new")
+        self.assertEqual(worker.xfer_handshake_metadata.engine_id, "engine-new")
+
+    def test_sync_engine_id_migrates_consumer_local_metadata(self):
+        local_addrs = [0x1000, 0x2000]
+        thread = types.SimpleNamespace(
+            local_engine_id="engine-old",
+            local_handshake_port=12345,
+            remote_metadata_lock=threading.Lock(),
+            kv_caches_base_addr=defaultdict(
+                dict,
+                {
+                    "engine-old": {12345: local_addrs},
+                    "remote-old": {22345: [0x3000]},
+                },
+            ),
+            remote_te_port=defaultdict(dict, {"remote-old": {22345: 9090}}),
+        )
+        metadata = types.SimpleNamespace(engine_id="consumer-metadata")
+        kv_cfg = types.SimpleNamespace(
+            engine_id="engine-old",
+            is_kv_producer=False,
+            is_kv_consumer=True,
+        )
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.engine_id = "engine-old"
+        worker.vllm_config = types.SimpleNamespace(kv_transfer_config=kv_cfg)
+        worker.xfer_handshake_metadata = metadata
+        worker.kv_recv_thread = thread
+
+        worker._sync_engine_id_after_snapshot("engine-new")
+
+        self.assertEqual(worker.engine_id, "engine-new")
+        self.assertEqual(kv_cfg.engine_id, "engine-new")
+        self.assertEqual(thread.local_engine_id, "engine-new")
+        self.assertEqual(
+            thread.kv_caches_base_addr,
+            {"engine-new": {12345: local_addrs}},
+        )
+        self.assertEqual(thread.remote_te_port, {})
+        # Consumer metadata is not exposed by a send thread.
+        self.assertEqual(metadata.engine_id, "consumer-metadata")

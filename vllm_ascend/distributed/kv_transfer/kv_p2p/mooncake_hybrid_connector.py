@@ -1617,7 +1617,45 @@ class MooncakeConnectorWorker:
         assert self._decode_pp_size == 1, "decode pp size must be 1"
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
 
-    def rebuild_kv_transfer_endpoint(self, local_ip: str) -> None:
+    def _sync_engine_id_after_snapshot(self, new_engine_id: str) -> None:
+        """Rotate worker-side engine_id and drop stale remote metadata caches."""
+        # Preserve the old connector-level ID while migrating recv-thread state.
+        old_engine_id = self.engine_id
+
+        # Update state owned by the reused recv thread.
+        thread = self.kv_recv_thread
+        if thread is not None:
+            local_port = thread.local_handshake_port
+            with thread.remote_metadata_lock:
+                old_local = thread.kv_caches_base_addr.get(old_engine_id)
+                local_addrs = old_local.get(local_port) if old_local is not None else None
+                if local_addrs is None:
+                    raise RuntimeError(
+                        "[snapshot][rebuild] local KV metadata is missing for "
+                        f"engine_id={old_engine_id}, port={local_port}"
+                    )
+                thread.kv_caches_base_addr.clear()
+                thread.remote_te_port.clear()
+                thread.kv_caches_base_addr[new_engine_id][local_port] = local_addrs
+                thread.local_engine_id = new_engine_id
+
+        # Reset connector-level state used to construct the new send thread.
+        self.engine_id = new_engine_id
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is not None:
+            kv_cfg.engine_id = new_engine_id
+            if kv_cfg.is_kv_producer and self.xfer_handshake_metadata is not None:
+                self.xfer_handshake_metadata.engine_id = new_engine_id
+
+        logger.info(
+            "[snapshot][rebuild] worker engine_id %s->%s",
+            old_engine_id,
+            new_engine_id,
+        )
+
+    def rebuild_kv_transfer_endpoint(
+        self, local_ip: str, new_engine_id: str | None = None
+    ) -> None:
         """[snapshot] Rebind KV transfer endpoints on the new pod IP after resume.
 
         Mirrors the MooncakeLayerwiseConnector rebuild: destroy the stale
@@ -1651,6 +1689,11 @@ class MooncakeConnectorWorker:
                     "[snapshot][rebuild] old KV send thread did not stop"
                 )
             self.kv_send_thread = None
+
+        # Synchronize the rotated ID only after the old producer listener has
+        # stopped, so it cannot expose new identity with stale TE metadata.
+        if new_engine_id is not None:
+            self._sync_engine_id_after_snapshot(new_engine_id)
 
         # Detach all references to the old TE before resetting the singleton.
         self.engine = None

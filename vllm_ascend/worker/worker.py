@@ -814,7 +814,9 @@ class NPUWorker(WorkerBase):
             self.rank, local_ip, data_parallel_master_ip,
         )
 
-    def rebuild_kv_transfer_engine_after_resume(self, local_ip: str) -> None:
+    def rebuild_kv_transfer_engine_after_resume(
+        self, local_ip: str, new_engine_id: str | None = None
+    ) -> None:
         """[snapshot] Rebuild KV transfer endpoints after container resume."""
         kv_cfg = self.vllm_config.kv_transfer_config
         if kv_cfg is None:
@@ -831,7 +833,7 @@ class NPUWorker(WorkerBase):
             None,
         )
         if callable(rebuild):
-            rebuild(local_ip)
+            rebuild(local_ip, new_engine_id)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
