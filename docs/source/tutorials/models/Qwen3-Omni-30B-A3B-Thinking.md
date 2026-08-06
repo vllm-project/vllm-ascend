@@ -198,7 +198,7 @@ Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stre
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 

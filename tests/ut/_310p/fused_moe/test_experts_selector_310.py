@@ -19,13 +19,23 @@ import pytest
 import torch
 
 from vllm_ascend._310p.fused_moe.experts_selector import select_experts
+from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
+from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
 
 class TestExpertsSelector310:
     @pytest.mark.parametrize("global_num_experts", [256, 128])
-    def test_select_experts(self, global_num_experts):
+    def test_grouped_topk_router_310_select_experts(self, global_num_experts):
         hidden_states = torch.randn(8, 16)
         router_logits = torch.randn(8, 8)
+        router = AscendGroupedTopKRouter310(
+            top_k=2,
+            global_num_experts=global_num_experts,
+            num_expert_group=None,
+            topk_group=None,
+            use_grouped_topk=False,
+            renormalize=True,
+        )
 
         with patch("torch_npu.npu_moe_gating_top_k_softmax") as mock_npu:
             mock_npu.return_value = (
@@ -34,29 +44,25 @@ class TestExpertsSelector310:
                 None,
             )
 
-            topk_weights, topk_ids = select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=2,
-                use_grouped_topk=False,
-                renormalize=True,
-                topk_group=None,
-                num_expert_group=None,
-                custom_routing_function=None,
-                scoring_func="softmax",
-                e_score_correction_bias=None,
-                global_num_experts=global_num_experts,
-            )
+            topk_weights, topk_ids = router._select_experts(hidden_states=hidden_states, router_logits=router_logits)
 
             mock_npu.assert_called_once()
 
         assert topk_weights.shape == (8, 2)
         assert topk_ids.shape == (8, 2)
 
-    def test_select_experts_chunks_large_token_batch(self):
+    def test_grouped_topk_router_310_chunks_large_token_batch(self):
         num_tokens = 2050
         hidden_states = torch.randn(num_tokens, 16)
         router_logits = torch.randn(num_tokens, 8)
+        router = AscendGroupedTopKRouter310(
+            top_k=2,
+            global_num_experts=8,
+            num_expert_group=None,
+            topk_group=None,
+            use_grouped_topk=False,
+            renormalize=True,
+        )
 
         def mock_gating(logits, k):
             return (
@@ -69,17 +75,46 @@ class TestExpertsSelector310:
             "torch_npu.npu_moe_gating_top_k_softmax",
             side_effect=mock_gating,
         ) as mock_npu:
+            topk_weights, topk_ids = router._select_experts(hidden_states=hidden_states, router_logits=router_logits)
+
+        assert [call.args[0].shape[0] for call in mock_npu.call_args_list] == [1024, 1024, 2]
+        assert topk_weights.shape == (num_tokens, 2)
+        assert topk_ids.shape == (num_tokens, 2)
+        assert torch.all(topk_weights == 0.5)
+
+    def test_select_experts_wrapper_uses_310p_router(self):
+        hidden_states = torch.randn(8, 16)
+        router_logits = torch.randn(8, 8)
+
+        with patch.object(
+            AscendGroupedTopKRouter310,
+            "_select_experts",
+            return_value=(
+                torch.ones(8, 2, dtype=torch.float32),
+                torch.zeros(8, 2, dtype=torch.int32),
+            ),
+        ) as mock_select:
             topk_weights, topk_ids = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 top_k=2,
                 use_grouped_topk=False,
                 renormalize=True,
-                custom_routing_function=None,
-                scoring_func="softmax",
+                global_num_experts=8,
             )
 
-        assert [call.args[0].shape[0] for call in mock_npu.call_args_list] == [1024, 1024, 2]
-        assert topk_weights.shape == (num_tokens, 2)
-        assert topk_ids.shape == (num_tokens, 2)
-        assert torch.all(topk_weights == 0.5)
+        mock_select.assert_called_once_with(hidden_states=hidden_states, router_logits=router_logits)
+        assert topk_weights.shape == (8, 2)
+        assert topk_ids.shape == (8, 2)
+
+    def test_router_factory_returns_310p_router(self, monkeypatch):
+        monkeypatch.setattr("vllm_ascend.ops.fused_moe.router.router_factory.is_310p", lambda: True)
+
+        router = create_ascend_fused_moe_router(
+            top_k=2,
+            global_num_experts=8,
+            renormalize=True,
+            use_grouped_topk=False,
+        )
+
+        assert isinstance(router, AscendGroupedTopKRouter310)
