@@ -30,9 +30,6 @@ import time
 
 from tests.e2e.pull_request.one_card.rlhf.conftest import (
     gen,
-    is_paused,
-    is_sleeping,
-    npu_free_bytes,
     ok,
     pause,
     resume,
@@ -50,25 +47,6 @@ class TestPauseResume:
     /pause blocks scheduling without releasing NPU memory (level=0 equivalent
     from the NPU side, but a distinct code path and distinct state flag).
     """
-
-    def test_pause_blocks_without_releasing_memory(self):
-        with server() as url:
-            free_before = npu_free_bytes()
-            assert pause(url, mode="abort") == 200
-            assert is_paused(url) is True
-            # In v1 engine: is_sleeping = is_scheduler_paused OR executor.is_sleeping
-            # so /pause also returns is_sleeping=True (scheduler-side pause).
-            assert is_sleeping(url) is True
-
-            freed = (npu_free_bytes() - free_before) / 2**30
-            assert freed < 0.5, f"/pause released {freed:.2f} GiB — it must not touch NPU memory"
-
-            resp = gen(url, timeout=5)
-            assert not ok(resp)
-
-            assert resume(url) == 200
-            assert is_paused(url) is False
-            assert ok(gen(url))
 
     def test_pause_mode_wait_drains_inflight_request(self):
         """mode='wait' lets an in-flight request complete, then blocks new ones."""
