@@ -33,9 +33,7 @@ def tensor_parallel_wrap(func):
 
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
-    qkv, _ = self.qkv_proj(
-        hidden_states
-    )
+    qkv, _ = self.qkv_proj(hidden_states)
     if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
         cos_sin = self.rotary_emb.cos_sin_cache[positions]
         if cos_sin.device != qkv.device:

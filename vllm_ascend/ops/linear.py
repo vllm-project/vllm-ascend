@@ -210,15 +210,13 @@ class AscendQKVParallelLinear(QKVParallelLinear):
 
     def forward(
         self,
-        input_,
-        *,
-        sequence_parallel_unpadded_size: int | None = None,
+        input_
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
         return super().forward(
-            input_, sequence_parallel_unpadded_size=sequence_parallel_unpadded_size
+            input_
         )
 
 
