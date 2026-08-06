@@ -96,7 +96,7 @@ templates:
       - --quantization
       - "ascend"
       - --speculative-config
-      - '{"method": "eagle3","model":"vllm-ascend/MiniMax-M2.7-eagle-model-2","num_speculative_tokens":3}'
+      - '{"method": "eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
       - --enforce-eager
       - --additional-config
       - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true}'
@@ -150,7 +150,7 @@ templates:
       - --quantization
       - "ascend"
       - --speculative-config
-      - '{"method": "eagle3","model":"vllm-ascend/MiniMax-M2.7-eagle-model-2","num_speculative_tokens":3}'
+      - '{"method": "eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
       - --async-scheduling
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
@@ -206,7 +206,7 @@ templates:
       - --quantization
       - "ascend"
       - --speculative-config
-      - '{"method": "eagle3","model":"vllm-ascend/MiniMax-M2.7-eagle-model-2","num_speculative_tokens":3}'
+      - '{"method": "eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
       - --async-scheduling
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
