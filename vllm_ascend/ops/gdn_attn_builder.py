@@ -30,7 +30,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -195,7 +195,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
