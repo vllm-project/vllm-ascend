@@ -62,7 +62,6 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/attention/__init__.py
-    - vllm_ascend/attention/abstract.py
     - vllm_ascend/attention/attention_mask.py
     - vllm_ascend/attention/utils.py
   tests:
