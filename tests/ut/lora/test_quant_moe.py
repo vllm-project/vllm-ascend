@@ -42,7 +42,7 @@ def _make_input(**overrides) -> MoEMlpComputeInput:
 
 
 @pytest.mark.parametrize(
-    ("comm_type", "request"),
+    ("comm_type", "mlp_input"),
     [
         (MoECommType.ALLGATHER, _make_input()),
         (
@@ -55,7 +55,7 @@ def _make_input(**overrides) -> MoEMlpComputeInput:
         ),
     ],
 )
-def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, request) -> None:
+def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> None:
     quantized_input = torch.ones(2, 4, dtype=torch.int8)
     input_scale = torch.ones(2)
     gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
@@ -83,36 +83,36 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, request) -> No
         patch("torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = comm_type
-        output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=request)
+        output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
     assert output is down_out
     assert output_event is event
     assert dynamic_quant.call_count == 2
-    assert dynamic_quant.call_args_list[0].kwargs["hidden_states"] is request.hidden_states
+    assert dynamic_quant.call_args_list[0].kwargs["hidden_states"] is mlp_input.hidden_states
     assert dynamic_quant.call_args_list[1].kwargs["hidden_states"] is activated
     assert gmm1.call_args.kwargs["x"][0] is quantized_input
     assert gmm2.call_args.kwargs["hidden_states"] is quantized_activated
     if comm_type == MoECommType.ALLGATHER:
         recover_allgather.assert_called_once_with(
-            request.lora_context,
-            request.expanded_row_idx,
-            request.topk_ids,
+            mlp_input.lora_context,
+            mlp_input.expanded_row_idx,
+            mlp_input.topk_ids,
         )
         recover_all2all.assert_not_called()
     else:
         recover_all2all.assert_called_once_with(
-            request.lora_context,
-            group_list=request.group_list,
+            mlp_input.lora_context,
+            group_list=mlp_input.group_list,
         )
         recover_allgather.assert_not_called()
     apply_w13.assert_called_once_with(
-        request.lora_context,
+        mlp_input.lora_context,
         gate_up_out=gate_up_out,
-        hidden_states=request.hidden_states,
+        hidden_states=mlp_input.hidden_states,
         lora_routing=routing,
     )
     apply_w2.assert_called_once_with(
-        request.lora_context,
+        mlp_input.lora_context,
         down_out=down_out,
         silu_out=activated,
         lora_routing=routing,
@@ -120,21 +120,21 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, request) -> No
 
 
 @pytest.mark.parametrize(
-    ("comm_type", "request", "message"),
+    ("comm_type", "mlp_input", "message"),
     [
         (MoECommType.FUSED_MC2, _make_input(), "AllGather TP"),
         (MoECommType.ALLGATHER, _make_input(dynamic_eplb=True), "dynamic EPLB"),
     ],
 )
-def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, request, message) -> None:
+def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, mlp_input, message) -> None:
     with patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx:
         extra_ctx.moe_comm_type = comm_type
         with pytest.raises(NotImplementedError, match=message):
-            quant_apply_mlp_with_moe_lora(mlp_compute_input=request)
+            quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
 
 def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
-    request = _make_input(
+    mlp_input = _make_input(
         hidden_states=torch.empty(0, 4, dtype=torch.bfloat16),
         group_list=torch.zeros(2, dtype=torch.int64),
         expanded_row_idx=None,
@@ -147,9 +147,9 @@ def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:
         patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant") as dynamic_quant,
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLTOALL
-        output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=request)
+        output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
-    assert output is request.hidden_states
+    assert output is mlp_input.hidden_states
     assert output_event is None
     dynamic_quant.assert_not_called()
 
