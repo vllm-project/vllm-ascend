@@ -926,11 +926,11 @@ def init_ascend_config(vllm_config):
     # Pre-construct sub-configs that need vllm_config or special injection.
     from vllm_ascend import envs as ascend_envs
 
-    xlite = XliteGraphConfig(vllm_config=vllm_config, **additional_config.get("xlite_graph_config", {}))
-    finegrained = FinegrainedTPConfig(vllm_config=vllm_config, **additional_config.get("finegrained_tp_config", {}))
+    xlite = XliteGraphConfig(vllm_config=vllm_config, **additional_config.get("xlite_graph_config", {}))  # type: ignore[call-arg]
+    finegrained = FinegrainedTPConfig(vllm_config=vllm_config, **additional_config.get("finegrained_tp_config", {}))  # type: ignore[call-arg]
     sched = SchedulerConfig(
         _additional_config=additional_config, _balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING
-    )
+    )  # type: ignore[call-arg]
     sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
     # pre-step; the resolved path is passed as the dump_config_path field.
@@ -971,7 +971,7 @@ def init_ascend_config(vllm_config):
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _BYPASS_KEYS}
 
-    new_config = AscendConfig(
+    new_config = AscendConfig(  # type: ignore[call-arg]
         vllm_config=vllm_config,
         xlite_graph_config=xlite,
         finegrained_tp_config=finegrained,
