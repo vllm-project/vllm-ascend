@@ -606,7 +606,17 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
+#   4. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights`
+#    Why:
+#       The `load_weights` method of the DeepSeekMTP model does not apply the `cache_scale_mapper`.
+#    How：
+#       If the weight name is `fa_k.offset`, rename it to `mla_attn.mla_attn.fa_k.offset`.
+#    Related PR (if no, explain why):
+#       ModelSlim quantization (kvcache quantization) is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports pluggable weight preprocessing in `load_weights`
+#       or when ModelSlim cache scale naming aligns with upstream conventions.
+#   5. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
 #    Why:
 #       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
 #       does not skip `rot.weight`, and will cause ValueError while loading weights.
