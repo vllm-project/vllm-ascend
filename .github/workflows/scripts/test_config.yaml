@@ -369,7 +369,9 @@
     - vllm_ascend/ops/dsa.py
     - vllm_ascend/ops/mhc.py
     - vllm_ascend/ops/rope_dsv4.py
+    - vllm_ascend/ops/sparse_flash_mla.py
   tests:
+    - tests/ut/device/test_device_op.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: ops_distributed_inference
