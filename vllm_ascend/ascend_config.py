@@ -169,19 +169,21 @@ class AscendConfig:
     fixing the ``bool("false")``/``"2"==2`` pitfalls. Unknown keys are
     forbidden (``extra="forbid"``). A-family env-var fallbacks (additional_config
     → envs → default) run in a ``before`` model_validator. Cross-config
-    derivations, downgrades and mutex checks run in an ``after``
-    model_validator (preserving original ordering and error messages).
+    derivations, downgrades and mutex checks that need ``vllm_config`` run in
+    ``derive_and_validate()``, a plain method invoked explicitly by
+    ``init_ascend_config`` (not a pydantic validator) — preserving original
+    ordering and error messages.
 
-    ``vllm_config`` is injected as a ``kw_only`` field with
-    ``arbitrary_types_allowed=True`` so pydantic does not recursively validate
-    the heavy upstream object; it is consumed only inside the ``after``
-    validator for derivations (pd_tp_ratio, enable_sp_by_pass, sparse, etc.).
+    ``vllm_config`` is NOT a member field. Pydantic handles only type/range/
+    enum validation here; cross-config derivations and mutex checks that need
+    ``vllm_config`` live in ``derive_and_validate()``, a plain method invoked
+    explicitly by ``init_ascend_config``. This keeps AscendConfig a pure
+    Ascend-configuration container, free of the heavy upstream VllmConfig graph
+    (and drops ``arbitrary_types_allowed``, which existed only for the former
+    ``vllm_config`` field).
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
-    # ---- injected dependency (non-user input) ----
-    vllm_config: VllmConfig = dataclasses.field(kw_only=True, repr=False)
+    model_config = ConfigDict(extra="forbid")
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
@@ -267,10 +269,13 @@ class AscendConfig:
                 kw[key] = env_value
         return ArgsKwargs(data.args, kw)
 
-    # ---- derivations + cross-config downgrades/mutex (after, preserves original __init__ order) ----
-    @model_validator(mode="after")
-    def _derive_and_validate(self) -> AscendConfig:
-        vc = self.vllm_config
+    # ---- derivations + cross-config downgrades/mutex ----
+    # Business validation: invoked explicitly by init_ascend_config (NOT a
+    # pydantic after-validator). Preserves the original __init__ ordering —
+    # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
+    # the max_num_batched_tokens that FLASHCOMM1 writeback just corrected).
+    def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
+        vc = vllm_config
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
@@ -559,7 +564,10 @@ class FinegrainedTPConfig:
 
     Migrated to ``@config`` (pydantic dataclass). 5 int fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
-    data_parallel divisibility) moved to an ``after`` model_validator.
+    data_parallel divisibility) are validated in ``_validate_preconditions()``,
+    a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
+    business validation stays out of pydantic). ``vllm_config`` is no longer a
+    member field.
     """
 
     oproj_tensor_parallel_size: int = 0
@@ -567,11 +575,9 @@ class FinegrainedTPConfig:
     embedding_tensor_parallel_size: int = 0
     mlp_tensor_parallel_size: int = 0
     olora_tensor_parallel_size: int = 0
-    vllm_config: Any = dataclasses.field(kw_only=True, repr=False)
 
-    @model_validator(mode="after")
-    def _validate_preconditions(self):
-        vc = self.vllm_config
+    def _validate_preconditions(self, vllm_config: Any):
+        vc = vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
@@ -632,7 +638,6 @@ class FinegrainedTPConfig:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
-        return self
 
 
 @config
@@ -641,19 +646,17 @@ class XliteGraphConfig:
 
     Migrated to ``@config`` (pydantic dataclass). The vllm_config-dependent
     preconditions (speculative decoding / pipeline parallelism / cache block
-    size) are applied in an ``after`` model_validator. ``vllm_config`` is
-    injected as a ``kw_only`` field with ``arbitrary_types_allowed`` so pydantic
-    does not recursively validate the heavy upstream object.
+    size) are validated in ``_validate_preconditions()``, a plain method
+    invoked explicitly by ``init_ascend_config`` (Plan B: business validation
+    stays out of pydantic). ``vllm_config`` is no longer a member field.
     """
 
     enabled: bool = False
     full_mode: bool = False
-    vllm_config: Any = dataclasses.field(kw_only=True, repr=False)
 
-    @model_validator(mode="after")
-    def _validate_preconditions(self):
+    def _validate_preconditions(self, vllm_config: Any):
         if self.enabled:
-            vc = self.vllm_config
+            vc = vllm_config
             if bool(vc.speculative_config) and vc.speculative_config.num_speculative_tokens != 1:
                 raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
             if vc.parallel_config.pipeline_parallel_size > 1:
@@ -667,7 +670,6 @@ class XliteGraphConfig:
                     "current_block_size=%d, recommended_block_size=128.",
                     vc.cache_config.block_size,
                 )
-        return self
 
 
 @config
@@ -896,6 +898,11 @@ class SparseKVOffloadConfig:
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
+# Identity key for the singleton cache: the vllm_config that initialized it.
+# Private module state (not a field on AscendConfig) — replaces the former
+# ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
+# that vllm_config is no longer a member of AscendConfig.
+_INIT_VLLM_CONFIG: Any = None
 
 
 def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
@@ -914,20 +921,20 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
-    global _ASCEND_CONFIG
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
     if (
         _ASCEND_CONFIG is not None
         and not refresh
         and _is_ascend_config_initialized(_ASCEND_CONFIG)
-        and getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config
+        and _INIT_VLLM_CONFIG is vllm_config
     ):
         return _ASCEND_CONFIG
 
-    # Pre-construct sub-configs that need vllm_config or special injection.
+    # Pre-construct sub-configs that need special injection.
     from vllm_ascend import envs as ascend_envs
 
-    xlite = XliteGraphConfig(vllm_config=vllm_config, **additional_config.get("xlite_graph_config", {}))  # type: ignore[call-arg]
-    finegrained = FinegrainedTPConfig(vllm_config=vllm_config, **additional_config.get("finegrained_tp_config", {}))  # type: ignore[call-arg]
+    xlite = XliteGraphConfig(**additional_config.get("xlite_graph_config", {}))  # type: ignore[call-arg]
+    finegrained = FinegrainedTPConfig(**additional_config.get("finegrained_tp_config", {}))  # type: ignore[call-arg]
     sched = SchedulerConfig(
         _additional_config=additional_config, _balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING
     )  # type: ignore[call-arg]
@@ -943,16 +950,15 @@ def init_ascend_config(vllm_config):
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
-        "vllm_config",
         "xlite_graph_config",
         "finegrained_tp_config",
         "scheduler_config",
         "sparse_kv_offload_config",
         "dump_config_path",
-        # pure-derived fields (after-validator computes them; user input would residualize)
+        # pure-derived fields (derive_and_validate computes them; user input would residualize)
         # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
         # c8_enable_reshape_optim are NOT here — they are user-input fields that
-        # after-validator *augments* (self.x = self.x and condition), so the user
+        # derive_and_validate *augments* (self.x = self.x and condition), so the user
         # must be able to pass them. Only pure-derived fields (no user input) are stripped.
         "enable_sp_by_pass",
         "pd_tp_ratio",
@@ -968,7 +974,6 @@ def init_ascend_config(vllm_config):
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
 
     new_config = AscendConfig(  # type: ignore[call-arg]
-        vllm_config=vllm_config,
         xlite_graph_config=xlite,
         finegrained_tp_config=finegrained,
         scheduler_config=sched,
@@ -976,16 +981,26 @@ def init_ascend_config(vllm_config):
         dump_config_path=dump_config_path,
         **kwargs,
     )
+    # Business validation (Plan B): pydantic did type/range/enum checks during
+    # construction; the cross-config derivations and mutex checks that need
+    # vllm_config run here, explicitly, before the instance is usable. This is
+    # the single legitimate entry point — bypassing the factory leaves derived
+    # fields at their sentinel defaults.
+    new_config.derive_and_validate(vllm_config)
+    finegrained._validate_preconditions(vllm_config)
+    xlite._validate_preconditions(vllm_config)
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
+        _INIT_VLLM_CONFIG = vllm_config
     else:
         logger.warning("Ascend config instance is not fully initialized. action: skip singleton cache update. ")
     return new_config
 
 
 def clear_ascend_config():
-    global _ASCEND_CONFIG
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
     _ASCEND_CONFIG = None
+    _INIT_VLLM_CONFIG = None
     from vllm_ascend.utils import clear_enable_sp
 
     clear_enable_sp()
