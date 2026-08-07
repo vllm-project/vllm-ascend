@@ -51,6 +51,11 @@ DEFAULT_GOOD_TABLE = os.getenv(
     "/root/.cache/nightly_bisect/good_table.csv",
 )
 SAMPLE_GOOD_TABLE = str(Path(__file__).resolve().parent / "good_table.sample.csv")
+DEFAULT_VERSION_TABLE = os.getenv(
+    "BISECT_VERSION_TABLE",
+    str(Path(DEFAULT_GOOD_TABLE).with_name("version_history.csv")),
+)
+SAMPLE_VERSION_TABLE = str(Path(__file__).resolve().parent / "version_history.sample.csv")
 
 # Where per-run artifacts (logs, state, final report) are written.
 DEFAULT_WORK_DIR = os.getenv("BISECT_WORK_DIR", "/root/.cache/nightly_bisect/runs")
@@ -166,6 +171,10 @@ class BisectOptions:
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
     good_table_path: str = DEFAULT_GOOD_TABLE
+    version_table_path: str = DEFAULT_VERSION_TABLE
+    version_branch: str | None = None
+    version_target: str | None = None
+    sync_external_versions: bool = True
     # Re-confirm a FAIL this many extra times before trusting it (flaky guard).
     fail_confirm_retries: int = 1
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
