@@ -10,7 +10,7 @@ def precompute_and_store_context_kv(
     self,
     context_states: torch.Tensor,
     context_positions: torch.Tensor,
-    context_slot_mapping: torch.Tensor | None = None,
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
 ) -> None:
     if not hasattr(self, "_num_attn_layers"):
         self._build_fused_kv_buffers()
