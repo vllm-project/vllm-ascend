@@ -46,24 +46,6 @@ on:
         required: false
         default: ''
         type: string
-      aop_enabled:
-        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
-        required: false
-        default: false
-        type: boolean
-      build_type:
-        description: 'Build type: daily or release.'
-        required: false
-        default: 'release'
-        type: choice
-        options:
-          - release
-          - daily
-      cann_version:
-        description: 'CANN version for base image tag'
-        required: false
-        default: '2026.08.03'
-        type: string
 
 permissions:
   contents: read
@@ -179,9 +161,7 @@ jobs:
     with:
       target: a5
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
       quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
-      cann_version: ${{ inputs.cann_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -215,7 +195,6 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
@@ -257,7 +236,6 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      aop_single_enabled: ${{ inputs.aop_enabled }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-0
