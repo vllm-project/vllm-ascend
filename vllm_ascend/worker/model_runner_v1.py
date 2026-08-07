@@ -334,58 +334,77 @@ def _e48_report(before, after):
 # machinery is corrupted globally → CANN-level fix needed.  Set
 # VLLM_ASCEND_DEBUG_E53=1.
 def _e53_test_fresh_taskgroup():
-    q, k, v, actual_q, actual_kv, scale, H, HKV = _e48_build_tensors()
-    torch.npu.synchronize()
+    # torch.npu.graph() capture must run inside torch.inference_mode() (the
+    # vllm capture loop does).  Build fresh tensors here too so they are
+    # inference tensors consistent with the capture machinery; do NOT reuse the
+    # E48 cache (those tensors may have been created outside inference_mode).
+    with torch.inference_mode():
+        torch.npu.synchronize()
 
-    # Eager reference.
-    ref, _ = torch_npu.npu_fused_infer_attention_score(
-        query=q, key=k, value=v, block_table=None,
-        input_layout="TND", block_size=128,
-        actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
-        num_key_value_heads=HKV, num_heads=H, scale=scale, sparse_mode=0,
-    )
+        H, HKV, D = 4, 2, 128
+        cu = [0, 4, 10]
+        total = cu[-1]
+        scale = 1.0 / (D ** 0.5)
+        dtype = torch.bfloat16
+        q = torch.randn(total, H, D, dtype=dtype, device="npu")
+        k = torch.randn(total, HKV, D, dtype=dtype, device="npu")
+        v = torch.randn(total, HKV, D, dtype=dtype, device="npu")
+        actual_q = cu[1:]
+        actual_kv = cu[1:]
 
-    # Workspace (matches full_graph_fia's use of get_max_workspace).
-    workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-        query=q, key=k, value=v, atten_mask=None, block_table=None,
-        input_layout="TND", block_size=128,
-        actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
-        num_key_value_heads=HKV, num_heads=H,
-        sparse_mode=0, pre_tokens=2147483647, next_tokens=2147483647,
-        scale=scale,
-    )
-    out_buf = torch.empty_like(q)
-    lse_buf = torch.empty(1, dtype=torch.float32, device="npu")
-
-    def _fia_out():
-        torch_npu.npu_fused_infer_attention_score.out(
-            query=q, key=k, value=v, atten_mask=None, block_table=None,
+        # Eager reference.
+        ref, _ = torch_npu.npu_fused_infer_attention_score(
+            query=q, key=k, value=v, block_table=None,
             input_layout="TND", block_size=128,
             actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
             num_key_value_heads=HKV, num_heads=H, scale=scale, sparse_mode=0,
-            workspace=workspace, out=[out_buf, lse_buf],
         )
 
-    # Capture in a FRESH session on the current (default) stream.
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
-        stream = torch_npu.npu.current_stream()
-        torch.npu.graph_task_group_begin(stream)
+        # Workspace (matches full_graph_fia's use of get_max_workspace).
+        workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+            query=q, key=k, value=v, atten_mask=None, block_table=None,
+            input_layout="TND", block_size=128,
+            actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
+            num_key_value_heads=HKV, num_heads=H,
+            sparse_mode=0, pre_tokens=2147483647, next_tokens=2147483647,
+            scale=scale,
+        )
+        out_buf = torch.empty_like(q)
+        lse_buf = torch.empty(1, dtype=torch.float32, device="npu")
+
+        def _fia_out():
+            torch_npu.npu_fused_infer_attention_score.out(
+                query=q, key=k, value=v, atten_mask=None, block_table=None,
+                input_layout="TND", block_size=128,
+                actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
+                num_key_value_heads=HKV, num_heads=H, scale=scale,
+                sparse_mode=0,
+                workspace=workspace, out=[out_buf, lse_buf],
+            )
+
+        # Capture in a FRESH session on the current (default) stream, with a
+        # fresh graph pool so the session is truly independent of the vllm
+        # captures (which used the global graph pool).
+        graph = torch.npu.NPUGraph()
+        pool = torch.npu.graph_pool_handle()
+        with torch.npu.graph(graph, pool=pool):
+            stream = torch_npu.npu.current_stream()
+            torch.npu.graph_task_group_begin(stream)
+            _fia_out()
+            handle = torch.npu.graph_task_group_end(stream)
+        torch.npu.synchronize()
+
+        # Rebind params to the SAME inputs, then replay.
+        torch.npu.graph_task_update_begin(torch_npu.npu.current_stream(), handle)
         _fia_out()
-        handle = torch.npu.graph_task_group_end(stream)
-    torch.npu.synchronize()
+        torch.npu.graph_task_update_end(torch_npu.npu.current_stream())
+        torch.npu.synchronize()
+        graph.replay()
+        torch.npu.synchronize()
 
-    # Rebind params to the SAME inputs, then replay.
-    torch.npu.graph_task_update_begin(torch_npu.npu.current_stream(), handle)
-    _fia_out()
-    torch.npu.graph_task_update_end(torch_npu.npu.current_stream())
-    torch.npu.synchronize()
-    graph.replay()
-    torch.npu.synchronize()
-
-    max_diff = float((out_buf - ref).abs().max().item())
-    print(f"[E53] fresh task-group graph replay vs eager: match={max_diff <= 1e-3}, "
-          f"max_abs_diff={max_diff}")
+        max_diff = float((out_buf - ref).abs().max().item())
+        print(f"[E53] fresh task-group graph replay vs eager: match={max_diff <= 1e-3}, "
+              f"max_abs_diff={max_diff}")
 
 
 class NPUModelRunner(GPUModelRunner):
