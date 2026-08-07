@@ -136,7 +136,7 @@ The deployment scenarios validated for this release are organized by context win
 
 ##### 5.1.1.1 Single-Node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
 
 Run the following script to execute online inference.
 
@@ -200,7 +200,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 ##### 5.1.1.2 Multi-Node Co-Located Deployment
 
-- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+- `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (128GB × 16).
 
 Run the following scripts on two nodes respectively.
 
