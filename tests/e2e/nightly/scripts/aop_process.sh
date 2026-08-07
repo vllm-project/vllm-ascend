@@ -15,6 +15,7 @@
 #   $10 num_nodes       (multi_node only)
 #   $11 coord_dir       (multi_node only)
 #   $12 case_name       (optional)
+#   $13 soc             (optional)
 # ============================================================
 set -euo pipefail
 
@@ -30,6 +31,21 @@ BAD_COMMIT="${9:-HEAD}"
 NUM_NODES="${10:-}"
 COORD_DIR="${11:-}"
 NAME="${12:-}"
+SOC="${13:-}"
+
+if [[ -z "$SOC" || "$SOC" == "unknown" ]]; then
+  echo "ERROR: valid soc is required for good-table lookup"
+  exit 1
+fi
+
+case "$SCENE" in
+  single_node|multi_node)
+    ;;
+  *)
+    echo "ERROR: invalid scene: '$SCENE'"
+    exit 1
+    ;;
+esac
 
 echo "================================================"
 echo " PROCESS - needs attention"
@@ -84,6 +100,7 @@ BISECT_CMD=(
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")
 [ -n "$NAME" ] && BISECT_CMD+=(--name "$NAME")
+[ -n "$SOC" ] && BISECT_CMD+=(--soc "$SOC")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
 [ -n "$COORD_DIR" ] && BISECT_CMD+=(--coord-dir "$COORD_DIR")
 
