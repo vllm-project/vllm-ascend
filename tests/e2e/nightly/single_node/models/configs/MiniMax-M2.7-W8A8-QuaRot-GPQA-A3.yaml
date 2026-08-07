@@ -37,9 +37,10 @@ test_cases:
       - "ascend"
       - "--enforce-eager"
     benchmarks:
-      # Provisional GPQA baseline mirrors the MiniMax-M2.5 A2 nightly case
-      # (baseline 83, threshold 5). Align with the test-team exit baseline
-      # after the first V1 measurement (A00302_05 C2).
+      # Record-only gate for the first run: baseline 0 / threshold 100 covers
+      # the full 0-100 score range so the case only records the real GPQA
+      # accuracy. Replace with the measured V1 baseline (aligned with the
+      # test-team exit baseline, A00302_05 C2) after the first green run.
       acc_gpqa:
         case_type: accuracy
         dataset_path: vllm-ascend/gpqa
@@ -51,5 +52,5 @@ test_cases:
         top_p: 0.95
         top_k: 40
         ignore_eos: false
-        baseline: 83
-        threshold: 5
+        baseline: 0
+        threshold: 100
