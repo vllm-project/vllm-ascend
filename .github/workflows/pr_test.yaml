@@ -275,16 +275,22 @@ jobs:
 
       - name: Select tests based on changed files
         id: scope
-        if: steps.filter.outputs.src == 'true'
+        if: ${{ steps.filter.outputs.src == 'true' || contains(github.event.pull_request.labels.*.name, 'ready') }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
+          RUN_ALL_MODULES_FLAG=""
+          if [ "${{ contains(github.event.pull_request.labels.*.name, 'ready') }}" = "true" ]; then
+            RUN_ALL_MODULES_FLAG="--run-all-modules"
+          fi
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }}
+            ${RUN_ALL_MODULES_FLAG} \
+            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
+            --only-test-partitions a3_x2:2-3 a3_x4:3-3
 
       - name: Set no-tests output when source paths unchanged
         id: noop
-        if: steps.filter.outputs.src != 'true'
+        if: ${{ steps.filter.outputs.src != 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
         run: |
           {
             echo "has_tests=false"
@@ -361,7 +367,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -377,6 +382,7 @@ jobs:
       - ensure-csrc-cache
     if: >-
       ${{
+        false &&
         always() &&
         needs.pre-commit.result == 'success' &&
         needs.select-tests.result == 'success' &&

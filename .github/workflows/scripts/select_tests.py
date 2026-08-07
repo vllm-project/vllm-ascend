@@ -516,6 +516,29 @@ def _load_partition_config(meta: dict) -> dict[str, int]:
     return {k: int(v) for k, v in meta.get("partition", {}).items()}
 
 
+def _parse_partition_filters(filters: list[str] | None) -> set[tuple[str, str]]:
+    if not filters:
+        return set()
+    result: set[tuple[str, str]] = set()
+    for item in filters:
+        runner_key, separator, partition = item.partition(":")
+        if not separator or not runner_key or not partition:
+            raise ValueError(f"Invalid partition filter: {item!r}; expected <runner_key>:<partition>")
+        result.add((runner_key, partition))
+    return result
+
+
+def _filter_test_groups_by_partition(
+    test_groups: list[dict],
+    filters: set[tuple[str, str]],
+) -> list[dict]:
+    if not filters:
+        return test_groups
+    return [
+        group for group in test_groups if (f"{group['npu_type']}_x{group['num_npus']}", group["partition"]) in filters
+    ]
+
+
 def _lookup_estimated_time(
     test_name: str,
     estimated_times: dict[str, float],
@@ -756,6 +779,11 @@ def main():
         default=None,
         help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
     )
+    parser.add_argument(
+        "--only-test-partitions",
+        nargs="*",
+        help="Only keep selected runner partitions, formatted as <runner_key>:<partition>.",
+    )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
@@ -898,6 +926,7 @@ def main():
     estimated_times = _load_estimated_times(meta)
     partition_config = _load_partition_config(meta)
     test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
+    test_groups = _filter_test_groups_by_partition(test_groups, _parse_partition_filters(args.only_test_partitions))
 
     _write_output(test_groups, matched_modules)
 
