@@ -30,8 +30,13 @@ def tensor_parallel_wrap(func):
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
+    def get_cos_sin(positions):
+        forward_context = get_forward_context()
+        if not hasattr(forward_context, "cos_sin_cache") or forward_context.cos_sin_cache is None:
+            forward_context.cos_sin_cache = self.rotary_emb.cos_sin_cache[positions]
+        return forward_context.cos_sin_cache
     if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
-        cos_sin = self.rotary_emb.cos_sin_cache[positions]
+        cos_sin = get_cos_sin(positions)
         if cos_sin.device != qkv.device:
             cos_sin = cos_sin.to(qkv.device)
         if cos_sin.dtype != qkv.dtype:
