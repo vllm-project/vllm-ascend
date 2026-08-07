@@ -41,10 +41,18 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.26.0"):
+    from vllm.model_executor.layers.fused_moe import FusedMoE  # type: ignore[import-not-found]
+else:
+    from vllm.model_executor.layers.fused_moe import (  # type: ignore[import-not-found]
+        FusedMoEFactory as FusedMoE,
+    )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
