@@ -26,14 +26,9 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from vllm.compilation import breakable_cudagraph
-from vllm.compilation.breakable_cudagraph import (
-    BreakableCUDAGraphWrapper,
-    is_breakable_cudagraph_enabled,
-)
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.offloader.base import get_offloader
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
@@ -42,10 +37,6 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     weak_ref_workspaces,
 )
-
-
-def is_breakable_aclgraph_enabled() -> bool:
-    return is_breakable_cudagraph_enabled()
 
 
 class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
