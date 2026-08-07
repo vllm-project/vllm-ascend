@@ -249,7 +249,9 @@ class NPUWorker(WorkerBase):
         if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config, "
+                "or enable additional_config.rl_config (enabled: true) which disables NZ "
+                "automatically."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -320,7 +322,8 @@ class NPUWorker(WorkerBase):
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter "
                 "precision issues in the RL scenarios. Please set "
-                "VLLM_ASCEND_ENABLE_NZ=0."
+                "VLLM_ASCEND_ENABLE_NZ=0, or enable additional_config.rl_config "
+                "(enabled: true) which disables NZ automatically."
             )
 
     def start_weight_update(self) -> None:
