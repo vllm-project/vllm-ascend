@@ -83,7 +83,7 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
         for part in msg.get("content", []):
             p = dict(part)
             if p.get("type") == "image_url":
-                img = p.get("image_url") or {}
+                img = dict(p.get("image_url") or {})
                 url = (img.get("url") or "").strip()
                 if url:
                     if re.search(r"\{IMAGE_\d+\}", url):
