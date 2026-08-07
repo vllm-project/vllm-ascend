@@ -30,8 +30,6 @@ from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
-    moe_counter = -1
-
     def __init__(
         self,
         layer_name,

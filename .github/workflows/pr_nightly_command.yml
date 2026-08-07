@@ -526,7 +526,8 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
+            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
           sleep 8
           _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')

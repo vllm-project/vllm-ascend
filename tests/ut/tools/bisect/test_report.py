@@ -18,7 +18,7 @@ def test_write_report_json_serializes_candidates_and_trials(tmp_path: Path):
         log_path="/tmp/round.log",
         note="pytest failed",
     )
-    inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit=bad.commit, name="case")
+    inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit=bad.commit, soc="a2", name="case")
 
     path = write_report_json(
         tmp_path / "report.json",

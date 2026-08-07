@@ -25,6 +25,11 @@ on:
         type: string
         default: ''
         description: override CONFIG_BASE_PATH used by the yaml loader inside the pod (defaults to nightly path)
+      test_frequency:
+        required: false
+        type: string
+        default: nightly
+        description: good-table namespace and baseline cadence (nightly or weekly)
       replicas:
         required: false
         default: "1"
@@ -231,7 +236,9 @@ jobs:
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
-            -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
+            -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
+            -D soc_version="${{ inputs.soc_version }}" \
+            -D max_good_age_days="${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml
@@ -337,11 +344,12 @@ jobs:
           RUN_LINK: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 tests/e2e/nightly/scripts/update_good_table.py \
-            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/nightly/good_table.csv" \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
             --test-name "$TEST_NAME" \
             --test-path "$TEST_PATH" \
             --config-base-path "$CONFIG_BASE_PATH" \
             --scene "multi_node" \
+            --soc "${{ inputs.soc_version }}" \
             --run-link  "$RUN_LINK" \
             --vllm-ascend-dir "." \
             --vllm-ascend-version "${{ steps.stream_logs.outputs.vllm_ascend_hash }}" \

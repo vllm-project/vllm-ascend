@@ -39,13 +39,15 @@ def _build_apply_layer():
         zero_expert_type=None,
         n_shared_experts=0,
         swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
         activation="gelu",
         apply_router_weight_on_input=True,
         ascend_expert_map=None,
         global_redundant_expert_num=0,
         log2phy=None,
-        _ascend_pertoken_scale=None,
-        _ascend_mc2_mask=None,
+        ascend_pertoken_scale=None,
+        ascend_mc2_mask=None,
     )
 
 
@@ -254,6 +256,45 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     assert layer.w2_weight.is_contiguous() is True
     assert layer.w13_weight.weight_loader is w13_loader
     assert layer.w2_weight.weight_loader is w2_loader
+
+
+def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
+    method = _build_unquantized_method(dynamic_eplb=True)
+    layer = _build_weight_layer()
+    num_experts = layer.w13_weight.shape[0]
+    ascend_config = SimpleNamespace(enable_fused_mc2=1)
+
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(routed_experts_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
+    monkeypatch.setattr(routed_experts_module.torch.npu, "empty_cache", lambda: None)
+    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
+    monkeypatch.setattr(
+        upstream_method_base,
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert not hasattr(layer, "w13_weight")
+    assert not hasattr(layer, "w2_weight")
+    assert len(layer.w13_weight_list) == num_experts
+    assert len(layer.w2_weight_list) == num_experts
+
+
+def test_update_expert_map_updates_routed_experts_and_manager():
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    nn.Module.__init__(routed_experts)
+    manager = SimpleNamespace(_expert_map=torch.tensor([0, 1, 2, -1], dtype=torch.int32))
+    routed_experts.expert_map_manager = manager
+    routed_experts.ascend_expert_map = torch.tensor([0, -1, 1], dtype=torch.int32)
+
+    new_map = torch.tensor([0, 1, -1], dtype=torch.int32)
+    routed_experts.update_expert_map(new_map)
+
+    assert routed_experts.ascend_expert_map is new_map
+    assert manager._expert_map is new_map
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
