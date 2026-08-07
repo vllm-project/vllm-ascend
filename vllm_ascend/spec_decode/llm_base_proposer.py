@@ -736,7 +736,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
-
+    
+    @property
+    def uses_independent_cudagraph_dispatcher(self) -> bool:
+        return False
+    
+    def get_runtime_cudagraph_dispatcher(self):
+        assert self.runner is not None
+        if self.uses_independent_cudagraph_dispatcher:
+            return self.cudagraph_dispatcher
+        return self.runner.cudagraph_dispatcher
+    
     def _propose(
         self,
         num_speculative_tokens: int,
@@ -822,15 +832,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _, ori_token_indices_to_sample = long_seq_args
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
+        is_dspark = self.method == "dspark"
         uniform_decode = target_model_batch_desc.uniform
+        
+        # Use the Dspark drafter dispatcher
+        # Do not use the target runner dispatcher
+        draft_dispatcher = self.get_runtime_cudagraph_dispatcher()
 
         if self.use_cuda_graph:
-            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+            _, batch_descriptor = draft_dispatcher.dispatch(
                 num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
-            num_input_tokens = batch_descriptor.num_tokens
+            num_input_tokens = int(batch_descriptor.num_tokens)
         else:
-            num_input_tokens = num_tokens
+            batch_descriptor = None
+            num_input_tokens = int(num_tokens)
 
         (
             num_input_tokens,
@@ -839,10 +855,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
 
         if self.use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+            aclgraph_runtime_mode, batch_descriptor = draft_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
-            num_input_tokens = batch_descriptor.num_tokens
+            num_input_tokens = int(batch_descriptor.num_tokens)
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
@@ -856,13 +872,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
+            
+            graph_num_reqs = int(batch_descriptor.num_reqs)
+            actual_num_reqs = int(common_attn_metadata.num_reqs)
+            
+            draft_query_width = int(num_input_tokens) // graph_num_reqs
+            
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
                 self.query_start_loc,
                 num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
-                common_attn_metadata.num_reqs,
+                graph_num_reqs,
+                actual_num_reqs,
                 aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
+                graph_num_reqs,
+                uniform_decode_query_len=draft_query_width,
             )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
@@ -871,7 +894,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
+            if self.method == "dflash" or is_dspark:
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)

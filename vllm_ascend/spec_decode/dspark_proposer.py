@@ -2,16 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any
+import copy
 
 import torch
+from vllm.logger import logger
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 
@@ -60,7 +64,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             device=self.device,
         )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        self.use_cuda_graph = False
+        # self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
         # Position ids for the draft query block [max_query_tokens].
@@ -101,6 +105,51 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+            
+    @property
+    def uses_independent_cudagraph_dispatcher(self) -> bool:
+        return True
+    
+    def initialize_cudagraph_keys(
+        self,
+        cudagraph_mode: CUDAGraphMode,
+    ) -> None:
+        """Initialize independent FULL graph keys for the DSpark drafter.
+        Remap all target shapes: B*(K + 1) into dspark shapes: B*K
+        """
+        draft_width = int(self.num_speculative_tokens)
+        target_width = draft_width + 1
+        
+        target_config = (
+            self.runner.cudagraph_dispatcher.compilation_config
+        )
+        target_capture_sizes = list(
+            target_config.cudagraph_capture_sizes or []
+        )
+        draft_capture_sizes = sorted({
+            int(size) // target_width * draft_width
+            for size in target_capture_sizes
+            if int(size) % target_width == 0
+        })
+        draft_config = copy.deepcopy(target_config)
+        draft_config.cudagraph_capture_sizes = draft_capture_sizes
+        draft_config.max_cudagraph_capture_size = max(
+            draft_capture_sizes
+        )   
+        draft_dispatcher = self.cudagraph_dispatcher
+        draft_dispatcher.compilation_config = draft_config
+        draft_dispatcher.uniform_decode_query_len = draft_width
+        draft_dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode,
+            draft_width,
+        )
+        draft_dispatcher.uniform_decode_query_len = draft_width
+        
+        logger.info(
+            "Initialized Dspark cudagraph shapes: target=%s, draft=%s",
+            target_capture_sizes,
+            draft_capture_sizes
+        )
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
@@ -218,14 +267,20 @@ class AscendDSparkProposer(AscendDflashProposer):
             for attn_group in self.draft_attn_groups
         }
         self._context_slot_mapping_buffers = None
-        self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
+        
+        # Target context has width K+1, while the draft queey block has width self.num_query_per_req
+        # Keep the full target hidden-state range for context-KV precomputation
+        self._dflash_num_context = int(target_token_ids.shape[0])
+        #self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
         self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
-
-        token_indices_to_sample = torch.empty(
-            num_sample_total,
-            dtype=torch.int32,
-            device=self.device,
-        )
+        
+        # Graph replay requires stable token-index buffer address
+        token_indices_to_sample = self.token_indices_to_sample[: num_sample_total]
+        #token_indices_to_sample = torch.empty(
+        #    num_sample_total,
+        #    dtype=torch.int32,
+        #    device=self.device,
+        #)
 
         # Query block: reuse the DFlash inputs kernel logic (host-side ref)
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
@@ -308,8 +363,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         batch_descriptor=None,
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
+        dspark_num_context_tokens: int | None = None,
         **kwargs,
     ) -> None:
+        
+        # Draft graph inputs and target context use different widths:
+        # query: = B * self.num_query_per_req
+        # context: = B * (K+1)
         num_query_total = num_reqs * self.num_query_per_req
         num_query_tokens = min(num_query_total if num_reqs > 0 else num_tokens, self.max_query_tokens)
 
@@ -318,18 +378,92 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
+        
+        if dspark_num_context_tokens is None:
+            dspark_num_context_tokens = num_input_tokens
+        dspark_num_context_tokens = int(dspark_num_context_tokens)
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        context_positions = self._context_positions_buffer[:num_input_tokens]
-        context_states = self.hidden_states[:num_input_tokens]
+        context_positions = self._context_positions_buffer[:dspark_num_context_tokens]
+        context_states = self.hidden_states[:dspark_num_context_tokens]
+        
+        self._dflash_num_context = dspark_num_context_tokens
 
         self.token_indices_to_sample.fill_(0)
         self._pad_draft_buffers(num_query_total, num_input_tokens)
+        
+        multi_steps_attn_metadata = []
+        
+        if (
+            aclgraph_runtime_mode == CUDAGraphMode.FULL
+            and self.draft_attn_groups
+        ):
+            # Build graph-capture metadata independently for every KV-cache group in Dflash style
+            # Different draft layers may belong to different groups and therefore...
+            # require different block tables and slot mappings
+            per_layer_attn_metadata = {}
+            
+            for attn_group in self.draft_attn_groups:
+                gid = attn_group.kv_cache_group_id
+                builder = attn_group.get_metadata_builder()
+                
+                block_table = self._per_group_block_tables.get(gid)
+                if block_table is None:
+                    block_table = (
+                        self.runner.input_batch.block_table[gid]
+                        .get_device_tensor()
+                    )
+                common_attn_metadata = AscendCommonAttentionMetadata(
+                    query_start_loc=(
+                        self.arange_dflash[: num_reqs + 1]
+                        * self.num_query_per_req
+                    ),
+                    query_start_loc_cpu=(
+                        torch.from_numpy(
+                            self.token_arange_np[: num_reqs + 1]
+                        ).clone()
+                        * self.num_query_per_req
+                    ).to(torch.int32),
+                    seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                    seq_lens_cpu_upper_bound=(
+                        self.runner.optimistic_seq_lens_cpu
+                    ),
+                    seq_lens=self.runner.seq_lens[: num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_input_tokens,
+                    max_query_len=self.num_query_per_req,
+                    max_seq_len=0,
+                    slot_mapping=(
+                        self._per_group_query_slot_mapping_buffers[gid][
+                            :num_query_total
+                        ]
+                    ),
+                    block_table_tensor=block_table[:num_reqs],
+                    attn_states=AscendAttentionState.ChunkedPrefill,
+                    causal=False,
+                    is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
+                )
+                attn_metadata = builder.build_for_graph_capture(
+                    common_attn_metadata,
+                    AscendAttentionState.ChunkedPrefill,
+                )
+                attn_metadata.attn_mask = None
+                attn_metadata.attn_state = (
+                    AscendAttentionState.ChunkedPrefill
+                )
+                
+                for layer_name in attn_group.layer_names:
+                    per_layer_attn_metadata[layer_name] = attn_metadata
+            
+            multi_steps_attn_metadata.append(per_layer_attn_metadata)
+                
 
         with set_ascend_forward_context(
-            None,
+            multi_steps_attn_metadata[0]
+            if multi_steps_attn_metadata
+            else None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
@@ -338,7 +472,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            draft_attn_metadatas=[],
+            draft_attn_metadatas=multi_steps_attn_metadata,
         ):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)
@@ -349,13 +483,25 @@ class AscendDSparkProposer(AscendDflashProposer):
                 )
 
             else:
-                self._dflash_num_context = num_input_tokens
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=num_reqs,
                     token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
-                    target_positions=self._get_positions(num_input_tokens),
+                    # Context position cover B * (K+1), not the smaller draft-query tensor
+                    target_positions=context_positions,
                     inputs_embeds=None,
-                    multi_steps_attn_metadata=[],
+                    multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_input_tokens,
+                )
+            forward_context = get_forward_context()
+            if (
+                forward_context is not None
+                and forward_context.cudagraph_runtime_mode
+                == CUDAGraphMode.FULL
+                and not _EXTRA_CTX.capturing
+            ):
+                self._update_full_graph_params(
+                    forward_context,
+                    num_query_tokens,
+                    multi_steps_attn_metadata,
                 )
