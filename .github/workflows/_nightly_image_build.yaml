@@ -29,21 +29,12 @@ on:
         type: string
         default: 'main'
         description: "Branch/ref to checkout"
-      quay_daily_username:
-        required: false
-        type: string
     secrets:
       HW_USERNAME:
         required: false
       HW_TOKEN:
         required: false
       GITEE_TOKEN:
-        required: false
-      HW_USERNAME_DAILY:
-        required: false
-      HW_TOKEN_DAILY:
-        required: false
-      QUAY_DAILY_PASSWORD:
         required: false
 
 jobs:
