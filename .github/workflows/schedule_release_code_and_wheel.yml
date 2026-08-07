@@ -328,7 +328,7 @@ jobs:
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l a5
+            -l 950dt
           echo "Generated variant wheels:"
           ls dist/variants/
 
