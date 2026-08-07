@@ -205,5 +205,5 @@ jobs:
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
           uv pip install -e .

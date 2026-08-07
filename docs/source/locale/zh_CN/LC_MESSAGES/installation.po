@@ -319,10 +319,10 @@ msgstr "要安装 `triton-ascend`，请运行："
 
 #: ../../source/installation.md:229
 msgid ""
-"pip install triton-ascend==3.2.1 --extra-index-url "
+"pip install triton-ascend==3.2.2 --extra-index-url "
 "https://mirrors.huaweicloud.com/ascend/repos/pypi"
 msgstr ""
-"pip install triton-ascend==3.2.1 --extra-index-url "
+"pip install triton-ascend==3.2.2 --extra-index-url "
 "https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
 #: ../../source/installation.md:231
