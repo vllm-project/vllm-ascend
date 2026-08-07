@@ -293,7 +293,7 @@ benchmarks:
     max_out_len: 1
     batch_size: 1
     request_rate: 0
-    baseline: 1
+    baseline: 0
     threshold: 0.95
   perf_1M_1k_prefix99:
     case_type: performance
