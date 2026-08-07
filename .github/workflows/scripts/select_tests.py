@@ -103,6 +103,12 @@ _DEFAULT_KEY: RunnerKey = (0, NpuType.CPU)
 # is selected for UT runs (along with the changed test files).
 DEFAULT_CPU_UT_MODULE = "default_cpu_ut"
 
+# Coverage-based recommendation emits this batch label (not a real pytest
+# path) to represent the always-on CPU UT suite. Map it to ``tests/ut`` so
+# the ``--test-list-file`` flow runs the same CPU UTs as the diff flow.
+CPU_UT_BATCH_ALIAS = "cpu-ut"
+CPU_UT_BATCH_PATH = "tests/ut"
+
 _BISECT_TOOL_ROOTS = ("tools/bisect", "tests/ut/tools/bisect")
 _BISECT_TOOL_SUPPORT_FILES = {
     ".github/workflows/scripts/select_tests.py",
@@ -496,7 +502,19 @@ def _route_explicit_test_target(
     groups: dict[RunnerKey, list[str]],
 ) -> None:
     """Route a single explicit UT/E2E target to the appropriate runner group."""
-    file_path = _pytest_node_file_path(target)
+    # The coverage recommender emits "cpu-ut" (the batch label of the
+    # default_cpu_ut module) instead of the real pytest path "tests/ut".
+    # Map it back so the recommended path runs the same CPU UTs the
+    # diff-based select-tests path selects for default_cpu_ut: tests/ut
+    # scanned with cpu_only=True, i.e. NPU-convention subdirs are skipped
+    # and the remaining files route to the CPU runner.
+    cpu_only = False
+    if target == CPU_UT_BATCH_ALIAS:
+        target = CPU_UT_BATCH_PATH
+        file_path = target
+        cpu_only = True
+    else:
+        file_path = _pytest_node_file_path(target)
     if not _is_test_path(file_path):
         print(
             f"Warning: Skipping non-test path: {target}",
@@ -515,9 +533,16 @@ def _route_explicit_test_target(
     if _is_ut_path(file_path):
         if "::" in target or path.is_file():
             key = _route_ut_dir(file_path)
+            if cpu_only and key != _DEFAULT_KEY:
+                print(
+                    f"Warning: cpu_only module test {target} routes to NPU runner;"
+                    " check test_config.yaml for misconfigured cpu_only tests.",
+                    file=sys.stderr,
+                )
+                return
             groups[key].append(target)
         else:
-            _scan_ut_test_dir(target, groups)
+            _scan_ut_test_dir(target, groups, cpu_only=cpu_only)
         return
 
     if _is_e2e_path(file_path):
