@@ -34,7 +34,7 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
 
     act_quant_type: torch.dtype = torch.float8_e4m3fn
     tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
-    supports_dsa_cp_o_proj = True
+    supports_tp_weight_switch = True
 
     def __init__(self):
         pass

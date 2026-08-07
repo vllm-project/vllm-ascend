@@ -85,6 +85,8 @@ class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod
     """Linear method without quantization"""
 
     tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
+    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
+    supports_tp_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

@@ -98,7 +98,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         TPWeightGatherSpec("weight"),
         TPWeightGatherSpec("weight_scale_second"),
     )
-    supports_dsa_cp_o_proj = True
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale_second", gather_dim=1),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()

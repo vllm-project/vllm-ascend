@@ -48,7 +48,14 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
     """
 
     tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
-    supports_dsa_cp_o_proj = True
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("quant_bias"),
+        TPWeightGatherSpec("deq_scale"),
+        TPWeightGatherSpec("weight_scale"),
+        TPWeightGatherSpec("weight_offset"),
+    )
+    supports_tp_weight_switch = True
     tp_weight_repeat_specs = (
         TPWeightRepeatSpec("aclnn_input_scale"),
         TPWeightRepeatSpec("aclnn_input_scale_reciprocal"),

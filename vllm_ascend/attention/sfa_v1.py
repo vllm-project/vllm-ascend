@@ -973,9 +973,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             return
 
         linear_method = self._get_o_proj_linear_method()
-        if not isinstance(linear_method, TPWeightSwitchMixin):
+        if not isinstance(linear_method, TPWeightSwitchMixin) or not linear_method.supports_tp_weight_switch:
             raise RuntimeError(
-                "SFA DSA-CP o_proj full-weight switching requires a TPWeightSwitchMixin implementation, "
+                "SFA DSA-CP o_proj full-weight switching requires a TP weight-switch capable method, "
                 f"got {type(linear_method).__name__}."
             )
         self.o_proj_tp_weight_state = linear_method.enable_tp_weight_switch(

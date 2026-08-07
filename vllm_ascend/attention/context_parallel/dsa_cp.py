@@ -1175,10 +1175,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     def _get_tp_weight_switch_method(layer: torch.nn.Module) -> TPWeightSwitchMixin:
         quant_method = layer.quant_method
         linear_method = getattr(quant_method, "quant_method", quant_method)
-        if not isinstance(linear_method, TPWeightSwitchMixin) or not linear_method.supports_dsa_cp_o_proj:
+        if not isinstance(linear_method, TPWeightSwitchMixin) or not linear_method.supports_tp_weight_switch:
             raise RuntimeError(
-                "DSA-CP o_proj TP full-weight switching requires a quantized method "
-                "that supports the DSA-CP o_proj operator, "
+                "DSA-CP o_proj TP full-weight switching requires a TP weight-switch capable method, "
                 f"got {type(linear_method).__name__}."
             )
         return linear_method
@@ -1263,7 +1262,40 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             return self.wo_b(o_proj_input)
         return self.wo_b.quant_method.apply(self.wo_b, o_proj_input, bias=None)
 
-    def forward(
+    def _get_batched_wo_a_weight(self, num_groups: int) -> torch.Tensor:
+        """Return wo_a in the DSA batched-matmul layout [group, input, rank]."""
+        weight = self.wo_a.weight
+        if weight.ndim == 3:
+            if weight.shape[0] == num_groups:
+                return weight
+            if weight.shape[1] == num_groups:
+                return weight.permute(1, 0, 2)
+            raise RuntimeError(
+                "DSA-CP wo_a weight has no group axis matching the o_proj input: "
+                f"weight_shape={tuple(weight.shape)}, num_groups={num_groups}."
+            )
+
+        linear_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
+        if isinstance(linear_method, AscendUnquantizedLinearMethod):
+            return weight.reshape(num_groups, -1, weight.shape[-1]).transpose(1, 2)
+        return weight.reshape(weight.shape[0], num_groups, -1).permute(1, 0, 2)
+
+    def _get_batched_wo_a_scale(self, num_groups: int) -> torch.Tensor:
+        """Move the output-sharded wo_a scale's group axis to the front."""
+        scale = self.wo_a.weight_scale
+        if scale.ndim == 1:
+            return scale.reshape(num_groups, -1)
+        if scale.shape[0] == num_groups:
+            return scale
+        if scale.shape[1] % num_groups != 0:
+            raise RuntimeError(
+                "DSA-CP wo_a scale cannot be reshaped by o_proj group: "
+                f"scale_shape={tuple(scale.shape)}, num_groups={num_groups}."
+            )
+        scale = scale.reshape(scale.shape[0], num_groups, -1, *scale.shape[2:])
+        return scale.permute(1, 0, 2, *range(3, scale.ndim))
+
+    def forward(  # type: ignore[override]
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
@@ -1311,19 +1343,23 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         try:
             if get_ascend_device_type() in {AscendDeviceType.A5}:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-                o = torch_npu.npu_transpose_quant_batchmatmul(
-                    o,
-                    self.wo_a.weight,
-                    dtype=torch.bfloat16,
-                    bias=None,
-                    group_sizes=(0, 0, 32),
-                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                    x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                )
+                wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
+                if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
+                    o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
+                else:
+                    o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                    o = torch_npu.npu_transpose_quant_batchmatmul(
+                        o,
+                        self._get_batched_wo_a_weight(o_proj_groups),
+                        dtype=torch.bfloat16,
+                        bias=None,
+                        group_sizes=(0, 0, 32),
+                        x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                        x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
+                        perm_x1=(1, 0, 2),
+                        perm_x2=(0, 1, 2),
+                        perm_y=(1, 0, 2),
+                    )
                 o = o.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
             else:
@@ -1335,7 +1371,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
-                        self.wo_a.weight,
+                        self._get_batched_wo_a_weight(o_proj_groups),
                         bias=None,
                         scale=None,
                         perm_x1=(1, 0, 2),

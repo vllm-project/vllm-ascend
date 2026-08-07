@@ -71,9 +71,11 @@ class TPWeightSwitchMixin:
     """Opt-in TP/full weight switching for one linear method.
 
     Subclasses declare the direct layer attributes needed by a full-weight
-    forward after ``process_weights_after_loading()`` has completed. When
-    adding support for a quantization type, document the following in the
-    subclass docstring or adjacent spec declaration:
+    forward after ``process_weights_after_loading()`` has completed. The
+    input-sharded specs are used by row-parallel linears and the
+    output-sharded specs by column-parallel linears. When adding support for a
+    quantization type, document the following in the subclass docstring or
+    adjacent spec declaration:
 
     1. The post-processing layout and TP-sharded dimension of every declared
        attribute. ``TPWeightGatherSpec.gather_dim`` must identify that exact
@@ -85,11 +87,12 @@ class TPWeightSwitchMixin:
        ``tp_weight_repeat_specs``. Use this only when the full-weight kernel
        expects the same rank-local value once per TP shard; rank-distinct data
        must be gathered instead.
-    4. The supported o_proj execution paths and any excluded path. Declaring
-       switch specs only guarantees weight switching; it does not make a
-       quantized operator compatible with every SFA or DSA-CP kernel. Declare
-       ``supports_dsa_cp_o_proj = True`` only after validating the DSA-CP
-       operator.
+    4. Both input- and output-sharded layouts when the method can be used by
+       row- and column-parallel linears. Include every quantization parameter
+       that becomes TP-sharded in each layout.
+    5. Set ``supports_tp_weight_switch = True`` only after validating every
+       declared layout. Callers use this as the common opt-in gate; it carries
+       no SFA- or DSA-CP-specific meaning.
 
     ``attr_name`` must name a direct tensor attribute on the layer. The mixin
     owns only reusable TP/full state and collective handles; subclasses retain
@@ -98,7 +101,9 @@ class TPWeightSwitchMixin:
 
     tp_weight_gather_specs: ClassVar[tuple[TPWeightGatherSpec, ...]] = ()
     tp_weight_repeat_specs: ClassVar[tuple[TPWeightRepeatSpec, ...]] = ()
-    supports_dsa_cp_o_proj: ClassVar[bool] = False
+    tp_weight_output_gather_specs: ClassVar[tuple[TPWeightGatherSpec, ...]] = ()
+    tp_weight_output_repeat_specs: ClassVar[tuple[TPWeightRepeatSpec, ...]] = ()
+    supports_tp_weight_switch: ClassVar[bool] = False
 
     @staticmethod
     def split_tensor_for_tp(
@@ -129,9 +134,45 @@ class TPWeightSwitchMixin:
         clone_tp_tensors: bool = False,
     ) -> TPWeightSwitchState:
         """Allocate TP/full aliases and buffers for one compatible linear layer."""
+        if not self.supports_tp_weight_switch:
+            raise RuntimeError(f"{type(self).__name__} does not support TP weight switching.")
+
+        input_size = getattr(layer, "input_size", None)
+        input_size_per_partition = getattr(layer, "input_size_per_partition", None)
+        output_size = getattr(layer, "output_size", None)
+        output_size_per_partition = getattr(layer, "output_size_per_partition", None)
+        input_sharded = (
+            input_size is not None
+            and input_size_per_partition is not None
+            and input_size != input_size_per_partition
+        )
+        output_sharded = (
+            output_size is not None
+            and output_size_per_partition is not None
+            and output_size != output_size_per_partition
+        )
+        if input_sharded == output_sharded:
+            raise RuntimeError(
+                "TP weight switching requires a linear layer with exactly one TP-sharded axis, "
+                f"got input_size={input_size}, input_size_per_partition={input_size_per_partition}, "
+                f"output_size={output_size}, output_size_per_partition={output_size_per_partition}."
+            )
+        if input_sharded:
+            gather_specs = self.tp_weight_gather_specs
+            repeat_specs = self.tp_weight_repeat_specs
+            shard_axis = "input"
+        else:
+            gather_specs = self.tp_weight_output_gather_specs
+            repeat_specs = self.tp_weight_output_repeat_specs
+            shard_axis = "output"
+        if not gather_specs and not repeat_specs:
+            raise RuntimeError(
+                f"{type(self).__name__} does not declare TP weight switch specs for a {shard_axis}-sharded layer."
+            )
+
         state = TPWeightSwitchState()
 
-        for spec in self.tp_weight_gather_specs:
+        for spec in gather_specs:
             tensor = getattr(layer, spec.attr_name, None)
             if tensor is None:
                 raise RuntimeError(
@@ -185,7 +226,7 @@ class TPWeightSwitchMixin:
                 full_tensor=full_tensor,
             )
 
-        for spec in self.tp_weight_repeat_specs:
+        for spec in repeat_specs:
             tensor = getattr(layer, spec.attr_name, None)
             if tensor is None:
                 raise RuntimeError(

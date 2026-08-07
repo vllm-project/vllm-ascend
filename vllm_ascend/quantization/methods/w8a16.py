@@ -37,7 +37,12 @@ class AscendW8A16LinearMethod(AscendLinearScheme):
         pass
 
     tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
-    supports_dsa_cp_o_proj = True
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale"),
+        TPWeightGatherSpec("weight_offset"),
+    )
+    supports_tp_weight_switch = True
 
     def get_weight(
         self,
