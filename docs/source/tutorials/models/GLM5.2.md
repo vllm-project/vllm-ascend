@@ -151,6 +151,46 @@ The parameters are explained as follows:
 
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
 
+#### Single Atlas 800 A2 (64G × 8) node
+
+- Quantized model `GLM-5.2-w4a8c8` can also be deployed on **1 Atlas 800 A2 (64G × 8)** node. A single A2 node only has 8 NPUs (an A3 node has 16), so use `dp1tp8` with expert parallel instead of `dp2tp8`, and reduce `max-num-seqs` / `max-model-len` to fit the smaller HBM.
+
+```shell
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FUSED_MC2=0
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
+--host 0.0.0.0 \
+--port 8077 \
+--api-server-count 1 \
+--data-parallel-size 1 \
+--enable-expert-parallel \
+--tensor-parallel-size 8 \
+--seed 1024 \
+--served-model-name glm-5 \
+--tool-call-parser glm47 \
+--reasoning-parser glm45 \
+--enable-auto-tool-choice \
+--max-num-seqs 4 \
+--max-model-len 16384 \
+--max-num-batched-tokens 2048 \
+--trust-remote-code \
+--gpu-memory-utilization 0.96 \
+--quantization ascend \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_flashcomm1": true,"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+
+```
+
+**Notice:**
+
+- Use image `v0.23.0rc1` or later. With `v0.22.1rc1` the model fails to load with `KeyError: model.layers.X.self_attn.indexer.wq_b.weight`, because GLM-5.2 DSA uses a "shared indexer": only "full" layers store an independent indexer weight while "shared" layers reuse the previous full layer's indexer, so the quant description has no key for shared layers.
+- On a single A2 node the weights take ~54.7 GB/card, leaving little HBM for KV cache. If startup fails with a KV-cache `ValueError` (it prints a suggested maximum length), lower `max-model-len` further or raise `gpu-memory-utilization`.
+
 ### Multi-node Deployment
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
