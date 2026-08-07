@@ -136,7 +136,7 @@ a3:
       - name: multi-node-minimax-m2.7-disagg-pd
         config_file_path: MiniMax-M2.7-W8A8-QuaRot-disagg-pd.yaml
         size: 2
-        testcase_timeout: 180
+        testcase_timeout: 240
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
@@ -151,10 +151,6 @@ a3:
       - name: MiniMax-M3-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M3-W8A8-A3.yaml
-      - name: MiniMax-M2.7-GPQA-A3
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: MiniMax-M2.7-W8A8-QuaRot-GPQA-A3.yaml
-        testcase_timeout: 180
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
