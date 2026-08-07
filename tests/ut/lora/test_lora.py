@@ -10,7 +10,8 @@ from vllm_ascend.lora.fused_moe import (
     AscendFusedMoE3DWithLoRA,
     AscendFusedMoEWithLoRA,
 )
-from vllm_ascend.lora.punica_npu import PunicaWrapperNPU, _lora_bmm_expand_slice_op
+from vllm_ascend.lora.lora_ops import bmm_expand_slice
+from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
 
 def test_ascend_fused_moe_3d_initializes_upstream_weight_state() -> None:
@@ -112,7 +113,7 @@ def test_expand_slice_path_follows_model_structure_and_tensor_shape(
 
 
 @pytest.mark.parametrize("add_inputs", [False, True])
-def test_compatible_lora_bmm_expand_slice_matches_reference(add_inputs: bool) -> None:
+def test_lora_bmm_expand_slice_fallback_matches_reference(add_inputs: bool) -> None:
     x = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
     weights = torch.tensor(
         [
@@ -123,7 +124,7 @@ def test_compatible_lora_bmm_expand_slice_matches_reference(add_inputs: bool) ->
     indices = torch.tensor([0, 1, -1], dtype=torch.long)
     y = torch.ones((3, 5))
 
-    _lora_bmm_expand_slice_op(y, x, weights, indices, 1, 3, add_inputs)
+    bmm_expand_slice(x, weights, y, indices, 1, 3, add_inputs)
 
     delta = torch.stack(
         [
@@ -155,4 +156,4 @@ def test_lora_bmm_expand_slice_rejects_incompatible_shapes(
     y = torch.zeros(y_shape)
 
     with pytest.raises(ValueError, match=message):
-        _lora_bmm_expand_slice_op(y, x, weights, indices, 1, slice_size, True)
+        bmm_expand_slice(x, weights, y, indices, 1, slice_size, True)

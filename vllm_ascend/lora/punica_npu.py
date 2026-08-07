@@ -5,80 +5,9 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.lora.lora_ops import bmm_expand_slice
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-
-@torch.library.custom_op("vllm_ascend::lora_bmm_expand_slice", mutates_args={"y"})
-def _lora_bmm_expand_slice_op(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indices: torch.Tensor,
-    y_offset: int,
-    y_slice_size: int,
-    add_inputs: bool,
-) -> None:
-    if x.ndim != 2:
-        raise ValueError(f"Expected 2D LoRA shrink input, got shape {tuple(x.shape)}")
-    if y.ndim != 2:
-        raise ValueError(f"Expected 2D LoRA output, got shape {tuple(y.shape)}")
-    if w_t_all.ndim != 4 or w_t_all.shape[1] != 1:
-        raise ValueError(f"Expected LoRA-B shape [slots, 1, output_size, rank], got {tuple(w_t_all.shape)}")
-    if indices.ndim != 1 or indices.shape[0] != x.shape[0]:
-        raise ValueError(
-            "LoRA indices and shrink input must have the same row count, "
-            f"got indices={tuple(indices.shape)} and x={tuple(x.shape)}"
-        )
-    if y.shape[0] != x.shape[0]:
-        raise ValueError(
-            f"LoRA output and shrink input must have the same row count, got y={tuple(y.shape)} and x={tuple(x.shape)}"
-        )
-    if x.shape[-1] != w_t_all.shape[-1]:
-        raise ValueError(
-            "LoRA shrink rank must match LoRA-B input rank, "
-            f"got x rank={x.shape[-1]} and LoRA-B rank={w_t_all.shape[-1]}"
-        )
-    if w_t_all.shape[-2] != y_slice_size:
-        raise ValueError(
-            "LoRA-B output size must match the destination slice, "
-            f"got LoRA-B output={w_t_all.shape[-2]} and slice={y_slice_size}"
-        )
-    if y_offset < 0 or y_offset + y_slice_size > y.shape[-1]:
-        raise ValueError(
-            "LoRA destination slice is outside the output tensor, "
-            f"got offset={y_offset}, size={y_slice_size}, output={y.shape[-1]}"
-        )
-
-    safe_indices = indices.clamp(min=0).to(torch.long)
-    gathered = w_t_all[safe_indices, 0].to(y.dtype)
-
-    # Profiling can produce empty tensors, which NPU BMM does not accept.
-    if x.shape[0] == 0 or gathered.shape[1] == 0:
-        return
-
-    delta = torch.bmm(gathered, x.to(y.dtype).unsqueeze(-1)).squeeze(-1)
-    valid_mask = (indices >= 0).unsqueeze(-1)
-    delta = torch.where(valid_mask, delta, torch.zeros_like(delta))
-
-    y_slice = y.narrow(1, y_offset, y_slice_size)
-    if add_inputs:
-        y_slice.add_(delta)
-    else:
-        y_slice.copy_(delta)
-
-
-@_lora_bmm_expand_slice_op.register_fake
-def _lora_bmm_expand_slice_fake(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indices: torch.Tensor,
-    y_offset: int,
-    y_slice_size: int,
-    add_inputs: bool,
-) -> None:
-    return None
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -236,10 +165,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         add_inputs: bool,
     ):
         """Run a graph-safe BMM fallback without padding or truncation."""
-        _lora_bmm_expand_slice_op(
-            y,
+        bmm_expand_slice(
             x,
             w_t_all,
+            y,
             self._get_token_lora_indices(x),
             y_offset,
             y_slice_size,
