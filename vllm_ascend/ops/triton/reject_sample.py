@@ -163,7 +163,7 @@ def rejection_greedy_sample_triton(
 
 
 @triton.jit(
-    do_not_specialize=[""
+    do_not_specialize=[
         "max_spec_len",
         "vec_len",
     ]
@@ -572,7 +572,12 @@ def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replac
     )
 
 
-@triton.jit(do_not_specialize=["max_spec_len", "vec_len"])
+@triton.jit(
+    do_not_specialize=[
+        "max_spec_len",
+        "vec_len",
+    ]
+)
 def rejection_random_sample_block_verify_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]

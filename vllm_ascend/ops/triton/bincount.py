@@ -36,7 +36,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
         "seq_len",
         "tp_rank",
         "counts_batch_stride",
-        "total_blocks"
+        "total_blocks",
     ]
 )
 def token_bin_counts_and_mask_kernel(
