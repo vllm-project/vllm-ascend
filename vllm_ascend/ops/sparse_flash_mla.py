@@ -8,12 +8,6 @@ from typing import Any
 import torch
 import torch_npu
 
-_CANN92_SPARSE_FLASH_MLA_HINT = (
-    "DeepSeek-V4 BF16 KV on Ascend A5 requires torch_npu APIs "
-    "npu_sparse_flash_mla and npu_sparse_flash_mla_metadata from a "
-    "matching CANN 9.2 toolkit and torch_npu/op-plugin build."
-)
-
 
 @lru_cache
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
@@ -22,7 +16,11 @@ def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
         attention_op = torch_npu.npu_sparse_flash_mla
         metadata_op = torch_npu.npu_sparse_flash_mla_metadata
     except AttributeError as exc:
-        raise RuntimeError(_CANN92_SPARSE_FLASH_MLA_HINT) from exc
+        raise RuntimeError(
+            "DeepSeek-V4 BF16 KV on Ascend A5 requires torch_npu APIs "
+            "npu_sparse_flash_mla and npu_sparse_flash_mla_metadata from a "
+            "matching CANN 9.2 toolkit and torch_npu/op-plugin build."
+        ) from exc
     return attention_op, metadata_op
 
 
