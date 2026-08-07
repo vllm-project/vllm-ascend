@@ -78,7 +78,7 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
         for img in image_data_list:
             parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}})
         return [{"role": "user", "content": parts}]
-        image_index = 0
+    image_index = 0
     messages: list[dict[str, Any]] = []
     for msg in raw:
         content_parts: list[dict[str, Any]] = []
