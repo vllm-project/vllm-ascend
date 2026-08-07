@@ -93,6 +93,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please ensure that FlashComm1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
+| `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
@@ -183,6 +184,23 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
 
+**dynamic_spec_config**
+
+> **Note**: This is an exploratory feature for model runner v1. The current `"dspark"` method relies on the DSpark confidence head. You still need a normal DSpark `speculative_config`; `dynamic_spec_config` only controls how many drafted tokens are verified per request. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding) for usage and limitations.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `method` | str | `None` | Dynamic method name. Currently only `"dspark"` is supported. Omit or set to `None` to disable. |
+| `method_params` | dict | `{}` | Method-specific hyperparameters. When empty, each method falls back to its built-in defaults. |
+
+**dynamic_spec_config.method_params** (when `method` is `"dspark"`)
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `initial_verify_budget_per_req` | int | `5` | Initial per-request verify budget before the first recompute. |
+| `budget_update_interval` | int | `50` | Recompute the shared verify budget every N decode steps. |
+| `budget_threshold` | float | `0.7` | Confidence threshold used when estimating the mean verify budget from `sigmoid(confidence)`. |
+
 **scheduler_config.short_request_first_config**
 
 ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
@@ -223,6 +241,14 @@ An example of additional configuration is as follows:
         "enable_entropy_verify": True,
         "posterior_threshold": 0.95,
         "posterior_alpha": 0.4,
+    },
+    "dynamic_spec_config": {
+        "method": "dspark",
+        "method_params": {
+            "initial_verify_budget_per_req": 5,
+            "budget_update_interval": 50,
+            "budget_threshold": 0.7,
+        },
     },
     "refresh": False
 }
