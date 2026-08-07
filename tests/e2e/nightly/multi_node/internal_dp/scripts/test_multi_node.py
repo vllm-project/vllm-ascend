@@ -158,8 +158,13 @@ def _save_benchmark_results_json(
 
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
     if version:
-        job_name = f"{job_name}_{version}"
-    write_results_json(output, job_name=job_name)
+        write_results_json(
+            output,
+            job_name=f"{job_name}_{version}",
+            output_dir=Path("/root/.cache/benchmark_results") / job_name,
+        )
+    else:
+        write_results_json(output, job_name=job_name)
 
 
 def _abort_marker_path() -> str:
