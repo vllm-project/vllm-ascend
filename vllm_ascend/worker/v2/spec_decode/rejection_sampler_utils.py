@@ -29,6 +29,8 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _insert_resampled_kernel,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 
 @triton.jit
 def _npu_gumbel_block_argmax(
@@ -114,6 +116,7 @@ def _resample_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    DIVIDE_DRAFT_BY_TEMP: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -144,6 +147,11 @@ def _resample_kernel(
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
+        if DIVIDE_DRAFT_BY_TEMP:
+            # main2main compat: draft_logits are cached pre-temperature on
+            # main (gumbel_sample stores before applying temperature), so the
+            # rejection sampler re-applies the scale on load.
+            draft_logits = draft_logits / temp
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
         target_log_probs = target_logits - target_lse
@@ -236,6 +244,7 @@ def _probabilistic_rejection_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    DIVIDE_DRAFT_BY_TEMP: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -293,6 +302,10 @@ def _probabilistic_rejection_kernel(
                         + i * draft_logits_stride_1
                         + draft_sampled
                     ).to(tl.float32)
+                    if DIVIDE_DRAFT_BY_TEMP:
+                        # draft_logits are cached pre-temperature on main;
+                        # re-apply the scale to match the draft LSE.
+                        draft_logit = draft_logit / temp
                     draft_lse = _compute_global_lse(
                         draft_local_max_ptr,
                         draft_local_max_stride,
@@ -359,6 +372,7 @@ def rejection_sample(
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
+    divide_draft_by_temp = not vllm_version_is("0.26.0")
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -438,6 +452,7 @@ def rejection_sample(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        DIVIDE_DRAFT_BY_TEMP=divide_draft_by_temp,
         num_warps=1,
     )
 
@@ -470,6 +485,7 @@ def rejection_sample(
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        DIVIDE_DRAFT_BY_TEMP=divide_draft_by_temp,
     )
 
     # Insert the resampled tokens into the output sampled.
