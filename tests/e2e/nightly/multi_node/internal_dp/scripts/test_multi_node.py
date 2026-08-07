@@ -4,9 +4,12 @@ import os
 import shlex
 import subprocess
 import sys
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 import vllm
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -17,6 +20,7 @@ from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import (
 )
 from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     build_task_entry,
+    compare_version_results,
     extract_hardware,
     filter_environment,
     write_results_json,
@@ -126,7 +130,11 @@ def _build_serve_cmd(config: MultiNodeConfig) -> dict[str, Any]:
     return {"dp": {f"node{node.index}": node.server_cmd for node in config.nodes}}
 
 
-def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) -> None:
+def _save_benchmark_results_json(
+    config: MultiNodeConfig,
+    results: list[Any],
+    version: str | None = None,
+) -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
 
@@ -137,6 +145,7 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
 
     output: dict[str, Any] = {
         "model_name": config.model,
+        "version": version or "default",
         "hardware": extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.nodes[0].server_cmd, config.envs),
@@ -148,28 +157,73 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     }
 
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
+    if version:
+        job_name = f"{job_name}_{version}"
     write_results_json(output, job_name=job_name)
 
 
-@pytest.mark.asyncio
-async def test_multi_node() -> None:
-    config = MultiNodeConfigLoader.from_yaml()
-    if config.special_dependencies:
-        for k, v in config.special_dependencies.items():
-            command = [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                f"{k}=={v}",
-            ]
-            subprocess.call(command)
+def _abort_marker_path() -> str:
+    """Return the shared-PVC path used by the leader to abort worker waiting."""
+    log_prefix = os.environ.get("LOG_PREFIX", "/tmp")
+    return os.path.join(log_prefix, "abort")
 
+
+def _version_done_marker_path(version_index: int) -> str:
+    """Return the shared-PVC path marking the end of a version run on the leader."""
+    log_prefix = os.environ.get("LOG_PREFIX", "/tmp")
+    return os.path.join(log_prefix, f"version_done_{version_index}")
+
+
+def _raise_if_aborted(marker_path: str) -> None:
+    if os.path.exists(marker_path):
+        raise RuntimeError(f"Leader aborted the multi-version run (abort marker: {marker_path})")
+
+
+def _hang_until_version_done(
+    health_url: str,
+    *,
+    done_marker: str,
+    abort_marker: str,
+    timeout_seconds: int = 2800,
+) -> None:
+    """Wait until the leader finishes the current version or tears down its server.
+
+    The leader writes the done marker before shutting down its server, so workers
+    never depend on a possibly-transient health failure between versions.
+    """
+    start = time.time()
+    while time.time() - start < timeout_seconds:
+        _raise_if_aborted(abort_marker)
+        if os.path.exists(done_marker):
+            return
+        try:
+            resp = requests.get(health_url, timeout=5)
+            healthy = resp.status_code == 200
+        except requests.RequestException:
+            healthy = False
+        if not healthy:
+            time.sleep(2)
+            _raise_if_aborted(abort_marker)
+            return
+        time.sleep(5)
+    raise TimeoutError(f"Timed out after {timeout_seconds}s waiting for leader at {health_url}")
+
+
+def _run_single_version(
+    config: MultiNodeConfig,
+    *,
+    envs: dict[str, str] | None = None,
+    version: str | None = None,
+    version_index: int | None = None,
+    results_by_version: dict[str, list[Any]] | None = None,
+    abort_marker: str | None = None,
+) -> None:
+    node_envs = envs if envs is not None else config.envs
     with (
         ProxyLauncher(
             nodes=config.nodes,
             disagg_cfg=config.disagg_cfg,
-            envs=config.envs,
+            envs=node_envs,
             proxy_port=config.proxy_port,
             cur_index=config.cur_index,
         ) as proxy,
@@ -178,7 +232,7 @@ async def test_multi_node() -> None:
             vllm_serve_args=config.server_cmd,
             server_port=config.server_port,
             server_host=config.master_ip,
-            env_dict=config.envs,
+            env_dict=node_envs,
             auto_port=False,
             proxy_port=proxy.proxy_port,
             disaggregated_prefill=config.disagg_cfg,
@@ -195,7 +249,73 @@ async def test_multi_node() -> None:
                 aisbench_cases=config.benchmark_cases,
                 host_ip=host,
             )
-            _save_benchmark_results_json(config, results)
+            _save_benchmark_results_json(config, results, version=version)
+            if results_by_version is not None and version is not None:
+                results_by_version[version] = results
+            if version_index is not None:
+                Path(_version_done_marker_path(version_index)).touch()
         else:
             # We should keep listening on the master node's server url determining when to exit.
-            server.hang_until_terminated(f"http://{host}:{config.server_port}/health")
+            if abort_marker is None:
+                server.hang_until_terminated(f"http://{host}:{config.server_port}/health")
+            else:
+                _hang_until_version_done(
+                    f"http://{host}:{config.server_port}/health",
+                    done_marker=_version_done_marker_path(version_index),
+                    abort_marker=abort_marker,
+                )
+
+
+@pytest.mark.asyncio
+async def test_multi_node() -> None:
+    config = MultiNodeConfigLoader.from_yaml()
+    if config.special_dependencies:
+        for k, v in config.special_dependencies.items():
+            command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                f"{k}=={v}",
+            ]
+            subprocess.call(command)
+
+    if not config.versions:
+        _run_single_version(config)
+        return
+
+    abort_marker = _abort_marker_path()
+    results_by_version: dict[str, list[Any]] = {}
+    try:
+        for version_index, version in enumerate(config.versions):
+            version_name = version["name"]
+            version_envs = {**config.envs, **version["env"]}
+            logger.info("Starting version %s with env overrides: %s", version_name, version["env"])
+            _run_single_version(
+                config,
+                envs=version_envs,
+                version=version_name,
+                version_index=version_index,
+                results_by_version=results_by_version,
+                abort_marker=abort_marker,
+            )
+    except Exception:
+        if config.is_master:
+            try:
+                Path(abort_marker).touch()
+            except OSError:
+                logger.exception("Failed to write abort marker %s", abort_marker)
+        raise
+
+    if config.is_master:
+        baseline_versions = [version["name"] for version in config.versions if version["is_baseline"]]
+        report, passed = compare_version_results(
+            benchmark_cases=config.benchmark_cases,
+            results_by_version=results_by_version,
+            baseline_version_name=baseline_versions[0],
+            default_threshold=config.version_threshold,
+        )
+        for entry in report:
+            logger.info("Version comparison: %s", entry)
+            print(f"VERSION COMPARISON: {entry}")
+        assert passed, "Version performance comparison failed (see report above)"
