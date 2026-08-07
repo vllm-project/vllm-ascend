@@ -33,9 +33,11 @@ that V2 output throughput is not worse than V1 by more than 3%
 
 Benchmarks use vLLM's built-in ``vllm bench serve`` CLI with its synthetic
 datasets (``random`` for 16k1k, ``prefix_repetition`` for 128k1k), so no
-external dataset publication is required. (Nightly single-node cases use
-aisbench instead; this PR E2E case follows the PR E2E toolchain, whose only
-performance precedent is ``tools/vllm_bench.py``.)
+external dataset publication is required. Each run is preceded by 5 warm-up
+requests that are excluded from the metrics, mirroring the internal
+methodology of discarding the first complete round. (Nightly single-node
+cases use aisbench instead; this PR E2E case follows the PR E2E toolchain,
+whose only performance precedent is ``tools/vllm_bench.py``.)
 """
 
 from __future__ import annotations
@@ -124,6 +126,8 @@ BENCH_COMMON_ARGS = [
     "50,90,99",
     "--request-rate",
     "inf",
+    "--num-warmups",
+    "5",
     "--temperature",
     "0",
     "--ignore-eos",
