@@ -10,6 +10,7 @@ test_cases:
     prompts:
       - "Hello!"
       - "What is the weather in Shanghai?"
+      - "Count to 5."
     api_keyword_args:
       - max_tokens: 100
       - max_tokens: 100
@@ -21,6 +22,8 @@ test_cases:
               properties:
                 location:
                   type: "string"
+      - max_tokens: 50
+        stream: true
     envs:
       VLLM_USE_MODELSCOPE: "true"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"

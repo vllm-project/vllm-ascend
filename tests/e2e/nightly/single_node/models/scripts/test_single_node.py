@@ -70,6 +70,7 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
     for prompt, api_args in zip(prompts, api_args_list):
         max_tokens = api_args.get("max_tokens", 100) if isinstance(api_args, dict) else 100
         tools = api_args.get("tools") if isinstance(api_args, dict) else None
+        stream = api_args.get("stream", False) if isinstance(api_args, dict) else False
         
         request_body = {
             "model": config.model,
@@ -78,31 +79,55 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
         }
         if tools:
             request_body["tools"] = tools
+        if stream:
+            request_body["stream"] = True
         
-        response = requests.post(
-            f"{url}/v1/messages",
-            headers={"Content-Type": "application/json"},
-            json=request_body,
-        )
-        assert response.status_code == 200, f"Request failed for prompt '{prompt}' with status {response.status_code}: {response.text}"
-        data = response.json()
-        assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
-        assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
-        assert "content" in data, "Response missing 'content' field"
-        assert isinstance(data["content"], list), f"Expected content to be a list, got {type(data['content'])}"
-        assert len(data["content"]) > 0, f"Expected non-empty content for prompt '{prompt}'"
-        
-        # For tool calling, check for text or tool_use blocks
-        if tools:
-            valid_blocks = [block for block in data["content"] if block.get("type") in ["text", "tool_use"]]
-            assert len(valid_blocks) > 0, f"No text or tool_use content found in response for prompt '{prompt}'"
+        if stream:
+            # Streaming response (SSE)
+            response = requests.post(
+                f"{url}/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+                stream=True,
+            )
+            assert response.status_code == 200, f"Streaming request failed for prompt '{prompt}' with status {response.status_code}: {response.text}"
+            
+            events = []
+            for line in response.iter_lines():
+                if line:
+                    events.append(line.decode("utf-8"))
+            
+            assert len(events) > 0, f"No SSE events received for prompt '{prompt}'"
+            assert any("message_start" in e for e in events), f"Missing 'message_start' event for prompt '{prompt}'"
+            assert any("content_block_delta" in e for e in events), f"Missing 'content_block_delta' event for prompt '{prompt}'"
+            assert any("message_stop" in e for e in events), f"Missing 'message_stop' event for prompt '{prompt}'"
+            print(f"Messages API streaming test passed for prompt '{prompt}' (max_tokens={max_tokens}, events={len(events)})")
         else:
-            text_content = [block for block in data["content"] if block.get("type") == "text"]
-            assert len(text_content) > 0, f"No text content found in response for prompt '{prompt}'"
-            actual_text = text_content[0].get("text", "")
-            assert actual_text and actual_text.strip(), f"Empty or whitespace-only text response for prompt '{prompt}'"
-        
-        print(f"Messages API test passed for prompt '{prompt}' (max_tokens={max_tokens}, tools={'yes' if tools else 'no'}): {data}")
+            # Non-streaming response
+            response = requests.post(
+                f"{url}/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+            )
+            assert response.status_code == 200, f"Request failed for prompt '{prompt}' with status {response.status_code}: {response.text}"
+            data = response.json()
+            assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
+            assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
+            assert "content" in data, "Response missing 'content' field"
+            assert isinstance(data["content"], list), f"Expected content to be a list, got {type(data['content'])}"
+            assert len(data["content"]) > 0, f"Expected non-empty content for prompt '{prompt}'"
+            
+            # For tool calling, check for text or tool_use blocks
+            if tools:
+                valid_blocks = [block for block in data["content"] if block.get("type") in ["text", "tool_use"]]
+                assert len(valid_blocks) > 0, f"No text or tool_use content found in response for prompt '{prompt}'"
+            else:
+                text_content = [block for block in data["content"] if block.get("type") == "text"]
+                assert len(text_content) > 0, f"No text content found in response for prompt '{prompt}'"
+                actual_text = text_content[0].get("text", "")
+                assert actual_text and actual_text.strip(), f"Empty or whitespace-only text response for prompt '{prompt}'"
+            
+            print(f"Messages API test passed for prompt '{prompt}' (max_tokens={max_tokens}, tools={'yes' if tools else 'no'}): {data}")
 
 
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
