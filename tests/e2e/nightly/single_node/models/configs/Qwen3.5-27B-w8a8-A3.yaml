@@ -5,25 +5,6 @@
 test_cases:
   - name: "Qwen3.5-27B-w8a8"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    test_content:
-      - "messages"
-    prompts:
-      - "Hello!"
-      - "What is the weather in Shanghai?"
-      - "Count to 5."
-    api_keyword_args:
-      - max_tokens: 100
-      - max_tokens: 100
-        tools:
-          - name: "get_weather"
-            description: "Get weather info"
-            input_schema:
-              type: "object"
-              properties:
-                location:
-                  type: "string"
-      - max_tokens: 50
-        stream: true
     envs:
       VLLM_USE_MODELSCOPE: "true"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -64,6 +45,25 @@ test_cases:
       - "--enable-auto-tool-choice"
       - "--tool-call-parser"
       - "qwen3_coder"
+    test_content:
+      - "messages"
+    prompts:
+      - "Hello!"
+      - "What is the weather in Shanghai?"
+      - "Count to 5."
+    api_keyword_args:
+      - max_tokens: 100
+      - max_tokens: 100
+        tools:
+          - name: "get_weather"
+            description: "Get weather info"
+            input_schema:
+              type: "object"
+              properties:
+                location:
+                  type: "string"
+      - max_tokens: 50
+        stream: true
     benchmarks:
       acc_aime2025:
         case_type: accuracy
