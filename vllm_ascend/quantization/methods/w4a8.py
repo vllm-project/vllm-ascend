@@ -27,6 +27,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
@@ -487,7 +488,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -537,19 +538,21 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.use_expert_weight_list,
-                expert_map=getattr(layer, "ascend_expert_map", None),
-                global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
-                mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
-                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
-                log2phy=getattr(layer, "log2phy", None),
-                pertoken_scale=getattr(layer, "_ascend_pertoken_scale", None),
-                activation=getattr(layer, "activation", "silu"),
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                log2phy=layer.log2phy,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 is_per_channel_weight=self.is_per_channel_weight,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
+                swiglu_beta=layer.swiglu_beta,
             )
         )
 

@@ -39,13 +39,15 @@ def _build_apply_layer():
         zero_expert_type=None,
         n_shared_experts=0,
         swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
         activation="gelu",
         apply_router_weight_on_input=True,
         ascend_expert_map=None,
         global_redundant_expert_num=0,
         log2phy=None,
-        _ascend_pertoken_scale=None,
-        _ascend_mc2_mask=None,
+        ascend_pertoken_scale=None,
+        ascend_mc2_mask=None,
     )
 
 

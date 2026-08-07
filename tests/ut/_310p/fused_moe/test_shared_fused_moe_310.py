@@ -152,7 +152,15 @@ def test_unquantized_apply_310_uses_preselected_experts():
         w13_weight=torch.randn(2, 4, 6),
         w2_weight=torch.randn(2, 6, 4),
         ascend_expert_map=expert_map,
+        global_redundant_expert_num=0,
+        ascend_mc2_mask=None,
         apply_router_weight_on_input=True,
+        log2phy=None,
+        ascend_pertoken_scale=None,
+        activation="silu",
+        swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
     )
     hidden_states = torch.randn(3, 6)
     topk_weights = torch.rand(3, 2)
