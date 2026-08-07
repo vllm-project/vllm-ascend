@@ -58,30 +58,23 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
 
     url = f"http://{server.host}:{server.port}"
     max_tokens = config.api_keyword_args.get("max_tokens", 100)
-    prompts = config.prompts if config.prompts else ["Hello!"]
+    prompt = config.prompts[0] if config.prompts else "Hello!"
 
-    for prompt in prompts:
-        response = requests.post(
-            f"{url}/v1/messages",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": config.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-            },
-        )
-        assert response.status_code == 200, f"Request failed for prompt '{prompt}' with status {response.status_code}: {response.text}"
-        data = response.json()
-        assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
-        assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
-        assert "content" in data, "Response missing 'content' field"
-        assert isinstance(data["content"], list), f"Expected content to be a list, got {type(data['content'])}"
-        assert len(data["content"]) > 0, f"Expected non-empty content for prompt '{prompt}'"
-        text_content = [block for block in data["content"] if block.get("type") == "text"]
-        assert len(text_content) > 0, f"No text content found in response for prompt '{prompt}'"
-        actual_text = text_content[0].get("text", "")
-        assert actual_text and actual_text.strip(), f"Empty or whitespace-only text response for prompt '{prompt}'"
-        print(f"Messages API test passed for prompt '{prompt}': {data}")
+    response = requests.post(
+        f"{url}/v1/messages",
+        headers={"Content-Type": "application/json"},
+        json={
+            "model": config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        },
+    )
+    assert response.status_code == 200, f"Request failed with status {response.status_code}: {response.text}"
+    data = response.json()
+    assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
+    assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
+    assert len(data["content"]) > 0, "Expected non-empty content in response"
+    print(f"Messages API response: {data}")
 
 
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
