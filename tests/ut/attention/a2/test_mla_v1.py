@@ -1953,6 +1953,38 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_dynamic_mlapo_a3(
+        self, mock_format_cast, mock_get_ascend_device_type
+    ):
+        layer = MagicMock(spec=LinearBase)
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
+        shape_1 = self.impl.kv_lora_rank
+        layer.weight = torch.randn(shape_0, shape_1)
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+
+        from vllm_ascend.attention.mla_v1 import (
+            AscendDeviceType,
+            AscendW8A8DynamicLinearMethod,
+        )
+
+        dynamic_method = AscendW8A8DynamicLinearMethod()
+        self.impl.enable_mlapo = True
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.quant_method.quant_method = dynamic_method
+        self.impl.q_proj.quant_method.quant_method = dynamic_method
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A3
+        self.impl._process_weights_for_fused_mlapo = MagicMock()
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertTrue(self.impl.enable_mlapo)
+        self.assertEqual(self.impl.mlapo_quant_mode, "per_token_quant_symm")
+        self.impl._process_weights_for_fused_mlapo.assert_called_once_with(torch.bfloat16)
+
     @patch("vllm_ascend.attention.mla_v1.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_fa_quant(self, mock_format_cast, mock_maybe_trans_nz):

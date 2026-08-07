@@ -387,7 +387,7 @@ class BaseDeviceAdaptor:
                 ctkv_scale=atten_obj.ctkv_scale,
                 q_nope_scale=atten_obj.q_nope_scale,
                 cache_mode="nzcache" if atten_obj.enable_kv_nz else "krope_ctkv",
-                quant_mode="per_tensor_quant_asymm",
+                quant_mode=atten_obj.mlapo_quant_mode,
                 q_out0=decode_q_nope,
                 kv_cache_out0=decode_k_nope,
                 q_out1=decode_q_pe,

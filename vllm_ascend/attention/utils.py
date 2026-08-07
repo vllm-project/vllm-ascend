@@ -498,13 +498,4 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
-    config_val = get_ascend_config().enable_mlapo
-    if get_ascend_device_type() == AscendDeviceType.A5:
-        return bool(config_val)
-
-    is_decode_instance = (
-        vllm_config.kv_transfer_config is not None
-        and vllm_config.kv_transfer_config.is_kv_consumer
-        and not vllm_config.kv_transfer_config.is_kv_producer
-    )
-    return bool(config_val and is_decode_instance)
+    return bool(get_ascend_config().enable_mlapo)
