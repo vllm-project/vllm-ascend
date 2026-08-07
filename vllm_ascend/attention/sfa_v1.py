@@ -291,14 +291,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
                 req_local_start = max(global_start, local_start)
                 req_local_end = min(global_end, local_end_with_pad)
-                num_local_tokens = req_local_end - req_local_start
+                num_local_tokens = max(req_local_end - req_local_start, 0)
 
                 if num_local_tokens > 0:
                     cum += num_local_tokens
                     actual_seq_lengths_query[i] = cum
 
                     offset = global_end - req_local_end
-                    actual_seq_lengths_key[i] = seq_lens[i].item() - offset
+                    actual_seq_lengths_key[i] = max(seq_lens[i].item() - offset, 0)
                 else:
                     actual_seq_lengths_query[i] = cum
                     actual_seq_lengths_key[i] = 0
