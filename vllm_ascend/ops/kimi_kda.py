@@ -47,6 +47,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.kda.fused_norm_gate import apply_kda_rms_norm_sigmoid_gate
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
@@ -258,9 +259,21 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             core_attn_out,
             self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, output_gate)
+        core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _apply_output_norm_gate(
+        self,
+        core_attn_out: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return apply_kda_rms_norm_sigmoid_gate(
+            core_attn_out,
+            output_gate,
+            self.o_norm.weight,
+            self.o_norm.eps,
+        )
 
     @staticmethod
     def _run_causal_conv1d(
