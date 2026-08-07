@@ -1212,17 +1212,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # mirror that here since this autoregressive loop bypasses it.
                 # TODO: implement d2t scatter (like upstream speculator) to enable
                 # probabilistic sampling with vocab remapping.
-                dspark_has_vocab_mapping = (
-                    getattr(self.model, "draft_id_to_target_id", None) is not None
-                )
-                use_probabilistic = (
-                    self._enable_probabilistic_draft_probs
-                    and not dspark_has_vocab_mapping
-                )
-                if (
-                    self._enable_probabilistic_draft_probs
-                    and dspark_has_vocab_mapping
-                ):
+                dspark_has_vocab_mapping = getattr(self.model, "draft_id_to_target_id", None) is not None
+                use_probabilistic = self._enable_probabilistic_draft_probs and not dspark_has_vocab_mapping
+                if self._enable_probabilistic_draft_probs and dspark_has_vocab_mapping:
                     logger.warning_once(
                         "draft_sample_method='probabilistic' is disabled for dspark "
                         "with vocab remapping (draft_id_to_target_id): draft probs "
@@ -1244,9 +1236,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             # Use probabilistic sampling instead of argmax.
                             # logits[:, idx] is [num_blk, V], matching
                             # batch_size for per-request temperature.
-                            token_ids, probs = self._sample_draft_from_logits(
-                                logits[:, idx], sampling_metadata
-                            )
+                            token_ids, probs = self._sample_draft_from_logits(logits[:, idx], sampling_metadata)
                             draft_token_ids[:, idx + 1].copy_(token_ids)
                             if probs is not None:
                                 dspark_probs_list.append(probs)
@@ -1255,9 +1245,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if use_probabilistic and dspark_probs_list:
                         # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
                         # [num_blk * K, V] to match early_exit view logic.
-                        draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).view(
-                            -1, logits.shape[-1]
-                        ).contiguous()
+                        draft_probs_step0 = (
+                            torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
+                        )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
