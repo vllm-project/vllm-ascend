@@ -161,7 +161,7 @@ docker run --rm \
 ::::{tab-item} Ascend950DT series
 :sync: 950dt
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```{code-block} bash
   :substitutions:
@@ -467,7 +467,7 @@ vllm serve $MODEL_PATH \
     --served-model-name qwen3.6 \
     --max-num-seqs 32 \
     --max-model-len 262144 \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 16384 \
     --trust-remote-code \
     --gpu-memory-utilization 0.90 \
     --no-enable-prefix-caching \
