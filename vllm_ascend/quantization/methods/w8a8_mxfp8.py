@@ -266,6 +266,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
             )
         )
 

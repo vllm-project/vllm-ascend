@@ -194,6 +194,9 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                swiglu_limit=getattr(layer, "swiglu_limit", 0.0),
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
             )
         )
 

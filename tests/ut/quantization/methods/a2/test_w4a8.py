@@ -448,6 +448,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         layer._ascend_mc2_mask = mc2_mask
         layer._ascend_pertoken_scale = pertoken_scale
         layer.activation = "silu"
+        layer.swiglu_alpha = 1.5
+        layer.swiglu_beta = 0.25
         layer.apply_router_weight_on_input = False
 
         mock_fused_input = Mock()
@@ -475,8 +477,10 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         build_kwargs = mock_build_input.call_args.kwargs
         self.assertTrue(torch.equal(build_kwargs["hidden_states"], x))
         self.assertEqual(build_kwargs["quant_type"], self.quant_method.quant_type)
-        self.assertTrue(build_kwargs["is_per_channel_weight"])
+        self.assertNotIn("is_per_channel_weight", build_kwargs)
         self.assertEqual(build_kwargs["activation"], "silu")
+        self.assertEqual(build_kwargs["swiglu_alpha"], 1.5)
+        self.assertEqual(build_kwargs["swiglu_beta"], 0.25)
         self.assertEqual(build_kwargs["apply_router_weight_on_input"], False)
 
         mock_comm.fused_experts.assert_called_once()

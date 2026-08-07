@@ -548,8 +548,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
-                is_per_channel_weight=self.is_per_channel_weight,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
+                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
             )
         )
 

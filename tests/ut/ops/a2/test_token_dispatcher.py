@@ -57,7 +57,6 @@ def build_token_dispatch_input_fixture(
     quant_type: QuantType = QuantType.NONE,
     comm_quant_mode: int | None = None,
     act_quant_type: torch.dtype | None = None,
-    is_per_channel_weight: bool = False,
     mc2_mask: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
     mxfp_spec = None
@@ -78,7 +77,6 @@ def build_token_dispatch_input_fixture(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,
             mxfp=mxfp_spec,
-            is_per_channel_weight=is_per_channel_weight,
         ),
     )
 
@@ -276,7 +274,6 @@ class TestTokenDispatcherWithMC2(TestBase):
             topk_ids=topk_ids,
             expert_map=expert_map,
             quant_type=QuantType.W4A8,
-            is_per_channel_weight=True,
         )
         with patch(
             "torch_npu.npu_moe_distribute_dispatch_v2", return_value=(torch.randn(10, 128),) * 5 + (None, None)
@@ -287,7 +284,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(mock_dispatch.call_args.kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_COUNT)
         self.assertEqual(output.group_list_type, EXPERT_TOKEN_NUMS_TYPE_COUNT)
 
-    def test_w4a8_group_dispatch_keeps_prefix_sum_group_list(self):
+    def test_w4a8_dispatch_always_uses_count_group_list(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
         topk_ids = torch.randint(0, 8, (10, 1))
@@ -299,11 +296,10 @@ class TestTokenDispatcherWithMC2(TestBase):
             topk_ids=topk_ids,
             expert_map=expert_map,
             quant_type=QuantType.W4A8,
-            is_per_channel_weight=False,
         )
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
-        self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_CUMSUM)
+        self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_COUNT)
 
     def test_get_combine_mc_kwargs_with_quant(self):
         hidden_states = torch.randn(10, 128)
