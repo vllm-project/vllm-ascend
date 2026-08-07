@@ -931,13 +931,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
-        if not self.use_mla_rope and (self.fa_quant_layer or self.enable_mlapo):
-            # Both optimized preprocess paths fuse rotary reordering into the
-            # q/kv prolog. A no-RoPE positional slice must remain in checkpoint
-            # order, so use the explicit no-RoPE baseline instead.
-            logger.warning_once("FA quant/MLAPO is disabled for MLA layers with RoPE disabled.")
-            self.fa_quant_layer = False
-            self.enable_mlapo = False
         if self.fa_quant_layer:
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
@@ -1156,21 +1149,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
-            # Currently mlapo only supports W8A8 and W8A8MXFP8 quantization in MLA scenario
-            # TODO(whx): modify this limitation when mlapo supports floating point
-            if self.fused_qkv_a_proj is None or (
-                not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None), AscendW8A8LinearMethod
-                )
-                and not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None),
-                    AscendW8A8MXFP8DynamicLinearMethod,
-                )
-            ):
+            device_type = get_ascend_device_type()
+            layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
+            quant_method = getattr(layer_quant_method, "quant_method", None)
+            self._mlapo_quant_type = type(quant_method) if quant_method is not None else None
+            supports_quantized_weights = isinstance(
+                quant_method, (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod)
+            )
+            supports_native_weights = device_type == AscendDeviceType.A5 and isinstance(
+                layer_quant_method, UnquantizedLinearMethod
+            )
+            if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
-                    "mlapo only supports W8A8 quantization in MLA. "
-                    "Some layers not W8A8 quantized, mlapo disabled for these layers."
+                    "MLAPO supports W8A8/W8A8-MXFP8 weights, plus native floating-point weights on A5. "
+                    "Some layers use an unsupported weight type, so MLAPO is disabled for these layers."
                 )
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1282,24 +1275,46 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
 
-        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
+        is_native = self._mlapo_quant_type is None
+        fused_weight = self.fused_qkv_a_proj.weight.data
+        if is_native:
+            # Unquantized Linear weights are stored as [out_features, in_features],
+            # whereas npu_mla_prolog_v3 consumes [in_features, out_features].
+            fused_weight = fused_weight.T
+
+        weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
 
-        weight_uq_qr = self.q_proj.weight.data.contiguous()
-        self.weight_uq_qr_scale = self.q_proj.weight_scale.data.transpose(0, 1)
-        self.weight_uq_qr_scale = self.weight_uq_qr_scale.reshape(
-            -1, self.weight_uq_qr_scale.shape[1] * self.weight_uq_qr_scale.shape[2]
-        )
+        weight_uq_qr = self.q_proj.weight.data
+        if is_native:
+            weight_uq_qr = weight_uq_qr.T.contiguous()
+            if self.head_padding > 0:
+                weight_uq_qr = weight_uq_qr.view(self.q_lora_rank, self.num_heads, self.qk_head_dim)
+                weight_uq_qr = F.pad(weight_uq_qr, (0, 0, 0, self.head_padding))
+                weight_uq_qr = weight_uq_qr.view(self.q_lora_rank, self.num_heads_padded * self.qk_head_dim)
+        weight_uq_qr = weight_uq_qr.contiguous()
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
 
-        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
-        weight_scale = self.fused_qkv_a_proj.weight_scale
-        weight_scale = weight_scale.transpose(0, 1)
-        weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
-        self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
-        self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
+        self.mlapo_weight_quant_mode = 0 if is_native else 3
+        if is_native:
+            self.mlapo_num_heads = self.num_heads_padded
+            self.mlapo_W_UK_T = self.W_UK_T
+            if self.head_padding > 0:
+                self.mlapo_W_UK_T = F.pad(self.W_UK_T, (0, 0, 0, 0, 0, self.head_padding))
+        if not is_native:
+            weight_uq_qr_scale = self.q_proj.weight_scale.data.transpose(0, 1)
+            self.weight_uq_qr_scale = weight_uq_qr_scale.reshape(
+                -1, weight_uq_qr_scale.shape[1] * weight_uq_qr_scale.shape[2]
+            )
+
+            weight_scale = self.fused_qkv_a_proj.weight_scale
+            weight_scale = weight_scale.transpose(0, 1)
+            weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
+            self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
+            self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
         if self.fa_quant_layer:
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
             self.quant_kscale = layer.quant_kscale
@@ -1918,6 +1933,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
+        if getattr(self, "mlapo_num_heads", self.num_heads) > self.num_heads:
+            decode_q_nope = decode_q_nope[:, : self.num_heads]
+            decode_q_pe = decode_q_pe[:, : self.num_heads]
         return decode_q_nope, decode_q_pe
 
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
@@ -2082,7 +2100,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states.contiguous(), need_gather_q_kv
             )
             decode_preprocess_res, prefill_preprocess_res = DeviceOperator.mla_preprocess_only_decode(
-                self, hidden_states, kv_cache, attn_metadata
+                self,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                use_mla_rope=self.use_mla_rope,
             )
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
