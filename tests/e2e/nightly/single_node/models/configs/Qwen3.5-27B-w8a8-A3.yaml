@@ -9,8 +9,18 @@ test_cases:
       - "messages"
     prompts:
       - "Hello!"
+      - "What is the weather in Shanghai?"
     api_keyword_args:
-      max_tokens: 100
+      - max_tokens: 100
+      - max_tokens: 100
+        tools:
+          - name: "get_weather"
+            description: "Get weather info"
+            input_schema:
+              type: "object"
+              properties:
+                location:
+                  type: "string"
     envs:
       VLLM_USE_MODELSCOPE: "true"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
