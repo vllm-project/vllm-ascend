@@ -378,10 +378,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
+        # Level-2 sleep discards NPU tensors that are not parameters/buffers.
+        # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
+        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
+        self._promote_attr_to_buffer("log2phy")
+        if self.dynamic_eplb:
+            self._promote_attr_to_buffer("moe_load")
+            if self.multi_stage:
+                self._promote_attr_to_buffer("load_counter")
+
         # Register this MoE layer with EPLB for PP compatibility.
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    def _promote_attr_to_buffer(self, name: str) -> None:
+        """Move an existing tensor attribute onto a Level-2 restorable named buffer."""
+        tensor = getattr(self, name, None)
+        if tensor is None:
+            return
+        delattr(self, name)
+        self.register_buffer(name, tensor)
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         if quant_config is None:
