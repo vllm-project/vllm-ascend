@@ -49,8 +49,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
-        # This flag is graph-static. Per-token indices below preserve base rows
-        # when the single adapter shares a compiled batch with base requests.
         self._single_lora_slot = (
             ascend_device_type == AscendDeviceType.A3
             and self.lora_config is not None
@@ -405,7 +403,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         packed_lora_a: torch.Tensor | None = None,
         add_inputs: bool,
     ) -> bool:
-        """Use masked GEMM when the service has one runtime LoRA slot."""
         if not self._single_lora_slot:
             return False
 
