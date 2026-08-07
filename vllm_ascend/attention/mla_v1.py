@@ -931,11 +931,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
-        if not self.use_mla_rope and self.fa_quant_layer:
-            # The A3 FA-quant path uses npu_mla_prolog_v2, which requires RoPE.
-            # Keep MLAPO enabled so no-RoPE models use _C_ascend.mla_preprocess.
-            logger.warning_once("FA quant is disabled for MLA layers with RoPE disabled.")
-            self.fa_quant_layer = False
         if self.fa_quant_layer:
             self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:

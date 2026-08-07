@@ -1068,7 +1068,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    def test_kimi_k3_no_rope_uses_mlapo_without_fa_quant(
+    def test_kimi_k3_no_rope_preserves_fa_quant_state(
         self,
         mock_get_current_vllm_config,
         mock_enabling_mlapo,
@@ -1108,7 +1108,7 @@ class TestAscendMLAImpl(TestBase):
             **kwargs,
         )
 
-        self.assertFalse(impl.fa_quant_layer)
+        self.assertTrue(impl.fa_quant_layer)
         self.assertTrue(impl.enable_mlapo)
 
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
