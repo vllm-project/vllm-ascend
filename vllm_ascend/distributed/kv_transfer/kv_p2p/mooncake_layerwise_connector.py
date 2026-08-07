@@ -933,9 +933,9 @@ class MooncakeLayerwiseConnectorScheduler:
             params,
         )
 
-        if params is not None and params.get("do_remote_prefill"):
+        if params is not None and params.get("do_remote_prefill") and num_external_tokens > 0:
             do_virtual = params.get("do_virtual", False)
-            local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
+            local_block_ids = blocks.get_block_ids()
             remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
@@ -980,6 +980,13 @@ class MooncakeLayerwiseConnectorScheduler:
                         logger.error("Access metaserver fail. error=%s. ", future.exception())
 
                 future.add_done_callback(handle_exception)
+        elif params is not None and params.get("do_remote_prefill"):
+            logger.debug(
+                "MooncakeLayerwiseConnector update_state_after_alloc: skip remote prefill for %s because no "
+                "external tokens were assigned",
+                request.request_id,
+            )
+            params["do_remote_prefill"] = False
 
         # Layerwise prefiller add request need send
         if params is not None and params.get("do_remote_decode"):

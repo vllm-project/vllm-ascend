@@ -33,9 +33,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
-            if i == chosen_connector or isinstance(c, MooncakeLayerwiseConnector):
+            if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
+            elif isinstance(c, MooncakeLayerwiseConnector):
+                # Preserve real blocks for Mooncake's producer-side push path,
+                # but do not grant load ownership after it loses FirstWin.
+                c.update_state_after_alloc(request, blocks, 0)
             else:
                 # Call with empty blocks for other connectors.
                 c.update_state_after_alloc(request, empty_blocks, 0)
