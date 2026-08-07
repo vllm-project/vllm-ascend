@@ -35,6 +35,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_npu
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
@@ -266,6 +267,62 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+# --- E48 diagnostic: does the FA3 decode graph capture corrupt the CANN op
+# dispatch globally?  Runs a standalone eager CANN V1 FIA (TND, sparse_mode=0)
+# before and after graph capture with identical inputs and compares the output.
+# If the two runs differ, the FA3 decode graph capture broke the CANN op
+# dispatch for ALL later CANN ops (deep corruption).  If they match, only the
+# task-group graph-replay path is affected.  Set VLLM_ASCEND_DEBUG_E48=1.
+_E48_TENSORS = None
+_E48_DONE = False
+
+
+def _e48_build_tensors():
+    """Deterministic small FIA inputs, built once and reused for both runs."""
+    global _E48_TENSORS
+    if _E48_TENSORS is None:
+        H, HKV, D = 4, 2, 128
+        cu = [0, 4, 10]  # cumulative seq lengths (leading 0)
+        total = cu[-1]
+        scale = 1.0 / (D ** 0.5)
+        dtype = torch.bfloat16
+        q = torch.randn(total, H, D, dtype=dtype, device="npu")
+        k = torch.randn(total, HKV, D, dtype=dtype, device="npu")
+        v = torch.randn(total, HKV, D, dtype=dtype, device="npu")
+        # Match the eager PrefillNoCache FIA call: both actual_seq_lengths and
+        # actual_seq_lengths_kv are cumulative (cu[1:]).
+        _E48_TENSORS = (q, k, v, cu[1:], cu[1:], scale, H, HKV)
+    return _E48_TENSORS
+
+
+def _e48_run_eager_fia():
+    """Run one standalone eager CANN V1 FIA (TND, sparse_mode=0, no mask)."""
+    q, k, v, actual_q, actual_kv, scale, H, HKV = _e48_build_tensors()
+    out, _ = torch_npu.npu_fused_infer_attention_score(
+        query=q,
+        key=k,
+        value=v,
+        block_table=None,
+        input_layout="TND",
+        block_size=128,
+        actual_seq_lengths=actual_q,
+        actual_seq_lengths_kv=actual_kv,
+        num_key_value_heads=HKV,
+        num_heads=H,
+        scale=scale,
+        sparse_mode=0,
+    )
+    return out
+
+
+def _e48_report(before, after):
+    max_diff = float((before - after).abs().max().item())
+    ok = max_diff <= 1e-3
+    print(f"[E48] eager FIA before/after graph capture: match={ok}, "
+          f"max_abs_diff={max_diff}")
+    return ok
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -5040,19 +5097,23 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
-        # E6 diagnostic: capture FULL graphs ascending (decode first, prefill
-        # last) so the FA3 decode graph captures happen BEFORE the prefill
-        # graphs.  Set VLLM_ASCEND_DEBUG_FA3_REORDER_CAPTURE=1 to enable.
-        if os.environ.get("VLLM_ASCEND_DEBUG_FA3_REORDER_CAPTURE") == "1":
-            mgr = getattr(self, "cudagraph_manager", None)
-            if mgr is not None and getattr(mgr, "_capture_descs", None):
-                descs = mgr._capture_descs.get(CUDAGraphMode.FULL)
-                if descs:
-                    # ascending num_tokens: decode (small) first, prefill (large) last
-                    descs.sort(key=lambda d: d.num_tokens)
+        global _E48_DONE
+        e48_before = None
+        if os.environ.get("VLLM_ASCEND_DEBUG_E48") == "1" and not _E48_DONE:
+            # E48: standalone eager CANN V1 FIA BEFORE any graph capture (clean
+            # CANN state).  Compared with the AFTER run below.
+            e48_before = _e48_run_eager_fia()
+            torch.npu.synchronize()
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
+        if os.environ.get("VLLM_ASCEND_DEBUG_E48") == "1" and not _E48_DONE:
+            # E48: standalone eager CANN V1 FIA AFTER graph capture (FA3 decode
+            # graphs may have corrupted the CANN op dispatch).
+            e48_after = _e48_run_eager_fia()
+            torch.npu.synchronize()
+            _e48_report(e48_before, e48_after)
+            _E48_DONE = True
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
