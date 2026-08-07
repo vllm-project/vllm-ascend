@@ -14,11 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep base and LoRA full graphs on independent compiled callables.
-
-A source-hash guard pins this internal wrapper patch to the verified vLLM
-version.
-"""
+"""Keep base and LoRA full graphs on independent compiled callables."""
 
 import hashlib
 import inspect
@@ -36,7 +32,6 @@ from vllm.config.compilation import DynamicShapesType
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 
-_SUPPORTED_VLLM_COMMIT = "d02df748bf9efd99022f1a062597dc3cb3808485"
 _SUPPORTED_WRAPPER_SHA256 = "c1b1fca679ea16aa07a696831a810c0d531da2bb0ea32dd6f1a95cdaef36de07"
 _PATCH_MARKER = "_vllm_ascend_lora_dual_graph_patch"
 _ORIGINAL_INIT_ATTR = "_vllm_ascend_lora_dual_graph_original_init"
@@ -61,8 +56,8 @@ def _verify_vllm_wrapper_baseline() -> None:
         actual_sha256 = hashlib.sha256(wrapper_file.read()).hexdigest()
     if actual_sha256 != _SUPPORTED_WRAPPER_SHA256:
         raise RuntimeError(
-            "The Ascend LoRA dual-graph patch requires the unmodified vLLM "
-            f"{_SUPPORTED_VLLM_COMMIT} compilation wrapper. Expected SHA256 "
+            "The Ascend LoRA dual-graph patch requires a compatible, "
+            "unmodified vLLM compilation wrapper. Expected SHA256 "
             f"{_SUPPORTED_WRAPPER_SHA256}, got {actual_sha256} from {wrapper_path}."
         )
     _BASELINE_VERIFIED = True
@@ -298,10 +293,7 @@ def apply_patch() -> None:
     TorchCompileWithNoGuardsWrapper._punica_has_lora = _punica_has_lora
     TorchCompileWithNoGuardsWrapper._mark_variant_dynamic_inputs = _mark_variant_dynamic_inputs
     setattr(TorchCompileWithNoGuardsWrapper, _PATCH_MARKER, True)
-    logger.info_once(
-        "Applied Ascend vLLM %s base/LoRA dual compile-graph patch",
-        _SUPPORTED_VLLM_COMMIT,
-    )
+    logger.info_once("Applied Ascend base/LoRA dual compile-graph patch")
 
 
 apply_patch()

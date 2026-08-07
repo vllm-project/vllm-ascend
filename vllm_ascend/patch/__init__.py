@@ -565,21 +565,16 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper`
 #    Why:
-#       vLLM d02df748 drops non-shape Dynamo guards after the first trace, so a
-#       LoRA-specialized service cannot keep independent base and adapter full
-#       graphs. Reusing one callable either mixes graph resources or forces the
-#       base path back to eager execution.
+#       The upstream wrapper owns one compiled callable. Ascend needs separate
+#       full-graph resources for base and LoRA execution.
 #    How:
-#       For the supported vLLM baseline, extend the existing wrapper before model loading
-#       and create separate LoRA, base, and one-token-base compiled callables.
-#       The vLLM wheel remains unmodified; the patch is active only when LoRA
-#       and `cudagraph_specialize_lora` are both enabled.
+#       Create LoRA, base, and one-token-base compiled callables when LoRA and
+#       `cudagraph_specialize_lora` are enabled. A source hash rejects
+#       incompatible upstream wrapper implementations.
 #    Related PR (if no, explain why):
-#       No. This is a baseline-specific compatibility patch while the generic
-#       multi-variant compile-wrapper design is discussed upstream.
+#       No. vLLM does not currently provide generic multi-variant compilation.
 #    Future Plan:
-#       Remove this patch after the supported vLLM version provides independent
-#       compile variants for base and LoRA graph specialization.
+#       Remove this patch when vLLM provides independent compile variants.
 #
 # ** 1. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
