@@ -803,6 +803,8 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 ::::
 :::::
 
+(glm5-prefill-decode-disaggregation-a3)=
+
 ### 5.3 Prefill-Decode Disaggregation (A3 series)
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
@@ -1984,11 +1986,11 @@ The tables below provide recommended parameter configurations for different depl
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|Low Latency<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|Low Latency<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|High Throughput<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|High Throughput<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|Long Context<br>(198K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(64K input)|PD Disaggregation, {ref}`Prefill-Decode Disaggregation <glm5-prefill-decode-disaggregation-a3>`|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(128K input)|PD Disaggregation, {ref}`Prefill-Decode Disaggregation <glm5-prefill-decode-disaggregation-a3>`|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(64K input)|PD Disaggregation, {ref}`Prefill-Decode Disaggregation <glm5-prefill-decode-disaggregation-a3>`|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(128K input)|PD Disaggregation, {ref}`Prefill-Decode Disaggregation <glm5-prefill-decode-disaggregation-a3>`|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Long Context<br>(198K input)|PD Disaggregation, {ref}`Prefill-Decode Disaggregation <glm5-prefill-decode-disaggregation-a3>`|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
 |High Throughput|2P1D deployment|32 NPUs (Ascend950DT)|GLM5-w4a4/GLM5.1-w4a4|P: dp1 dsa-cp8; D: dp16, balancing latency and throughput|
 |Low Latency|2P1D deployment|32 NPUs (Ascend950DT)|GLM5-w4a4/GLM5.1-w4a4|P: dp1 dsa-cp8; D: dp16, balancing latency and throughput|
 
