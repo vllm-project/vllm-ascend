@@ -719,7 +719,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
         local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
         max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
-        max_local_seqlen = max(1, int(local_seq_lens_cpu.max().item()))
+        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
         if num_reqs_actual is None:
             num_reqs_actual = num_reqs
@@ -753,8 +753,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=local_query_start_loc,
             seq_lens=local_seq_lens,
             seq_lens_q=local_seq_lens_q,
-            max_seqlen=max_local_seqlen,
-            max_seqlen_q=max_local_query_len,
+            max_query_len=max_local_query_len,
+            max_seq_lens=max_local_seq_lens,
             index_topk=index_topk,
             num_reqs=num_reqs,
             has_prefill=has_prefill,
@@ -766,8 +766,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=local_query_start_loc,
             seq_lens=local_seq_lens,
             seq_lens_q=local_seq_lens_q,
-            max_seqlen=max_local_seqlen,
-            max_seqlen_q=max_local_query_len,
             num_reqs=num_reqs,
         )
 
@@ -919,8 +917,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         query_start_loc,
         seq_lens,
         seq_lens_q,
-        max_seqlen,
-        max_seqlen_q,
+        max_query_len,
+        max_seq_lens,
         index_topk,
         num_reqs,
         has_prefill,
@@ -958,8 +956,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                 seqused_q=self.seqused_q,
                 seqused_kv=seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen,
+                max_seqlen_q=max_query_len,
+                max_seqlen_kv=max_seq_lens,
                 batch_size=num_reqs,
                 ori_mask_mode=4,
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
@@ -987,7 +985,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.req_sas_metadata[:1024] = metadata
         return self.req_sas_metadata[:1024]
 
-    def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, max_seqlen, max_seqlen_q, num_reqs):
+    def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
         if self.compressor_ratio != 4:
             return None
 
@@ -995,6 +993,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
+            max_seqlen_q = max(1, int(seq_lens_q.max().item()))
+            max_seqlen_k = max(1, int(seq_lens.max().item()))
             metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=seq_lens.clone(),
@@ -1005,7 +1005,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 key_quant_mode=0,
                 batch_size=num_reqs,
                 max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen,
+                max_seqlen_k=max_seqlen_k,
                 layout_query="TND",
                 layout_key="PA_BSND",
                 sparse_count=self.model_config.hf_config.index_topk,
