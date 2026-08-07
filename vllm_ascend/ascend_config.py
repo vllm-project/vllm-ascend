@@ -174,13 +174,13 @@ class AscendConfig:
     ``init_ascend_config`` (not a pydantic validator) — preserving original
     ordering and error messages.
 
-    ``vllm_config`` is NOT a member field. Pydantic handles only type/range/
-    enum validation here; cross-config derivations and mutex checks that need
-    ``vllm_config`` live in ``derive_and_validate()``, a plain method invoked
-    explicitly by ``init_ascend_config``. This keeps AscendConfig a pure
-    Ascend-configuration container, free of the heavy upstream VllmConfig graph
-    (and drops ``arbitrary_types_allowed``, which existed only for the former
-    ``vllm_config`` field).
+    ``vllm_config`` is NOT a member of AscendConfig (neither a declared
+    pydantic field nor a plain instance attribute). Pydantic handles only
+    type/range/enum validation here; the factory passes ``vllm_config``
+    explicitly to ``derive_and_validate()``. This keeps AscendConfig a pure
+    Ascend-configuration container, free of the heavy upstream VllmConfig
+    graph (and drops ``arbitrary_types_allowed``, which existed only for the
+    former ``vllm_config`` field).
     """
 
     model_config = ConfigDict(extra="forbid")
