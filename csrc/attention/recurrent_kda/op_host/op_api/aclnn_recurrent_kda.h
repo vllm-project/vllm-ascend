@@ -20,8 +20,8 @@ ACLNN_API aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     const aclTensor *value,
     const aclTensor *gate,
     const aclTensor *beta,
-    aclTensor *stateRef,
-    const aclTensor *cuSeqlens,
+    const aclTensor *initialStateRef,
+    const aclTensor *cuSeqlensOptional,
     const aclTensor *ssmStateIndicesOptional,
     const aclTensor *aLogOptional,
     const aclTensor *dtBiasOptional,
@@ -29,6 +29,7 @@ ACLNN_API aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     const char *layout,
     double scale,
     bool outputFinalState,
+    bool inplaceFinalState,
     bool useQkL2normInKernel,
     bool useGateInKernel,
     bool useBetaSigmoidInKernel,
@@ -36,7 +37,8 @@ ACLNN_API aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     bool safeGate,
     double lowerBound,
     bool stateVFirst,
-    const aclTensor *out,
+    const aclTensor *attnOut,
+    const aclTensor *finalState,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
