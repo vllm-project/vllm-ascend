@@ -1507,6 +1507,18 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(len(layer_tasks), 0)
 
+    def test_empty_layerwise_step_reowns_task_lists(self):
+        worker = self._make_worker()
+        worker.use_layerwise = True
+        old_save_tasks = worker.layer_save_tasks
+        old_load_tasks = worker.layer_load_tasks
+
+        worker.start_load_kv(AscendConnectorMetadata(set(), set()))
+
+        for layer_id in range(worker.num_layers):
+            self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
+            self.assertIsNot(worker.layer_load_tasks[layer_id], old_load_tasks[layer_id])
+
     def test_layerwise_load_is_prepared_before_next_save_allocation(self):
         worker = self._make_worker()
         worker.num_layers = 0
@@ -1519,6 +1531,33 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.process_layer_data([MagicMock()])
 
         self.assertEqual(call_order, ["load", "save"])
+
+    def test_process_layer_data_reowns_task_lists_before_populating(self):
+        worker = self._make_worker()
+        old_save_tasks = worker.layer_save_tasks
+        old_load_tasks = worker.layer_load_tasks
+        save_marker = MagicMock()
+        load_marker = MagicMock()
+        worker._process_save_for_layer_batch = MagicMock(
+            side_effect=lambda _requests, layer_id, *_args: worker.layer_save_tasks[layer_id].append(save_marker)
+        )
+        worker._process_load_for_layer_batch = MagicMock(
+            side_effect=lambda _requests, layer_id, *_args: worker.layer_load_tasks[layer_id].append(load_marker)
+        )
+        worker._prepare_load_gvas = MagicMock()
+        worker._alloc_gvas_for_save = MagicMock()
+        worker._build_shared_save_data = MagicMock()
+        worker._build_shared_load_data = MagicMock()
+
+        worker.process_layer_data([MagicMock()])
+
+        for layer_id in range(worker.num_layers):
+            self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
+            self.assertIsNot(worker.layer_load_tasks[layer_id], old_load_tasks[layer_id])
+            old_save_tasks[layer_id].clear()
+            old_load_tasks[layer_id].clear()
+            self.assertEqual(worker.layer_save_tasks[layer_id], [save_marker])
+            self.assertEqual(worker.layer_load_tasks[layer_id], [load_marker])
 
     def test_build_shared_save_data_marks_last_actual_task(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (

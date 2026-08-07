@@ -925,13 +925,17 @@ class NPUWorker(WorkerBase):
         )
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 1.0
-        num_buffer_assignments = len(reuse_layout.shared_buffer_layers)
+        num_buffer_assignments = len(reuse_layout.buffer_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = sum(
-            sum(entry.spec.page_size_bytes for entry in reuse_layout.layer_entries[layers_sharing_buffer[0]])
-            for layers_sharing_buffer in reuse_layout.shared_buffer_layers
-        )
+        physical_page_bytes = 0
+        for slot in reuse_layout.buffer_slots:
+            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
+            for layer in slot:
+                indexer = reuse_layout.layer_cache_specs[layer].indexer
+                if indexer is not None:
+                    physical_page_bytes += indexer.spec.page_size_bytes
+                    break
         return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
