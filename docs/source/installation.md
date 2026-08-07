@@ -291,8 +291,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products | openEuler |
-| vllm-ascend:{{ vllm_ascend_version }}-950dt | Atlas 950DT | Ubuntu |
-| vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler | Atlas 950DT | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-a5 | Atlas 950DT | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler | Atlas 950DT | openEuler |
 
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
@@ -718,10 +718,10 @@ docker run --rm \
     :substitutions:
 # Update the vllm-ascend image
 # openEuler:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt-openeuler
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a5-openeuler
 # Ubuntu:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a5
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a5
 
 # Run the container using the defined variables
 # Note if you are running bridge network with docker, Please expose available ports
