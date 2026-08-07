@@ -37,8 +37,10 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.acl_graph import (
+    ensure_graph_param_key,
     get_draft_graph_params,
     get_draft_graph_prefill_params,
+    get_graph_param_key,
     get_graph_params,
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
@@ -772,20 +774,21 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
             attn_keys = list(attn_metadata.keys())
+        graph_key = get_graph_param_key(num_tokens, speculative_config, attn_metadata)
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
         if num_layers == 0:
             return
         if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            attn_keys = attn_keys * (len(graph_params.attn_params[graph_key]) // num_layers)
         attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
                 attn_keys,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
+                graph_params.attn_params[graph_key],
+                graph_params.handles[graph_key],
+                graph_params.events[graph_key],
             ):
                 (
                     q_nope,
@@ -817,9 +820,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
-                    spec_multiple = speculative_config.num_speculative_tokens + 1
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
-                    actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
+                    assert actual_seq_lengths
+                    decode_query_len = int(actual_seq_lengths[0])
+                    assert num_tokens % decode_query_len == 0
+                    num_graph_reqs = num_tokens // decode_query_len
+                    assert len(seq_lens_list) <= num_graph_reqs
+                    seq_lens_list = seq_lens_list + [0] * (num_graph_reqs - len(seq_lens_list))
+                    actual_seq_lengths = [decode_query_len * (i + 1) for i in range(num_graph_reqs)]
                 elif _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     block_table = attn_metadata_current[key].decode.block_table
@@ -858,7 +865,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     block_size=block_size,
                     actual_seq_kvlen=seq_lens_list,
                     actual_seq_qlen=actual_seq_lengths,
-                    workspace=graph_params.workspaces.get(num_tokens),
+                    workspace=graph_params.workspaces.get(graph_key),
                     out=[attn_output, softmax_lse],
                     **extra_args,
                 )
@@ -1515,15 +1522,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        graph_key = get_graph_param_key(num_tokens, self.speculative_config, attn_metadata)
+        ensure_graph_param_key(graph_params, graph_key)
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
             event.wait(stream)
             event.reset(stream)
-            graph_params.events[num_tokens].append(event)
+            graph_params.events[graph_key].append(event)
 
-            workspace = graph_params.workspaces.get(num_tokens)
+            workspace = graph_params.workspaces.get(graph_key)
             attn_output = torch.empty(attn_output_shape, dtype=q_pe.dtype, device=q_pe.device)
             softmax_lse = torch.empty(num_tokens, dtype=q_pe.dtype, device=q_pe.device)
             attn_params = (
@@ -1559,16 +1568,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if _EXTRA_CTX.is_draft_model:
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
-                    update_graph_params_workspaces(num_tokens, workspace)
+                    update_graph_params_workspaces(graph_key, workspace)
 
-            graph_params.attn_params[num_tokens].append(attn_params)
+            graph_params.attn_params[graph_key].append(attn_params)
 
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score_v2.out(
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
+            graph_params.handles[graph_key].append(handle)
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 

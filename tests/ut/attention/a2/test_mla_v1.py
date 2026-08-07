@@ -1223,7 +1223,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch.npu.graph_task_update_begin")
     @patch("torch.npu.stream")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params_with_mtp(
+    def test_update_graph_params_with_dynamic_mtp(
         self,
         mock_get_forward_context,
         mock_npu_stream,
@@ -1237,8 +1237,8 @@ class TestAscendMLAImpl(TestBase):
 
         mock_attn_metadata = MagicMock()
         mock_attn_metadata.decode = MagicMock()
-        mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
-        mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
+        mock_attn_metadata.decode.seq_lens_list = [10, 20]
+        mock_attn_metadata.decode.actual_seq_lengths_q = [2, 4]
         mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
 
         # forward context
@@ -1255,7 +1255,7 @@ class TestAscendMLAImpl(TestBase):
         mock_graph_params = MagicMock()
 
         mock_graph_params.attn_params = {
-            100: [
+            (8, 2): [
                 (
                     MagicMock(),
                     MagicMock(),
@@ -1278,17 +1278,24 @@ class TestAscendMLAImpl(TestBase):
                 ),
             ]
         }
-        mock_graph_params.handles = {100: [MagicMock()]}
-        mock_graph_params.events = {100: [MagicMock()]}
+        mock_graph_params.handles = {(8, 2): [MagicMock()]}
+        mock_graph_params.events = {(8, 2): [MagicMock()]}
+        mock_graph_params.workspaces = {(8, 2): MagicMock()}
         mock_get_graph_params.return_value = mock_graph_params
 
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "mtp"
         mock_speculative_config.num_speculative_tokens = 4
+        mock_speculative_config.uses_dynamic_speculative_decoding.return_value = True
+        mock_speculative_config.use_eagle.return_value = True
 
         AscendMLAImpl.update_graph_params(
-            mock_update_stream, mock_forward_context, 100, speculative_config=mock_speculative_config
+            mock_update_stream, mock_forward_context, 8, speculative_config=mock_speculative_config
         )
+
+        kwargs = mock_npu_fused_infer.out.call_args.kwargs
+        self.assertEqual(kwargs["actual_seq_qlen"], [2, 4, 6, 8])
+        self.assertEqual(kwargs["actual_seq_kvlen"], [10, 20, 0, 0])
 
     def test_get_context_seq_len_npu(self):
         mock_attn_metadata = MagicMock()

@@ -53,8 +53,10 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.compilation.acl_graph import (
+    ensure_graph_param_key,
     get_draft_graph_params,
     get_draft_graph_prefill_params,
+    get_graph_param_key,
     get_graph_params,
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
@@ -478,6 +480,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         draft_attn_metadatas=None,
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
+        graph_key = get_graph_param_key(
+            num_tokens,
+            speculative_config,
+            forward_context.attn_metadata,
+        )
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
@@ -490,9 +497,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
+                    graph_params.attn_params[graph_key],
+                    graph_params.handles[graph_key],
+                    graph_params.events[graph_key],
                 ):
                     (
                         query,
@@ -558,11 +565,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
-            captured_attn_params = graph_params.attn_params[num_tokens]
-            handles = graph_params.handles[num_tokens]
-            events = graph_params.events[num_tokens]
+            captured_attn_params = graph_params.attn_params[graph_key]
+            handles = graph_params.handles[graph_key]
+            events = graph_params.events[graph_key]
             graph_param_count = len(captured_attn_params)
-            workspace = graph_params.workspaces.get(num_tokens)
+            workspace = graph_params.workspaces.get(graph_key)
             if _EXTRA_CTX.is_draft_model:
                 if graph_param_count > len(draft_attn_key_steps):
                     repeat_count = cdiv(graph_param_count, len(draft_attn_key_steps))
@@ -662,7 +669,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     # increasing by layer index, so need regular expressions to
                     # reorder the attn_keys and store the results in
                     # _ATTN_KEYS_BUFFER.
-                    attn_keys_length = len(graph_params.attn_params[num_tokens])
+                    attn_keys_length = len(graph_params.attn_params[graph_key])
                     global _ATTN_KEYS_BUFFER
                     if attn_keys_length == 0:
                         return
@@ -707,11 +714,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
-            captured_attn_params = graph_params.attn_params[num_tokens]
-            handles = graph_params.handles[num_tokens]
-            events = graph_params.events[num_tokens]
+            captured_attn_params = graph_params.attn_params[graph_key]
+            handles = graph_params.handles[graph_key]
+            events = graph_params.events[graph_key]
             graph_param_count = len(captured_attn_params)
-            workspace = graph_params.workspaces.get(num_tokens)
+            workspace = graph_params.workspaces.get(graph_key)
             if _EXTRA_CTX.is_draft_model:
                 if graph_param_count > len(draft_attn_key_steps):
                     repeat_count = cdiv(graph_param_count, len(draft_attn_key_steps))
@@ -862,6 +869,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             graph_params = get_graph_params()
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        graph_key = get_graph_param_key(num_tokens, self.speculative_config, attn_metadata)
+        ensure_graph_param_key(graph_params, graph_key)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
@@ -891,7 +900,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_mask = None
             sparse_mode = 0
         use_max_workspace = self._use_max_workspace_for_fia_graph
-        workspace = graph_params.workspaces.get(num_tokens)
+        workspace = graph_params.workspaces.get(graph_key)
         should_update_workspace_cache = False
         if use_max_workspace:
             # Some models mix attention layer shapes under the same graph size.
@@ -916,7 +925,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             workspace = cache_graph_workspace(
                 graph_params,
-                num_tokens,
+                graph_key,
                 candidate_workspace,
                 use_max_workspace=use_max_workspace,
             )
@@ -945,7 +954,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
-                update_graph_params_workspaces(num_tokens, workspace)
+                update_graph_params_workspaces(graph_key, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -953,7 +962,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event = torch.npu.ExternalEvent()
         event.wait(stream)
         event.reset(stream)
-        graph_params.events[num_tokens].append(event)
+        graph_params.events[graph_key].append(event)
         attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
@@ -983,7 +992,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_params = attn_params + (None, None, None, None)  # type: ignore
         layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
         attn_params = attn_params + (layer_name,)  # type: ignore
-        graph_params.attn_params[num_tokens].append(attn_params)
+        graph_params.attn_params[graph_key].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score.out(
@@ -1010,7 +1019,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
         handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
+        graph_params.handles[graph_key].append(handle)
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -1030,9 +1039,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params = get_graph_params()
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        graph_key = get_graph_param_key(num_tokens, self.speculative_config, attn_metadata)
+        ensure_graph_param_key(graph_params, graph_key)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         use_max_workspace = self._use_max_workspace_for_fia_graph
-        workspace = graph_params.workspaces.get(num_tokens)
+        workspace = graph_params.workspaces.get(graph_key)
         should_update_workspace_cache = False
         if use_max_workspace:
             # See full_graph_fia: this path needs the max workspace across layer
@@ -1057,7 +1068,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             workspace = cache_graph_workspace(
                 graph_params,
-                num_tokens,
+                graph_key,
                 candidate_workspace,
                 use_max_workspace=use_max_workspace,
             )
@@ -1086,7 +1097,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
-                update_graph_params_workspaces(num_tokens, workspace)
+                update_graph_params_workspaces(graph_key, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -1094,8 +1105,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event = torch.npu.ExternalEvent()
         event.wait(stream)
         event.reset(stream)
-        graph_params.events[num_tokens].append(event)
-        graph_params.attn_params[num_tokens].append(
+        graph_params.events[graph_key].append(event)
+        graph_params.attn_params[graph_key].append(
             (
                 weak_ref_tensors(query),
                 weak_ref_tensors(key),
@@ -1136,7 +1147,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             out=[output, softmax_lse],
         )
         handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
+        graph_params.handles[graph_key].append(handle)
         return output, num_tokens
 
     def full_graph_pa(
@@ -1148,8 +1159,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
+            graph_key = get_graph_param_key(num_tokens, self.speculative_config, attn_metadata)
+            ensure_graph_param_key(graph_params, graph_key)
             # Get workspace from cache or calculate it if not present.
-            workspace = graph_params.workspaces.get(num_tokens)
+            workspace = graph_params.workspaces.get(graph_key)
             if workspace is None:
                 workspace = torch_npu._npu_paged_attention_get_workspace(
                     query=query,
@@ -1162,7 +1175,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     context_lens=attn_metadata.seq_lens,
                     out=output,
                 )
-                update_graph_params_workspaces(num_tokens, workspace)
+                update_graph_params_workspaces(graph_key, workspace)
 
             # Handle graph capturing mode
             stream = torch_npu.npu.current_stream()
@@ -1170,8 +1183,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             event = torch.npu.ExternalEvent()
             event.wait(stream)
             event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-            graph_params.attn_params[num_tokens].append(
+            graph_params.events[graph_key].append(event)
+            graph_params.attn_params[graph_key].append(
                 PagedAttentionGraphParam(
                     (
                         weak_ref_tensors(query),
@@ -1202,7 +1215,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 workspace=workspace,
             )
             handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
+            graph_params.handles[graph_key].append(handle)
             return output
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):

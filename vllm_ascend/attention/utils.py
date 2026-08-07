@@ -1,3 +1,4 @@
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -104,7 +105,7 @@ def update_paged_attention_graph_param(
 
 def cache_graph_workspace(
     graph_params,
-    num_tokens: int,
+    graph_key: Hashable,
     candidate_workspace: torch.Tensor,
     *,
     use_max_workspace: bool,
@@ -112,16 +113,16 @@ def cache_graph_workspace(
     # Most models keep the original first-workspace cache behavior. Models with
     # mixed attention layer shapes may need the largest workspace for a graph
     # size because layers can require different FIA workspace sizes.
-    current_workspace = graph_params.workspaces.get(num_tokens)
+    current_workspace = graph_params.workspaces.get(graph_key)
     if use_max_workspace:
         if current_workspace is None or (
             candidate_workspace.numel() * candidate_workspace.element_size()
             > current_workspace.numel() * current_workspace.element_size()
         ):
-            graph_params.workspaces[num_tokens] = candidate_workspace
+            graph_params.workspaces[graph_key] = candidate_workspace
     elif current_workspace is None:
-        graph_params.workspaces[num_tokens] = candidate_workspace
-    return graph_params.workspaces[num_tokens]
+        graph_params.workspaces[graph_key] = candidate_workspace
+    return graph_params.workspaces[graph_key]
 
 
 @lru_cache(maxsize=1)
