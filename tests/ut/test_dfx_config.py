@@ -181,12 +181,12 @@ def test_dump_enabled_without_detector_allowed(tmp_path: Path):
     assert saved["dump"]["enabled"] is True
 
 
-def test_dump_once_not_consumed_when_dump_disabled(tmp_path: Path):
-    from vllm_ascend.dfx.detector.manual_dump import ManualDumpDetector
+def test_manual_trigger_not_consumed_when_dump_disabled(tmp_path: Path):
+    from vllm_ascend.dfx.manual_trigger import ManualTriggerManager
 
     cfg_path = tmp_path / "dfx_config.json"
     cfg_path.write_text(
-        json.dumps({"dump": {"enabled": False, "dump_once": True}}),
+        json.dumps({"dump": {"enabled": False, "manual_trigger": True}}),
         encoding="utf-8",
     )
     cfg = DfxRuntimeConfig(
@@ -198,12 +198,67 @@ def test_dump_once_not_consumed_when_dump_disabled(tmp_path: Path):
     )
     # Bootstrap may rewrite; ensure flags.
     cfg._data["dump"]["enabled"] = False
-    cfg._data["dump"]["dump_once"] = True
-    det = ManualDumpDetector(dfx_config=cfg, runner=None)
-    assert det.check_all() == []
-    assert cfg.dump_once() is True
+    cfg._data["dump"]["manual_trigger"] = True
+    mgr = ManualTriggerManager(dfx_config=cfg, runner=None)
+    assert mgr.consume_once(allow_arm=True) is None
+    assert cfg.manual_trigger() is True
 
 
+def _valid_dfx_data(**dump_overrides):
+    dump = {
+        "enabled": False,
+        "max_times": 0,
+        "cooldown_seconds": 300,
+        "manual_trigger": False,
+    }
+    dump.update(dump_overrides)
+    return {
+        "sync_mode": "file",
+        "reload_interval_seconds": 0,
+        "dump": dump,
+        "ascend_log": {"level": "INFO", "debug": []},
+        "detector": {
+            "stop_after_alert": True,
+            "spec_acceptance": {},
+            "token_logprob": {},
+            "output_substring": {},
+        },
+        "input_filter": {"filters": [], "print_input_token_ids_once": False},
+        "report": {
+            "save_sensitive_info": False,
+            "print_sampling_meta": False,
+            "decode_token_ids": True,
+            "max_prompt_token_ids": 1000,
+            "max_output_token_ids": 1000,
+        },
+    }
+
+
+def test_dump_rejects_unknown_keys_including_dump_once():
+    with pytest.raises(ValueError, match=r"unknown key\(s\) \['dump_once'\]"):
+        DfxRuntimeConfig._validate(_valid_dfx_data(dump_once=True))
+
+    with pytest.raises(ValueError, match=r"unknown key\(s\) \['foo'\]"):
+        DfxRuntimeConfig._validate(_valid_dfx_data(foo=1))
+
+    # Known keys still validate.
+    DfxRuntimeConfig._validate(_valid_dfx_data(manual_trigger=True, enabled=True))
+
+
+def test_dump_once_in_json_fails_bootstrap(tmp_path: Path):
+    cfg_path = tmp_path / "dfx_config.json"
+    cfg_path.write_text(
+        json.dumps({"dump": {"enabled": True, "dump_once": True}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"unknown key\(s\) \['dump_once'\]"):
+        DfxRuntimeConfig(
+            cfg_path,
+            report_dir=tmp_path / "report",
+            ensure_file=False,
+            sync_mode="file",
+            reload_interval_seconds=0,
+        )
 
 
 def test_input_filters_roundtrip(tmp_path: Path):
@@ -336,7 +391,7 @@ def test_bootstrap_and_save_skip_persist_on_non_leader(tmp_path: Path, monkeypat
     monkeypatch.setenv("RANK", "1")
     cfg_path = tmp_path / "dfx_config.json"
     prior = {
-        "dump": {"enabled": True, "max_times": 2, "cooldown_seconds": 10, "dump_once": False},
+        "dump": {"enabled": True, "max_times": 2, "cooldown_seconds": 10, "manual_trigger": False},
         "ascend_log": {"level": "INFO"},
         "detector": {"spec_acceptance": {"window": 33}},
     }
@@ -405,7 +460,7 @@ def test_save_prefers_disk_over_stale_memory(tmp_path: Path, monkeypatch):
     """save() must not wipe hand-edits that landed on disk after bootstrap."""
     monkeypatch.setenv("RANK", "0")
     cfg_path = tmp_path / "dfx_config.json"
-    cfg_path.write_text(json.dumps({"dump": {"max_times": 0, "dump_once": True}}), encoding="utf-8")
+    cfg_path.write_text(json.dumps({"dump": {"max_times": 0, "manual_trigger": True}}), encoding="utf-8")
     cfg = DfxRuntimeConfig(
         cfg_path,
         report_dir=tmp_path / "report",
@@ -416,13 +471,13 @@ def test_save_prefers_disk_over_stale_memory(tmp_path: Path, monkeypatch):
     assert cfg.dump_max_times() == 0
     # Concurrent hand-edit on disk (stale memory still has max_times=0).
     cfg_path.write_text(
-        json.dumps({"dump": {"max_times": 5, "dump_once": True}}),
+        json.dumps({"dump": {"max_times": 5, "manual_trigger": True}}),
         encoding="utf-8",
     )
-    assert cfg.save({"dump": {"dump_once": False}}) is True
+    assert cfg.save({"dump": {"manual_trigger": False}}) is True
     saved = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert saved["dump"]["max_times"] == 5
-    assert saved["dump"]["dump_once"] is False
+    assert saved["dump"]["manual_trigger"] is False
     assert cfg.dump_max_times() == 5
 
 

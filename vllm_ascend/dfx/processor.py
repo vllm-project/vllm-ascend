@@ -31,6 +31,7 @@ from vllm_ascend.dfx.detector.manager import DetectorManager
 from vllm_ascend.dfx.dumper import Dumper
 from vllm_ascend.dfx.input_filters import InputFilterManager, iter_batch_prompt_token_ids
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
+from vllm_ascend.dfx.manual_trigger import ManualTriggerManager, TriggerEvent
 from vllm_ascend.dfx.report import DfxReportWriter
 from vllm_ascend.dfx.tokenizer import load_model_tokenizer
 from vllm_ascend.logger import init_logger_ascend
@@ -69,6 +70,7 @@ class DfxProcessor:
         )
         self._report_tokenizer: Any | None = None
         self._report_tokenizer_failed = False
+        self.manual_triggers = ManualTriggerManager(dfx_config=dfx_config, runner=runner)
         # Stage-hook facade; concrete detectors stay inside the manager.
         self.detectors = DetectorManager(
             dfx_config=dfx_config,
@@ -85,7 +87,7 @@ class DfxProcessor:
         """All-rank DFX config sync. Must not be skipped on early PP.
 
         ``allow_arm``: False on idle ``execute_dummy_batch``. Config sync still
-        runs. ``dump_once`` is **not** consumed on the dummy path — only a real
+        runs. ``dump.manual_trigger`` is **not** consumed on the dummy path — only a real
         ``allow_arm=True`` wave may ``check_all`` / arm (avoids clearing the
         JSON flag with no dump when the service is idle or a peer DP is busy).
         """
@@ -102,16 +104,9 @@ class DfxProcessor:
             self.report_writer.max_output_token_ids = self.dfx_config.report_max_output_token_ids()
             self.report_writer.decode_token_ids = self.dfx_config.report_decode_token_ids()
         # Dump limits sync only when config changed (via apply_dfx_config).
-        # Drain dump_once whenever it is set in live config — not only on the
-        # mtime-changed step. Otherwise a missed/racy ``changed`` leaves
-        # dump_once stuck true on disk with no dump. Skip entirely on dummy
-        # waves so consume_dump_once cannot wipe the trigger without arming.
-        if self.dfx_config.dump_once():
-            if not allow_arm:
-                logger.debug("[DFX manual_dump] dump_once deferred (allow_arm=False); await execute_model wave")
-            else:
-                for alert in self.detectors.try_manual_dump():
-                    self._handle_alert(alert, detector=self.detectors.get(alert.anomaly_type))
+        trigger = self.manual_triggers.consume_once(allow_arm=allow_arm)
+        if trigger is not None:
+            self._handle_manual_trigger(trigger)
         self.maybe_print_input_token_ids_once(allow_arm=allow_arm)
         # Detector thresholds / enable flags: pulled lazily in each detector's
         # ``_precheck`` (and ``ensure_logprobs_for_detection``) so we do not
@@ -321,8 +316,6 @@ class DfxProcessor:
         - ``dump.enabled=false`` (detect-only): no dump arm; write report on detect.
         - ``dump.enabled=true``: arm dump. If arm fails (e.g. quota exhausted),
           still write report — detection evidence should not be lost.
-        - ``manual_dump_once``: report includes I/O snapshots for **all** batch
-          requests (not the synthetic dump req id).
         """
         dump_on = self.dfx_config.dump_enabled()
         if dump_on:
@@ -334,45 +327,64 @@ class DfxProcessor:
         if not write_report:
             return
 
-        is_manual = alert.anomaly_type == "manual_dump_once"
-        batch_rows = self._batch_request_io_rows() if is_manual else []
-        if is_manual and self.dfx_config.report_print_sampling_meta():
-            for req_id, _req_idx in batch_rows:
-                self.save_sample_param(req_id)
-        elif (not is_manual) and self.dfx_config.report_print_sampling_meta():
+        if self.dfx_config.report_print_sampling_meta():
             self.save_sample_param(alert.req_id)
 
         detail = alert.to_report_detail()
         include_ids = self.dfx_config.report_save_sensitive_info()
         io_mgr = RequestIoSnapshotManager.get()
-        if is_manual:
-            requests_detail: list[dict[str, Any]] = []
-            for req_id, req_idx in batch_rows:
-                snap = io_mgr.snapshot(
-                    self.runner,
-                    req_id,
-                    req_idx,
-                    include_token_ids=include_ids,
-                )
-                entry = {"req_id": req_id, "req_idx": req_idx}
-                entry.update(snap.as_detail_fields())
-                requests_detail.append(entry)
-            detail["num_requests"] = len(requests_detail)
-            detail["requests"] = requests_detail
-            report_req_id = alert.req_id
-        else:
-            snap = io_mgr.snapshot(
-                self.runner,
-                alert.req_id,
-                alert.req_idx,
-                include_token_ids=include_ids,
-            )
-            detail = io_mgr.merge_into_detail(detail, snap)
-            report_req_id = alert.req_id
+        snap = io_mgr.snapshot(
+            self.runner,
+            alert.req_id,
+            alert.req_idx,
+            include_token_ids=include_ids,
+        )
+        detail = io_mgr.merge_into_detail(detail, snap)
 
         self.report_writer.write(
             anomaly_type=alert.anomaly_type,
-            req_id=report_req_id,
+            req_id=alert.req_id,
+            detail=detail,
+            rank_tag=self.dumper.dump_rank_tag(),
+            tokenizer=self._get_report_tokenizer(),
+        )
+
+    def _handle_manual_trigger(
+        self,
+        trigger: TriggerEvent,
+        *,
+        write_report: bool = True,
+    ) -> None:
+        """Arm dump (optional) and write report for control-plane manual trigger."""
+        self.dumper.handle_manual_trigger(trigger)
+        if not write_report:
+            return
+
+        batch_rows = self._batch_request_io_rows()
+        if self.dfx_config.report_print_sampling_meta():
+            for req_id, _req_idx in batch_rows:
+                self.save_sample_param(req_id)
+
+        include_ids = self.dfx_config.report_save_sensitive_info()
+        io_mgr = RequestIoSnapshotManager.get()
+        requests_detail: list[dict[str, Any]] = []
+        for req_id, req_idx in batch_rows:
+            snap = io_mgr.snapshot(
+                self.runner,
+                req_id,
+                req_idx,
+                include_token_ids=include_ids,
+            )
+            entry = {"req_id": req_id, "req_idx": req_idx}
+            entry.update(snap.as_detail_fields())
+            requests_detail.append(entry)
+
+        detail = trigger.to_report_detail()
+        detail["num_requests"] = len(requests_detail)
+        detail["requests"] = requests_detail
+        self.report_writer.write(
+            anomaly_type=trigger.trigger_type,
+            req_id=trigger.req_id,
             detail=detail,
             rank_tag=self.dumper.dump_rank_tag(),
             tokenizer=self._get_report_tokenizer(),

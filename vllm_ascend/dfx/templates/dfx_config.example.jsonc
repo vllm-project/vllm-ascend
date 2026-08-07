@@ -9,7 +9,7 @@
   // Detect vs dump (orthogonal):
   //   - Detect-only: detector.<name>.enabled=true, dump.enabled=false → report on anomaly.
   //   - Detect + auto dump: detectors on, dump.enabled=true, max_times>0.
-  //   - Manual-only: dump.enabled=true, detectors off → dump_once only.
+  //   - Manual-only: dump.enabled=true, detectors off → manual_trigger only.
   //   - dump.enabled=true → report written regardless of arm success.
   // =============================================================================
 
@@ -22,7 +22,7 @@
   "dump": {
     // Dump arming sink (default false). Independent of detectors.
     "enabled": false,
-    // Max auto dumps per worker lifecycle; 0 = no auto dump arm (detect / dump_once OK).
+    // Max auto dumps per worker lifecycle; 0 = no auto dump arm (detect / manual_trigger OK).
     "max_times": 0,
     // Cooldown seconds between auto dumps.
     "cooldown_seconds": 300,
@@ -30,7 +30,7 @@
     // bypasses input filters. Not consumed while dump.enabled=false.
     // On consume: arms dump and writes one report with all
     // current batch requests' prompt/output (counts; ids if save_sensitive_info).
-    "dump_once": false
+    "manual_trigger": false
   },
 
   "ascend_log": {
@@ -106,7 +106,7 @@
     // Eval order within include/exclude: prompt_length → prefix → contains.
     // Allow result cached per req_id until request finishes / filters change
     // (unchanged filters on refresh do not clear the cache).
-    // dump_once bypasses. Missing prompt → deny when filters active (not cached).
+    // manual_trigger bypasses. Missing prompt → deny when filters active (not cached).
     // Prefix matching: use type "input_token_id_prefix" (no separate prefixes field).
     "filters": [],
 

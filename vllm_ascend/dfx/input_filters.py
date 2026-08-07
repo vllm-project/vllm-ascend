@@ -17,7 +17,7 @@
 
 ``InputFilterManager`` is a process-wide singleton; detectors call
 ``InputFilterManager.get().allow(...)`` before running checks. Manual
-``dump_once`` does not consult the manager.
+``manual_trigger`` does not consult the manager.
 
 Evaluation order (within include / exclude): ``prompt_length`` then
 ``input_token_id_prefix`` then ``prompt_contains_token_ids`` so cheap

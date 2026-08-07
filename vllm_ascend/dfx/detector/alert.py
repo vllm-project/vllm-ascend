@@ -45,7 +45,7 @@ class AnomalyAlert:
     req_idx: int | None = None
     detail: dict[str, Any] = field(default_factory=dict)
     skip_related_check: bool = False
-    # False for manual dump_once: do not bump max_times / cooldown.
+    # False for dump.manual_trigger: do not bump max_times / cooldown.
     consume_quota: bool = True
     # Optional context for post-arm logging (e.g. spec token dumps).
     log_context: dict[str, Any] = field(default_factory=dict)

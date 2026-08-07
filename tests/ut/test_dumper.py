@@ -228,12 +228,12 @@ def test_async_pending_does_not_consume_quota_before_activation():
     assert dumper._msprobe_dump_total_count == 0
 
 
-def test_dump_once_via_manual_detector_skips_quota():
-    from vllm_ascend.dfx.detector.manual_dump import MANUAL_DUMP_REQ_ID, ManualDumpDetector
+def test_manual_trigger_skips_quota():
+    from vllm_ascend.dfx.manual_trigger import MANUAL_TRIGGER_REQ_ID, TriggerEvent
     from vllm_ascend.dfx.input_filters import InputFilterManager
 
     InputFilterManager.reset_for_tests()
-    # Active filters must not block dump_once (ManualDumpDetector skips filters).
+    # Active filters must not block manual_trigger (manual trigger skips related-check).
     InputFilterManager.get().apply_configs(
         [
             {
@@ -261,35 +261,34 @@ def test_dump_once_via_manual_detector_skips_quota():
     dumper.dfx_config.dump_enabled.return_value = True
     dumper._use_pending_dump_sync = MagicMock(return_value=False)
 
-    detector = ManualDumpDetector(dfx_config=MagicMock(), runner=dumper.runner)
-    detector._dfx_config.consume_dump_once.return_value = True
+    trigger = TriggerEvent(
+        trigger_type="manual_trigger",
+        req_id=MANUAL_TRIGGER_REQ_ID,
+        detail={"source": "dump.manual_trigger"},
+        consume_quota=False,
+    )
 
     with (
-        patch("vllm_ascend.dfx.dumper.pending.should_run_anomaly_check_on_rank", return_value=True),
         patch("vllm_ascend.dfx.dumper.pending.get_pp_group") as get_pp_dump,
     ):
         get_pp_dump.return_value.is_last_rank = True
-        alerts = detector.check_all()
-        assert len(alerts) == 1
-        assert alerts[0].req_id == MANUAL_DUMP_REQ_ID
-        assert alerts[0].consume_quota is False
-        assert dumper.handle_anomaly_alert(alerts[0], detector=detector) is True
+        assert dumper.handle_manual_trigger(trigger) is True
 
     assert dumper._msprobe_dump_active
     assert dumper._msprobe_dump_total_count == 0
     InputFilterManager.reset_for_tests()
 
 
-def test_consume_dump_once_persists_false(tmp_path: Path):
+def test_consume_manual_trigger_persists_false(tmp_path: Path):
     cfg = make_dfx_config(tmp_path)
     cfg_path = cfg.config_path
-    assert cfg.save({"dump": {"dump_once": True}})
-    assert cfg.dump_once() is True
-    assert cfg.consume_dump_once() is True
-    assert cfg.dump_once() is False
+    assert cfg.save({"dump": {"manual_trigger": True}})
+    assert cfg.manual_trigger() is True
+    assert cfg.consume_manual_trigger() is True
+    assert cfg.manual_trigger() is False
     reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert reloaded["dump"]["dump_once"] is False
-    assert cfg.consume_dump_once() is False
+    assert reloaded["dump"]["manual_trigger"] is False
+    assert cfg.consume_manual_trigger() is False
 
 
 def test_dump_phase_idle_pending_active():
@@ -388,7 +387,7 @@ def test_sync_dump_pending_or_activates_when_peer_pending():
     dumper._clear_pending_dump.assert_called_once()
 
 
-def test_sync_dump_pending_or_propagates_dump_once_skip_quota():
+def test_sync_dump_pending_or_propagates_manual_trigger_skip_quota():
     dumper = _make_dumper()
     dumper._use_pending_dump_sync = MagicMock(return_value=True)
     dumper._pending_dump = False

@@ -72,7 +72,7 @@ class PendingDumpMixin:
     def _anomaly_dump_feature_enabled(self) -> bool:
         """Whether auto dump arming / OR early-out is allowed (needs quota).
 
-        Detect is independent. Manual ``dump_once`` does not use this gate.
+        Detect is independent. Manual ``dump.manual_trigger`` does not use this gate.
         """
         if not self.dfx_config.dump_enabled():
             return False
@@ -93,7 +93,7 @@ class PendingDumpMixin:
     def _activate_msprobe_dump(self, req_id: str | None, *, consume_quota: bool = True) -> bool:
         """Turn on dump_enable + reload on this rank (called after sync decide).
 
-        ``consume_quota=False``: manual ``dump_once`` — do not bump count / cooldown.
+        ``consume_quota=False``: ``dump.manual_trigger`` — do not bump count / cooldown.
         """
         if self._debugger is None:
             logger.error(
@@ -147,7 +147,7 @@ class PendingDumpMixin:
         """
         # Fast path — fully-off default service. With hot-reload disabled AND
         # the dump sink off, nothing can ever arm (auto dump, anomaly arm, and
-        # dump_once all require ``dump.enabled``), so the pending-OR is always 0.
+        # manual_trigger all require ``dump.enabled``), so the pending-OR is always 0.
         # Skip the collective entirely: a default run with no DFX params gets
         # zero distributed overhead per step. Safe because with hot-reload off
         # ``dump.enabled`` is a static startup value, identical across last-PP
@@ -173,11 +173,11 @@ class PendingDumpMixin:
 
         tp_group = get_tp_group()
         # Always join OR on last-PP (even if local pending is false /
-        # anomaly detectors are off). A peer with dump_once pending must not
+        # anomaly detectors are off). A peer with manual_trigger pending must not
         # hang alone in all_reduce.
         local_pending = 1 if self._pending_dump else 0
         # Only the arming rank has skip_quota; peers default False — must OR
-        # this flag too or dump_once peers incorrectly bump max_times.
+        # this flag too or manual_trigger peers incorrectly bump max_times.
         local_skip_quota = 1 if (self._pending_dump and self._pending_dump_skip_quota) else 0
         logger.debug(
             "[DFX sync] enter stage=dump_pending_or local=%d skip_quota=%d allow_arm=%s tp_world=%s %s",
@@ -206,7 +206,7 @@ class PendingDumpMixin:
         if not allow_arm:
             return False
 
-        # Prefer local armed req_id (TP0); peers keep None for dump_once.
+        # Prefer local armed req_id (TP0); peers keep None for manual_trigger.
         req_id = self._pending_dump_req_id
         consume_quota = skip_quota_sum == 0
         logger.debug(
@@ -248,7 +248,7 @@ class PendingDumpMixin:
             return False
         if not skip_related_check and not self.is_related_local_request(req_id, req_idx):
             return False
-        # Input filters run at detect time via InputFilterManager; dump_once
+        # Input filters run at detect time via InputFilterManager; manual_trigger
         # bypasses detectors' filter and arms here without re-checking.
         if self._pending_dump or self._msprobe_dump_active:
             # Already armed / dumping this cycle.

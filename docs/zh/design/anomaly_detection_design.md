@@ -19,7 +19,7 @@ detector.check_all(...) → list[AnomalyAlert]
 共同点：
 
 - **DetectorManager 门面**（`detector/manager.py`）：具体 detector 私有；runner / `DfxProcessor` 只调阶段钩子。
-- **InputFilterManager 门控**：每个 detector 在 `check_all` 内 `_passes_input_filter`（`manual dump_once` 除外）。
+- **InputFilterManager 门控**：每个 detector 在 `check_all` 内 `_passes_input_filter`（`dump.manual_trigger` 除外）。
 - **`stop_after_alert`**（`detector.stop_after_alert`，默认 `true`）：某请求一旦检出异常，后续步按 `req_id` 跳过再检（不拆 batch 行），避免反复写 report；`clear_finished` 后重算。设 `false` 则持续重检。
 - **只产 `AnomalyAlert`**：detector 不碰 Dumper；arm 由 processor 调 `Dumper.handle_anomaly_alert`。
 - **配置**：`detector.<name>.enabled`（默认 `false`）+ 各自阈值，JSON 热更新（广播 / file poll）。
@@ -137,7 +137,7 @@ msprobe ILLDetector.detector(topk_dicts, tokens, model_config)
 
 ### 3.6 限制与后续
 
-1. **detect ⊥ dump**：`dump.max_times=0`（或配额用尽）只阻止 **auto-arm dump**；auto 检测与 `ensure_logprobs_for_detection`（top-k）仍按 `detector.token_logprob.enabled` 运行；`dump_once` 仍可手动 arm。
+1. **detect ⊥ dump**：`dump.max_times=0`（或配额用尽）只阻止 **auto-arm dump**；auto 检测与 `ensure_logprobs_for_detection`（top-k）仍按 `detector.token_logprob.enabled` 运行；`manual_trigger` 仍可手动 arm。
 2. 中途无 eos → tk2cat 可能不可用。
 3. v1 / v2 均已接入：`check_after_sample` + async `get_output` 延迟检测；采样前 `ensure_logprobs_for_detection`。
 4. 若需更激进：减小 `window`/`stride`，或将 `ill_repet_window_thresh` 设为 `1`。
