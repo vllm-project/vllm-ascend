@@ -18,6 +18,7 @@
 import importlib.util
 import os
 import sys
+
 from vllm.logger import logger as vllm_logger
 
 _triton_available = importlib.util.find_spec("triton") is not None
@@ -115,8 +116,6 @@ def register_service_profiling():
 
 
 def register_model():
-    _ensure_global_patch()
-
     from vllm_ascend.patch.hunyuan_vl_processor_compat import (
         install_hunyuan_vl_processor_compat,
     )
