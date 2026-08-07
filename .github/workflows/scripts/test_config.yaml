@@ -496,6 +496,7 @@
   base: spec_decode_base
   source_file_dependencies:
     - vllm_ascend/spec_decode/dspark_proposer.py
+    - vllm_ascend/models/deepseek_v4_dspark.py
   tests:
     - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
 

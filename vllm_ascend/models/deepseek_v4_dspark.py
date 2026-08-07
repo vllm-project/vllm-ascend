@@ -40,8 +40,6 @@ from vllm_ascend.models.deepseek_v4 import (
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 
-_EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
-
 
 def _apply_dsv4_rope(
     rotary_emb: nn.Module,
@@ -120,12 +118,19 @@ class DeepseekV4DSparkModel(nn.Module):
         )
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
+
+        _model_quant_cfg = getattr(config, "quantization_config", None)
+        _main_proj_qconfig = (
+            vllm_config.quant_config
+            if _model_quant_cfg is not None and _model_quant_cfg.get("quant_method") == "fp8"
+            else None
+        )
         self.main_proj = ReplicatedLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
             bias=False,
             return_bias=False,
-            quant_config=None,
+            quant_config=_main_proj_qconfig,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -276,8 +281,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.has_own_embed_tokens = vllm_config.quant_config is not None
-        self.has_own_lm_head = vllm_config.quant_config is not None
+
+        # check if quant config exist
+        from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
+
+        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+
         self.model = DeepseekV4DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -363,9 +372,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         standalone embedding/head weights used by the Ascend draft loader.
         """
         expert_mapping = self.model.get_expert_mapping()
-        expert_scale_suffix = (
-            ".weight_scale" if getattr(self.config, "expert_dtype", "fp4") == "fp4" else ".weight_scale_inv"
-        )
 
         # (param_name, checkpoint shard name, shard_id) for non-expert
         # stacked parameters. Ascend keeps wq_a and wkv as separate parameters.
@@ -386,26 +392,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
-            if name == "embed.weight" and not self.has_own_embed_tokens:
+            if name == "embed.weight" and not self.rotation_path:
                 name = "model.embed_tokens.weight"
-            elif name == "head.weight" and not self.has_own_lm_head:
+            elif name == "head.weight" and not self.rotation_path:
                 name = "lm_head.weight"
+            elif name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+                name = f"model.{name}"
             else:
                 mapped_name = self._remap_dspark_name(name)
                 if mapped_name is None:
                     continue
                 name = mapped_name
 
-            # Expert scale parameters use a dtype-specific suffix; other
-            # quantized parameters use Ascend's ``weight_scale`` convention.
+            # Expert scale parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):
-                suffix = expert_scale_suffix if _EXPERT_SCALE_RE.search(name) else ".weight_scale"
-                name = name.removesuffix(".scale") + suffix
+                name = name.replace(".scale", ".weight_scale")
 
-            # E8M0 expert scales must retain their raw exponent bytes.
             if ".experts." in name:
-                if "weight_scale" in name and loaded_weight.dtype == torch.float8_e8m0fnu:
-                    loaded_weight = loaded_weight.view(torch.uint8)
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
