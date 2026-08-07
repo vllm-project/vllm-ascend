@@ -94,13 +94,21 @@ deployment:
         }'
 
 versions:
-  - name: v2
-    env:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
   - name: v1
     env:
       VLLM_USE_V2_MODEL_RUNNER: "0"
     is_baseline: true
+    # V1 only runs the performance scenarios; accuracy is guarded on V2.
+    benchmarks:
+      - perf_128k
+      - perf_16k
+  - name: v2
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    benchmarks:
+      - perf_128k
+      - perf_16k
+      - acc_gpqa
 
 version_threshold: 0.97
 
@@ -131,3 +139,22 @@ benchmarks:
     baseline: 1
     threshold: 0.97
     version_threshold: 0.97
+  # GPQA accuracy runs on the V2 service right after the performance
+  # scenarios (no extra service launch). max_out_len 65536 and batch_size 64
+  # saturate the service's --max-num-seqs 64. Record-only gate for the first
+  # run (baseline 0 / threshold 100 covers the full 0-100 range); replace with
+  # the measured V1 baseline aligned with the test-team exit baseline
+  # (A00302_05 C2) after the first green run.
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 64
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 40
+    ignore_eos: false
+    baseline: 0
+    threshold: 100

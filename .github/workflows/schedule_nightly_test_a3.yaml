@@ -302,7 +302,6 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      testcase_timeout: ${{ matrix.test_config.testcase_timeout || 120 }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
 
   multi-card-tests:
