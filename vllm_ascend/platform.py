@@ -73,6 +73,10 @@ else:
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
+MC2_HIERARCHY_COMM_SUPPORTED_DEVICES = (
+    AscendDeviceType.A2,
+    AscendDeviceType.A3,
+)
 
 
 class NPUPlatform(Platform):
@@ -385,6 +389,21 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+        if ascend_config.enable_mc2_hierarchy_comm:
+            from vllm_ascend.ascend_forward_context import MAX_MC2_HIERARCHY_COMM_EXPERTS
+
+            device_type = get_ascend_device_type()
+            if device_type not in MC2_HIERARCHY_COMM_SUPPORTED_DEVICES:
+                raise NotImplementedError(
+                    f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
+                )
+            num_logical_experts = model_config.get_num_experts()
+            if num_logical_experts > MAX_MC2_HIERARCHY_COMM_EXPERTS:
+                raise ValueError(
+                    "enable_mc2_hierarchy_comm supports at most "
+                    f"{MAX_MC2_HIERARCHY_COMM_EXPERTS} experts, but the model already has "
+                    f"{num_logical_experts} logical experts before EPLB redundancy."
+                )
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config:
             vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
