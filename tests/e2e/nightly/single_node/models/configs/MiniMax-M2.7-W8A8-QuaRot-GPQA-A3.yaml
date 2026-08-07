@@ -1,0 +1,55 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "MiniMax-M2.7-GPQA-A3"
+    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "2"
+      - "--seed"
+      - "1024"
+      - "--max-num-seqs"
+      - "64"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--quantization"
+      - "ascend"
+      - "--enforce-eager"
+    benchmarks:
+      # Provisional GPQA baseline mirrors the MiniMax-M2.5 A2 nightly case
+      # (baseline 83, threshold 5). Align with the test-team exit baseline
+      # after the first V1 measurement (A00302_05 C2).
+      acc_gpqa:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gpqa
+        request_conf: vllm_api_general_chat
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+        max_out_len: 65536
+        batch_size: 32
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 40
+        ignore_eos: false
+        baseline: 83
+        threshold: 5

@@ -151,6 +151,10 @@ a3:
       - name: MiniMax-M3-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M3-W8A8-A3.yaml
+      - name: MiniMax-M2.7-GPQA-A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MiniMax-M2.7-W8A8-QuaRot-GPQA-A3.yaml
+        testcase_timeout: 180
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
