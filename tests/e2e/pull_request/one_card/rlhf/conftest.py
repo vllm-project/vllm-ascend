@@ -109,6 +109,14 @@ def server(
         "m",
         *(base + (extra_args or [])),
     ]
+    # Establish the test process's NPU device context while the card is still
+    # idle, before the server reserves most of device memory. Otherwise the
+    # first in-process mem_get_info() in npu_free_bytes() would cold-init the
+    # device against a running server — the pattern that made the old
+    # subprocess helper time out on CI.
+    import torch
+
+    torch.npu.mem_get_info(0)
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     url = f"http://localhost:{port}"
     try:
@@ -282,16 +290,19 @@ def get_world_size(url, include_dp=True):
 
 
 def npu_free_bytes(device: int = 0) -> int:
-    """Read NPU free bytes via subprocess to avoid import-time torch init."""
-    out = subprocess.check_output(
-        [
-            sys.executable,
-            "-c",
-            f"import torch; f,_=torch.npu.mem_get_info({device}); print(f)",
-        ],
-        timeout=10,
-    )
-    return int(out.strip())
+    """Read NPU free bytes in-process (device-wide free memory).
+
+    Do NOT shell out to a fresh python subprocess as the upstream CUDA test
+    does: on Ascend a cold ``import torch`` + device-context init in a child
+    process can exceed a 10s timeout while the vLLM server holds the same card
+    busy (torch_npu init is far heavier than CUDA's). ``mem_get_info`` reports
+    device-wide free bytes, so an in-process query returns the same value
+    without paying subprocess startup cost. The device context is warmed up in
+    ``server()`` while the card is still idle.
+    """
+    import torch
+
+    return int(torch.npu.mem_get_info(device)[0])
 
 
 def sleep_metrics(url):
