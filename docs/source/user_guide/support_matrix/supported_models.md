@@ -23,7 +23,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 |-------|--------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
 |DeepSeek V4-Flash|||||||||||||||||||||
 |DeepSeek V4-Pro|||||||||||||||||||||
-|DeepSeek V3.1|||||||||||||||||||||
+|DeepSeek-V3.1|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
 |GLM-5.1|||||||||||||||||||||
 
 ::::
@@ -136,7 +136,6 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 |-------|--------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
 |Qwen3.5-397B-A17B|✅|  |✅| Ascend 950DT |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
 |Qwen3.6-27B|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
-|DeepSeek-V3.1|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
 
 ::::
 
