@@ -1923,6 +1923,20 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+at::Tensor attn_res_fwd_meta(
+    const at::Tensor &prefix_sum,
+    const at::Tensor &block_residual,
+    const at::Tensor &proj_weight,
+    const at::Tensor &norm_weight,
+    double norm_eps)
+{
+    (void)block_residual;
+    (void)proj_weight;
+    (void)norm_weight;
+    (void)norm_eps;
+    return at::empty_symint(prefix_sum.sym_sizes(), prefix_sum.options());
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1959,6 +1973,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+    ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors

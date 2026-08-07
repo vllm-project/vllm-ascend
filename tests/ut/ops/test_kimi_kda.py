@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -169,6 +169,48 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.shape == output.shape
     assert masked.dtype == output.dtype
     assert masked.device == output.device
+
+
+def test_output_norm_gate_uses_kda_fused_triton_kernel():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.o_norm = SimpleNamespace(
+        weight=nn.Parameter(torch.randn(3)),
+        eps=1e-6,
+    )
+    core_attn_out = torch.randn(1, 4, 2, 3)
+    output_gate = torch.randn(4, 2, 3)
+    expected = torch.randn_like(core_attn_out)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.apply_kda_rms_norm_sigmoid_gate",
+        return_value=expected,
+    ) as fused_norm_gate:
+        actual = attention._apply_output_norm_gate(core_attn_out, output_gate)
+
+    assert actual is expected
+    fused_norm_gate.assert_called_once_with(
+        core_attn_out,
+        output_gate,
+        attention.o_norm.weight,
+        attention.o_norm.eps,
+    )
+
+
+def test_output_norm_gate_falls_back_without_triton():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    expected = torch.randn(1, 4, 2, 3)
+    fallback_norm = MagicMock(return_value=expected)
+    attention.o_norm = fallback_norm
+    core_attn_out = torch.randn_like(expected)
+    output_gate = torch.randn(4, 2, 3)
+
+    with patch("vllm_ascend.ops.kimi_kda.apply_kda_rms_norm_sigmoid_gate", None):
+        actual = attention._apply_output_norm_gate(core_attn_out, output_gate)
+
+    assert actual is expected
+    fallback_norm.assert_called_once_with(core_attn_out, output_gate)
 
 
 def test_conv_post_load_processing_packs_kernel_layout_in_place():
