@@ -793,9 +793,6 @@ class NPUPlatform(Platform):
         # if the concurrency is below the threshold,
         # the performance may degrade due to the switching of
         # communication methods.
-        # TODO: remove the TP-size guard when torch_npu.npu_mm_reduce_scatter_base
-        # supports tp_size >= 16.
-        mmrs_fusion = tp_world_size <= 8
         if is_moe_model(vllm_config):
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
         else:
@@ -839,7 +836,6 @@ class NPUPlatform(Platform):
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
             "capturing": capturing,
-            "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
             "flash_comm_v1_enabled": flash_comm_v1_enabled,
             "pad_size": pad_size,

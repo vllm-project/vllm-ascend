@@ -43,7 +43,6 @@ from types import SimpleNamespace
 import regex as re
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from vllm.distributed import (
     split_tensor_along_last_dim,
@@ -55,7 +54,6 @@ from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
@@ -338,13 +336,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         assert self.quant_method is not None
         try:
             flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
-            mmrs_fusion = _EXTRA_CTX.mmrs_fusion
         except AssertionError:
             flash_comm_v1_enabled = False
-            mmrs_fusion = False
             logger.debug(
-                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), "
-                "using defaults: flash_comm_v1=False, mmrs_fusion=False",
+                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), using defaults: flash_comm_v1=False",
             )
 
         x = input_parallel
@@ -356,94 +351,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         pad_size = _EXTRA_CTX.pad_size
         dsa_cp_attn_out = enable_dsa_cp() and ("o_proj" in self.layer.prefix or "wo_b" in self.layer.prefix)
         if pad_size > 0 and not dsa_cp_attn_out:
-            x = F.pad(x, (0, 0, 0, pad_size))
+            x = torch.nn.functional.pad(x, (0, 0, 0, pad_size))
 
-        world_size = self.layer.tp_size
-        hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
-
-        from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-
-        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
-        from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
-
-        # For unquant
-        if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
-            output = DeviceOperator.npu_mm_reduce_scatter_base(
-                x,
-                self.layer.weight.t(),
-                hcom_name,
-                world_size,
-                reduce_op="sum",
-                bias=None,
-                comm_turn=0,
-            )
-            if bias_ is not None:
-                output.add_(bias_)
-        # For w8a8 quant
-        elif mmrs_fusion and (
-            isinstance(self.layer.quant_method, AscendLinearMethod)
-            and isinstance(self.layer.quant_method.quant_method, AscendW8A8LinearMethod)
-        ):
-            if x.dtype != torch.int8:
-                x_quant = torch.ops.vllm.quantize(
-                    x,
-                    self.layer.aclnn_input_scale,
-                    self.layer.aclnn_input_scale_reciprocal,
-                    self.layer.aclnn_input_offset,
-                )
-            else:
-                x_quant = x
-            quant_bias = self.layer.quant_bias
-            deq_scale = self.layer.deq_scale
-            output_dtype = torch.bfloat16
-            output = DeviceOperator.npu_mm_reduce_scatter_base(
-                x_quant,
-                self.layer.weight,
-                hcom_name,
-                world_size,
-                reduce_op="sum",
-                bias=None,
-                comm_turn=0,
-                x2_scale=deq_scale,
-                output_dtype=output_dtype,
-            )
-            output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
-        # For dynamic w8a8 quant
-        elif mmrs_fusion and (
-            isinstance(self.layer.quant_method, AscendLinearMethod)
-            and isinstance(self.layer.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
-            and hasattr(self.layer, "weight")
-            and hasattr(self.layer, "weight_scale")
-        ):
-            quant_method = self.layer.quant_method.quant_method
-            x_quant, pertoken_scale = DeviceOperator.npu_dynamic_quant(x, act_quant_type=quant_method.act_quant_type)
-            need_unsqueeze = False
-            if pertoken_scale.dim() == 2:
-                need_unsqueeze = True
-                x_quant = x_quant.squeeze(dim=1)
-                pertoken_scale = pertoken_scale.squeeze(dim=1)
-            x1_scale = pertoken_scale.reshape(-1, 1).contiguous()
-            weight_scale = getattr(self.layer, "weight_scale_fp32", self.layer.weight_scale)
-            x2_scale = weight_scale.reshape(1, -1).contiguous()
-            output = DeviceOperator.npu_mm_reduce_scatter_base(
-                x_quant,
-                self.layer.weight,
-                hcom_name,
-                world_size,
-                reduce_op="sum",
-                bias=bias_ if quant_method.act_quant_type == torch.int8 else None,
-                comm_turn=0,
-                x1_scale=x1_scale,
-                x2_scale=x2_scale,
-                output_dtype=x.dtype,
-            )
-            if need_unsqueeze:
-                output = output.unsqueeze(dim=1)
-            if bias_ is not None and quant_method.act_quant_type != torch.int8:
-                output = (output + bias_).to(x.dtype)
-        else:
-            output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
-            output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
+        output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
+        output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
 
         return output
 

@@ -250,9 +250,9 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self.assertIsNone(self._op("model.patch_merge_mlp.out_proj"))
 
 
-class TestSequenceRowParallelMatmulAndReduce(unittest.TestCase):
+class TestMatmulReduceScatterFusion(unittest.TestCase):
     def test_dynamic_w8a8_uses_mm_reduce_scatter_fusion(self):
-        from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+        from vllm_ascend.ops import register_custom_ops
         from vllm_ascend.quantization.method_adapters import AscendLinearMethod
         from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
@@ -264,34 +264,40 @@ class TestSequenceRowParallelMatmulAndReduce(unittest.TestCase):
         layer.weight_scale_fp32 = torch.randn(16, dtype=torch.float32)
         layer.tp_size = 2
         layer.tp_rank = 0
-
-        op = SequenceRowParallelOp(layer)
-        op.quant_method = layer.quant_method
+        layer.skip_bias_add = False
+        layer.bias = None
+        layer.prefix = "model.layers.0.self_attn.o_proj"
+        layer.custom_op = MagicMock()
         x = torch.randn(4, 8, dtype=torch.bfloat16)
         x_quant = torch.randint(-8, 8, (4, 8), dtype=torch.int8)
         pertoken_scale = torch.randn(4, dtype=torch.float32)
         fused_output = torch.randn(2, 16, dtype=torch.bfloat16)
 
         tp_group = MagicMock()
+        tp_group.world_size = 2
+        tp_group.rank_in_group = 0
         tp_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_comm"
+        forward_context = MagicMock()
+        forward_context.no_compile_layers = {"layer": layer}
 
         with (
             patch(
-                "vllm_ascend.ops.linear_op._EXTRA_CTX",
-                SimpleNamespace(flash_comm_v1_enabled=True, mmrs_fusion=True, pad_size=0),
+                "vllm_ascend.ops.register_custom_ops._EXTRA_CTX",
+                SimpleNamespace(flash_comm_v1_enabled=True, pad_size=0),
             ),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
-            patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=tp_group),
+            patch("vllm_ascend.ops.register_custom_ops.get_forward_context", return_value=forward_context),
+            patch("vllm_ascend.ops.register_custom_ops.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.register_custom_ops.get_tp_group", return_value=tp_group),
             patch(
-                "vllm_ascend.ops.linear_op.DeviceOperator.npu_dynamic_quant",
+                "vllm_ascend.ops.register_custom_ops.DeviceOperator.npu_dynamic_quant",
                 return_value=(x_quant, pertoken_scale),
             ) as mock_dynamic_quant,
             patch(
-                "vllm_ascend.ops.linear_op.DeviceOperator.npu_mm_reduce_scatter_base",
+                "vllm_ascend.ops.register_custom_ops.DeviceOperator.npu_mm_reduce_scatter_base",
                 return_value=fused_output,
             ) as mock_mmrs,
         ):
-            output = op.matmul_and_reduce(x, bias_=None)
+            output = register_custom_ops._matmul_reduce_scatter_impl(x, "layer")
 
         self.assertIs(output, fused_output)
         mock_dynamic_quant.assert_called_once_with(x, act_quant_type=quant_method.act_quant_type)
