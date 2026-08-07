@@ -53,6 +53,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.base import AscendLinearScheme
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
@@ -79,13 +80,6 @@ class PreprocessType(enum.Enum):
     NATIVE = "native"
     PROLOG_V3 = "prolog_v3"
     MLAPO = "mlapo"
-
-
-O_PROJ_ACLNN_INPUT_PARAMS = (
-    "aclnn_input_scale",
-    "aclnn_input_scale_reciprocal",
-    "aclnn_input_offset",
-)
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -504,7 +498,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     """
 
     # Reusable full-weight gather buffers for DSA-CP prefill/mixed requests.
-    o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, int, tuple[int, ...]], torch.Tensor] = {}
+    o_proj_full_pools: dict[Any, torch.Tensor] = {}
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -718,9 +712,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
-        if self.enable_dsa_cp:
-            if self.enable_dsa_cp_with_o_proj_tp:
-                self._init_o_proj_tp_full_params()
+        self._o_proj_tp_weight_switch_enabled = False
+        if self.enable_dsa_cp and self.enable_dsa_cp_with_o_proj_tp:
+            self._enable_o_proj_tp_full_weight_switch()
 
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
@@ -959,9 +953,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    def _init_o_proj_tp_full_params(self):
+    def _enable_o_proj_tp_full_weight_switch(self) -> None:
         """
-        Initialize TP-mode aliases and Full-mode buffers for DSA-CP o_proj.
+        Enable TP-mode aliases and full-mode buffers for DSA-CP o_proj.
 
         In SFA DSA-CP execution:
         - Decode-only batches all-to-all the SFA output in the TP group, then
@@ -970,13 +964,34 @@ class AscendSFAImpl(MLAAttentionImpl):
           compatible with TP-sharded o_proj, so each rank all-gathers the TP
           o_proj shards and input-sharded quant params before running o_proj.
 
-        The original TP parameter storage remains the persistent source of
-        truth. The o_proj_tp_* tensors below alias that storage, while the
-        o_proj_full_* tensors are temporary gather destinations reused across
-        forwards. They are not a second persistent copy of the TP weight.
+        The DSA-CP backend enables this after weight loading. The original TP
+        parameter storage remains the persistent source of truth; the
+        full-weight tensors are temporary gather destinations reused across
+        DSA-CP forwards.
         """
+        if self._o_proj_tp_weight_switch_enabled:
+            return
+
+        linear_method = self._get_o_proj_linear_method()
+        if isinstance(linear_method, AscendLinearScheme):
+            self.o_proj_tp_weight_state = linear_method.enable_tp_weight_switch(
+                self.o_proj,
+                self.tp_size,
+                pool=AscendSFAImpl.o_proj_full_pools,
+                pool_key_prefix=(type(linear_method).__qualname__, "sfa_o_proj"),
+                purpose="sfa_dsa_cp_o_proj",
+            )
+            self._o_proj_tp_weight_switch_enabled = True
+            return
+
         sample = self.o_proj.weight
-        self.o_proj_full_weight_gather_dim = 1 if self._is_o_proj_unquantized() else 0
+        if not self._is_o_proj_unquantized():
+            raise RuntimeError(
+                "SFA DSA-CP o_proj full-weight switching requires an Ascend quantization scheme "
+                f"or an unquantized method, got {type(linear_method).__name__}."
+            )
+        self.o_proj_tp_weight_state = None
+        self.o_proj_full_weight_gather_dim = 1
         if self.o_proj_full_weight_gather_dim == 0:
             full_shape = (sample.shape[0] * self.tp_size, sample.shape[1])
             gather_shape = full_shape
@@ -1012,35 +1027,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Communication scratch only: all_gather_into_tensor concatenates on
             # dim0, while unquantized row-parallel o_proj is sharded on dim1.
             self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight.transpose(0, 1).contiguous()
-        self.o_proj_tp_aclnn_input_params = {}
-        self.o_proj_full_aclnn_input_params = {}
-        for param_name in O_PROJ_ACLNN_INPUT_PARAMS:
-            param = getattr(self.o_proj, param_name, None)
-            if param is None:
-                continue
-            self.o_proj_tp_aclnn_input_params[param_name] = param.detach()
-            self.o_proj_full_aclnn_input_params[param_name] = param.repeat(self.tp_size)
-
-        self.o_proj_tp_input_sharded_quant_params = {}
-        self.o_proj_full_input_sharded_quant_params = {}
-        for param_name, param in self._iter_o_proj_input_sharded_quant_params():
-            self.o_proj_tp_input_sharded_quant_params[param_name] = param.detach()
-            self.o_proj_full_input_sharded_quant_params[param_name] = torch.empty(
-                (param.shape[0] * self.tp_size, *param.shape[1:]), dtype=param.dtype, device=param.device
-            )
-
-    def _iter_o_proj_input_sharded_quant_params(self):
-        if not isinstance(self.o_proj, nn.Module):
-            return
-        for param_name, param in self.o_proj.named_parameters(recurse=False):
-            if param_name == "weight" or param_name in O_PROJ_ACLNN_INPUT_PARAMS:
-                continue
-            if getattr(param, "input_dim", None) == 1:
-                yield param_name, param
-
-    def _switch_o_proj_params(self, params: dict[str, torch.Tensor]):
-        for param_name, param in params.items():
-            getattr(self.o_proj, param_name).set_(param)
+        self._o_proj_tp_weight_switch_enabled = True
 
     def _get_o_proj_linear_method(self):
         quant_method = self.o_proj.quant_method
@@ -1065,23 +1052,35 @@ class AscendSFAImpl(MLAAttentionImpl):
         """
         # Gather o_proj weight from all TP ranks for Full-mode computation
         if should_shard_weight:
-            # Wait for the completion of o_proj weight all-gather operation
-            if o_proj_full_handle is not None:
-                o_proj_full_handle.wait()
-            for handle in o_proj_full_param_handles or []:
-                if handle is not None:
-                    handle.wait()
+            linear_method = self._get_o_proj_linear_method()
+            if isinstance(linear_method, AscendLinearScheme):
+                assert self.o_proj_tp_weight_state is not None
+                linear_method.wait_tp_weight_all_gather(o_proj_full_param_handles or [])
+                linear_method.switch_tp_weight(
+                    self.o_proj,
+                    self.o_proj_tp_weight_state,
+                    use_full_weight=True,
+                )
+                output[...] = self._apply_o_proj_full_weight(attn_output)
+                linear_method.switch_tp_weight(
+                    self.o_proj,
+                    self.o_proj_tp_weight_state,
+                    use_full_weight=False,
+                )
+            else:
+                # Wait for the completion of o_proj weight all-gather operation
+                if o_proj_full_handle is not None:
+                    o_proj_full_handle.wait()
+                for handle in o_proj_full_param_handles or []:
+                    if handle is not None:
+                        handle.wait()
 
-            # Temporarily switch o_proj to the gathered full-weight view for
-            # prefill/mixed DSA-CP, whose attention output is not TP-sharded.
-            self.o_proj.weight.set_(self.o_proj_full_pool)
-            self._switch_o_proj_params(self.o_proj_full_aclnn_input_params)
-            self._switch_o_proj_params(self.o_proj_full_input_sharded_quant_params)
-            output[...] = self._apply_o_proj_full_weight(attn_output)
-            # Restore TP aliases so later decode batches keep using TP storage.
-            self.o_proj.weight.set_(self.o_proj_tp_weight)
-            self._switch_o_proj_params(self.o_proj_tp_aclnn_input_params)
-            self._switch_o_proj_params(self.o_proj_tp_input_sharded_quant_params)
+                # Temporarily switch o_proj to the gathered full-weight view for
+                # prefill/mixed DSA-CP, whose attention output is not TP-sharded.
+                self.o_proj.weight.set_(self.o_proj_full_pool)
+                output[...] = self._apply_o_proj_full_weight(attn_output)
+                # Restore TP aliases so later decode batches keep using TP storage.
+                self.o_proj.weight.set_(self.o_proj_tp_weight)
 
             return output, False
         else:
@@ -1690,19 +1689,20 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_ag_handle.wait()
 
             if full_gather_o_proj_enabled:
-                _, o_proj_full_handle = all_gather_async(
-                    self.o_proj_tp_weight_gather_input,
-                    get_tp_group(),
-                    output=self.o_proj_full_gather_pool,
-                )
-                o_proj_full_param_handles = []
-                for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
-                    _, param_handle = all_gather_async(
-                        param,
+                self._enable_o_proj_tp_full_weight_switch()
+                linear_method = self._get_o_proj_linear_method()
+                if isinstance(linear_method, AscendLinearScheme):
+                    assert self.o_proj_tp_weight_state is not None
+                    o_proj_full_param_handles = linear_method.all_gather_tp_weight(
+                        self.o_proj_tp_weight_state,
                         get_tp_group(),
-                        output=self.o_proj_full_input_sharded_quant_params[param_name],
                     )
-                    o_proj_full_param_handles.append(param_handle)
+                else:
+                    _, o_proj_full_handle = all_gather_async(
+                        self.o_proj_tp_weight_gather_input,
+                        get_tp_group(),
+                        output=self.o_proj_full_gather_pool,
+                    )
 
             if kv_cache is not None:
                 assert fused_kv_no_split is not None
@@ -1850,10 +1850,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         o_proj_full_param_handles = None
         # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
         # Decode keeps the original TP path and only exchanges activations.
-        full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        }
+        full_gather_o_proj_enabled = (
+            self.tp_size > 1
+            and self.enable_dsa_cp_with_o_proj_tp
+            and attn_metadata.attn_state
+            not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
 
         fused_type: PreprocessType = self.preprocess_type
         if (

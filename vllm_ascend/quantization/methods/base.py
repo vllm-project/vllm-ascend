@@ -17,11 +17,71 @@
 """Abstract base classes for Ascend quantization schemes."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
 
 import torch
 
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+@dataclass(frozen=True)
+class TPWeightGatherSpec:
+    """Tensor attribute that should be all-gathered across TP ranks."""
+
+    attr_name: str
+    gather_dim: int = 0
+
+
+@dataclass(frozen=True)
+class TPWeightRepeatSpec:
+    """Tensor attribute that should be expanded by local repeat."""
+
+    attr_name: str
+    repeat_dim: int = 0
+
+
+@dataclass
+class TPWeightGatherPart:
+    """Runtime tensors for one all-gathered TP attribute."""
+
+    spec: TPWeightGatherSpec
+    tp_tensor: torch.Tensor
+    gather_input: torch.Tensor
+    gather_output: torch.Tensor
+    full_tensor: torch.Tensor
+
+
+@dataclass
+class TPWeightRepeatPart:
+    """Runtime tensors for one repeated TP attribute."""
+
+    spec: TPWeightRepeatSpec
+    tp_tensor: torch.Tensor
+    full_tensor: torch.Tensor
+
+
+@dataclass
+class TPWeightSwitchState:
+    """Reusable buffers for switching a layer between TP and full weights."""
+
+    gather_parts: dict[str, TPWeightGatherPart] = field(default_factory=dict)
+    repeat_parts: dict[str, TPWeightRepeatPart] = field(default_factory=dict)
+
+
+def get_moe_num_logical_experts(
+    layer: torch.nn.Module,
+    num_experts: int,
+    global_redundant_expert_num: int = 0,
+    num_shared_experts: int = 0,
+) -> int:
+    moe_config = getattr(layer, "moe_config", None)
+    num_logical_experts = getattr(moe_config, "num_logical_experts", None)
+    if num_logical_experts is not None:
+        return int(num_logical_experts)
+
+    return int(num_experts - global_redundant_expert_num - num_shared_experts)
 
 
 class AscendLinearScheme(ABC):
@@ -31,6 +91,9 @@ class AscendLinearScheme(ABC):
     Other methods have default implementations that return empty dicts
     or do nothing.
     """
+
+    tp_weight_gather_specs: ClassVar[tuple[TPWeightGatherSpec, ...]] = ()
+    tp_weight_repeat_specs: ClassVar[tuple[TPWeightRepeatSpec, ...]] = ()
 
     @abstractmethod
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
@@ -111,6 +174,213 @@ class AscendLinearScheme(ABC):
             layer: The linear layer module.
         """
         return
+
+    def get_tp_weight_gather_specs(
+        self,
+        layer: torch.nn.Module,
+        purpose: str | None = None,
+    ) -> tuple[TPWeightGatherSpec, ...]:
+        """Return TP all-gather specs for this quantization scheme.
+
+        Subclasses own the concrete attribute list because processed weight and
+        scale layouts differ by quantization type.
+        """
+        return self.tp_weight_gather_specs
+
+    def get_tp_weight_repeat_specs(
+        self,
+        layer: torch.nn.Module,
+        purpose: str | None = None,
+    ) -> tuple[TPWeightRepeatSpec, ...]:
+        """Return TP repeat specs for this quantization scheme."""
+        return self.tp_weight_repeat_specs
+
+    @staticmethod
+    def split_tensor_for_tp(
+        tensor: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        dim: int = 0,
+        contiguous: bool = True,
+    ) -> torch.Tensor:
+        """Slice one TP shard from a full tensor."""
+        dim = dim if dim >= 0 else tensor.dim() + dim
+        if tensor.shape[dim] % tp_size != 0:
+            raise RuntimeError(
+                "Cannot split tensor for TP because the target dimension is not divisible by TP size: "
+                f"shape={tuple(tensor.shape)}, dim={dim}, tp_size={tp_size}."
+            )
+        shard_size = tensor.shape[dim] // tp_size
+        shard = tensor.narrow(dim, tp_rank * shard_size, shard_size)
+        return shard.contiguous() if contiguous else shard
+
+    @staticmethod
+    def _make_full_shape(shape: tuple[int, ...], tp_size: int, dim: int) -> tuple[int, ...]:
+        full_shape = list(shape)
+        full_shape[dim] *= tp_size
+        return tuple(full_shape)
+
+    @staticmethod
+    def _move_gather_dim_to_front(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+        if dim == 0:
+            return tensor
+        return torch.movedim(tensor, dim, 0).contiguous()
+
+    @staticmethod
+    def _restore_gather_dim_from_front(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+        if dim == 0:
+            return tensor
+        return torch.movedim(tensor, 0, dim)
+
+    @staticmethod
+    def _get_or_create_pool_tensor(
+        pool: dict[Any, torch.Tensor] | None,
+        key: Any,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if pool is None:
+            return torch.empty(shape, dtype=dtype, device=device)
+        pooled = pool.get(key)
+        if pooled is None:
+            pooled = torch.empty(shape, dtype=dtype, device=device)
+            pool[key] = pooled
+        return pooled
+
+    def enable_tp_weight_switch(
+        self,
+        layer: torch.nn.Module,
+        tp_size: int,
+        *,
+        pool: dict[Any, torch.Tensor] | None = None,
+        pool_key_prefix: Any | None = None,
+        clone_tp_tensors: bool = False,
+        purpose: str | None = None,
+    ) -> TPWeightSwitchState:
+        """Enable TP/full weight switching for one linear layer.
+
+        This is deliberately an explicit feature entry point. It allocates the
+        full-weight and repeated-parameter buffers only when a caller needs to
+        switch a layer out of its normal TP layout.
+        """
+        state = TPWeightSwitchState()
+        gather_specs = self.get_tp_weight_gather_specs(layer, purpose=purpose)
+        repeat_specs = self.get_tp_weight_repeat_specs(layer, purpose=purpose)
+
+        for spec in gather_specs:
+            tensor = getattr(layer, spec.attr_name, None)
+            if tensor is None:
+                raise RuntimeError(
+                    f"{type(self).__name__} declares TP gather attr {spec.attr_name!r}, "
+                    f"but layer {getattr(layer, 'prefix', layer)} does not have it."
+                )
+            dim = spec.gather_dim if spec.gather_dim >= 0 else tensor.dim() + spec.gather_dim
+            if dim < 0 or dim >= tensor.dim():
+                raise RuntimeError(
+                    f"Invalid TP gather dim {spec.gather_dim} for attr {spec.attr_name!r} "
+                    f"with shape {tuple(tensor.shape)}."
+            )
+
+            tp_tensor = tensor.clone().detach().contiguous() if clone_tp_tensors else tensor.detach()
+            if clone_tp_tensors:
+                with torch.no_grad():
+                    tensor.set_(tp_tensor)
+            full_shape = self._make_full_shape(tuple(tp_tensor.shape), tp_size, dim)
+            gather_input = self._move_gather_dim_to_front(tp_tensor, dim)
+            gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
+            pool_key = (
+                pool_key_prefix,
+                spec.attr_name,
+                tp_tensor.device.type,
+                tp_tensor.device.index,
+                tp_tensor.dtype,
+                dim,
+                full_shape,
+            )
+            gather_output = self._get_or_create_pool_tensor(
+                pool,
+                pool_key,
+                gather_shape,
+                tp_tensor.dtype,
+                tp_tensor.device,
+            )
+            full_tensor = self._restore_gather_dim_from_front(gather_output, dim)
+            state.gather_parts[spec.attr_name] = TPWeightGatherPart(
+                spec=spec,
+                tp_tensor=tp_tensor,
+                gather_input=gather_input,
+                gather_output=gather_output,
+                full_tensor=full_tensor,
+            )
+
+        for spec in repeat_specs:
+            tensor = getattr(layer, spec.attr_name, None)
+            if tensor is None:
+                raise RuntimeError(
+                    f"{type(self).__name__} declares TP repeat attr {spec.attr_name!r}, "
+                    f"but layer {getattr(layer, 'prefix', layer)} does not have it."
+                )
+            dim = spec.repeat_dim if spec.repeat_dim >= 0 else tensor.dim() + spec.repeat_dim
+            if dim < 0 or dim >= tensor.dim():
+                raise RuntimeError(
+                    f"Invalid TP repeat dim {spec.repeat_dim} for attr {spec.attr_name!r} "
+                    f"with shape {tuple(tensor.shape)}."
+                )
+            repeats = [1] * tensor.dim()
+            repeats[dim] = tp_size
+            tp_tensor = tensor.detach()
+            state.repeat_parts[spec.attr_name] = TPWeightRepeatPart(
+                spec=spec,
+                tp_tensor=tp_tensor,
+                full_tensor=tp_tensor.repeat(*repeats),
+            )
+
+        return state
+
+    def all_gather_tp_weight(
+        self,
+        state: TPWeightSwitchState,
+        group: Any,
+        *,
+        async_op: bool = True,
+    ) -> list[torch.distributed.Work | None]:
+        """All-gather every TP-sharded tensor in ``state``."""
+        from vllm_ascend.distributed.utils import all_gather_async
+
+        handles: list[torch.distributed.Work | None] = []
+        for part in state.gather_parts.values():
+            _, handle = all_gather_async(
+                part.gather_input,
+                group,
+                output=part.gather_output,
+                async_op=async_op,
+            )
+            handles.append(handle)
+        return handles
+
+    @staticmethod
+    def wait_tp_weight_all_gather(handles: list[torch.distributed.Work | None]) -> None:
+        for handle in handles:
+            if handle is not None:
+                handle.wait()
+
+    def switch_tp_weight(
+        self,
+        layer: torch.nn.Module,
+        state: TPWeightSwitchState,
+        *,
+        use_full_weight: bool,
+    ) -> None:
+        """Switch layer tensor attributes between TP-local and full views."""
+        for attr_name, part in state.gather_parts.items():
+            target = part.full_tensor if use_full_weight else part.tp_tensor
+            with torch.no_grad():
+                getattr(layer, attr_name).set_(target)
+        for attr_name, part in state.repeat_parts.items():
+            target = part.full_tensor if use_full_weight else part.tp_tensor
+            with torch.no_grad():
+                getattr(layer, attr_name).set_(target)
 
 
 class AscendAttentionScheme(ABC):

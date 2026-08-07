@@ -26,11 +26,11 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
+from vllm_ascend.quantization.methods.base import AscendLinearScheme
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -1047,10 +1047,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     understand this class
     """
 
-    wo_a_full_pool: ClassVar[torch.Tensor | None] = None
-    wo_a_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
-    wo_b_full_pool: ClassVar[torch.Tensor | None] = None
-    wo_b_full_weight_scale_pool: ClassVar[torch.Tensor | None] = None
+    o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
 
     def __init__(
         self,
@@ -1102,8 +1099,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and (
             get_ascend_device_type() == AscendDeviceType.A5
         )
-        self._wo_a_dynamic_quant = False
-        self._wo_b_dynamic_quant = False
+        self._o_proj_tp_weight_switch_enabled = False
 
         self.eps = kwargs["eps"]
 
@@ -1175,122 +1171,93 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
         if self.enable_dsa_cp_with_o_proj_tp:
-            self._maybe_init_o_proj_tp_full_params()
+            self._enable_o_proj_tp_full_weight_switch()
 
     @staticmethod
-    def _check_dynamic_quant(layer: torch.nn.Module) -> bool:
-        return get_ascend_device_type() in {AscendDeviceType.A5} and hasattr(layer, "weight_scale")
+    def _get_linear_scheme(layer: torch.nn.Module):
+        quant_method = layer.quant_method
+        return getattr(quant_method, "quant_method", quant_method)
 
-    def _maybe_init_o_proj_tp_full_params(self) -> None:
-        self._wo_a_dynamic_quant = type(self)._check_dynamic_quant(self.wo_a)
-        self._wo_b_dynamic_quant = type(self)._check_dynamic_quant(self.wo_b)
-        if AscendDSACPImpl.wo_a_full_pool is None:
-            sample = self.wo_a.weight
-            AscendDSACPImpl.wo_a_full_pool = torch.empty(
-                (sample.shape[0] * self.tp_size, *sample.shape[1:]),
-                dtype=sample.dtype,
-                device=sample.device,
+    def _enable_linear_tp_weight_switch(self, layer: torch.nn.Module, name: str):
+        linear_method = self._get_linear_scheme(layer)
+        if not isinstance(linear_method, AscendLinearScheme):
+            raise RuntimeError(
+                "DSA-CP o_proj TP full-weight switching requires an Ascend quantization scheme, "
+                f"got {type(linear_method).__name__} for {name}."
             )
-        self.wo_a_tp_weight = self.wo_a.weight.clone().detach().contiguous()
-        self.wo_a.weight.set_(self.wo_a_tp_weight)
-        if AscendDSACPImpl.wo_b_full_pool is None:
-            sample = self.wo_b.weight
-            AscendDSACPImpl.wo_b_full_pool = torch.empty(
-                (sample.shape[0] * self.tp_size, *sample.shape[1:]),
-                dtype=sample.dtype,
-                device=sample.device,
-            )
-        self.wo_b_tp_weight = self.wo_b.weight.clone().detach().contiguous()
-        self.wo_b.weight.set_(self.wo_b_tp_weight)
+        state = linear_method.enable_tp_weight_switch(
+            layer,
+            self.tp_size,
+            pool=AscendDSACPImpl.o_proj_full_pools,
+            pool_key_prefix=(type(linear_method).__qualname__, name, "dsa_cp_o_proj"),
+            clone_tp_tensors=True,
+            purpose="dsa_cp_o_proj",
+        )
+        return linear_method, state
 
-        if self._wo_a_dynamic_quant:
-            if AscendDSACPImpl.wo_a_full_weight_scale_pool is None:
-                sample = self.wo_a.weight_scale
-                AscendDSACPImpl.wo_a_full_weight_scale_pool = torch.empty(
-                    (sample.shape[0] * self.tp_size, *sample.shape[1:]),
-                    dtype=sample.dtype,
-                    device=sample.device,
-                )
-            self.wo_a_tp_weight_scale = self.wo_a.weight_scale.clone().detach().contiguous()
-            self.wo_a.weight_scale.set_(self.wo_a_tp_weight_scale)
-        if self._wo_b_dynamic_quant:
-            if AscendDSACPImpl.wo_b_full_weight_scale_pool is None:
-                sample = self.wo_b.weight_scale
-                AscendDSACPImpl.wo_b_full_weight_scale_pool = torch.empty(
-                    (sample.shape[0] * self.tp_size, *sample.shape[1:]),
-                    dtype=sample.dtype,
-                    device=sample.device,
-                )
-            self.wo_b_tp_weight_scale = self.wo_b.weight_scale.clone().detach().contiguous()
-            self.wo_b.weight_scale.set_(self.wo_b_tp_weight_scale)
+    def _enable_o_proj_tp_full_weight_switch(self) -> None:
+        """Allocate o_proj TP/full buffers when the DSA-CP backend is enabled."""
+        if self._o_proj_tp_weight_switch_enabled:
+            return
+        self.wo_a_tp_weight_scheme, self.wo_a_tp_weight_state = self._enable_linear_tp_weight_switch(
+            self.wo_a,
+            "wo_a",
+        )
+        self.wo_b_tp_weight_scheme, self.wo_b_tp_weight_state = self._enable_linear_tp_weight_switch(
+            self.wo_b,
+            "wo_b",
+        )
+        self._o_proj_tp_weight_switch_enabled = True
 
     def _maybe_all_gather_o_proj_full_weight(
         self,
         enabled: bool,
-    ) -> list[torch.distributed.Work]:
+    ) -> list[torch.distributed.Work | None]:
         if not enabled:
             return []
+        self._enable_o_proj_tp_full_weight_switch()
         handles = []
-        assert AscendDSACPImpl.wo_a_full_pool is not None
-        _, weight_handle = all_gather_async(
-            self.wo_a_tp_weight,
-            self.tp_group,
-            output=AscendDSACPImpl.wo_a_full_pool,
-        )
-        if weight_handle is not None:
-            handles.append(weight_handle)
-        assert AscendDSACPImpl.wo_b_full_pool is not None
-        _, wo_b_weight_handle = all_gather_async(
-            self.wo_b_tp_weight,
-            self.tp_group,
-            output=AscendDSACPImpl.wo_b_full_pool,
-        )
-        if wo_b_weight_handle is not None:
-            handles.append(wo_b_weight_handle)
-        if self._wo_a_dynamic_quant:
-            assert AscendDSACPImpl.wo_a_full_weight_scale_pool is not None
-            _, weight_scale_handle = all_gather_async(
-                self.wo_a_tp_weight_scale,
+        handles.extend(
+            self.wo_a_tp_weight_scheme.all_gather_tp_weight(
+                self.wo_a_tp_weight_state,
                 self.tp_group,
-                output=AscendDSACPImpl.wo_a_full_weight_scale_pool,
             )
-            if weight_scale_handle is not None:
-                handles.append(weight_scale_handle)
-        if self._wo_b_dynamic_quant:
-            assert AscendDSACPImpl.wo_b_full_weight_scale_pool is not None
-            _, wo_b_weight_scale_handle = all_gather_async(
-                self.wo_b_tp_weight_scale,
+        )
+        handles.extend(
+            self.wo_b_tp_weight_scheme.all_gather_tp_weight(
+                self.wo_b_tp_weight_state,
                 self.tp_group,
-                output=AscendDSACPImpl.wo_b_full_weight_scale_pool,
             )
-            if wo_b_weight_scale_handle is not None:
-                handles.append(wo_b_weight_scale_handle)
+        )
         return handles
 
     def _switch_o_proj_to_full_weight(
         self,
-        handles: list[torch.distributed.Work],
+        handles: list[torch.distributed.Work | None],
     ) -> None:
-        for handle in handles:
-            handle.wait()
-        assert AscendDSACPImpl.wo_a_full_pool is not None
-        self.wo_a.weight.set_(AscendDSACPImpl.wo_a_full_pool)
-        if self._wo_a_dynamic_quant:
-            assert AscendDSACPImpl.wo_a_full_weight_scale_pool is not None
-            self.wo_a.weight_scale.set_(AscendDSACPImpl.wo_a_full_weight_scale_pool)
-        assert AscendDSACPImpl.wo_b_full_pool is not None
-        self.wo_b.weight.set_(AscendDSACPImpl.wo_b_full_pool)
-        if self._wo_b_dynamic_quant:
-            assert AscendDSACPImpl.wo_b_full_weight_scale_pool is not None
-            self.wo_b.weight_scale.set_(AscendDSACPImpl.wo_b_full_weight_scale_pool)
+        AscendLinearScheme.wait_tp_weight_all_gather(handles)
+        self.wo_a_tp_weight_scheme.switch_tp_weight(
+            self.wo_a,
+            self.wo_a_tp_weight_state,
+            use_full_weight=True,
+        )
+        self.wo_b_tp_weight_scheme.switch_tp_weight(
+            self.wo_b,
+            self.wo_b_tp_weight_state,
+            use_full_weight=True,
+        )
 
     def _switch_o_proj_to_tp_weight(self) -> None:
-        self.wo_a.weight.set_(self.wo_a_tp_weight)
-        if self._wo_a_dynamic_quant:
-            self.wo_a.weight_scale.set_(self.wo_a_tp_weight_scale)
-        self.wo_b.weight.set_(self.wo_b_tp_weight)
-        if self._wo_b_dynamic_quant:
-            self.wo_b.weight_scale.set_(self.wo_b_tp_weight_scale)
+        self.wo_a_tp_weight_scheme.switch_tp_weight(
+            self.wo_a,
+            self.wo_a_tp_weight_state,
+            use_full_weight=False,
+        )
+        self.wo_b_tp_weight_scheme.switch_tp_weight(
+            self.wo_b,
+            self.wo_b_tp_weight_state,
+            use_full_weight=False,
+        )
 
     def _apply_wo_b(
         self,

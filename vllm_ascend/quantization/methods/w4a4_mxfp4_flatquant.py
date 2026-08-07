@@ -24,7 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import RowParallelLinear
 
-from .base import AscendLinearScheme
+from .base import AscendLinearScheme, TPWeightGatherSpec
 from .registry import register_scheme
 
 # Maximum supported dimension for Kronecker quantization left_trans_dim and right_trans_dim
@@ -66,6 +66,11 @@ def get_decompose_dim(n: int, m: int) -> tuple[int, int]:
 @register_scheme("W4A4_MXFP4_FLATQUANT", "linear")
 class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A4_MXFP4_FLATQUANT_DYNAMIC."""
+
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
 
     def __init__(self):
         vllm_config = get_current_vllm_config()

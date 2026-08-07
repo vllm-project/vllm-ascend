@@ -19,7 +19,7 @@ from typing import Any
 
 import torch
 
-from .base import QuantType
+from .base import QuantType, TPWeightGatherSpec
 from .registry import register_scheme
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 
@@ -33,6 +33,7 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
     """
 
     act_quant_type: torch.dtype = torch.float8_e4m3fn
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
 
     def __init__(self):
         pass

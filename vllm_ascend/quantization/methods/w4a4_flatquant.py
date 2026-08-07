@@ -22,7 +22,7 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
-from .base import AscendLinearScheme
+from .base import AscendLinearScheme, TPWeightGatherSpec
 from .registry import register_scheme
 
 KRONECKER_QUANT_MAX_BATCH_SIZE = 32768
@@ -87,6 +87,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
     """
 
     input_size = 0
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight_packed", gather_dim=1),)
 
     def __init__(self):
         self.sym = True

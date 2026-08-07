@@ -30,7 +30,12 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+)
 from .registry import register_scheme
 
 
@@ -88,6 +93,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     ``antiquant_scale`` as ``weight_scale * weight_scale_second`` converted to
     ``x.dtype`` with shape ``[input_size // group_size, output_size]``.
     """
+
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale_second"),
+    )
 
     def __init__(self):
         vllm_config = get_current_vllm_config()

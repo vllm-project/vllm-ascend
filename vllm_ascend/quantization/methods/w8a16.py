@@ -22,7 +22,7 @@ import torch_npu
 
 from vllm_ascend.utils import maybe_trans_nz
 
-from .base import AscendLinearScheme
+from .base import AscendLinearScheme, TPWeightGatherSpec
 from .registry import register_scheme
 
 
@@ -35,6 +35,8 @@ class AscendW8A16LinearMethod(AscendLinearScheme):
 
     def __init__(self) -> None:
         pass
+
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
 
     def get_weight(
         self,
