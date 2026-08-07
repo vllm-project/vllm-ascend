@@ -17,7 +17,8 @@ What is guarded here (everything reachable from CPU UT):
 * upstream ``run_engine_core`` still instantiates ``DPEngineCoreProc`` by
   module-global name -- the whole reason we can swap the module-level symbol
   instead of copying ``run_engine_core``;
-* the module-level class swaps actually took effect;
+* the module-level class swaps and the DyntraLB -> balance wrapper chain
+  actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
 * the 3 balance deltas remain present in ``schedule()`` (intent lock);
@@ -53,7 +54,6 @@ import pytest
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
-from vllm.v1.core.sched.scheduler import Scheduler as _UpstreamScheduler
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
 
@@ -76,12 +76,19 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #   EngineCoreProc.run_engine_core = _balance_run_engine_core            (eager)
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
 #       swapped inside _balance_run_engine_core only when balance is enabled)
+from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_run_engine_core,
     _balance_scheduling_enabled,
     _OriginalRunEngineCore,
 )
+
+# Importing any vLLM module can activate the Ascend platform plugin before this
+# test module finishes importing, so a direct ``Scheduler`` import may already
+# resolve to ``BalanceScheduler``. Its base class is the installed upstream
+# scheduler and remains unmodified by the BalanceScheduler class replacement.
+_UpstreamScheduler = BalanceScheduler.__bases__[0]
 
 # ---------------------------------------------------------------------------
 # Scheduler config compatibility
@@ -436,13 +443,14 @@ def test_upstream_run_engine_core_instantiates_dp_proc_by_name():
 # ---------------------------------------------------------------------------
 
 
-def test_module_level_swaps_take_effect():
-    """The patch rebinds ``Scheduler`` eagerly and installs the
-    ``run_engine_core`` wrapper eagerly, but DEFERS the ``DPEngineCoreProc``
-    swap to wrapper-call-time (conditional on balance being enabled), so that
-    balance does not touch configs that don't use it (e.g. PD-disaggregated
-    recompute). At import time the engine-core class must therefore still be
-    the pristine upstream one, and the wrapper must be installed.
+def test_module_level_swaps_and_wrapper_chain_take_effect():
+    """The balance patch rebinds ``Scheduler`` eagerly and installs its
+    ``run_engine_core`` wrapper, while the subsequently loaded DyntraLB patch
+    becomes the outer wrapper. DyntraLB delegates to the balance wrapper when
+    disabled; the two features are rejected by configuration validation when
+    both are enabled. The ``DPEngineCoreProc`` swap remains deferred until the
+    selected wrapper runs, so at import time the engine-core class must still
+    be the pristine upstream one.
     (``Scheduler`` propagating into ``vllm.v1.engine.core.Scheduler``
     additionally depends on the platform patch loading before engine.core is
     imported -- that ordering is enforced by the platform patch system and is
@@ -457,8 +465,11 @@ def test_module_level_swaps_take_effect():
         "patch swapped vllm.v1.engine.core.DPEngineCoreProc at import time; "
         "the swap must be deferred to run_engine_core entry (conditional)."
     )
-    assert _UpstreamEngineCoreProc.run_engine_core is _balance_run_engine_core, (  # type: ignore[comparison-overlap]
-        "patch did not install the _balance_run_engine_core wrapper on EngineCoreProc.run_engine_core"
+    assert _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
+        "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
+    )
+    assert _dyntra_patch._PreviousRunEngineCore is _balance_run_engine_core, (
+        "DyntraLB must delegate to the balance wrapper when DyntraLB is disabled"
     )
 
 
