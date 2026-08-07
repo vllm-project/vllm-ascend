@@ -143,10 +143,12 @@ Run the following script to execute online inference.
 ```{code-block} bash
    :substitutions:
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
-
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=0
@@ -219,6 +221,9 @@ Run the following scripts on two nodes respectively.
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_TRANSFER_TIMEOUT=600
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=3600
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=400
@@ -270,6 +275,9 @@ Run the following scripts on two nodes respectively.
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_TRANSFER_TIMEOUT=600
+    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_CONNECT_TIMEOUT=3600
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=400
@@ -451,6 +459,9 @@ Before you start, please
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -516,6 +527,9 @@ Before you start, please
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -579,6 +593,9 @@ Before you start, please
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
@@ -645,6 +662,9 @@ Before you start, please
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
@@ -851,7 +871,7 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_RPC_TIMEOUT=360000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_EXEC_TIMEOUT=200
     export HCCL_CONNECT_TIMEOUT=120
     export OMP_PROC_BIND=false
@@ -907,7 +927,7 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_RPC_TIMEOUT=360000
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_EXEC_TIMEOUT=200
     export HCCL_CONNECT_TIMEOUT=120
     export OMP_PROC_BIND=false
@@ -1260,6 +1280,9 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TASK_QUEUE_ENABLE=1
@@ -1323,6 +1346,9 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TASK_QUEUE_ENABLE=1
@@ -1385,6 +1411,9 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TASK_QUEUE_ENABLE=1
@@ -1455,6 +1484,9 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TASK_QUEUE_ENABLE=1
