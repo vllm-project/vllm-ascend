@@ -1185,7 +1185,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             model=self.model,
                             last_hidden_states=last_hidden_states,
                             draft_token_ids=draft_token_ids,
-                            num_blk=num_blk,
+                            num_reqs=num_blk,
                         )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
