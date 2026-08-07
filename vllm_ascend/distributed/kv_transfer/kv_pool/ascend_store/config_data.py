@@ -919,6 +919,8 @@ class ReqMeta:
         load_block_gvas_np: np.ndarray | None = None,
         load_block_gvas_by_group_np: list[np.ndarray] | None = None,
         load_gva_block_offset: int = 0,
+        partial_save_gvas_by_group: list[int] | None = None,
+        partial_load_gvas_by_group: list[int] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -955,6 +957,8 @@ class ReqMeta:
         self.load_block_gvas_np = load_block_gvas_np
         self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
         self.load_gva_block_offset = load_gva_block_offset
+        self.partial_save_gvas_by_group = partial_save_gvas_by_group or []
+        self.partial_load_gvas_by_group = partial_load_gvas_by_group or []
 
     @property
     def block_ids(self) -> list[int]:
@@ -980,6 +984,8 @@ class ReqMeta:
     block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
     load_block_gvas_by_group_np: list[np.ndarray] | None = None
+    partial_save_gvas_by_group: list[int] = field(default_factory=list)
+    partial_load_gvas_by_group: list[int] = field(default_factory=list)
 
     @staticmethod
     def from_request_tracker(
@@ -992,6 +998,7 @@ class ReqMeta:
         discard_partial_chunks: bool = True,
         original_block_size: list[int] | int | None = None,
         kv_cache_group_families: list[str] | None = None,
+        save_partial_block: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1029,7 +1036,12 @@ class ReqMeta:
         else:
             partial_block_index = None
 
-        skip_save = skip_save or (num_tokens_to_save < chunk_boundary and partial_block_index is None)
+        has_partial_block = save_partial_block and (
+            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
+        )
+        skip_save = skip_save or (
+            num_tokens_to_save < chunk_boundary and partial_block_index is None and not has_partial_block
+        )
         if skip_save and load_spec is None:
             return None
 
@@ -1139,6 +1151,9 @@ class LayerTransferTask:
     shared_block_data: SharedBlockData | None = None
     group_id: int = 0
     layer_idx_in_group: int = 0
+    # Publish newly allocated GVA keys after this task completes the final
+    # actual layer copy for the batch.
+    write_finish_keys: list[str] = field(default_factory=list)
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
