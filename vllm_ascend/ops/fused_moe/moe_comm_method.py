@@ -25,8 +25,11 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import (
+    CannMegaMoeLayerCapability,
+    resolve_cann_mega_moe_activation,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -56,12 +59,19 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
     return _MoECommMethods.get(moe_comm_type)
 
 
-def setup_moe_comm_method(moe_config):
+def setup_moe_comm_method(
+    moe_config,
+    *,
+    cann_mega_moe_capability: CannMegaMoeLayerCapability | None = None,
+):
     if moe_config.ep_size > 1:
         _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
         _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(
+            moe_config,
+            cann_mega_moe_capability=cann_mega_moe_capability,
+        )
     else:
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
@@ -281,12 +291,24 @@ class FusedMC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
-    def __init__(self, moe_config):
+    def __init__(
+        self,
+        moe_config,
+        *,
+        cann_mega_moe_capability: CannMegaMoeLayerCapability | None = None,
+    ):
+        self.cann_mega_moe_capability = cann_mega_moe_capability or CannMegaMoeLayerCapability(
+            False,
+            "layer capability was not registered",
+            QuantType.NONE,
+        )
         super().__init__(moe_config)
         self._mega_moe_symm_buffer = None
         self._mega_moe_weight_type = None
+        self.get_symm_buffer_for_mega_moe = None
+        self.mega_moe = None
         fused_mc2_enabled = get_ascend_config().enable_fused_mc2 == 1
-        if _MEGA_MOE_SUPPORTED:
+        if self.cann_mega_moe_capability.supported and fused_mc2_enabled:
             self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops(
                 preload_comm_context=(self.token_dispatcher.a5_need_extra_args and fused_mc2_enabled),
             )
@@ -299,7 +321,9 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(
+            cann_mega_moe_supported=self.cann_mega_moe_capability.supported,
+        )
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
@@ -358,6 +382,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.token_dispatcher.global_bs,
             num_max_tokens_per_rank,
         )
+        assert self.get_symm_buffer_for_mega_moe is not None
         self._mega_moe_symm_buffer = self.get_symm_buffer_for_mega_moe(
             group,
             num_experts,
@@ -422,15 +447,17 @@ class FusedMC2CommImpl(MoECommMethod):
                 fused_experts_input,
             )
 
-        activation = "swiglu"
-        activation_alpha = None
-        activation_beta = None
-        activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
-        if isinstance(fused_experts_input.activation, SituActivationConfig):
-            activation = "situ"
-            activation_alpha = fused_experts_input.activation.linear_beta
-            activation_beta = fused_experts_input.activation.beta
-            activation_clamp = None
+        activation_config = resolve_cann_mega_moe_activation(fused_experts_input.activation)
+        if activation_config is None:
+            raise RuntimeError(f"Unsupported CANN MegaMoe activation: {fused_experts_input.activation}")
+        activation = activation_config.name
+        activation_clamp = (
+            None
+            if activation == "situ"
+            else fused_experts_input.swiglu_limit
+            if fused_experts_input.swiglu_limit > 0
+            else None
+        )
         x_active_mask = None
         if (
             fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
@@ -450,7 +477,17 @@ class FusedMC2CommImpl(MoECommMethod):
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
+        activation_kwargs = (
+            {
+                "activation": activation,
+                "activation_alpha": activation_config.alpha,
+                "activation_beta": activation_config.beta,
+            }
+            if activation == "situ"
+            else {}
+        )
 
+        assert self.mega_moe is not None
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
@@ -464,11 +501,9 @@ class FusedMC2CommImpl(MoECommMethod):
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
             activation_clamp=activation_clamp,
-            activation=activation,
-            activation_alpha=activation_alpha,
-            activation_beta=activation_beta,
             weight1_type=self._mega_moe_weight_type,
             weight2_type=self._mega_moe_weight_type,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
@@ -481,13 +516,14 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
-        # CANN MegaMoe supports Kimi's SiTU only for the A5 W4A8 MXFP path.
-        # Keep every other SiTU configuration on the decomposed implementation.
-        if isinstance(fused_experts_input.activation, SituActivationConfig) and (
-            not self.token_dispatcher.a5_need_extra_args
-            or fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
-            or fused_experts_input.activation.linear_beta is None
-        ):
+        runtime_activation = resolve_cann_mega_moe_activation(fused_experts_input.activation)
+        use_cann_mega_moe = (
+            self.cann_mega_moe_capability.supported
+            and self.mega_moe is not None
+            and fused_experts_input.quant.quant_type == self.cann_mega_moe_capability.quant_type
+            and runtime_activation == self.cann_mega_moe_capability.activation
+        )
+        if _MEGA_MOE_SUPPORTED and not use_cann_mega_moe:
             return super().fused_experts(fused_experts_input)
         assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
@@ -504,7 +540,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            if _MEGA_MOE_SUPPORTED:
+            if use_cann_mega_moe:
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
             else:
                 assert not (

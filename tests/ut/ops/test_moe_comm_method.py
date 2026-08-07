@@ -8,6 +8,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from tests.ut.base import TestBase
 from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import CannMegaMoeLayerCapability
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
@@ -52,6 +53,7 @@ class TestMoECommMethod(TestBase):
         self.assertIs(mega_moe, ops_module.mega_moe)
 
     def setUp(self):
+        comm_utils.load_cann_mega_moe_ops.cache_clear()
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant = False
         self.mock_ascend_config.enable_fused_mc2 = False
@@ -80,11 +82,18 @@ class TestMoECommMethod(TestBase):
         self.moe_config.global_redundant_expert_num = 0
 
     def tearDown(self):
+        comm_utils.load_cann_mega_moe_ops.cache_clear()
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
 
     def test_a3_w4a8_mxfp_situ_falls_back_to_decomposed_mc2_pipeline(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.cann_mega_moe_capability = CannMegaMoeLayerCapability(
+            False,
+            "A2/A3 MegaMoe does not support W4A8MXFP",
+            QuantType.W4A8MXFP,
+        )
+        comm_impl.mega_moe = None
         comm_impl.token_dispatcher = SimpleNamespace(a5_need_extra_args=False)
         fused_input = MoEFusedExpertsInput(
             hidden_states=torch.randn(2, 4),
@@ -105,14 +114,23 @@ class TestMoECommMethod(TestBase):
         )
         expected = object()
 
-        with patch.object(MoECommMethod, "fused_experts", return_value=expected) as mock_decomposed:
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method._MEGA_MOE_SUPPORTED", True),
+            patch.object(MoECommMethod, "fused_experts", return_value=expected) as mock_decomposed,
+        ):
             result = comm_impl.fused_experts(fused_input)
 
         self.assertIs(result, expected)
         mock_decomposed.assert_called_once_with(fused_input)
 
-    def test_fused_mc2_unquantized_non_situ_does_not_fall_back(self):
+    def test_fused_mc2_unquantized_layer_falls_back_to_decomposed_pipeline(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.cann_mega_moe_capability = CannMegaMoeLayerCapability(
+            False,
+            "unsupported quantization",
+            QuantType.NONE,
+        )
+        comm_impl.mega_moe = None
         fused_input = MoEFusedExpertsInput(
             hidden_states=torch.randn(2, 4),
             topk_weights=torch.ones(2, 1),
@@ -131,13 +149,16 @@ class TestMoECommMethod(TestBase):
             activation=None,
         )
 
-        with (
-            patch.object(MoECommMethod, "fused_experts") as mock_decomposed,
-            self.assertRaisesRegex(AssertionError, "w1_scale and w2_scale"),
-        ):
-            comm_impl.fused_experts(fused_input)
+        expected = object()
 
-        mock_decomposed.assert_not_called()
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method._MEGA_MOE_SUPPORTED", True),
+            patch.object(MoECommMethod, "fused_experts", return_value=expected) as mock_decomposed,
+        ):
+            result = comm_impl.fused_experts(fused_input)
+
+        self.assertIs(result, expected)
+        mock_decomposed.assert_called_once_with(fused_input)
 
     def test_cann_megamoe_w4a8_mxfp_quant_settings(self):
         self.assertEqual(
@@ -276,6 +297,15 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(call.kwargs["l2_weights_sf"][0].shape, (4, 1, 2))
         self.assertEqual(call.args[3][0].data_ptr(), w1[0].data_ptr())
         self.assertEqual(call.args[4][0].data_ptr(), w2[0].data_ptr())
+
+        comm_impl.mega_moe.reset_mock()
+        swiglu_input = replace(fused_input, activation="silu")
+        comm_impl._apply_cann_mega_moe(swiglu_input, swiglu_input.topk_ids)
+
+        call = comm_impl.mega_moe.call_args
+        self.assertNotIn("activation", call.kwargs)
+        self.assertNotIn("activation_alpha", call.kwargs)
+        self.assertNotIn("activation_beta", call.kwargs)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")

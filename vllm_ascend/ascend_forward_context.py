@@ -1,6 +1,5 @@
 import importlib.util
 import math
-from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -14,6 +13,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import get_model_cann_mega_moe_capability
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -40,9 +40,6 @@ _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "quanttype.w8a8",
     "quanttype.w4a8",
 }
-_CANN_MEGAMOE_W4A8_MXFP_QUANT_NAMES = {"w4a8_mxfp", "quanttype.w4a8mxfp"}
-_CANN_MEGAMOE_W4A8_MXFP_FORMATS = {"mxfp4-pack-quantized"}
-
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
@@ -69,11 +66,7 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
-def _cann_megamoe_supported_by_config(
-    vllm_config: VllmConfig,
-    *,
-    allow_w4a8_mxfp: bool = False,
-) -> bool:
+def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
     hf_text_config = vllm_config.model_config.hf_text_config
     hidden_size = getattr(hf_text_config, "hidden_size", None)
     if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
@@ -97,72 +90,7 @@ def _cann_megamoe_supported_by_config(
     if quant_type is None:
         return True
     quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES or (
-        allow_w4a8_mxfp and quant_name in _CANN_MEGAMOE_W4A8_MXFP_QUANT_NAMES
-    )
-
-
-def _config_value(config: object, name: str, default=None):
-    if isinstance(config, Mapping):
-        return config.get(name, default)
-    return getattr(config, name, default)
-
-
-def _modelslim_k3_w4a8_mxfp_by_config(vllm_config: VllmConfig) -> bool:
-    """Recognize K3 routed expert W4A8 MXFP in ModelSlim metadata."""
-    quant_config = getattr(vllm_config, "quant_config", None)
-    if quant_config is None or not callable(getattr(quant_config, "get_name", None)):
-        return False
-    if str(quant_config.get_name()).lower() != "ascend":
-        return False
-
-    quant_description = getattr(quant_config, "quant_description", None)
-    if not isinstance(quant_description, Mapping):
-        return False
-
-    hf_text_config = vllm_config.model_config.hf_text_config
-    first_moe_layer = int(getattr(hf_text_config, "first_k_dense_replace", 0))
-    expert_prefixes = (
-        f"language_model.model.layers.{first_moe_layer}.block_sparse_moe.experts.0",
-        f"model.layers.{first_moe_layer}.block_sparse_moe.experts.0",
-    )
-    return any(
-        all(
-            str(quant_description.get(f"{prefix}.{projection}.weight", "")).upper()
-            == "W4A8_MXFP"
-            for projection in ("w1", "w2", "w3")
-        )
-        for prefix in expert_prefixes
-    )
-
-
-def _cann_megamoe_w4a8_mxfp_by_config(vllm_config: VllmConfig) -> bool:
-    """Recognize K3 W4A8 MXFP across its supported checkpoint formats."""
-    if _modelslim_k3_w4a8_mxfp_by_config(vllm_config):
-        return True
-
-    hf_text_config = vllm_config.model_config.hf_text_config
-    quant_type = getattr(
-        hf_text_config,
-        "moe_quantize",
-        getattr(hf_text_config, "quantize", None),
-    )
-    if quant_type is not None:
-        quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-        return quant_name in _CANN_MEGAMOE_W4A8_MXFP_QUANT_NAMES
-
-    quant_config = getattr(hf_text_config, "quantization_config", None)
-    if quant_config is None:
-        return False
-    quant_method = str(_config_value(quant_config, "quant_method", "")).lower()
-    if quant_method not in {"compressed-tensors", "compressed_tensors"}:
-        return False
-
-    formats = {_config_value(quant_config, "format", "")}
-    config_groups = _config_value(quant_config, "config_groups", {})
-    if isinstance(config_groups, Mapping):
-        formats.update(_config_value(group, "format", "") for group in config_groups.values())
-    return bool(formats & _CANN_MEGAMOE_W4A8_MXFP_FORMATS)
+    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
 
 @contextmanager
@@ -209,6 +137,7 @@ def set_ascend_forward_context(
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            model_instance=model_instance,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -397,13 +326,16 @@ def _select_a5_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
 ) -> MoECommType:
     hf_text_config = vllm_config.model_config.hf_text_config
+    if cann_mega_moe_supported is None:
+        cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
     if (
         get_ascend_config().enable_fused_mc2 == 1
-        and _MEGA_MOE_SUPPORTED
-        and _cann_megamoe_w4a8_mxfp_by_config(vllm_config)
-        and _cann_megamoe_supported_by_config(vllm_config, allow_w4a8_mxfp=True)
+        and cann_mega_moe_supported
+        and num_tokens <= mc2_tokens_capacity
     ):
         return MoECommType.FUSED_MC2
 
@@ -420,7 +352,13 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
 
@@ -439,7 +377,10 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode.
+        model_instance (torch.nn.Module | None): Loaded model used to aggregate
+            registered MegaMoe layer capabilities.
+        cann_mega_moe_supported (bool | None): Optional already-aggregated
+            capability result for initialization paths without a model handle.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -470,7 +411,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             vllm_config,
         )
     elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a5_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            model_instance,
+            cann_mega_moe_supported,
+        )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
 

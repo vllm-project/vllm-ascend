@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from functools import cache
 from importlib import import_module
 
 import torch
@@ -115,6 +116,7 @@ def gather_from_sequence_parallel_region(
     return _gather_along_first_dim(input_, group, output_split_sizes)
 
 
+@cache
 def load_cann_mega_moe_ops(*, preload_comm_context: bool = False):
     if preload_comm_context:
         # A5 multi-node MegaMoe must build the communication-context extension

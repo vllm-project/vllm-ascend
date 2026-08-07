@@ -109,7 +109,7 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
 
 
 class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
-    def __init__(self, **kwargs):
+    def __init__(self, *, cann_mega_moe_supported: bool | None = None, **kwargs):
         super().__init__(**kwargs)
         device_group = get_mc2_group().device_group
         # TODO: Try local_rank = ep_group.rank_in_group
@@ -147,7 +147,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use global_bs=0 (uniform mode) and pass mc2_mask.
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
-        self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
+        self.global_bs = (
+            _max_global_bs
+            if should_skip_allreduce_across_dp_group(
+                vllm_config,
+                cann_mega_moe_supported=cann_mega_moe_supported,
+            )
+            else 0
+        )
 
         # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
         self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
