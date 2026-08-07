@@ -29,7 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, maybe_trans_nz
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
@@ -107,12 +107,18 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     already packed as int4 pairs in int8 storage and are reinterpreted as int32
     by grouping four int8 values.
 
-    After processing, ``torch_npu.npu_weight_quant_batchmatmul`` is called with
-    ``weight`` as ``torch.int32`` in the operator-required packed layout
-    with shape ``[input_size, output_size // 8]`` and
-    ``antiquant_scale`` as either the per-channel ``weight_scale`` or the
-    per-group product ``weight_scale * weight_scale_second``, converted to
-    ``x.dtype``.
+    Per-group linear weights use ``torch_npu.npu_weight_quant_batchmatmul``.
+    Generic per-channel linear weights use ``torch_npu.npu_quant_matmul``.
+    K3 shared experts use the per-channel W4A8 grouped-matmul path: activations
+    are dynamically quantized to int8, packed int4 weights are converted to NZ,
+    and the projection is evaluated as a single expert by
+    ``torch_npu.npu_grouped_matmul``. This avoids silently degrading K3 shared
+    experts to W4A16.
+
+    The generic linear operators consume ``weight`` as ``torch.int32`` with
+    shape ``[input_size, output_size // 8]``. The K3 shared-expert grouped
+    operator consumes a leading singleton expert dimension, with shape
+    ``[1, input_size, output_size // 8]``.
     """
 
     def __init__(self):
@@ -122,25 +128,25 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
         self._uses_kimi_k3_shared_expert_per_channel = _is_kimi_k3_model(vllm_config)
-        self._force_kimi_shared_expert_weight_only = False
+        self._force_kimi_shared_expert_per_channel = False
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def _uses_per_channel_shared_expert(self, layer: torch.nn.Module) -> bool:
         # This is deliberately not a model-wide K3 flag: only K3 shared
         # experts have per-channel W4A8 scales. Routed experts stay per-group.
-        return self._force_kimi_shared_expert_weight_only or (
+        return self._force_kimi_shared_expert_per_channel or (
             self._uses_kimi_k3_shared_expert_per_channel and ".shared_experts." in getattr(layer, "prefix", "")
         )
 
     def enable_per_channel_for_kimi_shared_expert(self) -> None:
-        """Select the per-channel weight-only path for a Kimi shared expert."""
+        """Select the per-channel W4A8 path for a Kimi shared expert."""
         self.group_size = 0
         self.is_per_channel_weight = True
         # This scheme instance is attached to one shared-expert projection.
         # Retain that selection through weight loading, where layer.prefix is
         # not a reliable discriminator for every vLLM Linear wrapper.
-        self._force_kimi_shared_expert_weight_only = True
+        self._force_kimi_shared_expert_per_channel = True
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Create weight parameters.
@@ -231,17 +237,40 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     ) -> torch.Tensor:
         if self.is_per_channel_weight:
             if self._uses_per_channel_shared_expert(layer):
-                # K3 shared experts use W4 INT4Pack weights. The generic
-                # QuantMatmul WeightNZ path cannot consume that representation
-                # on A3, so use the W4-native weight-only kernel as a
-                # functional fallback. It consumes BF16 activations and a
-                # per-channel antiquant scale directly.
-                return torch_npu.npu_weight_quant_batchmatmul(
-                    x,
-                    layer.weight,
-                    antiquant_scale=layer.weight_scale.to(x.dtype),
-                    antiquant_group_size=0,
+                # QuantMatmul cannot consume the A3 per-channel INT4 WeightNZ
+                # representation. Model this projection as one grouped expert
+                # instead, which keeps both the int8 activation and int4 weight.
+                input_shape = x.shape
+                x_2d = x.reshape(-1, input_shape[-1])
+                quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x_2d)
+                group_list = torch.tensor(
+                    [quantized_x.shape[0]],
+                    dtype=torch.int64,
+                    device=x.device,
                 )
+
+                scale_bias = layer.scale_bias
+                if scale_bias.dim() == 2:
+                    rank = tp_rank or 0
+                    if rank >= scale_bias.shape[1]:
+                        raise ValueError(f"tp_rank {rank} exceeds scale_bias width {scale_bias.shape[1]}")
+                    scale_bias = scale_bias[:, rank]
+
+                output = torch_npu.npu_grouped_matmul(
+                    x=[quantized_x],
+                    weight=[layer.weight],
+                    scale=[layer.weight_scale.reshape(1, 1, -1)],
+                    bias=[scale_bias.reshape(1, -1)],
+                    per_token_scale=[pertoken_scale],
+                    split_item=2,
+                    group_list=group_list,
+                    group_type=0,
+                    group_list_type=1,
+                    output_dtype=x.dtype,
+                )[0]
+                if bias is not None:
+                    output = output + bias
+                return output.reshape(*input_shape[:-1], output.shape[-1])
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
             need_unsqueeze = pertoken_scale.dim() == 2
             if need_unsqueeze:
@@ -269,14 +298,38 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         uses_per_channel_shared_expert = self._uses_per_channel_shared_expert(layer)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        # Keep K3 shared-expert INT4Pack weights in ND. The weight-only
-        # fallback accepts ND INT32 INT4Pack, while a per-channel INT4
-        # WeightNZ operand has a different transpose contract and cannot be
-        # passed to the generic QuantMatmul WeightNZ path.
-        if not uses_per_channel_shared_expert:
-            layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+
+        if uses_per_channel_shared_expert:
+            if not self.new_quant_version:
+                raise ValueError("K3 shared-expert W4A8 requires quantization version 1.0.0")
+
+            # Preserve the floating-point scale for the fused SiTU path, then
+            # bit-cast it to the int64 representation required by grouped
+            # matmul. Each int64 element stores one FP32 scale bit pattern.
+            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+            scale_np = layer.weight_scale_fp32.contiguous().cpu().numpy()
+            scale_np.dtype = np.uint32
+            layer.weight_scale.data = torch.from_numpy(scale_np.astype(np.int64)).to(layer.weight_scale.device)
+
+            if not hasattr(layer, "scale_bias"):
+                raise ValueError("K3 shared-expert W4A8 requires scale_bias")
+            if layer.scale_bias.data.shape[1] == 1:
+                layer.scale_bias.data = layer.scale_bias.data.flatten()
+            else:
+                layer.scale_bias.data = layer.scale_bias.data.contiguous()
+
+            # Treat the shared projection as one grouped expert. Keep packed
+            # int4 bytes while converting to NZ, then expose groups of four
+            # bytes as the int32 storage expected by the GMM interface.
+            assert layer.weight.data.shape[-1] % 4 == 0, (
+                f"the last dim of weight needs to be divided by 4 but got shape {layer.weight.data.shape}"
+            )
+            layer.weight.data = maybe_trans_nz(layer.weight.data.unsqueeze(0)).view(torch.int32).contiguous()
+            return
+
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
         if self.is_per_channel_weight:
             # QuantMatmul consumes the checkpoint dtype, while the fused SiTU
             # dequantization step requires an FP32 copy of the same scale.
@@ -312,6 +365,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
         else:
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
+
 
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):

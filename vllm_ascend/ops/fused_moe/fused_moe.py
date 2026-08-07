@@ -878,9 +878,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
-                # Kimi K3 per-channel W4A8 shared experts also use this
-                # path. Their Linear scheme runs the W4-native weight-only
-                # matmul, avoiding QuantMatmul WeightNZ for INT4Pack weights.
+                # Kimi K3 per-channel W4A8 shared experts also use this path.
+                # Their Linear scheme dynamically quantizes each projection's
+                # activation and evaluates its INT4 NZ weight as one GMM group.
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
