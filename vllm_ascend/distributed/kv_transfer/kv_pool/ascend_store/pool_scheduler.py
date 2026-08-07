@@ -27,7 +27,7 @@ from vllm.v1.serial_utils import MsgpackEncoder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     KeyMetadata,
