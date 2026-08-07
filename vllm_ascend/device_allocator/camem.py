@@ -201,6 +201,14 @@ class CaMemAllocator:
             len(self.pointer_to_data),
             offload_tags,
         )
+        # Graph replay and normal NPU launches are asynchronous.  All tensors
+        # tracked below are backed by virtual mappings that are removed by
+        # unmap_and_release(), so every user of those mappings must finish
+        # before the first unmap.  Synchronizing only via empty_cache() after
+        # the loop is too late and can turn an in-flight graph's tensor
+        # addresses into dangling pointers.
+        torch.npu.synchronize()
+
         for ptr, data in self.pointer_to_data.items():
             if data.tag == CaMemAllocator.sleep_persistent_tag:
                 # This memory is not offloaded or released during sleep.
