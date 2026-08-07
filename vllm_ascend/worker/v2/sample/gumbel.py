@@ -88,7 +88,7 @@ def apply_temperature(
     do_not_specialize=[
         "local_argmax_stride",
         "local_max_stride",
-        "processed_logits_stride",
+        "logits_cache_stride",
         "logits_stride",
         "vocab_size",
     ]
@@ -98,9 +98,9 @@ def _gumbel_sample_kernel(
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
+    logits_cache_ptr,
+    logits_cache_stride,
+    logits_cache_col_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -110,6 +110,8 @@ def _gumbel_sample_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
+    STORE_PRE_TEMP: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -126,20 +128,31 @@ def _gumbel_sample_kernel(
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
     if temp != 0.0 and APPLY_TEMPERATURE:
-        # NOTE(woosuk): Match the behavior of _temperature_kernel.
-        logits = logits / temp
+        if not STORE_PRE_TEMP:
+            # Release: cache temperature-applied logits (matches _temperature_kernel).
+            logits = logits / temp
 
-    if processed_logits_ptr is not None:
-        # Store the temperature-applied logits.
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
+    if logits_cache_ptr is not None:
+        # Store the logits *before* temperature on main so the rejection
+        # sampler divides by the same temperature on load (bitwise-exact).
+        # On release the cached logits are already temperature-applied.
+        if logits_cache_col_ptr is not None:
+            if PER_TOKEN_COL:
+                col = tl.load(logits_cache_col_ptr + token_idx)
+            else:
+                col = tl.load(logits_cache_col_ptr)
         else:
             col = 0
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+            logits_cache_ptr + req_state_idx * logits_cache_stride + col * vocab_size + block,
             logits,
             mask=mask,
         )
+
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        if STORE_PRE_TEMP:
+            # Main: apply temperature after caching the pre-temperature logits.
+            logits = logits / temp
 
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
@@ -164,16 +177,17 @@ def _gumbel_sample_kernel(
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
-def gumbel_sample(
+def _gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
     temperature: torch.Tensor,  # [max_num_reqs]
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    output_processed_logits: torch.Tensor | None = None,
-    output_processed_logits_col: torch.Tensor | None = None,
-    use_fp64: bool = False,
+    logits_cache: torch.Tensor | None,  # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_col: torch.Tensor | None,  # scalar or [num_tokens]
+    use_fp64: bool,
+    store_pre_temp: bool,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
@@ -192,14 +206,15 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
+    per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
+        logits_cache,
+        logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -209,8 +224,68 @@ def gumbel_sample(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
+        PER_TOKEN_COL=per_token_col,
+        STORE_PRE_TEMP=store_pre_temp,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
+
+
+# main2main compat: upstream `gumbel_sample` post-0.26.0 renamed
+# `output_processed_logits`/`output_processed_logits_col` to
+# `logits_cache`/`logits_cache_col` and now stores the logits *before*
+# temperature so the rejection sampler re-applies it on load. The release
+# callers pass the old names.
+if vllm_version_is("0.26.0"):
+
+    def gumbel_sample(
+        logits: torch.Tensor,  # [num_tokens, vocab_size]
+        expanded_idx_mapping: torch.Tensor,  # [num_tokens]
+        temperature: torch.Tensor,  # [max_num_reqs]
+        seed: torch.Tensor,  # [max_num_reqs]
+        pos: torch.Tensor,  # [num_tokens]
+        apply_temperature: bool,
+        output_processed_logits: torch.Tensor | None = None,
+        output_processed_logits_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+    ) -> torch.Tensor:
+        return _gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature,
+            output_processed_logits,
+            output_processed_logits_col,
+            use_fp64,
+            store_pre_temp=False,
+        )
+
+else:
+
+    def gumbel_sample(  # type: ignore[misc]
+        logits: torch.Tensor,  # [num_tokens, vocab_size]
+        expanded_idx_mapping: torch.Tensor,  # [num_tokens]
+        temperature: torch.Tensor,  # [max_num_reqs]
+        seed: torch.Tensor,  # [max_num_reqs]
+        pos: torch.Tensor,  # [num_tokens]
+        apply_temperature: bool,
+        logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, V]
+        logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
+        use_fp64: bool = False,
+    ) -> torch.Tensor:
+        return _gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature,
+            logits_cache,
+            logits_cache_col,
+            use_fp64,
+            store_pre_temp=True,
+        )
