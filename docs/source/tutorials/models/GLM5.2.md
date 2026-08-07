@@ -1443,7 +1443,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **Deployment** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
 ## 9 Performance Tuning
 
