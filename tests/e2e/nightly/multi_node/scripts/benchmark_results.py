@@ -68,9 +68,7 @@ def compare_version_results(
         baseline_ott = get_output_throughput(baseline_results[idx]) if idx < len(baseline_results) else None
         for candidate_name in candidate_names:
             candidate_results = results_by_version[candidate_name]
-            candidate_ott = (
-                get_output_throughput(candidate_results[idx]) if idx < len(candidate_results) else None
-            )
+            candidate_ott = get_output_throughput(candidate_results[idx]) if idx < len(candidate_results) else None
             entry = {
                 "case_name": case_name,
                 "dataset_path": case.get("dataset_path", ""),
