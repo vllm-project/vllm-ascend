@@ -27,6 +27,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
 - `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
+- `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4).
+- `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
 - `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -74,7 +76,7 @@ docker run --rm \
     --device /dev/ummu \
     --device /dev/uburma \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hixlep/:/etc/hixlep/ \
     -v /root/.cache:/root/.cache \
     -v /usr/local/sbin:/usr/local/sbin \
@@ -211,7 +213,7 @@ vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
 --port 8015 \
 --max_model_len 135168 \
 --max-num-batched-tokens 16384 \
---served-model-name dsv3 \
+--served-model-name deepseek_v3 \
 --gpu-memory-utilization 0.9 \
 --data-parallel-size 1 \
 --tensor-parallel-size 8 \

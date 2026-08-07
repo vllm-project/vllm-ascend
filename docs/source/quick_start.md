@@ -15,6 +15,7 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
+- Atlas 950DT inference series (Atlas 950DT)
 - Atlas 300I DUO
 - Atlas 200I Pro
 
@@ -22,7 +23,7 @@ This section guides you through container-based environment setup and large mode
 
 :::::{tab-set}
 
-::::{tab-item} Atlas A2/A3 inference products
+::::{tab-item} Atlas A2/A3/950DT inference products
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
@@ -78,6 +79,8 @@ export DEVICE=/dev/davinci0
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 # Atlas A3:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+# Atlas 950DT:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
@@ -144,6 +147,8 @@ export DEVICE=/dev/davinci0
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 # Atlas A3:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3-openeuler
+# Atlas 950DT:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt-openeuler
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 docker run --rm \
 --name vllm-ascend \
