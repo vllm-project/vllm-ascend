@@ -155,6 +155,32 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(scheduler.load_specs["r1"].kvpool_store_skip_tokens, 64)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layerwise_mtp_hit_uses_safe_load_extent(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
+        scheduler.use_layerwise = True
+        scheduler.use_gva_layerwise = True
+        scheduler.use_eagle = True
+        scheduler.cache_transfer_granularity = 16
+        scheduler._get_layerwise_gva_hit_tokens = MagicMock(return_value=64)
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        need, is_async = scheduler.get_num_new_matched_tokens(request, 48)
+
+        self.assertEqual(need, 0)
+        self.assertFalse(is_async)
+        load_spec = scheduler.load_specs["r1"]
+        self.assertEqual(load_spec.kvpool_cached_tokens, 48)
+        self.assertEqual(load_spec.kvpool_store_skip_tokens, 64)
+        self.assertTrue(load_spec.can_load)
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        self.assertTrue(load_spec.can_load)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_full_hbm_hit_skips_external_lookup(self, mock_client_cls):
         scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
         request = MagicMock()
