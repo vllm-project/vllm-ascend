@@ -209,7 +209,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     """
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
+    temp = HV // H
+    i_h = i_hv // temp
 
     if IS_VARLEN:
         bos, eos = (
