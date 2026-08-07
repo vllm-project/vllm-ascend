@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+import vllm_ascend.envs as envs_ascend
 
 MIN_PAD_SIZE: int = 64  # min_size to pad weight
 MAX_PAD_SIZE: int = 128  # max_size to pad weight
@@ -66,7 +67,11 @@ class AscendMMEncoderAttention310(MMEncoderAttention):
             prefix=prefix,
         )
 
-        self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self.enable_pad = (
+            envs_ascend.VLLM_ASCEND_MM_ENCODER_ENABLE_PAD
+            and self.head_size > MIN_PAD_SIZE
+            and self.head_size < MAX_PAD_SIZE
+        )
         self.scale_value = self.head_size**-0.5
         self.support_approximate_calculation = is_approximate_calculation_supported()
 
