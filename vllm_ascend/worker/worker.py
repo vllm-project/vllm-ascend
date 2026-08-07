@@ -970,6 +970,9 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        # Idle DP skips execute_model; still must join this EngineCore's DFX
+        # sync (per-DP config group or file poll + last-PP TP dump OR).
+        self.model_runner.dfx.sync_for_step(allow_arm=False)
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
