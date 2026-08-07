@@ -209,13 +209,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             if self.use_heterogeneous_vocab:
                 raise ValueError("use_heterogeneous_vocab is not compatible with draft_sample_method='probabilistic'.")
-            if self.use_cuda_graph:
-                logger.warning(
-                    "draft_sample_method='probabilistic' is not compatible "
-                    "with ACLGraph. The draft model has been automatically "
-                    "switched to eager mode (enforce_eager=true)."
-                )
-                self.use_cuda_graph = False
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -1257,16 +1250,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             draft_token_ids[:, idx + 1].copy_(token_ids)
                             if probs is not None:
                                 dspark_probs_list.append(probs)
-                            # Diagnostic: compare probabilistic sample vs argmax
-                            # to measure divergence caused by random sampling.
-                            argmax_ids = logits[:, idx].argmax(dim=-1)
-                            match_rate = (token_ids == argmax_ids).float().mean().item()
-                            logger.info(
-                                "[dspark_step_diag] step=%d, "
-                                "sample_vs_argmax_match_rate=%.3f, "
-                                "num_blk=%d",
-                                idx, match_rate, num_blk,
-                            )
                         else:
                             draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
                     if use_probabilistic and dspark_probs_list:
