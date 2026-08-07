@@ -7,9 +7,12 @@ import torch
 import vllm
 from torch import nn
 from vllm.lora.layers import MergedColumnParallelLinearWithLoRA, MergedQKVParallelLinearWithLoRA
+from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.lora.utils import (
+    AscendFusedMoE3DWithLoRA,
+    AscendFusedMoEWithLoRA,
     AscendMergedColumnParallelLinearWithLoRA,
     AscendMergedQKVParallelLinearWithLoRA,
     _PackedLoRAAWeightsMixin,
@@ -208,12 +211,21 @@ def test_packed_lora_wrappers_extend_only_non_sharded_merged_layers() -> None:
 
 def test_refresh_lora_classes_prioritizes_packed_wrappers() -> None:
     original_classes = vllm.lora.utils._all_lora_classes
+    ascend_classes = (
+        AscendMergedColumnParallelLinearWithLoRA,
+        AscendMergedQKVParallelLinearWithLoRA,
+        AscendFusedMoEWithLoRA,
+        AscendFusedMoE3DWithLoRA,
+    )
+    expected_count = len(ascend_classes) + sum(cls not in ascend_classes for cls in original_classes)
     with patch.object(vllm.lora.utils, "_all_lora_classes", original_classes):
+        refresh_all_lora_classes()
         refresh_all_lora_classes()
         assert vllm.lora.utils._all_lora_classes[:2] == (
             AscendMergedColumnParallelLinearWithLoRA,
             AscendMergedQKVParallelLinearWithLoRA,
         )
+        assert len(vllm.lora.utils._all_lora_classes) == expected_count
 
 
 def test_packed_lora_a_weights_follow_set_and_reset_lifecycle() -> None:
