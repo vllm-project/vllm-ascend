@@ -516,6 +516,7 @@ class KVPoolWorker:
                     self.get_event,
                     self.layer_load_finished_events,
                     self.layer_save_finished_events,
+                    self.sync_save_events,
                     self.num_layers,
                     self.h2d_stagger_us,
                     self.layerwise_max_transfer_blocks,
@@ -869,6 +870,11 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
             self.next_layer_to_submit = 0
+            # Transfer threads receive these lists by reference. Give every
+            # step fresh lists so a late clear of a previous step cannot drop
+            # newly prepared loads/saves and leave a reused buffer stale.
+            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
             reset_attention_compute_start_gate()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
@@ -1017,6 +1023,7 @@ class KVPoolWorker:
         # Only the first rank in each put_step group saves to the
         # pool.  Other ranks in the same group share the same KV cache
         # (e.g. MLA latent), so they skip save to avoid redundant writes.
+        # TODO(lf): Distribute KV block writes across ranks in the put_step group.
         if self.tp_rank % self.put_step != 0:
             return
         block_size = self._get_effective_group_block_size(group_id)
@@ -1645,6 +1652,10 @@ class KVPoolWorker:
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
+        # Keep this method safe for direct callers as well as start_load_kv().
+        # Worker threads may still own the lists from the preceding step.
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
