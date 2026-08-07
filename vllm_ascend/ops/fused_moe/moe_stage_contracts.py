@@ -65,6 +65,12 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoERoutingParams
     quant: MoEQuantParams
+    # The routed-expert layer owning the weights. The standard MLP stage reads
+    # the quant-method-specific weights (e.g. ``w13_weight_list``) from here,
+    # so quant methods no longer need to thread every weight tensor through
+    # ``build_fused_experts_input``. ``weights`` is kept for the FUSED_MC2
+    # communication path and for backward-compatible callers.
+    layer: torch.nn.Module | None = None
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
@@ -143,6 +149,8 @@ class MoEMlpComputeInput:
     weights: MoEWeights
     quant: MoEQuantParams
     fusion: bool
+    # Weight source for the gmm hooks (see MoEFusedExpertsInput.layer).
+    layer: torch.nn.Module | None = None
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False

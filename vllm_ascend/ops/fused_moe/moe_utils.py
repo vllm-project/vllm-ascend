@@ -21,8 +21,10 @@ import torch
 import torch.distributed
 import torch.distributed as dist
 import torch_npu
+from torch.nn.functional import pad
 
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import enable_custom_op
 
 COMM_STREAM = None
 
@@ -178,3 +180,85 @@ def get_moe_num_logical_experts(
         return int(num_logical_experts)
 
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
+def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
+    return (
+        fusion
+        and dynamic_eplb
+        and getattr(activation, "value", activation) != "swigluoai_uninterleave"
+        and enable_custom_op()
+    )
+
+
+def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activation=None):
+    return (use_mxfp_quant or (fusion and not dynamic_eplb)) and (
+        getattr(activation, "value", activation) != "swigluoai_uninterleave"
+    )
+
+
+def cumsum_group_list(
+    group_list: torch.Tensor, src_list_type: int, dst_list_type: int, active_num: int = 0, expert_num: int = 0
+) -> torch.Tensor:
+    if src_list_type not in [0, 1, 2]:
+        raise ValueError(f"group_list_type should be in [0, 1, 2], but received {src_list_type}")
+
+    if src_list_type == dst_list_type:
+        return group_list
+    if src_list_type == 1 and dst_list_type == 0:
+        return group_list.cumsum(dim=0)
+    if src_list_type == 0 and dst_list_type == 1:
+        group_diff = torch.diff(group_list)
+        new_group = torch.cat([group_list[0].unsqueeze(0), group_diff], dim=0)
+        return new_group
+    if src_list_type == 2 and dst_list_type == 0:
+        experts = pad(group_list[:, 0], (1, 0))
+        tokens = pad(group_list[:, 1].cumsum(dim=0), (1, 0))
+        cumsum_group_list = torch.full(
+            size=(expert_num,), fill_value=active_num, dtype=group_list.dtype, device=group_list.device
+        )
+
+        for i, (start, end) in enumerate(zip(experts[:-1], experts[1:])):
+            if end > start:
+                cumsum_group_list[start:end] = tokens[i]
+
+        return cumsum_group_list
+    raise NotImplementedError(
+        f"Conversion from src_list_type={src_list_type} to dst_list_type={dst_list_type} is not implemented yet. "
+        "This feature is under development."
+    )
+
+
+def _require_single_tensor_for_swiglu_quant(
+    tensor_or_list: list[torch.Tensor] | torch.Tensor, *, name: str
+) -> torch.Tensor:
+    if isinstance(tensor_or_list, list):
+        if len(tensor_or_list) != 1:
+            raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
+        return tensor_or_list[0]
+    return tensor_or_list
+
+
+def _prepare_dequant_swiglu_weight_scale(
+    w1_scale: list[torch.Tensor] | torch.Tensor,
+) -> torch.Tensor:
+    """Prepare w1_scale for the swigluoai_uninterleave dequant fused op."""
+    if isinstance(w1_scale, list):
+        if len(w1_scale) == 1:
+            weight_scale = w1_scale[0]
+        else:
+            weight_scale = torch.stack([scale.reshape(-1) for scale in w1_scale], dim=0)
+    else:
+        weight_scale = w1_scale
+    if weight_scale.dtype != torch.float32:
+        weight_scale = weight_scale.to(torch.float32)
+    if weight_scale.dim() == 1:
+        weight_scale = weight_scale.reshape(1, -1)
+    return weight_scale
+
+
+def _prepare_swigluoai_grouped_matmul_scales(
+    weight_scale: list[torch.Tensor] | torch.Tensor, output_dtype: torch.dtype
+) -> list[torch.Tensor]:
+    scales = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+    return [scale.to(output_dtype) if scale.dtype != output_dtype else scale for scale in scales]

@@ -26,7 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
-from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_activation import get_moe_activation_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
     MoEMlpComputeInput,
@@ -133,6 +133,7 @@ class MoECommMethod(ABC):
     def fused_experts(
         self,
         fused_experts_input: MoEFusedExpertsInput,
+        quant_method=None,
     ):
         # Check constraints
         assert fused_experts_input.hidden_states.dtype in [
@@ -163,8 +164,13 @@ class MoECommMethod(ABC):
             token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
         )
-
-        mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
+        if quant_method is None:
+            # Legacy path (310P): the comm method overrides ``_apply_mlp`` with
+            # its own MLP implementation.
+            mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
+        else:
+            act_method = get_moe_activation_method(fused_experts_input.activation)
+            mlp_output, before_gmm2_evt = act_method.apply_mlp(mlp_compute_input, quant_method)
 
         before_combine_evt = torch.npu.current_stream().record_event()
         routed_out = self.token_dispatcher.token_combine(
@@ -185,7 +191,10 @@ class MoECommMethod(ABC):
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+        raise NotImplementedError(
+            "Comm method must either override _apply_mlp or receive a quant_method "
+            "so the MLP stage can be orchestrated by MoeActionMethod."
+        )
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
@@ -360,9 +369,10 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
+        weights,
     ):
-        assert fused_experts_input.weights.w1_scale is not None
-        assert fused_experts_input.weights.w2_scale is not None
+        assert weights.w1_scale is not None
+        assert weights.w2_scale is not None
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
@@ -370,16 +380,16 @@ class FusedMC2CommImpl(MoECommMethod):
         def to_list(x):
             return x if isinstance(x, list) else [x]
 
-        weight1 = to_list(fused_experts_input.weights.w1)
-        weight2 = to_list(fused_experts_input.weights.w2)
+        weight1 = to_list(weights.w1)
+        weight2 = to_list(weights.w2)
         # A8W4-INT MegaMoe reads N from weight1.storageShape.lastDim treated as int8 (N = lastDim*2)
         # and checks weight2.dim0 == N/2, so the weights MUST be int8-shaped (two int4 per byte), NOT
         # the eight-int4-per-int32 packing (that makes the op read N four times too small and fail
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
-        weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
+        weight_scales1 = to_list(weights.w1_scale)
+        weight_scales2 = to_list(weights.w2_scale)
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
         # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
         # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
@@ -406,8 +416,8 @@ class FusedMC2CommImpl(MoECommMethod):
             else:
                 x_active_mask = raw_mask.to(torch.int8).contiguous()
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
-        l1_bias = fused_experts_input.weights.w1_scale_bias
-        l2_bias = fused_experts_input.weights.w2_scale_bias
+        l1_bias = weights.w1_scale_bias
+        l2_bias = weights.w2_scale_bias
 
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
@@ -435,8 +445,15 @@ class FusedMC2CommImpl(MoECommMethod):
     def fused_experts(
         self,
         fused_experts_input: MoEFusedExpertsInput,
+        quant_method=None,
     ):
-        assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
+        if quant_method is not None:
+            weights = quant_method.get_moe_weights(fused_experts_input.layer)
+        else:
+            # Backward-compatible fallback for legacy callers that still build
+            # the weight payload through build_fused_experts_input.
+            weights = fused_experts_input.weights
+        assert not (weights.w1_scale is None or weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )
 
@@ -452,23 +469,22 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
             if _MEGA_MOE_SUPPORTED:
-                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
+                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids, weights)
             else:
-                assert not (
-                    fused_experts_input.weights.w1_scale_bias is None
-                    or fused_experts_input.weights.w2_scale_bias is None
-                ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
+                assert not (weights.w1_scale_bias is None or weights.w2_scale_bias is None), (
+                    "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
+                )
 
                 out = torch.empty_like(fused_experts_input.hidden_states)
                 torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                     x=fused_experts_input.hidden_states,
-                    weight1=fused_experts_input.weights.w1,
-                    weight2=fused_experts_input.weights.w2,
+                    weight1=weights.w1,
+                    weight2=weights.w2,
                     expert_idx=topk_ids,
-                    scale1=fused_experts_input.weights.w1_scale,
-                    scale2=fused_experts_input.weights.w2_scale,
-                    bias1=fused_experts_input.weights.w1_scale_bias,
-                    bias2=fused_experts_input.weights.w2_scale_bias,
+                    scale1=weights.w1_scale,
+                    scale2=weights.w2_scale,
+                    bias1=weights.w1_scale_bias,
+                    bias2=weights.w2_scale_bias,
                     probs=fused_experts_input.topk_weights.to(torch.float32),
                     group=self.token_dispatcher.moe_all_to_all_group_name,
                     max_output_size=get_ascend_config().mega_moe_max_tokens,
