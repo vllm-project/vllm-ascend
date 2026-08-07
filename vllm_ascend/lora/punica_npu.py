@@ -51,16 +51,12 @@ def _lora_bmm_expand_slice_op(
         )
 
     safe_indices = indices.clamp(min=0).to(torch.long)
-    # Collapse the legacy stacking dimension after selecting one adapter per row.
     gathered = w_t_all[safe_indices, 0].to(y.dtype)
 
-    # profile_run / dummy_run can hand us empty tensors; downstream NPU ops
-    # trip index errors in that case.
+    # Profiling can produce empty tensors, which NPU BMM does not accept.
     if x.shape[0] == 0 or gathered.shape[1] == 0:
         return
 
-    # Equivalent to einsum("br, bor -> bo") without allocating the broadcasted
-    # [rows, output_size, rank] intermediate.
     delta = torch.bmm(gathered, x.to(y.dtype).unsqueeze(-1)).squeeze(-1)
     valid_mask = (indices >= 0).unsqueeze(-1)
     delta = torch.where(valid_mask, delta, torch.zeros_like(delta))
@@ -126,10 +122,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_shrink = sgmv_shrink
 
     def _requires_bmm_expand_slice(self, x: torch.Tensor, y_slice_size: int) -> bool:
-        # The fused Ascend expand op requires rank <= output slice size. Packed
-        # Qwen3.5 projections can contain narrower slices, so select the
-        # compatible implementation from the static tensor shape instead of a
-        # model-specific environment switch.
+        # Fused expand requires rank <= output slice size.
         return x.shape[-1] > y_slice_size
 
     def _shrink_prefill(
@@ -242,13 +235,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        """Fallback for shapes unsupported by the fused Ascend expand op.
-
-        Dispatching through a mutating custom op keeps Dynamo fullgraph from
-        tracing the dynamic size nodes that trip vLLM graph splitting. The
-        custom op validates the exact LoRA matrix contract and never pads or
-        truncates tensors to make incompatible shapes multiply.
-        """
+        """Run a graph-safe BMM fallback without padding or truncation."""
         _lora_bmm_expand_slice_op(
             y,
             x,

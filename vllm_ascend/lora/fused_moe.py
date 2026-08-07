@@ -331,8 +331,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
-        # We intentionally skip the upstream GPU-only constructor, so keep
-        # the state consumed by its v0.26 weight/context helpers in sync here.
+        # State normally initialized by the skipped GPU-only constructor.
         self._lora_stream = None
         self._events = None
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
