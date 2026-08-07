@@ -40,6 +40,24 @@ test_cases:
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--mm-processor-cache-gb"
       - "0"
+    messages_tests:
+      - type: "basic"
+        prompt: "Hello!"
+        max_tokens: 100
+      - type: "tool_calling"
+        prompt: "What is the weather in Shanghai?"
+        max_tokens: 100
+        tools:
+          - name: "get_weather"
+            description: "Get weather info"
+            input_schema:
+              type: "object"
+              properties:
+                location:
+                  type: "string"
+      - type: "streaming"
+        prompt: "Count to 5."
+        max_tokens: 50
     benchmarks:
       perf:
         case_type: performance
