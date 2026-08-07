@@ -30,10 +30,6 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 @triton.jit(
     do_not_specialize=[
         "num_seqs",
-        "stride_logits_seq",
-        "stride_prompt_mask_seq",
-        "stride_output_mask_seq",
-        "stride_bin_counts_seq"
     ]
 )
 def apply_all_penalties_kernel(

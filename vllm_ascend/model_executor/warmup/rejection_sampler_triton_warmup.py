@@ -412,6 +412,3 @@ def rejection_sampler_triton_warmup(worker: NPUWorker) -> None:
                 enable_reduce_sampling=enable_reduce_sampling,
                 block_verify=block_verify,
             )
-
-    if device.type == "npu":
-        torch.npu.synchronize()

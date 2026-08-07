@@ -85,6 +85,3 @@ def triton_rms_warmup(worker: NPUWorker) -> None:
             device=device,
         )
         triton_q_rms(q, variance_epsilon)
-
-    if device.type == "npu":
-        torch.npu.synchronize()

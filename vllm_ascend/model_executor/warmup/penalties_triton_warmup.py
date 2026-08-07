@@ -76,6 +76,3 @@ def penalties_triton_warmup(worker: NPUWorker) -> None:
         frequency_penalties,
         repetition_penalties,
     )
-
-    if device.type == "npu":
-        torch.npu.synchronize()
