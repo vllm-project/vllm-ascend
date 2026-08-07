@@ -36,6 +36,14 @@ on:
         required: false
       GITEE_TOKEN:
         required: false
+      HW_USERNAME_DAILY:
+        required: false
+      HW_TOKEN_DAILY:
+        required: false
+      GITEE_TOKEN:
+        required: false
+      QUAY_DAILY_PASSWORD:
+        required: false
 
 jobs:
   build:
