@@ -4,6 +4,7 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
@@ -61,6 +62,7 @@ class TestMoECommMethod(TestBase):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "all_gather"
+        mock_context.moe_comm_type = MoECommType.ALLGATHER
         mock_get_forward_context.return_value = mock_context
 
         # Mock prepare finalize
@@ -174,10 +176,10 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.MoEMLPPlanner.execute")
     @patch("torch.npu.current_stream", MagicMock())
     def test_fused_experts_method(
-        self, mock_unified_apply_mlp, mock_token_dispatcher, mock_prepare_finalize, mock_get_forward_context
+        self, mock_execute_mlp, mock_token_dispatcher, mock_prepare_finalize, mock_get_forward_context
     ):
         # Mock forward context
         mock_context = MagicMock()
@@ -199,7 +201,7 @@ class TestMoECommMethod(TestBase):
         mock_td_instance = MagicMock()
         dispatch_topk_weights = torch.tensor([[0.5, 0.5], [0.3, 0.7], [0.8, 0.2], [0.6, 0.4]])
         mock_td_instance.token_dispatch.return_value = MoETokenDispatchOutput(
-            hidden_states=torch.randn(6, 8),
+            hidden_states=torch.zeros(6, 8, dtype=torch.int8),
             group_list=torch.tensor([2, 2, 2]),
             group_list_type=1,
             combine_metadata=MoEAllGatherCombineMetadata(
@@ -211,11 +213,11 @@ class TestMoECommMethod(TestBase):
         mock_td_instance.token_combine.return_value = torch.randn(4, 8)
         mock_token_dispatcher.return_value = mock_td_instance
 
-        # Mock unified_apply_mlp returns (tensor, event) tuple
-        mock_unified_apply_mlp.return_value = (torch.randn(6, 8), MagicMock())
+        # Mock the cached MLP planner result.
+        mock_execute_mlp.return_value = (torch.randn(6, 8), MagicMock())
 
         # Create instance
-        comm_impl = AllGatherCommImpl(self.moe_config)
+        comm_impl = AllGatherCommImpl(self.moe_config, output_dtype=torch.float16)
 
         # Test fused_experts method
         hidden_states = torch.randn(4, 8).contiguous()
@@ -257,14 +259,15 @@ class TestMoECommMethod(TestBase):
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()
 
-        # Verify unified_apply_mlp was called
-        mock_unified_apply_mlp.assert_called_once()
-        mlp_compute_input = mock_unified_apply_mlp.call_args.kwargs["mlp_compute_input"]
+        # Verify the cached MLP planner was called.
+        mock_execute_mlp.assert_called_once()
+        mlp_compute_input = mock_execute_mlp.call_args.args[0]
         self.assertFalse(mlp_compute_input.fusion)
         self.assertFalse(mlp_compute_input.quant.is_mxfp)
+        self.assertEqual(mlp_compute_input.output_dtype, torch.float16)
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(
-            hidden_states=mock_unified_apply_mlp.return_value[0],
+            hidden_states=mock_execute_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )

@@ -16,6 +16,7 @@
 #
 import torch
 import torch.nn.functional as F
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -81,7 +82,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._quant_method,
             )
 
-        setup_moe_comm_method(self.moe_config)
+        output_dtype = get_current_vllm_config().model_config.dtype
+        setup_moe_comm_method(self.moe_config, output_dtype=output_dtype)
 
     @property
     def is_internal_router(self) -> bool:

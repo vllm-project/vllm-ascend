@@ -47,6 +47,7 @@ def build_mlp_compute_input_fixture(
         topk_scales=None,
         weights=MoEWeights(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale),
         quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
+        output_dtype=hidden_states.dtype,
         fusion=False,
         activation="silu",
         need_trans=False,

@@ -19,6 +19,7 @@ import unittest
 import torch
 
 import vllm_ascend.ops.fused_moe.moe_runtime_args as runtime_args
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoETokenDispatchOutput,
@@ -219,6 +220,8 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     fused_experts_input=fused_experts_input,
                     token_dispatch_output=token_dispatch_output,
                     use_fusion_ops=True,
+                    moe_comm_type=MoECommType.MC2,
+                    output_dtype=torch.float16,
                 )
 
                 self.assertIs(mlp_compute_input.hidden_states, token_dispatch_output.hidden_states)
@@ -226,6 +229,8 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertIs(mlp_compute_input.weights.w1_scale, fused_experts_input.weights.w1_scale)
                 self.assertIs(mlp_compute_input.weights.w2_scale, fused_experts_input.weights.w2_scale)
                 self.assertEqual(mlp_compute_input.fusion, expected_fusion)
+                self.assertEqual(mlp_compute_input.output_dtype, torch.float16)
+                self.assertEqual(mlp_compute_input.moe_comm_type, MoECommType.MC2)
                 self.assertTrue(mlp_compute_input.quant.is_mxfp)
                 assert mlp_compute_input.quant.mxfp is not None
                 self.assertEqual(mlp_compute_input.quant.mxfp.act_quant_type, mxfp_dtype)

@@ -16,6 +16,18 @@ from vllm_ascend.ops.fused_moe.moe_mlp import (
     quant_apply_mlp,
     unified_apply_mlp,
     unquant_apply_mlp,
+    weight_only_apply_mlp,
+)
+from vllm_ascend.ops.fused_moe.moe_mlp_activation import (
+    MoEMLPActivationKind,
+    apply_unquantized_activation,
+    resolve_mlp_activation,
+)
+from vllm_ascend.ops.fused_moe.moe_mlp_plan import (
+    GateUpKernel,
+    MoEMLPPlanKey,
+    MoEMLPPlanner,
+    build_mlp_plan,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -62,17 +74,155 @@ class TestCumsumGroupList(unittest.TestCase):
                 self.assertIn("This feature is under development.", str(excinfo.exception))
 
 
-class TestW4A8RuntimeFlags(unittest.TestCase):
-    def test_w4a8_per_channel_gmm_swiglu_flag(self):
-        self.assertTrue(
-            MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
+class TestMoEMLPPlanSelection(unittest.TestCase):
+    def _key(self, quant_type, activation=MoEMLPActivationKind.SWIGLU, **kwargs):
+        return MoEMLPPlanKey(
+            quant_type=quant_type,
+            activation=activation,
+            fusion=kwargs.get("fusion", False),
+            dynamic_eplb=kwargs.get("dynamic_eplb", False),
+            group_list_type=kwargs.get("group_list_type", 1),
+            custom_op_enabled=kwargs.get("custom_op_enabled", True),
+            moe_comm_type=kwargs.get("moe_comm_type", MoECommType.ALLGATHER),
         )
-        self.assertFalse(
-            MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=False).use_w4a8_per_channel_gmm_swiglu
+
+    def test_w4a8_always_selects_per_channel_path(self):
+        plan = build_mlp_plan(self._key(QuantType.W4A8))
+        self.assertFalse(hasattr(plan, "family"))
+        self.assertEqual(plan.gate_up_kernel, GateUpKernel.W4A8_PER_CHANNEL)
+
+    def test_w4a8_gelu_uses_decomposed_per_channel_path(self):
+        plan = build_mlp_plan(self._key(QuantType.W4A8, MoEMLPActivationKind.GELU_TANH))
+        self.assertEqual(plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+
+    def test_comm_type_is_a_plan_dimension(self):
+        fields = set(MoEMLPPlanKey.__dataclass_fields__)
+        self.assertIn("moe_comm_type", fields)
+
+    def test_dequant_swiglu_is_selected_only_for_mc2(self):
+        mc2_plan = build_mlp_plan(self._key(QuantType.W8A8, moe_comm_type=MoECommType.MC2))
+        allgather_plan = build_mlp_plan(self._key(QuantType.W8A8, moe_comm_type=MoECommType.ALLGATHER))
+        alltoall_plan = build_mlp_plan(self._key(QuantType.W8A8, moe_comm_type=MoECommType.ALLTOALL))
+
+        self.assertEqual(mc2_plan.gate_up_kernel, GateUpKernel.DEQUANT_SWIGLU)
+        self.assertEqual(allgather_plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+        self.assertEqual(alltoall_plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+
+    def test_mxfp_swiglu_selects_fused_kernel(self):
+        plan = build_mlp_plan(self._key(QuantType.W4A8MXFP, fusion=False))
+        self.assertEqual(plan.gate_up_kernel, GateUpKernel.FUSED)
+
+    def test_w4a16_selects_weight_only_plan(self):
+        plan = build_mlp_plan(self._key(QuantType.W4A16, MoEMLPActivationKind.GELU))
+        self.assertEqual(plan.gate_up_kernel, GateUpKernel.ANTIQUANT)
+
+    def test_gelu_never_selects_fused_swiglu(self):
+        plan = build_mlp_plan(self._key(QuantType.W8A8, MoEMLPActivationKind.GELU_TANH, fusion=True))
+        self.assertEqual(plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+
+    def test_swigluoai_never_selects_standard_fused_swiglu(self):
+        for quant_type in (QuantType.W8A8, QuantType.W4A8):
+            with self.subTest(quant_type=quant_type):
+                plan = build_mlp_plan(self._key(quant_type, MoEMLPActivationKind.SWIGLUOAI, fusion=True))
+                self.assertEqual(plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+
+    def test_swigluoai_uninterleave_selects_dequant_swiglu(self):
+        mc2_plan = build_mlp_plan(
+            self._key(
+                QuantType.W8A8,
+                MoEMLPActivationKind.SWIGLUOAI_UNINTERLEAVE,
+                fusion=True,
+                moe_comm_type=MoECommType.MC2,
+            )
         )
-        self.assertFalse(
-            MoEQuantParams(quant_type=QuantType.W8A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
+        allgather_plan = build_mlp_plan(
+            self._key(
+                QuantType.W8A8,
+                MoEMLPActivationKind.SWIGLUOAI_UNINTERLEAVE,
+                fusion=True,
+                moe_comm_type=MoECommType.ALLGATHER,
+            )
         )
+
+        self.assertEqual(mc2_plan.gate_up_kernel, GateUpKernel.DEQUANT_SWIGLU)
+        self.assertEqual(allgather_plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+
+    def test_planner_caches_static_kernel_decisions(self):
+        planner = MoEMLPPlanner(custom_op_enabled=False)
+        request = SimpleNamespace(
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            activation="silu",
+            fusion=True,
+            dynamic_eplb=False,
+            group_list_type=0,
+            moe_comm_type=MoECommType.ALLGATHER,
+        )
+        self.assertIs(planner.get_plan(request), planner.get_plan(request))
+
+    def test_planner_reselects_when_comm_type_changes_between_forwards(self):
+        planner = MoEMLPPlanner(custom_op_enabled=False)
+        common_request = {
+            "quant": MoEQuantParams(quant_type=QuantType.W8A8),
+            "activation": "silu",
+            "fusion": False,
+            "dynamic_eplb": False,
+            "group_list_type": 0,
+        }
+        allgather_request = SimpleNamespace(
+            **common_request,
+            moe_comm_type=MoECommType.ALLGATHER,
+        )
+        mc2_request = SimpleNamespace(
+            **common_request,
+            moe_comm_type=MoECommType.MC2,
+        )
+
+        allgather_plan = planner.get_plan(allgather_request)
+        mc2_plan = planner.get_plan(mc2_request)
+
+        self.assertEqual(allgather_plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+        self.assertEqual(mc2_plan.gate_up_kernel, GateUpKernel.DEQUANT_SWIGLU)
+        self.assertIs(planner.get_plan(allgather_request), allgather_plan)
+        self.assertIs(planner.get_plan(mc2_request), mc2_plan)
+
+    def test_planner_resolves_custom_op_capability_lazily(self):
+        request = SimpleNamespace(
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            activation="silu",
+            fusion=True,
+            dynamic_eplb=True,
+            group_list_type=0,
+            moe_comm_type=MoECommType.ALLGATHER,
+        )
+        with patch("vllm_ascend.ops.fused_moe.moe_mlp_plan.enable_custom_op", return_value=False) as mock_enable:
+            planner = MoEMLPPlanner()
+            mock_enable.assert_not_called()
+            planner.get_plan(request)
+            planner.get_plan(request)
+        mock_enable.assert_called_once_with()
+
+
+class TestMoEMLPActivation(unittest.TestCase):
+    def test_unquantized_swigluoai_forwards_activation_parameters(self):
+        hidden_states = torch.zeros(2, 8)
+        expected = torch.zeros(2, 4)
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_mlp_activation.AscendSwigluOAIAndMul.swiglu_oai_forward",
+            return_value=expected,
+        ) as mock_oai:
+            output = apply_unquantized_activation(
+                hidden_states,
+                MoEMLPActivationKind.SWIGLUOAI,
+                hidden_size=8,
+                swiglu_limit=6.0,
+                swiglu_alpha=1.5,
+                swiglu_beta=0.0,
+            )
+
+        self.assertIs(output, expected)
+        mock_oai.assert_called_once()
+        torch.testing.assert_close(mock_oai.call_args.args[0], hidden_states.view(-1, 8))
+        self.assertEqual(mock_oai.call_args.kwargs, {"alpha": 1.5, "limit": 6.0})
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
@@ -126,6 +276,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w2_bias=torch.randn(1, 8),
             ),
             quant=MoEQuantParams(quant_type=QuantType.NONE),
+            output_dtype=hidden_states.dtype,
             fusion=False,
             activation="silu",
             need_trans=False,
@@ -172,6 +323,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                             use_bf16=False,
                         ),
                     ),
+                    output_dtype=torch.float16,
                     fusion=True,
                     activation="silu",
                     need_trans=False,
@@ -188,12 +340,153 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 mock_quant.assert_called_once()
                 quant_kwargs = mock_quant.call_args.kwargs
                 self.assertTrue(quant_kwargs["use_mxfp_quant"])
-                self.assertTrue(quant_kwargs["fusion"])
-                self.assertTrue(quant_kwargs["dynamic_eplb"])
+                self.assertTrue(quant_kwargs["kernel_plan"].key.fusion)
+                self.assertTrue(quant_kwargs["kernel_plan"].key.dynamic_eplb)
                 self.assertEqual(quant_kwargs["act_quant_type"], mxfp_dtype)
                 self.assertEqual(quant_kwargs["weight_quant_type"], mxfp_dtype)
                 self.assertFalse(quant_kwargs["use_bf16"])
                 mock_unquant.assert_not_called()
+
+    def test_request_weight_only_path_uses_dedicated_executor(self):
+        hidden_states = torch.randn(2, 8)
+        expected = (torch.randn(2, 8), MagicMock())
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=hidden_states,
+            group_list=torch.tensor([2, 2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=torch.randn(1, 16, 8),
+                w2=torch.randn(1, 8, 8),
+                w1_scale=torch.randn(1, 16),
+                w2_scale=torch.randn(1, 8),
+                w1_offset=torch.randn(1, 16),
+                w2_offset=torch.randn(1, 8),
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W4A16),
+            output_dtype=torch.bfloat16,
+            fusion=False,
+            activation="silu",
+        )
+
+        with (
+            patch(f"{MOE_MLP}.weight_only_apply_mlp", return_value=expected) as mock_weight_only,
+            patch(f"{MOE_MLP}.quant_apply_mlp") as mock_quant,
+            patch(f"{MOE_MLP}.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_weight_only.assert_called_once()
+        mock_quant.assert_not_called()
+        mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_w4a8_per_channel_plan(self):
+        hidden_states = torch.randn(2, 8)
+        expected = torch.randn(2, 8)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=hidden_states,
+            group_list=torch.tensor([2, 2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=torch.randn(2, 1),
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=torch.randn(1, 16, 8),
+                w2=torch.randn(1, 8, 8),
+                w1_scale=[torch.randn(1, 16)],
+                w2_scale=[torch.randn(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W4A8),
+            output_dtype=torch.bfloat16,
+            fusion=False,
+            activation="silu",
+            need_trans=False,
+            dynamic_eplb=False,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp_plan.enable_custom_op", return_value=False),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertTrue(output is expected)
+        quant_kwargs = mock_quant.call_args.kwargs
+        kernel_plan = quant_kwargs["kernel_plan"]
+        self.assertEqual(kernel_plan.gate_up_kernel, GateUpKernel.DECOMPOSED)
+        mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_swiglustep_activation(self):
+        expected = torch.randn(1, 2)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones((1, 2), dtype=torch.float32),
+            group_list=torch.tensor([1], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
+                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
+                w1_scale=[torch.ones((1,), dtype=torch.float32)],
+                w2_scale=[torch.ones((1,), dtype=torch.float32)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            output_dtype=torch.bfloat16,
+            fusion=True,
+            activation=MoEActivation.SWIGLUSTEP,
+            swiglu_limit=5.0,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertTrue(output is expected)
+        quant_kwargs = mock_quant.call_args.kwargs
+        self.assertEqual(
+            quant_kwargs["kernel_plan"].key.activation,
+            MoEMLPActivationKind.SWIGLUSTEP,
+        )
+        self.assertEqual(quant_kwargs["swiglu_limit"], 5.0)
+        mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_gelu_activation(self):
+        expected = torch.randn(1, 2)
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.ones((1, 2), dtype=torch.float32),
+            group_list=torch.tensor([1], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
+                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
+                w1_scale=[torch.ones((1,), dtype=torch.float32)],
+                w2_scale=[torch.ones((1,), dtype=torch.float32)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            output_dtype=torch.bfloat16,
+            fusion=True,
+            activation=MoEActivation.GELU_TANH,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertTrue(output is expected)
+        quant_kwargs = mock_quant.call_args.kwargs
+        self.assertEqual(
+            quant_kwargs["kernel_plan"].key.activation,
+            MoEMLPActivationKind.GELU_TANH,
+        )
+        mock_unquant.assert_not_called()
 
     def test_active_quantized_lora_uses_registered_backend(self):
         expected = (torch.randn(2, 8), None)
@@ -210,6 +503,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w2_scale=[torch.ones(1, 8)],
             ),
             quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            output_dtype=torch.bfloat16,
             fusion=True,
             expanded_row_idx=torch.tensor([0, 1], dtype=torch.int32),
             topk_ids=torch.tensor([[0], [0]], dtype=torch.int32),
@@ -244,6 +538,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w2_scale=[torch.ones(1, 8)],
             ),
             quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            output_dtype=torch.bfloat16,
             fusion=True,
             lora_context=SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)),
         )
@@ -257,101 +552,6 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertIs(output, expected)
         mock_quant.assert_called_once()
         mock_lora.assert_not_called()
-
-    def test_request_quant_path_passes_w4a8_per_channel_flag(self):
-        hidden_states = torch.randn(2, 8)
-        expected = torch.randn(2, 8)
-        mlp_compute_input = MoEMlpComputeInput(
-            hidden_states=hidden_states,
-            group_list=torch.tensor([2, 2], dtype=torch.int64),
-            group_list_type=1,
-            dynamic_scale=torch.randn(2, 1),
-            topk_scales=None,
-            weights=MoEWeights(
-                w1=torch.randn(1, 16, 8),
-                w2=torch.randn(1, 8, 8),
-                w1_scale=[torch.randn(1, 16)],
-                w2_scale=[torch.randn(1, 8)],
-            ),
-            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
-            fusion=False,
-            activation="silu",
-            need_trans=False,
-            dynamic_eplb=False,
-        )
-
-        with (
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
-        ):
-            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
-
-        self.assertTrue(output is expected)
-        quant_kwargs = mock_quant.call_args.kwargs
-        self.assertTrue(quant_kwargs["use_w4a8_per_channel_gmm_swiglu"])
-        mock_unquant.assert_not_called()
-
-    def test_request_quant_path_passes_swiglustep_activation(self):
-        expected = torch.randn(1, 2)
-        mlp_compute_input = MoEMlpComputeInput(
-            hidden_states=torch.ones((1, 2), dtype=torch.float32),
-            group_list=torch.tensor([1], dtype=torch.int64),
-            group_list_type=1,
-            dynamic_scale=None,
-            topk_scales=None,
-            weights=MoEWeights(
-                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
-                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
-                w1_scale=[torch.ones((1,), dtype=torch.float32)],
-                w2_scale=[torch.ones((1,), dtype=torch.float32)],
-            ),
-            quant=MoEQuantParams(quant_type=QuantType.W8A8),
-            fusion=True,
-            activation=MoEActivation.SWIGLUSTEP,
-            swiglu_limit=5.0,
-        )
-
-        with (
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
-        ):
-            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
-
-        self.assertTrue(output is expected)
-        quant_kwargs = mock_quant.call_args.kwargs
-        self.assertEqual(quant_kwargs["activation"], MoEActivation.SWIGLUSTEP)
-        self.assertEqual(quant_kwargs["swiglu_limit"], 5.0)
-        mock_unquant.assert_not_called()
-
-    def test_request_quant_path_passes_gelu_activation(self):
-        expected = torch.randn(1, 2)
-        mlp_compute_input = MoEMlpComputeInput(
-            hidden_states=torch.ones((1, 2), dtype=torch.float32),
-            group_list=torch.tensor([1], dtype=torch.int64),
-            group_list_type=1,
-            dynamic_scale=None,
-            topk_scales=None,
-            weights=MoEWeights(
-                w1=[torch.ones((1, 2, 4), dtype=torch.float32)],
-                w2=[torch.ones((1, 2, 2), dtype=torch.float32)],
-                w1_scale=[torch.ones((1,), dtype=torch.float32)],
-                w2_scale=[torch.ones((1,), dtype=torch.float32)],
-            ),
-            quant=MoEQuantParams(quant_type=QuantType.W8A8),
-            fusion=True,
-            activation=MoEActivation.GELU_TANH,
-        )
-
-        with (
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
-            patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
-        ):
-            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
-
-        self.assertTrue(output is expected)
-        quant_kwargs = mock_quant.call_args.kwargs
-        self.assertEqual(quant_kwargs["activation"], MoEActivation.GELU_TANH)
-        mock_unquant.assert_not_called()
 
 
 def _patch_npu_stream():
@@ -409,54 +609,44 @@ class _GeluPathBase(unittest.TestCase):
         group_list=None,
         dynamic_scale=None,
     ):
+        kernel_plan = build_mlp_plan(
+            MoEMLPPlanKey(
+                quant_type=QuantType.W8A8,
+                activation=resolve_mlp_activation(activation),
+                fusion=False,
+                dynamic_eplb=False,
+                group_list_type=group_list_type,
+                custom_op_enabled=False,
+                moe_comm_type=MoECommType.MC2,
+            )
+        )
         return dict(
             hidden_states=torch.randn(1, 4),
             w1=torch.randn(1, 8, 4),
             w1_scale=[torch.randn(1, 8, dtype=w1_scale_dtype)],
             w2=torch.randn(1, 4, 1),
             w2_scale=[torch.randn(1, 4, dtype=w2_scale_dtype)],
+            output_dtype=torch.bfloat16,
             group_list=group_list if group_list is not None else torch.tensor([1], dtype=torch.int64),
             group_list_type=group_list_type,
             dynamic_scale=dynamic_scale if dynamic_scale is not None else torch.randn(1, 1),
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
-            w1_offset=None,
-            w2_offset=None,
-            fusion=False,
-            dynamic_eplb=False,
             use_mxfp_quant=False,
             mxfp_quant_dtype=None,
             act_quant_type=torch.int8,
             weight_quant_type=torch.float8_e4m3fn,
             use_bf16=True,
-            activation=activation,
             swiglu_limit=0.0,
-            use_w4a8_per_channel_gmm_swiglu=False,
+            kernel_plan=kernel_plan,
         )
 
 
 class TestQuantApplyMlpGeluPath(_GeluPathBase):
     """GELU path: dispatch, math, and layout coverage.
 
-    In the in-branch/guard variant the GELU path runs through the existing
-    branch preamble. Stub `_EXTRA_CTX` in setUp so each test can focus on the
-    GELU dispatch/math.
+    Kernel selection is resolved by the MLP plan before execution.
     """
-
-    def setUp(self):
-        # Configurable forward-context mock; default moe_comm_type is not MC2.
-        self._ctx_mock = MagicMock()
-        self._ctx_mock.moe_comm_type = -1
-        self._patches = [
-            patch(f"{MOE_MLP}._EXTRA_CTX", self._ctx_mock),
-        ]
-        for p in self._patches:
-            p.start()
-        self.addCleanup(self._stop_patches)
-
-    def _stop_patches(self):
-        for p in self._patches:
-            p.stop()
 
     def test_w8a8_gelu_tanh_applies_correct_activation(self):
         """W8A8 + gelu_tanh: GMM1(dequant) -> gelu(tanh)·up -> requant -> GMM2."""
@@ -510,11 +700,18 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2") as mock_gmm2,
             patch(f"{MOE_MLP}.dispose_tensor"),
         ):
-            kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
-            # Switch to the W4A16 antiquant layout.
-            kwargs["w1_offset"] = torch.randn(1, 8, 4)
-            kwargs["w2_offset"] = torch.randn(1, 4, 1)
-            out, out_evt = quant_apply_mlp(**kwargs)
+            out, out_evt = weight_only_apply_mlp(
+                hidden_states=torch.randn(1, 4),
+                w1=torch.randn(1, 8, 4),
+                w1_scale=torch.randn(1, 8),
+                w1_offset=torch.randn(1, 8, 4),
+                w2=torch.randn(1, 4, 1),
+                w2_scale=torch.randn(1, 4),
+                w2_offset=torch.randn(1, 4, 1),
+                group_list=torch.tensor([1], dtype=torch.int64),
+                output_dtype=torch.bfloat16,
+                activation=MoEMLPActivationKind.GELU_TANH,
+            )
 
         self.assertEqual(mock_gmm.call_count, 2)
         # Both GMM calls use antiquant (not scale/per_token_scale).
@@ -531,78 +728,149 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         self.assertIs(out, gmm2_out)
         self.assertIs(out_evt, evt)
 
-    def test_w8a8_gelu_with_scale_bias_sets_bias_and_bfloat16(self):
-        """W8A8 + gelu + scale_bias: bias1/bias2 passed, output dtype bfloat16,
-        and group_list_type 0 -> 1 conversion applied."""
+    def test_w4a8_gelu_uses_bfloat16_intermediate_and_model_output_dtype(self):
+        """W4A8 keeps its BF16 GMM1 contract but restores model dtype in GMM2."""
         w1_sb = [torch.zeros(1)]
         w2_sb = [torch.zeros(1)]
         with (
             _mock_w8a8_gelu_compute(torch.zeros(1, 8), gmm2_out=torch.zeros(1, 2)) as m,
             patch("torch.cat", wraps=torch.cat) as mock_cat,
         ):
-            quant_apply_mlp(
-                **self._common_w8a8_kwargs(
-                    activation=MoEActivation.GELU_TANH,
-                    w1_scale_bias=w1_sb,
-                    w2_scale_bias=w2_sb,
+            kwargs = self._common_w8a8_kwargs(
+                activation=MoEActivation.GELU_TANH,
+                w1_scale_bias=w1_sb,
+                w2_scale_bias=w2_sb,
+                group_list_type=0,
+                group_list=torch.tensor([0, 1], dtype=torch.int64),
+            )
+            kwargs["kernel_plan"] = build_mlp_plan(
+                MoEMLPPlanKey(
+                    quant_type=QuantType.W4A8,
+                    activation=MoEMLPActivationKind.GELU_TANH,
+                    fusion=False,
+                    dynamic_eplb=False,
                     group_list_type=0,
-                    group_list=torch.tensor([0, 1], dtype=torch.int64),
+                    custom_op_enabled=False,
                 )
             )
+            kwargs["output_dtype"] = torch.float16
+            quant_apply_mlp(**kwargs)
         # bias1 propagated to GMM1.
         self.assertIs(m.gmm.call_args.kwargs["bias"], w1_sb)
+        self.assertEqual(m.gmm.call_args.kwargs["output_dtype"], torch.bfloat16)
+        self.assertIs(m.gmm2.call_args.kwargs["bias"], w2_sb)
+        self.assertEqual(m.gmm2.call_args.kwargs["fallback_output_dtype"], torch.float16)
         # group_list_type 0 -> 1 conversion invoked (torch.cat + torch.diff).
         self.assertTrue(mock_cat.called)
 
-    def test_w8a8_gelu_converts_w1_scale_dtype_to_output_dtype(self):
-        """When w1_scale dtype != _output_dtype, it is cast before GMM1."""
-        # w1_scale fp32, w2_scale bf16 -> _output_dtype = bfloat16, so the GELU
-        # path must cast w1_scale to bfloat16 before GMM1.
-        with _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m:
-            quant_apply_mlp(
-                **self._common_w8a8_kwargs(
-                    activation=MoEActivation.GELU_TANH,
-                    w1_scale_dtype=torch.float32,
-                    w2_scale_dtype=torch.bfloat16,
-                )
+    def test_w4a8_per_channel_requires_both_scale_biases(self):
+        kernel_plan = build_mlp_plan(
+            MoEMLPPlanKey(
+                quant_type=QuantType.W4A8,
+                activation=MoEMLPActivationKind.GELU_TANH,
+                fusion=False,
+                dynamic_eplb=False,
+                group_list_type=1,
+                custom_op_enabled=False,
             )
-        self.assertEqual(m.gmm.call_args.kwargs["scale"][0].dtype, torch.bfloat16)
+        )
+        scale_bias = [torch.zeros(1)]
 
-    def test_alltoall_dynamic_eplb_swigluoai_passes_all_w1_scales_to_gmm1(self):
-        self._ctx_mock.moe_comm_type = MoECommType.ALLTOALL
+        for w1_scale_bias, w2_scale_bias in (
+            (None, None),
+            (scale_bias, None),
+            (None, scale_bias),
+        ):
+            with self.subTest(w1_scale_bias=w1_scale_bias, w2_scale_bias=w2_scale_bias):
+                kwargs = self._common_w8a8_kwargs(
+                    activation=MoEActivation.GELU_TANH,
+                    w1_scale_bias=w1_scale_bias,
+                    w2_scale_bias=w2_scale_bias,
+                )
+                kwargs["kernel_plan"] = kernel_plan
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "W4A8 per-channel MLP requires both w1_scale_bias and w2_scale_bias",
+                ):
+                    quant_apply_mlp(**kwargs)
+
+    def test_w8a8_dynamic_eplb_swigluoai_passes_all_scales_to_gmm1(self):
         scale0 = torch.arange(8, dtype=torch.float32)
         scale1 = torch.arange(8, 16, dtype=torch.float32)
+        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
+        kwargs.update(
+            {
+                "w1": [torch.randn(8, 4), torch.randn(8, 4)],
+                "w1_scale": [scale0, scale1],
+                "w2": [torch.randn(4, 4), torch.randn(4, 4)],
+                "w2_scale": [torch.randn(4), torch.randn(4)],
+                "group_list": torch.tensor([1, 1], dtype=torch.int64),
+                "kernel_plan": build_mlp_plan(
+                    MoEMLPPlanKey(
+                        quant_type=QuantType.W8A8,
+                        activation=MoEMLPActivationKind.SWIGLUOAI_UNINTERLEAVE,
+                        fusion=False,
+                        dynamic_eplb=True,
+                        group_list_type=1,
+                        custom_op_enabled=False,
+                        moe_comm_type=MoECommType.ALLTOALL,
+                    )
+                ),
+            }
+        )
+
         with (
-            _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m,
+            _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as mocks,
             patch("torch_npu.npu_clipped_swiglu", return_value=torch.zeros(1, 4), create=True),
-            patch.object(DeviceOperator, "npu_dynamic_quant", return_value=(torch.zeros(1, 4), torch.ones(1))),
         ):
+            quant_apply_mlp(**kwargs)
+
+        gmm1_scales = mocks.gmm.call_args.kwargs["scale"]
+        self.assertEqual(len(gmm1_scales), 2)
+        torch.testing.assert_close(gmm1_scales[0], scale0.bfloat16())
+        torch.testing.assert_close(gmm1_scales[1], scale1.bfloat16())
+
+    def test_w8a8_gelu_uses_explicit_output_dtype_when_hidden_is_quantized(self):
+        """The explicit model dtype, rather than w2_scale dtype, controls GMM output."""
+        with _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m:
             kwargs = self._common_w8a8_kwargs(
-                activation="swigluoai_uninterleave",
-                w2_scale_dtype=torch.bfloat16,
+                activation=MoEActivation.GELU_TANH,
+                w1_scale_dtype=torch.float32,
+                w2_scale_dtype=torch.float32,
             )
-            kwargs.update(
-                {
-                    "w1": [torch.randn(8, 4), torch.randn(8, 4)],
-                    "w1_scale": [scale0, scale1],
-                    "w2": [torch.randn(4, 4), torch.randn(4, 4)],
-                    "w2_scale": [
-                        torch.randn(4, dtype=torch.bfloat16),
-                        torch.randn(4, dtype=torch.bfloat16),
-                    ],
-                    "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                    "dynamic_eplb": True,
-                }
-            )
+            kwargs["hidden_states"] = torch.zeros(1, 4, dtype=torch.int8)
+            kwargs["output_dtype"] = torch.float16
+            quant_apply_mlp(**kwargs)
+        self.assertEqual(m.gmm2.call_args.kwargs["input_dtype"], torch.float16)
+        self.assertIsNone(m.gmm2.call_args.kwargs["bias"])
+        self.assertEqual(m.gmm2.call_args.kwargs["fallback_output_dtype"], torch.float16)
+
+    def test_mxfp_gelu_decomposed_gmm1_outputs_bfloat16(self):
+        """MXFP decomposed activations require a BF16 GMM1 output."""
+        kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
+        kwargs.update(
+            use_mxfp_quant=True,
+            mxfp_quant_dtype=QuantType.W8A8MXFP,
+            kernel_plan=build_mlp_plan(
+                MoEMLPPlanKey(
+                    quant_type=QuantType.W8A8MXFP,
+                    activation=MoEMLPActivationKind.GELU_TANH,
+                    fusion=False,
+                    dynamic_eplb=False,
+                    group_list_type=1,
+                    custom_op_enabled=False,
+                )
+            ),
+        )
+
+        with _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m:
             quant_apply_mlp(**kwargs)
 
         gmm1_kwargs = m.gmm.call_args.kwargs
-        self.assertEqual(len(gmm1_kwargs["weight"]), 2)
-        self.assertEqual(len(gmm1_kwargs["scale"]), 2)
-        self.assertEqual(gmm1_kwargs["scale"][0].dtype, torch.bfloat16)
-        self.assertEqual(gmm1_kwargs["scale"][1].dtype, torch.bfloat16)
-        torch.testing.assert_close(gmm1_kwargs["scale"][0], scale0.bfloat16())
-        torch.testing.assert_close(gmm1_kwargs["scale"][1], scale1.bfloat16())
+        self.assertEqual(gmm1_kwargs["output_dtype"], torch.bfloat16)
+        self.assertEqual(gmm1_kwargs["scale_dtype"], torch_npu.float8_e8m0fnu)
+        self.assertEqual(gmm1_kwargs["per_token_scale_dtype"], torch_npu.float8_e8m0fnu)
 
     def test_gelu_path_does_not_call_swiglu_op(self):
         """GELU path must use torch.gelu, never the SwiGLU NPU op."""
@@ -611,12 +879,18 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         mock_swiglu.assert_not_called()
 
     def test_fusion_on_gelu_skips_fused_swiglu_quant(self):
-        """Guard: with fusion ON (default), GELU must still skip the fused
-        npu_grouped_matmul_swiglu_quant op and use the non-fused GELU path.
-        This is the case that breaks without the ``and not is_gelu_activation``
-        guard on use_gmm_swiglu_quant_fusion."""
+        """A GELU plan must not select the fused SwiGLU quant kernel."""
         kwargs = self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH)
-        kwargs["fusion"] = True  # -> use_gmm_swiglu_quant_fusion = True
+        kwargs["kernel_plan"] = build_mlp_plan(
+            MoEMLPPlanKey(
+                quant_type=QuantType.W8A8,
+                activation=MoEMLPActivationKind.GELU_TANH,
+                fusion=True,
+                dynamic_eplb=False,
+                group_list_type=1,
+                custom_op_enabled=True,
+            )
+        )
         with (
             _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m,
             patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
@@ -628,25 +902,21 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         self.assertIn("scale", m.gmm.call_args.kwargs)
         self.assertIn("per_token_scale", m.gmm.call_args.kwargs)
 
-    def test_mc2_gelu_skips_mc2_fused_branch(self):
-        """Guard: under MC2 comm, GELU must skip the all-fused MC2 branch and
-        use the non-fused GELU path. Without the ``and not is_gelu_activation``
-        guard on the MC2 entry, GELU+MC2 would hit npu_dequant_swiglu_quant."""
-        self._ctx_mock.moe_comm_type = MoECommType.MC2  # force is_mc2 True
+    def test_gelu_plan_skips_fused_swiglu_branch(self):
+        """GELU uses the decomposed plan independently of communication."""
         with (
             _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m,
-            patch("torch.ops._C_ascend.npu_dequant_swiglu_quant", create=True) as mock_mc2_fused,
-            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_fused,
+            patch("torch.ops._C_ascend.npu_dequant_swiglu_quant", create=True) as mock_dequant_fused,
+            patch.object(DeviceOperator, "npu_grouped_matmul_swiglu_quant") as mock_grouped_fused,
         ):
             quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.GELU_TANH))
-        # MC2 fused SwiGLU op must NOT be called for GELU.
-        mock_mc2_fused.assert_not_called()
-        mock_fused.assert_not_called()
+        # The fused SwiGLU op must not be called for GELU.
+        mock_dequant_fused.assert_not_called()
+        mock_grouped_fused.assert_not_called()
         # Non-fused dequant GMM1 IS used instead.
         self.assertIn("scale", m.gmm.call_args.kwargs)
 
-    def test_mc2_dynamic_eplb_swigluoai_stacks_w1_scale(self):
-        self._ctx_mock.moe_comm_type = MoECommType.MC2
+    def test_dynamic_eplb_swigluoai_stacks_w1_scale(self):
         gate_up_out = torch.zeros(1, 8, dtype=torch.int32)
         expected = torch.zeros(1, 4, dtype=torch.float32)
         scale0 = torch.arange(8, dtype=torch.bfloat16)
@@ -660,7 +930,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
                 "w2": [torch.randn(4, 4), torch.randn(4, 4)],
                 "w2_scale": [torch.randn(4), torch.randn(4)],
                 "group_list": torch.tensor([1, 1], dtype=torch.int64),
-                "dynamic_eplb": True,
             }
         )
 
@@ -684,8 +953,7 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         torch.testing.assert_close(weight_scale[1], scale1.float())
         self.assertIs(out, expected)
 
-    def test_mc2_swigluoai_preserves_single_list_w1_scale_shape(self):
-        self._ctx_mock.moe_comm_type = MoECommType.MC2
+    def test_swigluoai_preserves_single_list_w1_scale_shape(self):
         gate_up_out = torch.zeros(1, 8, dtype=torch.int32)
         expected = torch.zeros(1, 4, dtype=torch.float32)
         weight_scale = torch.arange(12, dtype=torch.bfloat16).view(3, 4)
@@ -698,7 +966,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
                 "w2": [torch.randn(4, 4)],
                 "w2_scale": [torch.randn(4)],
                 "group_list": torch.tensor([1], dtype=torch.int64),
-                "dynamic_eplb": False,
             }
         )
 
@@ -728,13 +995,17 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     def _run_non_gelu(self, activation):
         with (
             _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
-            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
-            patch(f"{MOE_MLP}.HAS_TRITON", False),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp_activation.HAS_TRITON", False),
             patch("torch_npu.npu_swiglu", return_value=torch.zeros(1, 4), create=True) as mock_swiglu,
             patch("torch.nn.functional.gelu") as mock_gelu,
         ):
-            mock_ctx.moe_comm_type = -1  # not MoECommType.MC2
-            quant_apply_mlp(**self._common_w8a8_kwargs(activation=activation))
+            kwargs = self._common_w8a8_kwargs(activation=activation)
+            key = kwargs["kernel_plan"].key
+            kwargs["kernel_plan"] = type(kwargs["kernel_plan"])(
+                key=key,
+                gate_up_kernel=GateUpKernel.DECOMPOSED,
+            )
+            quant_apply_mlp(**kwargs)
         return mock_gelu, mock_swiglu
 
     def test_silu_activation_skips_gelu_path(self):
@@ -747,8 +1018,24 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
         mock_gelu, _ = self._run_non_gelu(MoEActivation.SWIGLUSTEP)
         mock_gelu.assert_not_called()
 
-    def test_swigluoai_activation_skips_gelu_path(self):
-        mock_gelu, _ = self._run_non_gelu(MoEActivation.SWIGLUOAI)
+    def test_swigluoai_activation_uses_oai_formula(self):
+        gate_up_out = torch.zeros(1, 8)
+        activated = torch.zeros(1, 4)
+        with (
+            _mock_w8a8_gelu_compute(gate_up_out),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp_activation.AscendSwigluOAIAndMul.swiglu_oai_forward",
+                return_value=activated,
+            ) as mock_oai,
+            patch("torch_npu.npu_swiglu", create=True) as mock_swiglu,
+            patch("torch.nn.functional.gelu") as mock_gelu,
+        ):
+            kwargs = self._common_w8a8_kwargs(activation=MoEActivation.SWIGLUOAI)
+            kwargs.update(swiglu_alpha=1.5, swiglu_limit=6.0)
+            quant_apply_mlp(**kwargs)
+
+        mock_oai.assert_called_once_with(gate_up_out, alpha=1.5, limit=6.0)
+        mock_swiglu.assert_not_called()
         mock_gelu.assert_not_called()
 
 

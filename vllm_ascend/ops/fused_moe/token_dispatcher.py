@@ -63,7 +63,9 @@ EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
     # grouped_matmul_swiglu_quant_v2 consumes per-expert counts; existing
     # MC2 grouped-matmul paths consume prefix sums.
-    if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu:
+    # W4A8 supports only per-channel expert weights. Its MLP kernel consumes
+    # count-style expert-token metadata regardless of the checkpoint adapter.
+    if token_dispatch_input.quant.quant_type == QuantType.W4A8:
         return EXPERT_TOKEN_NUMS_TYPE_COUNT
     return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
 

@@ -22,6 +22,7 @@ from typing import Any, Generic, TypeVar
 import numpy as np
 import torch
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutingParams
 
 TMoECombineMetadata = TypeVar("TMoECombineMetadata")
@@ -142,7 +143,11 @@ class MoEMlpComputeInput:
     topk_scales: torch.Tensor | None
     weights: MoEWeights
     quant: MoEQuantParams
+    # Dtype of the dequantized MoE output. This is model execution metadata,
+    # not hidden_states.dtype because dispatch may quantize hidden_states.
+    output_dtype: torch.dtype
     fusion: bool
+    moe_comm_type: MoECommType = MoECommType.ALLGATHER
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False

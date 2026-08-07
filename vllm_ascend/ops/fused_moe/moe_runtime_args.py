@@ -60,6 +60,7 @@ from __future__ import annotations
 import torch
 
 import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
@@ -137,7 +138,6 @@ def build_fused_experts_input(
     mxfp_scale_dtype: torch.dtype | None = None,
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
-    is_per_channel_weight: bool = False,
     w1_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w2_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w1_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
@@ -196,7 +196,6 @@ def build_fused_experts_input(
                 mxfp_per_token_scale_dtype=mxfp_per_token_scale_dtype,
                 mxfp_use_bf16=mxfp_use_bf16,
             ),
-            is_per_channel_weight=is_per_channel_weight,
         ),
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
@@ -224,6 +223,8 @@ def build_mlp_compute_input(
     fused_experts_input: MoEFusedExpertsInput,
     token_dispatch_output: MoETokenDispatchOutput[TMoECombineMetadata],
     use_fusion_ops: bool,
+    output_dtype: torch.dtype,
+    moe_comm_type: MoECommType = MoECommType.ALLGATHER,
 ) -> MoEMlpComputeInput:
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
@@ -248,6 +249,8 @@ def build_mlp_compute_input(
             QuantType.W4A16MXFP,
         )
         and use_fusion_ops,
+        output_dtype=output_dtype,
+        moe_comm_type=moe_comm_type,
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,

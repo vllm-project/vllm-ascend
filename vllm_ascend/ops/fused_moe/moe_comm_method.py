@@ -26,7 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
-from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_mlp_plan import MoEMLPPlanner
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
     MoEMlpComputeInput,
@@ -55,14 +55,14 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
     return _MoECommMethods.get(moe_comm_type)
 
 
-def setup_moe_comm_method(moe_config):
+def setup_moe_comm_method(moe_config, output_dtype: torch.dtype | None = None):
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config, output_dtype)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config, output_dtype)
+        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config, output_dtype)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config, output_dtype)
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config, output_dtype)
 
 
 def set_gmmswigluquant_method():
@@ -89,12 +89,14 @@ class FusedExpertsResult:
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
-    def __init__(self, moe_config: FusedMoEConfig):
+    def __init__(self, moe_config: FusedMoEConfig, output_dtype: torch.dtype | None = None):
         self.moe_config = moe_config
+        self.output_dtype = output_dtype
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
         self.use_fusion_ops = set_gmmswigluquant_method()
+        self.mlp_planner = MoEMLPPlanner()
         self.lora_context = None
 
     def set_lora_context(self, lora_context) -> None:
@@ -140,9 +142,13 @@ class MoECommMethod(ABC):
             torch.float8_e4m3fn,
             torch.uint8,
         ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
+        if self.output_dtype is None:
+            raise RuntimeError("MoE output_dtype must be configured before MLP execution.")
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        assert moe_comm_type is not None, "Missing communication type"
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
 
@@ -155,6 +161,8 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
+            moe_comm_type=moe_comm_type,
+            output_dtype=self.output_dtype,
         )
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
@@ -174,8 +182,8 @@ class MoECommMethod(ABC):
             expert_tokens=token_dispatch_output.group_list,
         )
 
-    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> tuple[torch.Tensor, torch.npu.Event | None]:
+        return self.mlp_planner.execute(mlp_compute_input)
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
@@ -270,10 +278,10 @@ class FusedMC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
-    def __init__(self, moe_config):
-        super().__init__(moe_config)
+    def __init__(self, moe_config, output_dtype: torch.dtype | None = None):
+        super().__init__(moe_config, output_dtype)
         self._mega_moe_symm_buffer = None
-        self._mega_moe_weight_type = None
+        self._mega_moe_weight_type: int | None = None
         if _MEGA_MOE_SUPPORTED:
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
         if get_ascend_config().enable_fused_mc2 == 1:
