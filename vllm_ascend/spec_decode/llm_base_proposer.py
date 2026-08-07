@@ -1259,15 +1259,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                                 dspark_probs_list.append(probs)
                             # Diagnostic: compare probabilistic sample vs argmax
                             # to measure divergence caused by random sampling.
-                            if logger.isEnabledFor(logging.DEBUG):
-                                argmax_ids = logits[:, idx].argmax(dim=-1)
-                                match_rate = (token_ids == argmax_ids).float().mean().item()
-                                logger.debug(
-                                    "[dspark_step_diag] step=%d, "
-                                    "sample_vs_argmax_match_rate=%.3f, "
-                                    "num_blk=%d",
-                                    idx, match_rate, num_blk,
-                                )
+                            argmax_ids = logits[:, idx].argmax(dim=-1)
+                            match_rate = (token_ids == argmax_ids).float().mean().item()
+                            logger.info(
+                                "[dspark_step_diag] step=%d, "
+                                "sample_vs_argmax_match_rate=%.3f, "
+                                "num_blk=%d",
+                                idx, match_rate, num_blk,
+                            )
                         else:
                             draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
                     if use_probabilistic and dspark_probs_list:
