@@ -233,7 +233,7 @@ class NPUModelRunner(GPUModelRunner):
             and state is not None
             and _flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
         ):
-            num_tokens = state.input_batch.num_tokens
+            num_tokens = state.input_batch.num_tokens_after_padding
             assert state.hidden_states is not None
             gathered_output = _all_gather_hidden_states_and_aux(
                 (state.hidden_states, state.aux_hidden_states)
