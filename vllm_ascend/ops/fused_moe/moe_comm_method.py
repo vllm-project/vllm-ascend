@@ -361,8 +361,6 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
     ):
-        assert fused_experts_input.weights.w1_scale is not None
-        assert fused_experts_input.weights.w2_scale is not None
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
@@ -378,19 +376,18 @@ class FusedMC2CommImpl(MoECommMethod):
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
-        weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
+        weight_scales1 = fused_experts_input.weights.w1_scale
+        weight_scales2 = fused_experts_input.weights.w2_scale
         # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
         # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
         # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
         # [1, N] per-channel case to avoid flattening genuine per-group scales.
-        weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
-        weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
+        #weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
+        #weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
 
-        if self._mega_moe_symm_buffer is None:
-            self._init_mega_moe_symm_buffer(
-                fused_experts_input,
-            )
+        self._init_mega_moe_symm_buffer(
+            fused_experts_input,
+        )
 
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
         x_active_mask = None
@@ -436,10 +433,6 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
-        assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
-            "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
-        )
-
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
