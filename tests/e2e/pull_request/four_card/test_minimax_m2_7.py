@@ -48,13 +48,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import (
     RemotePDServer,
     wait_npu_memory_free,
     wait_until_npu_memory_free,
 )
-from vllm.utils.network_utils import get_open_port
 
 # ModelScope repo published by the model owner; override locally with
 # MINIMAX_M2_7_MODEL_PATH for private/internal weight paths.
@@ -76,6 +76,7 @@ SERVER_ENV = {
     "TASK_QUEUE_ENABLE": "1",
     "PYTHONHASHSEED": "0",
 }
+
 
 # Server launch parameters identical to the validated internal setup.
 def _server_args(port: int) -> list[str]:
