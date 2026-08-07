@@ -37,7 +37,7 @@ The same-device mode maximizes hardware utilization when NPU cards are scarce bu
 | Reproducible, train-consistent rollouts | Deterministic compute across batch shapes | [Batch Invariance](#batch-invariance) | [Batch Invariance](./batch_invariance.md) |
 | Feed pre-tokenized prompts, receive raw output tokens | Bypass redundant tokenization/detokenization in the RL loop | [Token In / Token Out](#token-in--token-out) | Upstream RFC [#22817](https://github.com/vllm-project/vllm/issues/22817) |
 | Provide token-level logprobs to trainer | Per-token log probabilities for advantage / importance sampling | [Token Logprobs](#token-logprobs) | Upstream [SamplingParams](https://docs.vllm.ai/en/latest/dev/sampling_params/) |
-| Align MoE expert routing between inference and training | Record and replay expert selections | [Router Replay (R3)](#router-replay-r3) | Upstream [Return Routed Experts](https://docs.vllm.ai/en/latest/features/moe/#return-routed-experts) |
+| Align MoE expert routing between inference and training | Record and replay expert selections | [Router Replay (R3)](#router-replay-r3) | Upstream [Return Routed Experts](https://docs.vllm.ai/en/latest/examples/rl/routed_experts_e2e/?h=experts) |
 | Provide hidden states for value / distillation | Return prompt hidden states | [Extract Hidden States](#extract-hidden-states) | Upstream [SamplingParams](https://docs.vllm.ai/en/latest/dev/sampling_params/) |
 | Emit structured tool calls in agentic rollouts | Model emits function-call syntax, environment executes and returns results | [Tool Call](#tool-call) | Upstream [Tool Calling](https://docs.vllm.ai/en/latest/features/tool_calling/) |
 | Route rollout requests to the correct DP shard | DP-index-aware request dispatching | [DP-Aware Routing](#dp-aware-routing) | — |
@@ -374,7 +374,7 @@ This is the most efficient path for RL: the RL framework sends token IDs it alre
 prompt → model generates tool call → environment executes tool → result appended to prompt → model continues
 ```
 
-vLLM supports tool calling through [OpenAI-compatible function calling](https://platform.openai.com/docs/guides/function-calling). The server accepts a `tools` parameter defining the available functions, and the model can respond with a `tool_calls` block specifying which function to invoke and with what arguments. For RL, this enables:
+vLLM supports tool calling through. The server accepts a `tools` parameter defining the available functions, and the model can respond with a `tool_calls` block specifying which function to invoke and with what arguments. For RL, this enables:
 
 - **Tool-augmented exploration** — the policy learns when and how to use tools to solve tasks.
 - **Verifiable reward signals** — tool execution results (success/failure, return values) provide ground-truth feedback.
@@ -426,6 +426,7 @@ See the upstream [Tool Calling](https://docs.vllm.ai/en/latest/features/tool_cal
 **Principle.** In large-scale RL deployments, the rollout engine is often replicated across multiple **data-parallel (DP)** shards. Each DP shard is paired with a training worker that holds the corresponding parameter shard. To minimize weight transfer overhead and ensure cache locality, rollout requests must be routed to the engine instance that serves the correct DP index.
 
 Without DP-aware routing, a request assigned to DP shard *k* might land on the engine for DP shard *j* (j ≠ k), causing:
+
 - **Unnecessary weight transfer** — the wrong engine must fetch weights from DP shard *k*'s trainer.
 - **KV cache cold start** — the engine has no cached context for this DP group's conversation history.
 - **Load imbalance** — random routing can concentrate requests on a subset of engines while others sit idle.
