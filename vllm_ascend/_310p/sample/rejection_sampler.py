@@ -18,8 +18,9 @@
 from contextlib import contextmanager
 
 import torch
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 import vllm_ascend.sample.rejection_sampler as rejection_sampler_module
@@ -111,3 +112,64 @@ class AscendRejectionSampler310(AscendRejectionSampler):
                 enable_reduce_sampling=enable_reduce_sampling,
             )
         return recovered_token_ids
+
+    def _get_logprobs_tensors(
+        self,
+        max_num_logprobs: int,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        target_logits: torch.Tensor,
+        bonus_logits: torch.Tensor,
+        sampled_token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        """Build speculative logprobs without 310P AICPU index operators."""
+        cu_num_sampled_tokens = torch.cat(
+            (
+                torch.zeros_like(metadata.cu_num_sampled_tokens[:1]),
+                metadata.cu_num_sampled_tokens[:-1],
+            )
+        )
+
+        if self.is_processed_logprobs_mode:
+            final_logits = torch.zeros_like(logits, dtype=torch.float32)
+            final_logits = torch.index_copy(
+                final_logits,
+                0,
+                metadata.target_logits_indices,
+                target_logits.to(torch.float32),
+            )
+            final_logits = torch.index_copy(
+                final_logits,
+                0,
+                metadata.bonus_logits_indices,
+                bonus_logits.to(torch.float32),
+            )
+        else:
+            # In raw-logprobs mode the original target tensor already contains
+            # both target and bonus rows in their final flattened order.
+            final_logits = logits.to(torch.float32)
+
+        offsets = torch.arange(
+            sampled_token_ids.shape[-1],
+            device=cu_num_sampled_tokens.device,
+            dtype=cu_num_sampled_tokens.dtype,
+        )
+        accepted_logit_indices = (cu_num_sampled_tokens.unsqueeze(1) + offsets.unsqueeze(0)).flatten()
+        accepted_logit_indices.clamp_(max=final_logits.shape[0] - 1)
+
+        accepted_tokens = sampled_token_ids.flatten()
+        accepted_tokens = torch.where(
+            accepted_tokens == PLACEHOLDER_TOKEN_ID,
+            torch.zeros_like(accepted_tokens),
+            accepted_tokens,
+        )
+
+        accepted_logits = final_logits[accepted_logit_indices]
+        accepted_logprobs = (
+            accepted_logits if self.is_logits_logprobs_mode else self.sampler.compute_logprobs(accepted_logits)
+        )
+        return self.sampler.gather_logprobs(
+            accepted_logprobs,
+            max_num_logprobs,
+            accepted_tokens.to(torch.int64),
+        )
