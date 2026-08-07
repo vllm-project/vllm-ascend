@@ -751,12 +751,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16), MagicMock())
 
-        # LoRA index exchange imports async_all_to_all in its own module.
-        patcher_lora_all2all = patch("vllm_ascend.lora.fused_moe.async_all_to_all")
-        self.mock_lora_async_all_to_all = patcher_lora_all2all.start()
-        self.addCleanup(patcher_lora_all2all.stop)
-        self.mock_lora_async_all_to_all.return_value = (None, torch.randn(16, 16), MagicMock())
-
         # Mock gather_from_sequence_parallel_region
         patcher7 = patch("vllm_ascend.ops.fused_moe.token_dispatcher.gather_from_sequence_parallel_region")
         self.mock_gather_from_sequence_parallel_region = patcher7.start()
@@ -847,7 +841,10 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             quant_type=QuantType.W8A8,
         )
 
-        result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        # This test covers dispatch-side activation quantization, not the
+        # separately tested LoRA index exchange collective.
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+            result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.mock_npu_dynamic_quant.assert_not_called()
         self.assertIsNone(result.dynamic_scale)
