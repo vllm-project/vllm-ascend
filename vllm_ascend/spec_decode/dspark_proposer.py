@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from typing import Any
 
 import torch
@@ -10,6 +11,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
@@ -59,6 +61,40 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=self.dtype,
             device=self.device,
         )
+        # Dynamic verify-length (confidence head) state and buffers. The
+        # hyperparameters can be overridden through
+        # additional_config.dynamic_spec_config.method_params when the dspark
+        # dynamic method is selected; otherwise the defaults below are used.
+        dynamic_spec_config = get_ascend_config().dynamic_spec_config
+        dspark_params = dynamic_spec_config.method_params if dynamic_spec_config.method == "dspark" else {}
+        # Initial per-request verify budget before the first recompute.
+        self.initial_verify_budget_per_req = int(dspark_params.get("initial_verify_budget_per_req", 5))
+        # Recompute the budget once this many decoding steps have accumulated.
+        self.budget_update_interval = int(dspark_params.get("budget_update_interval", 50))
+        self.budget_threshold = float(dspark_params.get("budget_threshold", 0.7))
+        self.budget_k = self.initial_verify_budget_per_req
+        # Steps accumulated since the last budget update; cleared to zero on every recompute.
+        self._steps_since_budget_update = 0
+        # Guaranteed minimum verify length per request.
+        self._dspark_min_k = 1
+        # Per-request verify lengths of the latest proposal, consumed by
+        # NPUModelRunner.take_draft_token_ids. None means keep all tokens.
+        self._dspark_num_verify_tokens: torch.Tensor | None = None
+        self._dspark_confidence_logits_buffer = torch.zeros(
+            (self.max_batch_size, self.num_speculative_tokens),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._dspark_num_verify_tokens_buffer = torch.zeros(
+            self.max_batch_size,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._keep_lens = torch.zeros(
+            (self.max_batch_size,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
@@ -101,6 +137,111 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+
+    def update_num_verify_tokens(
+        self,
+        last_hidden_states: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+        num_reqs: int,
+    ) -> None:
+        """Predict per-request verify lengths with the confidence head.
+
+        Two stages: first compute the shared verify-token budget, then
+        allocate it across requests. The result is published through
+        ``self._dspark_num_verify_tokens`` and consumed by
+        ``NPUModelRunner.take_draft_token_ids``.
+        """
+        confidence_logits = self._compute_confidence_logits(last_hidden_states, draft_token_ids, num_reqs)
+        self._compute_verify_budget(confidence_logits)
+        self._dspark_num_verify_tokens = self._allocate_verify_budget(confidence_logits)
+
+    def _compute_confidence_logits(
+        self,
+        last_hidden_states: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+        num_reqs: int,
+    ) -> torch.Tensor:
+        num_tokens = num_reqs * self.num_speculative_tokens
+        flat_hidden = last_hidden_states.reshape(num_tokens, last_hidden_states.shape[-1])
+        # Markov embeddings of the draft input tokens (cheap lookup, so they
+        # are recomputed here instead of being captured in the drafting loop).
+        markov_embs = self.model.markov_embed(draft_token_ids[:, : self.num_speculative_tokens])
+        # The confidence head concatenates both inputs, so their dtypes must
+        # match; it upcasts to float32 internally.
+        flat_markov = markov_embs.reshape(num_tokens, markov_embs.shape[-1]).to(flat_hidden.dtype)
+        conf_raw = self.model.confidence_logits(flat_hidden, flat_markov)
+        confidence_logits = self._dspark_confidence_logits_buffer[:num_reqs]
+        confidence_logits.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
+        return confidence_logits
+
+    def _compute_verify_budget(self, confidence_logits: torch.Tensor) -> None:
+        """Recompute the per-request verify budget every `budget_update_interval` steps."""
+        self._steps_since_budget_update += 1
+        if self._steps_since_budget_update < self.budget_update_interval:
+            return
+        self._steps_since_budget_update = 0
+        num_reqs = confidence_logits.shape[0]
+        # Approximated budget allocation via averaged per-position anticipated acceptance.
+        # .item() waits for the NPU computation to finish and copies the result to the CPU,
+        # so this introduces a synchronization on only budget-update steps
+        mean_k = float((confidence_logits.sigmoid() > self.budget_threshold).sum().item()) / float(num_reqs)
+        new_budget_k = math.ceil(mean_k)
+        # Previously measured on Qwen3-8b on A3 the next behaviour of verification costs
+        # of adjacent budgets differ slightly: the next odd budget is approximately equal
+        # to or even less than the previous even one as example s 64: k7 - 54.3; k6 - 52.9
+        # this happens because when adding a bonus token during verification, the odd budget turns
+        # into an even one, and even forms are processed more efficiently by the current core
+        # during verification, possibly due to operations like next_power_of_2()
+        if new_budget_k % 2 == 0:
+            new_budget_k += 1
+        self.budget_k = max(1, min(new_budget_k, self.num_speculative_tokens))
+
+    def _allocate_verify_budget(self, confidence_logits: torch.Tensor) -> torch.Tensor:
+        """Distribute the verify budget across requests by survival probability."""
+        num_reqs, num_draft_tokens = confidence_logits.shape
+        min_k = self._dspark_min_k
+        extra_budget_per_req = max(self.budget_k - min_k, 0)
+        conf_prob = torch.sigmoid(confidence_logits.float()).clamp_(min=1e-6, max=1.0)
+        survival = torch.cumprod(conf_prob, dim=1)
+
+        keep_lens = self._keep_lens[:num_reqs]
+        keep_lens.fill_(min_k)
+        candidate_window = survival[:, min_k:]
+
+        num_budget_tokens = min(
+            num_reqs * extra_budget_per_req,
+            candidate_window.numel(),
+        )
+
+        if num_budget_tokens > 0:
+            flat_survival = candidate_window.reshape(-1)
+
+            survival_eps = 0.0
+            valid = flat_survival >= survival_eps
+
+            masked_survival = torch.where(
+                valid,
+                flat_survival,
+                torch.full_like(flat_survival, float("-inf")),
+            )
+            _, top_indices = torch.topk(masked_survival, k=num_budget_tokens)
+
+            candidate_cols = num_draft_tokens - min_k
+
+            chosen_requests = top_indices // candidate_cols
+            chosen_valid = valid[top_indices].to(keep_lens.dtype)
+
+            keep_lens.scatter_add_(
+                0,
+                chosen_requests.to(torch.int64),
+                chosen_valid,
+            )
+
+        keep_lens.clamp_(min=min_k, max=num_draft_tokens)
+
+        num_verify_tokens = self._dspark_num_verify_tokens_buffer[:num_reqs]
+        num_verify_tokens.copy_(keep_lens)
+        return num_verify_tokens
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)

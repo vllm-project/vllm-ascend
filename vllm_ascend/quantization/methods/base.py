@@ -24,20 +24,6 @@ import torch
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-def get_moe_num_logical_experts(
-    layer: torch.nn.Module,
-    num_experts: int,
-    global_redundant_expert_num: int = 0,
-    num_shared_experts: int = 0,
-) -> int:
-    moe_config = getattr(layer, "moe_config", None)
-    num_logical_experts = getattr(moe_config, "num_logical_experts", None)
-    if num_logical_experts is not None:
-        return int(num_logical_experts)
-
-    return int(num_experts - global_redundant_expert_num - num_shared_experts)
-
-
 class AscendLinearScheme(ABC):
     """Base class for all linear quantization schemes.
 
@@ -252,6 +238,10 @@ class AscendMoEScheme(ABC):
             Output tensor after MoE computation.
         """
         ...
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        """Return expert-first weight views consumed by upstream EPLB."""
+        return []
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing for MoE layer.
