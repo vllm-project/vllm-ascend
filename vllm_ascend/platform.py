@@ -46,6 +46,7 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     get_ascend_device_type,
+    is_drafter_moe_model,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -750,6 +751,7 @@ class NPUPlatform(Platform):
         from vllm_ascend.ascend_forward_context import (
             get_mc2_mask,
             get_mrv2_in_profile_run,
+            get_mrv2_is_draft_forward,
             select_moe_comm_method,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
@@ -772,8 +774,10 @@ class NPUPlatform(Platform):
         if not vllm_config.use_v2_model_runner:
             return {}
 
-        # is_draft_model will be removed later, so we set it to False temporarily.
-        is_draft_model = False
+        # Speculative draft forwards are wrapped by the Ascend speculators with
+        # override_mrv2_is_draft_forward(); the platform hook has no other way
+        # to tell draft and target forwards apart under MRv2.
+        is_draft_model = get_mrv2_is_draft_forward()
         # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
         is_draft_model_prefill = False
         sinks = False
@@ -793,10 +797,18 @@ class NPUPlatform(Platform):
         # if the concurrency is below the threshold,
         # the performance may degrade due to the switching of
         # communication methods.
+        # main model and drafter model may have different architecture.
+        is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
         mmrs_fusion = True
-        if is_moe_model(vllm_config):
+        if is_context_moe_model:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
+        elif is_draft_model:
+            # Mirror the V1 behavior (set_ascend_forward_context): for dense
+            # drafters (e.g. eagle/eagle3), FlashComm1/SP is redundant and is
+            # not compatible with the draft forward (embeds are reduce-scattered
+            # while hidden_states stay full-sequence).
+            flash_comm_v1_enabled = False
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
         pad_size = 0
