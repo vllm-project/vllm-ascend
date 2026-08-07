@@ -148,7 +148,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"
-      - "66600"
+      - "67584"
       - "--max-num-seqs"
       - "8"
       - "--gpu-memory-utilization"

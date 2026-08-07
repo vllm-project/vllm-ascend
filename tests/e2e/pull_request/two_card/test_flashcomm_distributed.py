@@ -52,6 +52,30 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_deepseek_v2_lite_fc1_model_runner_v2_tp2() -> None:
+    example_prompts = [
+        "test" * 1001,
+    ]
+    sampling_params = SamplingParams(
+        max_tokens=5,
+        temperature=0.0,
+        top_k=50,
+        top_p=0.9,
+    )
+    with VllmRunner(
+        "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+        dtype="auto",
+        tensor_parallel_size=2,
+        distributed_executor_backend="mp",
+        enable_expert_parallel=True,
+        enforce_eager=True,
+        quantization="ascend",
+        additional_config={"enable_flashcomm1": True},
+    ) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_fc1_tp2(model):

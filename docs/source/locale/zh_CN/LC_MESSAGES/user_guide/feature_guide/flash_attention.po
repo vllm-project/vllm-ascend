@@ -53,14 +53,6 @@ msgid ""
 msgstr ""
 "FA3需要`flash_attn_npu`包，该包提供包含`flash_attn_with_kvcache`算子的`flash_attn_npu_v3`模块。"
 
-msgid ""
-"Install the `flash_attn_npu` wheel package refer to: "
-"<https://github.com/MinghuasLab/flash-attention-"
-"npu/blob/main/README.md#installation>."
-msgstr ""
-"安装`flash_attn_npu` wheel包，请参考：<https://github.com/MinghuasLab/flash-"
-"attention-npu/blob/main/README.md#installation>。"
-
 msgid "To enable FA3, you need to:"
 msgstr "要启用FA3，您需要："
 
@@ -129,13 +121,6 @@ msgstr ""
 
 msgid "## Hardware Requirements"
 msgstr "## 硬件要求"
-
-msgid ""
-"FA3 currently requires Ascend Atlas A2 and A3 inference products NPUs.\n"
-"We will support other NPUs in the future."
-msgstr ""
-"FA3 目前需要 Ascend Atlas A2 和 A3 推理产品 NPU。\n"
-"未来我们将支持其他 NPU。"
 
 msgid "## Software Requirements"
 msgstr "## 软件要求"
@@ -211,3 +196,18 @@ msgstr ""
 
 msgid "| Feature | GPU FA3 | NPU FA3 |"
 msgstr "| 特性 | GPU FA3 | NPU FA3 |"
+
+msgid ""
+"FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.\n"
+"We will support other NPUs in the future."
+msgstr ""
+"FA3目前需要昇腾Atlas A2和A3推理NPU。\n"
+"我们将在未来支持其他NPU。"
+
+msgid ""
+"To install the `flash_attn_npu` wheel package, refer to: "
+"<https://github.com/MinghuasLab/flash-attention-"
+"npu/blob/main/README.md#installation>."
+msgstr ""
+"要安装`flash_attn_npu`轮子包，请参考：<https://github.com/MinghuasLab/flash-attention-"
+"npu/blob/main/README.md#installation>。"

@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'Content of recommendations from upstream job output (priority 1)'
+    secrets:
+      OBS_ACCESS_KEY_FAILURE_ANALYSIS:
+        required: false
+      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS:
+        required: false
 
 defaults:
   run:

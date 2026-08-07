@@ -67,7 +67,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
-| `eplb_config`                       | dict | `{}`    | Configuration options for eplb |
+| `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
@@ -91,10 +91,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
+| `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please ensure that FlashComm1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
-| `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
+| `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
 The details of each configuration option are as follows:
 
@@ -102,8 +102,8 @@ The details of each configuration option are as follows:
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enabled` | bool | `False` | Whether to enable Xlite graph mode. Currently only Llama, Qwen dense series models, and Qwen3-VL are supported. |
-| `full_mode` | bool | `False` | Whether to enable Xlite for both the prefill and decode stages. By default, Xlite is only enabled for the decode stage. |
+| `enabled` | bool | `False` | Whether to enable Xlite graph mode. See [Using XliteGraph](../feature_guide/graph_mode.md#using-xlitegraph) for the supported models, the decode-only vs. full-mode distinction, and examples. |
+| `full_mode` | bool | `False` | Whether to enable Xlite for both the prefill and decode stages. By default, Xlite is only enabled for the decode stage, with prefill falling back to the runnable under ACLGraph. When `True`, xlite owns prefill and decode, ACLGraph capture is not used, and `--enforce-eager` is recommended (unless speculative decoding is configured, etc.). |
 
 **finegrained_tp_config**
 
@@ -126,16 +126,29 @@ The details of each configuration option are as follows:
 
 **eplb_config**
 
+The accepted fields depend on the model runner:
+
+- **Model Runner V2** accepts only `load_collection_phase` here. Configure
+  upstream EPLB through `--enable-eplb` and `--eplb-config`, and set
+  `--eplb-config.use_async false` on Ascend.
+- **Model Runner V1** accepts the legacy fields below except
+  `load_collection_phase`.
+  MRv1 does not accept upstream `--enable-eplb` on Ascend.
+
+Mixing the two schemas fails during startup instead of silently ignoring
+configuration.
+
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `dynamic_eplb`                   | bool| `False`| Whether to enable dynamic EPLB. |
-| `expert_map_path`                | str | `None` | When using expert load balancing for an MoE model, an expert map path needs to be passed in.|
-| `expert_heat_collection_interval`| int | `400`  | Forward iterations when EPLB begins. |
-| `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
-| `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
-| `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
-| `eplb_policy_type`               | int | `1`    | EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), `3`=FlashLB (statistical method with sliding windows). |
-| `eplb_heat_collection_stage`      | str | `"all"`| Stage to collect EPLB heat: `"prefill"` collects only during prefill, `"decode"` collects only during decode, `"all"` collects during both stages. In PD colocation scenarios, prefill and decode requests may produce different expert workloads. Selectively collecting heat on one stage can reduce expert imbalance more effectively. |
+| `dynamic_eplb`                   | bool| `False`| MRv1 only. Whether to enable legacy dynamic EPLB. |
+| `expert_map_path`                | str | `None` | MRv1 only. Load a recorded static expert map. |
+| `expert_heat_collection_interval`| int | `600`  | MRv1 only. Number of forward iterations used to collect expert heat. |
+| `algorithm_execution_interval`   | int | `50`   | MRv1 only. Interval allowed for the EPLB worker to finish its CPU task. |
+| `expert_map_record_path`         | str | `None` | MRv1 only. Save the calculated expert map to the specified JSON path. |
+| `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
+| `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
+| `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
+| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
 
 **scheduler_config**
 
