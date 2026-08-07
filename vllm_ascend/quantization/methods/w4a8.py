@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -27,11 +26,11 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
@@ -341,12 +340,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
       ``[num_experts, 1, hidden_sizes]``.
     """
 
+    supports_eplb = True
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W4A8
 
     def __init__(self):
-        self.supports_eplb = True
-
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         # NOTE: the weights are quantized from bf16 to int4 through a per-channel quantization process
@@ -362,7 +360,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.tp_size = (
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
         )
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
+        self.use_expert_weight_list = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
@@ -487,71 +488,16 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: torch.Tensor | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
-        tid2eid: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
-        num_logical_experts = get_moe_num_logical_experts(
-            layer,
-            num_experts,
-            global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
-        )
-        assert router_logits.shape[1] == num_logical_experts, (
-            "Number of global experts mismatch (excluding redundancy): "
-            f"router_logits.shape[1]={router_logits.shape[1]}, num_logical_experts={num_logical_experts}"
-        )
-
-        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_logical_experts,
-            tid2eid=tid2eid,
-        )
-
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
-        if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
-
         topk_weights = topk_weights.to(x.dtype)
 
-        if self.dynamic_eplb:
+        if self.use_expert_weight_list:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
             w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
@@ -591,22 +537,57 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1=w1,
                 w2=w2,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
-                activation=activation,
+                dynamic_eplb=self.use_expert_weight_list,
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                log2phy=layer.log2phy,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 is_per_channel_weight=self.is_per_channel_weight,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
+                swiglu_beta=layer.swiglu_beta,
             )
         )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+        if hasattr(layer, "w13_weight_list"):
+            weights = [
+                layer.w13_weight_list,
+                layer.w2_weight_list,
+                layer.w13_weight_scale_list,
+                layer.w2_weight_scale_list,
+            ]
+            w13_scale_bias = layer.w13_scale_bias_list
+            w2_scale_bias = layer.w2_scale_bias_list
+            if (w13_scale_bias is None) != (w2_scale_bias is None):
+                raise RuntimeError(
+                    "W4A8 EPLB requires w13_scale_bias_list and w2_scale_bias_list to be present or absent together."
+                )
+            if w13_scale_bias is not None:
+                weights.extend([w13_scale_bias, w2_scale_bias])
+            return weights
+
+        weights = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+        ]
+        w13_scale_bias = getattr(layer, "w13_scale_bias", None)
+        w2_scale_bias = getattr(layer, "w2_scale_bias", None)
+        if (w13_scale_bias is None) != (w2_scale_bias is None):
+            raise RuntimeError("W4A8 EPLB requires w13_scale_bias and w2_scale_bias to be present or absent together.")
+        if w13_scale_bias is not None:
+            weights.extend([w13_scale_bias, w2_scale_bias])
+        return weights
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         scale = scale.transpose(1, 2).contiguous()
@@ -680,6 +661,27 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             return scale.squeeze(1)
         return scale
 
+    @staticmethod
+    def _split_expert_weights(layer: torch.nn.Module) -> None:
+        tensor_names = (
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        )
+        for tensor_name in tensor_names:
+            tensor = getattr(layer, tensor_name)
+            setattr(layer, f"{tensor_name}_list", [expert.clone() for expert in tensor.data.unbind(dim=0)])
+
+        for tensor_name in ("w13_scale_bias", "w2_scale_bias"):
+            tensor = getattr(layer, tensor_name, None)
+            expert_tensors = None if tensor is None else [expert.clone() for expert in tensor.data.unbind(dim=0)]
+            setattr(layer, f"{tensor_name}_list", expert_tensors)
+
+        for tensor_name in (*tensor_names, "w13_scale_bias", "w2_scale_bias"):
+            if hasattr(layer, tensor_name):
+                delattr(layer, tensor_name)
+
     def process_weights_after_loading(self, layer):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.process_weights_after_loading_compressed_tensors(layer)
@@ -738,7 +740,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # FIX(mega W4A8 all-route): with MegaMoe on, keep ND int8 (skip trans_nz + pack_to_int32);
         # _maybe_build_cann_mega_moe_lists casts each expert slice to FRACTAL_NZ individually. See
         # the modelslim path below for the full rationale. Non-mega keeps the standard NZ-int32 form.
-        if get_ascend_config().enable_fused_mc2 == 1 and not self.dynamic_eplb and _MEGA_MOE_SUPPORTED:
+        if self.use_expert_weight_list:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            self._split_expert_weights(layer)
+        elif get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
             self._maybe_build_cann_mega_moe_lists(layer)
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
@@ -794,33 +800,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.is_per_channel_weight:
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
 
-        if self.dynamic_eplb:
+        if self.use_expert_weight_list:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-            layer.w13_weight_scale_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
-            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
-            layer.w13_scale_bias_list = (
-                [weight.clone() for weight in layer.w13_scale_bias.data.unbind(dim=0)]
-                if hasattr(layer, "w13_scale_bias")
-                else None
-            )
-            layer.w2_scale_bias_list = (
-                [weight.clone() for weight in layer.w2_scale_bias.data.unbind(dim=0)]
-                if hasattr(layer, "w2_scale_bias")
-                else None
-            )
-            del layer.w13_weight
-            del layer.w2_weight
-            del layer.w13_weight_scale
-            del layer.w2_weight_scale
-            del layer.w13_scale_bias
-            del layer.w2_scale_bias
+            self._split_expert_weights(layer)
         # keep weights as ND int8 when MegaMoe is on (skip trans_nz).
         elif get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
             self._maybe_build_cann_mega_moe_lists(layer)
-
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from functools import wraps
 from typing import Any, cast
 
@@ -27,6 +28,11 @@ from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
+
+# main2main compat: mirror vllm_ascend.utils.vllm_version_is without
+# importing vllm_ascend (which pulls in vllm) so that CPU-UT tests that
+# load this module from source via `_load_module()` do not break.
+_IS_VLLM_026 = os.getenv("VLLM_VERSION", "") == "0.26.0"
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
@@ -98,57 +104,120 @@ def _patch_destroy_distributed_environment():
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
-    def __init__(
-        self,
-        group_ranks: list[list[int]],
-        local_rank: int,
-        torch_distributed_backend: str | Backend,
-        use_device_communicator: bool,  # whether to use device communicator
-        use_message_queue_broadcaster: bool = False,
-        group_name: str | None = None,
-    ):
-        group_name = group_name or "anonymous"
-        self.unique_name = _get_unique_name(group_name)
-        _register_group(self)
+    # main2main compat: `use_all2all` was added to upstream
+    # GroupCoordinator.__init__() in vllm main after 0.26.0. Ascend NPU
+    # has no all2all implementation, so we only accept the kwarg to keep
+    # the interface aligned.
+    # Remove the version gate once 0.26.0 support is dropped.
+    if _IS_VLLM_026:
 
-        self.rank = torch.distributed.get_rank()
-        self.local_rank = local_rank
-        self.torch_distributed_backend = torch_distributed_backend
-        self.backend = _normalize_backend(torch_distributed_backend)
-        self._acquired_hccl_keys: list[HcclPgKey] = []
-        self._unshared_hccl_groups: list[object] = []
-        self.use_device_communicator = use_device_communicator
-        self.device_communicator: NPUCommunicator | None = None
-        self.mq_broadcaster = None
-        self.cpu_group = None
-        self.device_group = None
-        self.device = None
-        self.use_custom_op_call = True
-        self.use_cpu_custom_send_recv = False
-        self.group_name = group_name
-        self.group_ranks = group_ranks
+        def __init__(
+            self,
+            group_ranks: list[list[int]],
+            local_rank: int,
+            torch_distributed_backend: str | Backend,
+            use_device_communicator: bool,  # whether to use device communicator
+            use_message_queue_broadcaster: bool = False,
+            group_name: str | None = None,
+        ):
+            group_name = group_name or "anonymous"
+            self.unique_name = _get_unique_name(group_name)
+            _register_group(self)
 
-        try:
-            self._init_device_groups(create_cpu_group=True)
-            assert self.cpu_group is not None
-            assert self.device_group is not None
+            self.rank = torch.distributed.get_rank()
+            self.local_rank = local_rank
+            self.backend = _normalize_backend(torch_distributed_backend)
+            self.torch_distributed_backend = torch_distributed_backend
+            self._acquired_hccl_keys: list[HcclPgKey] = []
+            self._unshared_hccl_groups: list[object] = []
+            self.use_device_communicator = use_device_communicator
+            self.device_communicator: NPUCommunicator | None = None
+            self.mq_broadcaster = None
+            self.cpu_group = None
+            self.device_group = None
+            self.device = None
+            self.use_custom_op_call = True
+            self.use_cpu_custom_send_recv = False
+            self.group_name = group_name
+            self.group_ranks = group_ranks
 
-            self._init_device_communicator()
-
-            from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
-
-            if use_message_queue_broadcaster and self.world_size > 1:
-                self.mq_broadcaster = MessageQueue.create_from_process_group(
-                    self.cpu_group,
-                    1 << 22,
-                    6,
-                )
-        except Exception:
             try:
-                self.destroy()
+                self._init_device_groups(create_cpu_group=True)
+                assert self.cpu_group is not None
+                assert self.device_group is not None
+
+                self._init_device_communicator()
+
+                from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+                if use_message_queue_broadcaster and self.world_size > 1:
+                    self.mq_broadcaster = MessageQueue.create_from_process_group(
+                        self.cpu_group,
+                        1 << 22,
+                        6,
+                    )
             except Exception:
-                logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
-            raise
+                try:
+                    self.destroy()
+                except Exception:
+                    logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
+                raise
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            group_ranks: list[list[int]],
+            local_rank: int,
+            torch_distributed_backend: str | Backend,
+            use_device_communicator: bool,  # whether to use device communicator
+            use_message_queue_broadcaster: bool = False,
+            group_name: str | None = None,
+            use_all2all: bool = False,
+        ):
+            self.use_all2all = use_all2all
+
+            group_name = group_name or "anonymous"
+            self.unique_name = _get_unique_name(group_name)
+            _register_group(self)
+
+            self.rank = torch.distributed.get_rank()
+            self.local_rank = local_rank
+            self.backend = _normalize_backend(torch_distributed_backend)
+            self.torch_distributed_backend = torch_distributed_backend
+            self._acquired_hccl_keys: list[HcclPgKey] = []  # type: ignore[no-redef]
+            self._unshared_hccl_groups: list[object] = []  # type: ignore[no-redef]
+            self.use_device_communicator = use_device_communicator
+            self.device_communicator: NPUCommunicator | None = None  # type: ignore[no-redef]
+            self.mq_broadcaster = None
+            self.cpu_group = None
+            self.device_group = None
+            self.device = None
+            self.use_custom_op_call = True
+            self.use_cpu_custom_send_recv = False
+            self.group_name = group_name
+            self.group_ranks = group_ranks
+
+            try:
+                self._init_device_groups(create_cpu_group=True)
+                assert self.cpu_group is not None
+                assert self.device_group is not None
+
+                self._init_device_communicator()
+
+                from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+                if use_message_queue_broadcaster and self.world_size > 1:
+                    self.mq_broadcaster = MessageQueue.create_from_process_group(
+                        self.cpu_group,
+                        1 << 22,
+                        6,
+                    )
+            except Exception:
+                try:
+                    self.destroy()
+                except Exception:
+                    logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
+                raise
 
     def _init_device_groups(self, create_cpu_group: bool) -> None:
         reuse_domain = _resolve_reuse_domain(self.group_name)

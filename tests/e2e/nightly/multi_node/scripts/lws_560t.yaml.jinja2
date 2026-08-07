@@ -57,7 +57,9 @@ spec:
               - sh
               - -c
               - |
-                bash /root/.cache/tests/run.sh
+                bash /root/.cache/tests/run.sh \
+                  "{{ soc_version | default("") }}" \
+                  "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
@@ -131,7 +133,9 @@ spec:
               - sh
               - -c
               - |
-                bash /root/.cache/tests/run.sh
+                bash /root/.cache/tests/run.sh \
+                  "{{ soc_version | default("") }}" \
+                  "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}

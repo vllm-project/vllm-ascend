@@ -237,8 +237,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
 
-        if self.kv_role == "kv_consumer":
-            # Don't do save if the role is kv_consumer
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+            # A load-only consumer does not publish KV.
             return
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
