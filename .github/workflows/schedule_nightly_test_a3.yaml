@@ -260,6 +260,7 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       request_id: ${{ inputs.request_id || '' }}
+      testcase_timeout: ${{ matrix.test_config.testcase_timeout || 120 }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
