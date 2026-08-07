@@ -226,7 +226,13 @@ class DeepseekV4DSparkModel(nn.Module):
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
         residual = None
         for layer in self.layers.values():
-            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling=None)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling=None,
+                input_ids=input_ids,
+            )
         head_hidden = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         return head_hidden
 
