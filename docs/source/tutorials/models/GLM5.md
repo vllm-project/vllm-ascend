@@ -206,7 +206,6 @@ export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MU
 export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
 
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
@@ -230,7 +229,6 @@ export DYNAMIC_EPLB="true"
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
 --host 0.0.0.0 \
 --port 8077 \
---distributed-executor-backend mp \
 --data-parallel-size 1 \
 --tensor-parallel-size 8 \
 --seed 1024 \
@@ -243,12 +241,10 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
 --enable-prefix-caching \
 --gpu-memory-utilization 0.95 \
 --quantization ascend \
---async-scheduling \
 --enable-auto-tool-choice \
 --tool-call-parser glm47 \
 --reasoning-parser glm45 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
 --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
 --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "enable_sparse_c8": "True", "enable_dsa_cp": true, "eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts": 0 }}'
@@ -807,7 +803,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 ::::
 :::::
 
-### 5.3 Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation (A3 series)
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
@@ -1382,7 +1378,7 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
     ```
 
-### 5.4 Prefill-Decode Disaggregation(Ascend950DT series)
+### 5.4 Prefill-Decode Disaggregation (Ascend950DT series)
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with 2P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
@@ -1521,7 +1517,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-        export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
@@ -1534,7 +1529,6 @@ Before you start, please
             --served-model-name glm-5 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
-            --async-scheduling \
             --max-num-seqs 8 \
             --enable-prefix-caching \
             --trust-remote-code \
@@ -1545,7 +1539,6 @@ Before you start, please
             --reasoning-parser glm45 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
-            --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -1594,7 +1587,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-        export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
@@ -1607,7 +1599,6 @@ Before you start, please
             --served-model-name glm-5 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
-            --async-scheduling \
             --max-num-seqs 8 \
             --enable-prefix-caching \
             --trust-remote-code \
@@ -1618,7 +1609,6 @@ Before you start, please
             --reasoning-parser glm45 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
-            --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
@@ -1666,7 +1656,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-        export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
@@ -1682,7 +1671,6 @@ Before you start, please
             --served-model-name glm-5 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
-            --async-scheduling \
             --max-num-seqs 60 \
             --enable-prefix-caching \
             --trust-remote-code \
@@ -1693,7 +1681,6 @@ Before you start, please
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
-            --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -1741,7 +1728,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-        export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
@@ -1757,7 +1743,6 @@ Before you start, please
             --served-model-name glm-5 \
             --gpu-memory-utilization 0.95 \
             --enable-expert-parallel \
-            --async-scheduling \
             --max-num-seqs 60 \
             --enable-prefix-caching \
             --trust-remote-code \
@@ -1768,7 +1753,6 @@ Before you start, please
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
-            --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
