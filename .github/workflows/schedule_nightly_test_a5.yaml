@@ -161,14 +161,10 @@ jobs:
     with:
       target: a5
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   multi-node-tests:
     name: multi-node
