@@ -99,6 +99,8 @@ public:
         if (t_->codebookMode == TQ_CB_LUT) {
             DataCopy(cb_, cbGm_, 2 * (1 << BITS));
         }
+        SetFlag<HardEvent::MTE2_V>(EVENT_ID6);   // signs_/cb_ are consumed by V ops
+        WaitFlag<HardEvent::MTE2_V>(EVENT_ID6);
     }
 
     /*
@@ -152,6 +154,20 @@ private:
         PipeBarrier<PIPE_V>();
         RotatePi(q, signs_, tmp, d, t_->invSqrtHeadDim);
 
+        if (t_->variant == 9u) {
+            // expose the rotated query: out = Pi q, compared against an
+            // independently computed rotation in Python
+            Adds(acc, q, 0.0f, d);
+            PipeBarrier<PIPE_V>();
+            LocalTensor<half> dbg = outBuf_.Get<half>();
+            Cast(dbg, acc, RoundMode::CAST_NONE, d);
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
+            DataCopy(outGm_[(b * t_->numHeads + qh) * d], dbg, d);
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID5);
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID5);
+            return;
+        }
         Duplicate(acc, 0.0f, d);
         PipeBarrier<PIPE_V>();
         float runMax = kNegInf;
@@ -193,7 +209,7 @@ private:
                  * pipe flag can fix it, which is why six sync hypotheses moved
                  * the failure around without ever converging.
                  */
-                ReduceSum(red, tmp, wrk, d);
+                ReduceSum(tmp, tmp, tmp, d);   // aliased, as in the working write path
                 PipeBarrier<PIPE_V>();
                 // NOTE: a Muls(red, red, 1.0f, 1) was tried here to mirror the
                 // write path's Sqrt(tmp, tmp, 1). count=1 is NOT a valid vector
@@ -236,15 +252,18 @@ private:
                  * This separates the two remaining candidates in one build.
                  */
                 if (tk == 0) {
-                    dbgDot = red.GetValue(0);
+                    dbgDot = tmp.GetValue(0);
+                }
+                if (t_->variant == 6u) {
+                    acc.SetValue(tk, tmp.GetValue(0));   // per-token dot dump
                 }
                 float score;
-                if (t_->variant == 2u) {
+                if (t_->variant == 2u || t_->variant == 7u || t_->variant == 8u) {
                     score = 0.0f;
                 } else if (t_->variant == 3u) {
                     score = 2.0f * static_cast<float>(static_cast<int32_t>(tk));  // uint->float is banned in aicore
                 } else {
-                    score = red.GetValue(0) * kNorm * t_->scale;
+                    score = tmp.GetValue(0) * kNorm * t_->scale;
                 }
 
                 // ---- online softmax update ---------------------------------
@@ -258,27 +277,46 @@ private:
                 runSum = runSum * corr + w;
                 runMax = newMax;
 
+                if (t_->variant == 8u) {
+                    // accumulate the FIRST gather's kv directly; skip the second
+                    // gather entirely so only the score-path K read is exercised
+                    Muls(kv, kv, w * kNorm, d);
+                    PipeBarrier<PIPE_V>();
+                    Add(acc, acc, kv, d);
+                    PipeBarrier<PIPE_V>();
+                    runSum = runSum;   // weights already updated above
+                    continue;
+                }
                 // ---- accumulate w * ||v|| * yhat_v (still rotated) ----------
-                GatherNz(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
+                GatherNz((t_->variant == 7u) ? kCacheGm_ : vCacheGm_, bytes, kvh,
+                         static_cast<uint32_t>(phys), tk);
                 UnpackCodes<BITS>(bytes, codes, d);
                 SetFlag<HardEvent::S_V>(EVENT_ID1);   // scalar wrote `codes` -> vector reads it
                 WaitFlag<HardEvent::S_V>(EVENT_ID1);
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
                 const float vNorm = static_cast<float>(
                     vNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
-                Muls(kv, kv, w * vNorm, d);
+                if (t_->variant == 7u) {
+                    // accumulate the K vector instead: out becomes mean(K),
+                    // which exposes a bad K gather that identical-key probes hide
+                    Muls(kv, kv, w * kNorm, d);
+                } else {
+                    Muls(kv, kv, w * vNorm, d);
+                }
                 PipeBarrier<PIPE_V>();
                 Add(acc, acc, kv, d);
                 PipeBarrier<PIPE_V>();
             }
         }
 
-        if (runSum > 0.0f) {
+        if (t_->variant != 6u && runSum > 0.0f) {
             Muls(acc, acc, 1.0f / runSum, d);
             PipeBarrier<PIPE_V>();
         }
         // Pi is self-inverse: one rotation returns the output to the original basis
-        RotatePi(acc, signs_, tmp, d, t_->invSqrtHeadDim);
+        if (t_->variant != 6u) {
+            RotatePi(acc, signs_, tmp, d, t_->invSqrtHeadDim);
+        }
 
         /*
          * variant==5: overwrite the output with the RAW ReduceSum result from
