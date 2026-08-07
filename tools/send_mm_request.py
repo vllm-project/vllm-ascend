@@ -65,9 +65,7 @@ def _messages_need_preload(mm: dict[str, Any]) -> bool:
                 return True
             if not url.startswith(("http://", "https://")):
                 return True
-    if mm.get("images"):
-        return True
-    return False
+    return bool(mm.get("images"))
 
 
 def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict[str, Any]]:
