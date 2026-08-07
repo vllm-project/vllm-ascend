@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import gc
 import logging
 import math
 import sys
@@ -181,6 +182,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_c_env,
     global_stream,
+    is_310p,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
@@ -3558,6 +3560,25 @@ class NPUModelRunner(GPUModelRunner):
                     self._has_sinks = True
                     break
             if self.drafter:
+                is_dsv4_310p = False
+                if is_310p():
+                    from vllm_ascend._310p.deepseek_v4 import is_deepseek_v4_model
+
+                    is_dsv4_310p = is_deepseek_v4_model(self.model_config)
+                if is_dsv4_310p:
+                    # DeepSeek V4 FP8/MXFP4 weights are converted to resident
+                    # W8A8 during target loading. Reclaim the replaced packed
+                    # storages before constructing the draft model so target
+                    # and draft do not overlap at peak HBM usage.
+                    gc.collect()
+                    torch.npu.empty_cache()
+                    free_memory, _ = torch.npu.mem_get_info()
+                    logger.info_once(
+                        "Released DeepSeek V4 target loading buffers before "
+                        "draft initialization; %.2f GiB device memory is free.",
+                        free_memory / (1024**3),
+                        scope="local",
+                    )
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)

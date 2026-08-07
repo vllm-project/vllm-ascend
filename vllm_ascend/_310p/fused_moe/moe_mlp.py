@@ -16,9 +16,51 @@
 
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+
+
+def clipped_swiglu_310p(
+    gate_up: torch.Tensor,
+    *,
+    limit: float = 0.0,
+    alpha: float = 1.0,
+    bias: float = 0.0,
+) -> torch.Tensor:
+    if gate_up.shape[-1] % 2 != 0:
+        raise ValueError(f"Gate/up width must be even, got {gate_up.shape[-1]}.")
+    if alpha != 1.0 or bias != 0.0:
+        raise NotImplementedError("The 310P composed routed-expert SwiGLU path supports only alpha=1.0 and bias=0.0.")
+    original_dtype = gate_up.dtype
+    gate, up = gate_up.float().chunk(2, dim=-1)
+    if limit > 0.0:
+        gate = torch.clamp(gate, max=limit)
+        up = torch.clamp(up, min=-limit, max=limit)
+    return (F.silu(gate) * up).to(original_dtype)
+
+
+def zero_inactive_grouped_matmul_rows(
+    hidden_states: torch.Tensor,
+    cumulative_group_list: torch.Tensor,
+) -> torch.Tensor:
+    """Clear rows that 310P grouped matmul leaves unwritten.
+
+    ``npu_quant_grouped_matmul_dequant`` preserves the input row count even
+    when the cumulative group list covers fewer rows. On 310P, the uncovered
+    tail is not initialized and may contain NaNs or stale values. Keep the
+    operation device-side so it also works with dynamic local expert loads.
+    """
+    if cumulative_group_list.numel() == 0:
+        return torch.zeros_like(hidden_states)
+    row_ids = torch.arange(
+        hidden_states.shape[0],
+        dtype=cumulative_group_list.dtype,
+        device=hidden_states.device,
+    )
+    valid_rows = row_ids < cumulative_group_list[-1]
+    return torch.where(valid_rows.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
 
 
 def quant_apply_mlp(
@@ -29,19 +71,36 @@ def quant_apply_mlp(
     w2_scale: torch.Tensor,
     group_list: torch.Tensor,
     group_list_type: int = 1,
+    swiglu_limit: float = 0.0,
+    swiglu_alpha: float = 1.0,
+    swiglu_beta: float = 0.0,
 ) -> torch.Tensor:
     if group_list_type == 1:
-        # Convert group_list to cumulative sum format if group_list is count format
+        # Convert expert row counts to the cumulative format required by GMM.
         group_list = torch.cumsum(group_list, dim=0)
 
     hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
-        x=hidden_states, quantized_weight=w1, weight_scale=w1_scale, group_list=group_list, quant_mode="pertoken"
+        x=hidden_states,
+        quantized_weight=w1,
+        weight_scale=w1_scale,
+        group_list=group_list,
+        quant_mode="pertoken",
     )
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
+    hidden_states = zero_inactive_grouped_matmul_rows(hidden_states, group_list)
+    hidden_states = clipped_swiglu_310p(
+        hidden_states,
+        limit=swiglu_limit,
+        alpha=swiglu_alpha,
+        bias=swiglu_beta,
+    )
     hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
-        x=hidden_states, quantized_weight=w2, weight_scale=w2_scale, group_list=group_list, quant_mode="pertoken"
+        x=hidden_states,
+        quantized_weight=w2,
+        weight_scale=w2_scale,
+        group_list=group_list,
+        quant_mode="pertoken",
     )
-    return hidden_states
+    return zero_inactive_grouped_matmul_rows(hidden_states, group_list)
 
 
 def unquant_apply_mlp(
@@ -91,6 +150,9 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             w2_scale=w2_scale,
             group_list=group_list,
             group_list_type=group_list_type,
+            swiglu_limit=mlp_compute_input.swiglu_limit,
+            swiglu_alpha=mlp_compute_input.swiglu_alpha,
+            swiglu_beta=mlp_compute_input.swiglu_beta,
         )
 
     return unquant_apply_mlp(

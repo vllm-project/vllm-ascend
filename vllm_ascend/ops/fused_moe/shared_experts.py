@@ -67,6 +67,10 @@ class AscendSharedExperts:
         self.hidden_size = moe_config.hidden_dim
         self.in_dtype = moe_config.in_dtype
         self.quant_type = quant_type
+        # DeepSeek V4 marks its shared-expert module when the model is built
+        # for 310P. Cache the decision here; model forward/profile paths are not
+        # guaranteed to run inside a current-vLLM-config context.
+        self.use_310p_quantized_fallback = bool(getattr(layer, "_ascend_use_310p_quantized_fallback", False))
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
 
@@ -148,35 +152,55 @@ class AscendSharedExperts:
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
-                hidden_states = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.gate_up_proj.weight,
-                    self.layer.gate_up_proj.weight_scale,
-                    pertoken_scale=None,
-                    bias=None,
-                    output_dtype=torch.int32,
-                )
-                # Execute activation concurrently with gmm2.
+                if self.use_310p_quantized_fallback:
+                    hidden_states = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        pertoken_scale=pertoken_scale,
+                        bias=None,
+                        output_dtype=original_dtype,
+                    )
+                    maybe_wait_event(fused_moe_evts.before_gmm2)
+                    from vllm_ascend._310p.ops.swiglu_quant import swiglu_quant_310p
 
-                maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
-                    x=hidden_states,
-                    weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
-                    activation_scale=pertoken_scale,
-                    bias=None,
-                    quant_scale=None,
-                    quant_offset=None,
-                    group_index=None,
-                    activate_left=True,
-                    quant_mode=1,
-                    swiglu_mode=1,
-                    clamp_limit=fused_moe_evts.swiglu_limit,
-                    **(
-                        {}
-                        if get_ascend_device_type() == AscendDeviceType.A5
-                        else {"glu_alpha": fused_moe_evts.swiglu_alpha, "glu_bias": fused_moe_evts.swiglu_beta}
-                    ),
-                )
+                    quantized_x, swiglu_out_scale = swiglu_quant_310p(
+                        hidden_states,
+                        clamp_limit=fused_moe_evts.swiglu_limit,
+                        glu_alpha=fused_moe_evts.swiglu_alpha,
+                        glu_bias=fused_moe_evts.swiglu_beta,
+                    )
+                else:
+                    hidden_states = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        pertoken_scale=None,
+                        bias=None,
+                        output_dtype=torch.int32,
+                    )
+                    maybe_wait_event(fused_moe_evts.before_gmm2)
+                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+                        x=hidden_states,
+                        weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                        activation_scale=pertoken_scale,
+                        bias=None,
+                        quant_scale=None,
+                        quant_offset=None,
+                        group_index=None,
+                        activate_left=True,
+                        quant_mode=1,
+                        swiglu_mode=1,
+                        clamp_limit=fused_moe_evts.swiglu_limit,
+                        **(
+                            {}
+                            if get_ascend_device_type() == AscendDeviceType.A5
+                            else {
+                                "glu_alpha": fused_moe_evts.swiglu_alpha,
+                                "glu_bias": fused_moe_evts.swiglu_beta,
+                            }
+                        ),
+                    )
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)

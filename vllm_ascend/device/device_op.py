@@ -667,6 +667,11 @@ class BaseDeviceAdaptor:
         return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
 
     @staticmethod
+    def get_dsa_qli_metadata_op():
+        """Returns the metadata builder for the quantized lightning indexer."""
+        return torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata
+
+    @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
         """Returns kwargs for sparse attention metadata builder."""
         return {"device": str(device)}
@@ -1835,6 +1840,26 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def get_dsa_sparse_attn_metadata_op():
+        from vllm_ascend._310p.attention.sparse_attn_metadata import (
+            sparse_attn_sharedkv_metadata_310p,
+        )
+
+        return sparse_attn_sharedkv_metadata_310p
+
+    @staticmethod
+    def get_dsa_qli_metadata_op():
+        def build_unused_qli_metadata(*args, **kwargs):
+            del args
+            for name in ("actual_seq_lengths_query", "actual_seq_lengths_key"):
+                tensor = kwargs.get(name)
+                if isinstance(tensor, torch.Tensor):
+                    return torch.zeros(1024, dtype=torch.int32, device=tensor.device)
+            return torch.zeros(1024, dtype=torch.int32, device=kwargs.get("device", "npu"))
+
+        return build_unused_qli_metadata
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu._npu_reshape_and_cache(

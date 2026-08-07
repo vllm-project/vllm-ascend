@@ -7,7 +7,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import vllm.envs as envs
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention.attention import _init_kv_cache_quant
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -108,7 +108,25 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
-        self.attn_backend = AscendDSABackend
+        # DeepSeek V4 historically hardcoded the generic DSA backend here,
+        # bypassing platform backend selection.  The 310P port needs its
+        # composed short-context implementation because the fused DSA custom
+        # operators are not available on this SoC/image.
+        from vllm_ascend.utils import is_310p
+
+        use_310p_backend = False
+        if is_310p():
+            from vllm.config import get_current_vllm_config
+
+            from vllm_ascend._310p.deepseek_v4 import is_deepseek_v4_model
+
+            use_310p_backend = is_deepseek_v4_model(get_current_vllm_config().model_config)
+        if use_310p_backend:
+            from vllm_ascend._310p.attention.dsa_v1 import AscendDSABackend310
+
+            self.attn_backend = AscendDSABackend310
+        else:
+            self.attn_backend = AscendDSABackend
 
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (
