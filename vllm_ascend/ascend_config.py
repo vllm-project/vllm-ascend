@@ -316,6 +316,12 @@ class AscendConfig:
         )
         self._validate_sparse_c8_kv_offload_compatibility()
 
+        # One-click RL mode configuration. When rl_config.enabled is True, the
+        # RL best-practice defaults are applied on top of the parsed values
+        # above (priority: rl_config > additional_config > env vars).
+        self.rl_config = RlConfig(additional_config.get("rl_config", {}))
+        self.rl_config._apply(self, additional_config)
+
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
             raise NotImplementedError(
@@ -460,6 +466,140 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+class RlConfig:
+    """
+    One-click RL mode configuration from ``additional_config.rl_config``.
+
+    When ``enabled`` is ``True`` (master switch), RL best-practice defaults are
+    applied automatically and each explicitly set sub-field overrides the
+    corresponding top-level ``additional_config`` key or environment variable.
+
+    Priority:
+
+    ``rl_config`` sub-fields > ``additional_config`` top-level keys >
+    environment variables > code defaults
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config '{"rl_config": {"enabled": true}}'
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"rl_config": {"enabled": True}})
+    """
+
+    #: rl_config sub-fields that mirror a top-level ``additional_config`` key.
+    #: When both are explicitly set to different values, a ``ValueError`` is
+    #: raised at ``AscendConfig.__init__`` time (fail-fast).
+    _TOP_LEVEL_MAP = {
+        "sleep_mode_extra_cleanup": "enable_sleep_mode_extra_cleanup",
+        "weight_nz_mode": "weight_nz_mode",
+    }
+
+    _defaults = {
+        "enabled": False,
+        "sleep_mode_extra_cleanup": False,
+        "weight_nz_mode": 0,
+        "disable_expandable_segments": True,
+        "enable_training_consistency": False,
+        "enable_batch_invariant": False,
+        "enable_dev_endpoints": True,
+    }
+
+    def __init__(self, config: dict[str, Any] | None = None):
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError(f"additional_config.rl_config must be a dict, got {type(config).__name__}.")
+        unknown_keys = set(config) - set(self._defaults)
+        if unknown_keys:
+            raise ValueError(f"Unknown rl_config keys: {sorted(unknown_keys)}")
+        self._explicit_keys = frozenset(config)
+        for key, default in self._defaults.items():
+            setattr(self, key, config.get(key, default))
+        self._validate()
+
+    def _validate(self) -> None:
+        bool_keys = (
+            "enabled",
+            "sleep_mode_extra_cleanup",
+            "disable_expandable_segments",
+            "enable_training_consistency",
+            "enable_batch_invariant",
+            "enable_dev_endpoints",
+        )
+        for key in bool_keys:
+            value = getattr(self, key)
+            if not isinstance(value, bool):
+                raise ValueError(f"rl_config.{key} must be a bool, got {type(value).__name__}: {value}.")
+        if self.weight_nz_mode not in (0, 1, 2):
+            raise ValueError(f"rl_config.weight_nz_mode must be 0, 1 or 2, got {self.weight_nz_mode!r}.")
+
+    def _check_top_level_conflicts(self, additional_config: dict[str, Any]) -> None:
+        for rl_key, top_level_key in self._TOP_LEVEL_MAP.items():
+            rl_value = getattr(self, rl_key)
+            if top_level_key in additional_config and additional_config[top_level_key] != rl_value:
+                raise ValueError(
+                    f"rl_config.{rl_key}={rl_value} conflicts with additional_config.{top_level_key}="
+                    f"{additional_config[top_level_key]}. Please keep only one of them; "
+                    "rl_config is recommended for RL workloads."
+                )
+
+    def _apply(self, ascend_config: "AscendConfig", additional_config: dict[str, Any]) -> None:
+        """Apply RL best-practice defaults onto the ascend config.
+
+        Only takes effect when ``enabled`` is ``True`` (master switch).
+        """
+        if not self.enabled:
+            return
+        self._check_top_level_conflicts(additional_config)
+
+        # weight_nz_mode: FRACTAL_NZ is incompatible with repeated
+        # sleep/wake_up or weight_transfer cycles in RL scenarios. Set both the
+        # config attribute and the legacy env var so runtime defense-in-depth
+        # checks (e.g. worker._check_nz_disabled) stay satisfied.
+        ascend_config.weight_nz_mode = self.weight_nz_mode
+        os.environ["VLLM_ASCEND_ENABLE_NZ"] = str(self.weight_nz_mode)
+
+        # enable_sleep_mode_extra_cleanup: mirror of the top-level key.
+        ascend_config.enable_sleep_mode_extra_cleanup = self.sleep_mode_extra_cleanup
+
+        # disable_expandable_segments: expandable_segments is mutually exclusive
+        # with the CaMemAllocator pool used by same-device (sleep mode) RL.
+        # No effect in cross-device mode.
+        if self.disable_expandable_segments and getattr(
+            getattr(ascend_config.vllm_config, "model_config", None), "enable_sleep_mode", False
+        ):
+            from vllm_ascend.platform import NPUPlatform
+
+            NPUPlatform.disable_expandable_segments()
+
+        # enable_batch_invariant: batch-invariant determinism is controlled
+        # through environment variables in vLLM. rl_config prevails over any
+        # previously set environment variable (config > env).
+        if "enable_batch_invariant" in self._explicit_keys or self.enable_batch_invariant:
+            os.environ["VLLM_BATCH_INVARIANT"] = "1" if self.enable_batch_invariant else "0"
+        if self.enable_batch_invariant:
+            os.environ["HCCL_DETERMINISTIC"] = "strict"
+            os.environ["LCCL_DETERMINISTIC"] = "1"
+
+        # enable_dev_endpoints: expose /sleep, /wake_up, /pause, /resume HTTP
+        # endpoints for online serving. Setting the env var in offline mode is
+        # harmless (it is only consumed by the server).
+        if "enable_dev_endpoints" in self._explicit_keys or self.enable_dev_endpoints:
+            os.environ["VLLM_SERVER_DEV_MODE"] = "1" if self.enable_dev_endpoints else "0"
+
+        # enable_training_consistency: aligns the inference operators with the
+        # training operators to improve training-inference consistency. The
+        # operator-alignment mechanism is not wired up yet; only the config
+        # framework is provided for now.
+        if self.enable_training_consistency:
+            logger.info(
+                "rl_config.enable_training_consistency is enabled. The operator-alignment "
+                "mechanism will be applied in a follow-up."
+            )
 
 
 class FinegrainedTPConfig:

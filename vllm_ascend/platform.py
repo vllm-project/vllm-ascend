@@ -688,6 +688,16 @@ class NPUPlatform(Platform):
                 "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
             )
 
+        cls._set_default_npu_alloc_conf(model_config)
+
+        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
+            raise ValueError(
+                "fused mc2 op cannot be used with hierarchy communication."
+                "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
+            )
+
+    @classmethod
+    def _set_default_npu_alloc_conf(cls, model_config) -> None:
         # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
         # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
         # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
@@ -708,11 +718,24 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
-            raise ValueError(
-                "fused mc2 op cannot be used with hierarchy communication."
-                "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
-            )
+    @classmethod
+    def disable_expandable_segments(cls) -> None:
+        """Remove ``expandable_segments`` from ``PYTORCH_NPU_ALLOC_CONF``.
+
+        ``expandable_segments`` is mutually exclusive with the CaMemAllocator
+        memory pool used by RL same-device (sleep mode) scenarios. Used by
+        ``additional_config.rl_config.disable_expandable_segments``.
+        """
+        npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
+        if not npu_alloc_configs:
+            return
+        filtered = [
+            item for item in npu_alloc_configs.split(",") if item and "expandable_segments" not in item
+        ]
+        new_configs = ",".join(filtered)
+        if new_configs != npu_alloc_configs:
+            os.environ["PYTORCH_NPU_ALLOC_CONF"] = new_configs
+            logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", new_configs)
 
     @classmethod
     def set_additional_forward_context(

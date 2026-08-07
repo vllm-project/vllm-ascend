@@ -24,6 +24,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
     AscendConfig,
     EplbConfig,
+    RlConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -52,11 +53,13 @@ class TestAscendConfig(TestBase):
         total_num_attention_heads: int = 32,
         total_num_kv_heads: int = 8,
         is_deepseek_mla: bool = False,
+        enable_sleep_mode: bool = False,
     ):
         return SimpleNamespace(
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
             enforce_eager=True,
+            enable_sleep_mode=enable_sleep_mode,
             model_arch_config=SimpleNamespace(total_num_attention_heads=total_num_attention_heads),
             get_total_num_kv_heads=lambda: total_num_kv_heads,
         )
@@ -492,6 +495,196 @@ class TestAscendConfig(TestBase):
         second_ascend_config = init_ascend_config(second_vllm_config)
         self.assertIsNot(first_ascend_config, second_ascend_config)
         self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_defaults_when_unset(self, mock_fix_incompatible_config):
+        with patch.dict(os.environ, {}, clear=True):
+            ascend_config = init_ascend_config(VllmConfig())
+
+        self.assertFalse(ascend_config.rl_config.enabled)
+        self.assertFalse(ascend_config.rl_config.sleep_mode_extra_cleanup)
+        self.assertEqual(ascend_config.rl_config.weight_nz_mode, 0)
+        self.assertTrue(ascend_config.rl_config.disable_expandable_segments)
+        self.assertFalse(ascend_config.rl_config.enable_training_consistency)
+        self.assertFalse(ascend_config.rl_config.enable_batch_invariant)
+        self.assertTrue(ascend_config.rl_config.enable_dev_endpoints)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_enabled_applies_best_practice_defaults(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
+        with patch.dict(os.environ, {}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+            self.assertEqual(ascend_config.weight_nz_mode, 0)
+            self.assertEqual(os.environ.get("VLLM_ASCEND_ENABLE_NZ"), "0")
+            self.assertEqual(os.environ.get("VLLM_SERVER_DEV_MODE"), "1")
+            self.assertFalse(ascend_config.enable_sleep_mode_extra_cleanup)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_disabled_is_noop(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": False, "weight_nz_mode": 0}}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+            # rl_config is a no-op when the master switch is off: the env var is
+            # neither overridden by the sub-field nor rewritten by rl_config.
+            self.assertEqual(ascend_config.weight_nz_mode, 2)
+            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "2")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_conflict_with_top_level_raises(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "rl_config": {"enabled": True},
+            "weight_nz_mode": 2,
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "conflicts with additional_config.weight_nz_mode"):
+                init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_matching_top_level_is_allowed(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "rl_config": {"enabled": True},
+            "weight_nz_mode": 0,
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.weight_nz_mode, 0)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_batch_invariant_overrides_env(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True, "enable_batch_invariant": True}}
+        with patch.dict(os.environ, {"VLLM_BATCH_INVARIANT": "0"}, clear=True):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+            # rl_config prevails over the environment variable.
+            self.assertEqual(os.environ["VLLM_BATCH_INVARIANT"], "1")
+            self.assertEqual(os.environ["HCCL_DETERMINISTIC"], "strict")
+            self.assertEqual(os.environ["LCCL_DETERMINISTIC"], "1")
+            self.assertTrue(ascend_config.rl_config.enable_batch_invariant)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_dev_endpoints_override_env(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
+        with patch.dict(os.environ, {"VLLM_SERVER_DEV_MODE": "0"}, clear=True):
+            init_ascend_config(test_vllm_config)
+            # Default enable_dev_endpoints=True prevails over the explicit env var.
+            self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "1")
+
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_dev_endpoints_explicit_optout(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True, "enable_dev_endpoints": False}}
+        with patch.dict(os.environ, {"VLLM_SERVER_DEV_MODE": "1"}, clear=True):
+            init_ascend_config(test_vllm_config)
+            self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "0")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_disable_expandable_segments_same_device(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = self._make_model_config(enable_sleep_mode=True)
+        test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
+        with patch.dict(
+            os.environ,
+            {"PYTORCH_NPU_ALLOC_CONF": "page_size:1g,expandable_segments:True"},
+            clear=True,
+        ):
+            init_ascend_config(test_vllm_config)
+            self.assertNotIn("expandable_segments", os.environ["PYTORCH_NPU_ALLOC_CONF"])
+            self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], "page_size:1g")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rl_config_non_dict_rejected(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"rl_config": "enabled"}
+        with self.assertRaisesRegex(ValueError, "rl_config must be a dict"):
+            init_ascend_config(test_vllm_config)
+
+
+class TestRlConfig(TestBase):
+    def test_defaults(self):
+        config = RlConfig()
+
+        self.assertFalse(config.enabled)
+        self.assertFalse(config.sleep_mode_extra_cleanup)
+        self.assertEqual(config.weight_nz_mode, 0)
+        self.assertTrue(config.disable_expandable_segments)
+        self.assertFalse(config.enable_training_consistency)
+        self.assertFalse(config.enable_batch_invariant)
+        self.assertTrue(config.enable_dev_endpoints)
+
+    def test_explicit_values(self):
+        config = RlConfig(
+            {
+                "enabled": True,
+                "sleep_mode_extra_cleanup": True,
+                "weight_nz_mode": 2,
+                "disable_expandable_segments": False,
+                "enable_training_consistency": True,
+                "enable_batch_invariant": True,
+                "enable_dev_endpoints": False,
+            }
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertTrue(config.sleep_mode_extra_cleanup)
+        self.assertEqual(config.weight_nz_mode, 2)
+        self.assertFalse(config.disable_expandable_segments)
+        self.assertTrue(config.enable_training_consistency)
+        self.assertTrue(config.enable_batch_invariant)
+        self.assertFalse(config.enable_dev_endpoints)
+
+    def test_unknown_key_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown rl_config keys"):
+            RlConfig({"foo": True})
+
+    def test_bool_validation(self):
+        with self.assertRaisesRegex(ValueError, "enabled must be a bool"):
+            RlConfig({"enabled": "yes"})
+        with self.assertRaisesRegex(ValueError, "enable_batch_invariant must be a bool"):
+            RlConfig({"enable_batch_invariant": 1})
+
+    def test_weight_nz_mode_validation(self):
+        with self.assertRaisesRegex(ValueError, "must be 0, 1 or 2"):
+            RlConfig({"weight_nz_mode": 5})
+
+    def test_non_dict_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must be a dict"):
+            RlConfig(["enabled"])
+
+    def test_disable_expandable_segments_strips_env(self):
+        from vllm_ascend.platform import NPUPlatform
+
+        with patch.dict(
+            os.environ,
+            {"PYTORCH_NPU_ALLOC_CONF": "page_size:1g,expandable_segments:True"},
+            clear=True,
+        ):
+            NPUPlatform.disable_expandable_segments()
+            self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], "page_size:1g")
+
+        with patch.dict(os.environ, {}, clear=True):
+            # Missing/empty env var is a no-op.
+            NPUPlatform.disable_expandable_segments()
+            self.assertNotIn("PYTORCH_NPU_ALLOC_CONF", os.environ)
 
 
 class TestShortRequestFirstConfig(TestBase):
