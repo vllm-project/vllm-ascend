@@ -304,7 +304,7 @@ The **Token In / Token Out** API (RFC [#22817](https://github.com/vllm-project/v
 
 This architecture also enables **disaggregated tokenization** for large-scale serving: a separate Renderer microservice handles tokenization (converting OpenAI-compatible requests to token IDs), and a separate Coordinator handles detokenization and tool-call parsing. The RL training loop can bypass both and speak directly to the token API.
 
-```
+```text
 RL Trainer (tokenizes prompts itself)
     │
     │  GenerateRequest { token_ids: [...], sampling_params: {...} }
@@ -370,7 +370,7 @@ This is the most efficient path for RL: the RL framework sends token IDs it alre
 
 **Principle.** In agentic RL (e.g., RL for coding agents, web agents, or tool-augmented reasoning), the model must emit structured tool/function calls during rollouts. The RL environment intercepts these calls, executes the corresponding tools, and feeds the results back as the next turn's prompt. This creates a multi-turn interaction loop:
 
-```
+```text
 prompt → model generates tool call → environment executes tool → result appended to prompt → model continues
 ```
 
@@ -434,7 +434,7 @@ DP-aware routing addresses this by tagging each request with its target DP index
 
 **Architecture.**
 
-```
+```text
 Trainer DP-0 ←→ vLLM Engine :8000 ┐
 Trainer DP-1 ←→ vLLM Engine :8001  ├── vLLM Router (:8080) ←── RL training loop
 Trainer DP-2 ←→ vLLM Engine :8002  │    (dp-aware dispatch)
