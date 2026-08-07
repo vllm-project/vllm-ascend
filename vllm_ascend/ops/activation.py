@@ -27,6 +27,12 @@ from vllm.model_executor.layers.activation import (
     SwigluOAIAndMul,
     SwigluStepAndMul,
 )
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.kimi_k3.situ_and_mul import situ_and_mul as fused_situ_and_mul
+else:
+    fused_situ_and_mul = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +54,24 @@ def situ_and_mul(
     *,
     beta: float = 1.0,
     linear_beta: float | None = None,
+    group_list: torch.Tensor | None = None,
+    group_list_type: int | None = None,
 ) -> torch.Tensor:
-    """Apply Kimi SiTU with FP32 intermediates and restore the input dtype."""
+    """Apply Kimi SiTU, using the K3 Triton fusion on Ascend when available."""
     config = SituActivationConfig(beta=beta, linear_beta=linear_beta)
     if x.shape[-1] % 2 != 0:
         raise ValueError(f"SiTU expects an even last dimension, got {x.shape[-1]}.")
+    if group_list is not None and group_list_type not in (0, 1):
+        raise ValueError(f"group_list_type must be 0 or 1, got {group_list_type}.")
+
+    if fused_situ_and_mul is not None and x.device.type == "npu" and x.numel() > 0:
+        return fused_situ_and_mul(
+            x,
+            group_list=group_list,
+            group_list_type=group_list_type,
+            beta=config.beta,
+            linear_beta=config.linear_beta,
+        )
 
     gate, up = x.to(torch.float32).chunk(2, dim=-1)
     gate = config.beta * torch.tanh(gate / config.beta) * torch.sigmoid(gate)
