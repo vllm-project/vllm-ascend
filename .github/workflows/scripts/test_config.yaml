@@ -663,6 +663,14 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
+- name: ms_metrics_observability
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - vllm_ascend/observability
+  tests:
+    - tests/ut/observability/test_ms_metrics_provider.py
+
 # === Features ===
 - name: quantization_gqa_mla_c8
   optional: false
