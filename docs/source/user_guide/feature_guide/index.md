@@ -30,4 +30,5 @@ weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
+flash_attention
 :::
