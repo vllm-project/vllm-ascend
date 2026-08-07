@@ -48,7 +48,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 3. File: platform/patch_distributed.py**
+# ** 4. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
 #    Why:
@@ -60,7 +60,7 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** 4. File: platform/patch_dp_device_ids.py**
+# ** 5. File: platform/patch_dp_device_ids.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.dp_utils.get_physical_gpu_ids_for_local_dp_rank`
 #    Why:
@@ -496,7 +496,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 20. File: platform/patch_tool_choice_none_content.py**
+# ** 19. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`

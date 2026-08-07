@@ -64,6 +64,8 @@ def _ensure_global_patch():
     if _GLOBAL_PATCH_APPLIED:
         return
 
+    import vllm_ascend.patch.platform.patch_breakable_cudagraph  # noqa: F401
+
     from vllm_ascend.utils import adapt_patch
 
     adapt_patch(is_global_patch=True)
@@ -105,6 +107,8 @@ def register_service_profiling():
 
 
 def register_model():
+    _ensure_global_patch()
+
     from vllm_ascend.patch.hunyuan_vl_processor_compat import (
         install_hunyuan_vl_processor_compat,
     )
