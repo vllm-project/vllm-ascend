@@ -82,6 +82,7 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
+            proposer.model = SimpleNamespace(get_draft_attn_causal=lambda: [False])
 
         with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
             proposer = AscendDSparkProposer(vllm_config, device)
