@@ -103,7 +103,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Whether to allow external padding in MMEncoderAttention when head_size is between 64 and 128.
     # 1 or unset: keep original padding behavior
     # 0: disable external padding and let FA score handle non-padded inputs internally.
-    "VLLM_ASCEND_MM_ENCODER_ENABLE_PAD": bool(int(os.getenv("VLLM_ASCEND_MM_ENCODER_ENABLE_PAD", "1"))),
+    "VLLM_ASCEND_MM_ENCODER_ENABLE_PAD": lambda: bool(int(os.getenv("VLLM_ASCEND_MM_ENCODER_ENABLE_PAD", "1"))),
 }
 
 # end-env-vars-definition
