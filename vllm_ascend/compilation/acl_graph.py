@@ -305,14 +305,7 @@ class GraphParams:
 
 
 class _GraphParamStore(dict):
-    """Resolve token-count lookups to the active full-graph descriptor.
-
-    vLLM can capture separate base and LoRA graphs with the same token count.
-    Ascend graph task parameters used to be keyed only by token count, causing
-    the two graphs to share attention handles, events, and workspaces. Keep the
-    existing integer API for attention backends while isolating each concrete
-    full graph by its BatchDescriptor.
-    """
+    """Isolate graph resources by descriptor while preserving integer lookups."""
 
     def __init__(self, capture_sizes: list[int], default_factory: Callable[[], Any]):
         super().__init__((size, default_factory()) for size in capture_sizes)

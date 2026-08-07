@@ -3344,9 +3344,7 @@ class NPUModelRunner(GPUModelRunner):
             num_active_loras=dummy_num_active_loras,
         ):
             if respect_num_active_loras and dummy_num_active_loras == 0:
-                # The dummy mapping update does not reliably refresh this
-                # Python state before the pre-capture compile. Keep Punica's
-                # branch state aligned with the base BatchDescriptor.
+                # Dummy mappings can leave Punica's Python branch state stale.
                 seen_punica_wrappers: set[int] = set()
                 for module in self.model.modules():
                     punica_wrapper = getattr(module, "punica_wrapper", None)
@@ -4847,17 +4845,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.lora_config is not None
                 and self.compilation_config.cudagraph_specialize_lora
             ):
-                # Dynamo must compile the no-LoRA guard variant before entering
-                # torch.npu.graph(). The Ascend compiler synchronizes the device,
-                # which is illegal while a stream is being captured.
+                # The compiler synchronizes the device, so compile before capture.
                 self._dummy_run(
                     num_tokens=self.max_num_tokens,
                     is_profile=True,
                     num_active_loras=0,
                     respect_num_active_loras=True,
                 )
-                # Backed dynamic shapes specialize 0/1 dimensions. Compile the
-                # singleton base variant separately before graph capture.
+                # Backed shapes specialize size 1; precompile that base variant.
                 self._dummy_run(
                     num_tokens=1,
                     is_profile=True,

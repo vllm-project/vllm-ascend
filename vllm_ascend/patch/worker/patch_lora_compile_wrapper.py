@@ -14,15 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep base and LoRA full graphs in separate vLLM compile variants.
+"""Keep base and LoRA full graphs on independent compiled callables.
 
-vLLM d02df748 drops non-shape Dynamo guards after the first trace. With LoRA
-specialization enabled, that makes base and adapter requests reuse one compiled
-callable. Ascend needs independent callables because each variant owns a
-different ACL Graph and graph-task resource set.
-
-This worker patch keeps the vLLM wheel unchanged and extends its compile wrapper
-before model loading. Its source hash guard binds it to the verified vLLM commit.
+A source-hash guard pins this internal wrapper patch to the verified vLLM
+version.
 """
 
 import hashlib
@@ -141,8 +136,7 @@ def _patched_init(
     is_encoder: bool = False,
 ) -> None:
     vllm_config = get_current_vllm_config()
-    # Speculative draft models do not own the target model's LoRA adapters.
-    # Reusing their native graph is both correct and avoids unused graph variants.
+    # Draft models do not own the target model's LoRA adapters.
     specialize_lora = bool(
         vllm_config.lora_config is not None
         and vllm_config.compilation_config.cudagraph_specialize_lora
