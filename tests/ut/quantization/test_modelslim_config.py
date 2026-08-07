@@ -597,6 +597,15 @@ class TestGetCacheScaleMapper(TestBase):
             mapper._map_name("model.layers.1.fa_v.offset"),
             "model.layers.1.mla_attn.mla_attn.fa_v.offset",
         )
+        # Kimi K3 multimodal loading invokes AutoWeightsLoader for both the
+        # outer model and language_model. A second application must preserve
+        # the parameter name registered on the inner MLAAttention module.
+        checkpoint_name = "language_model.model.layers.23.self_attn.fa_q.offset"
+        mapped_name = mapper._map_name(checkpoint_name)
+        self.assertEqual(
+            mapper._map_name(mapped_name),
+            "language_model.model.layers.23.self_attn.mla_attn.mla_attn.fa_q.offset",
+        )
 
     def test_indexer_quant_returns_mapper(self):
         config = AscendModelSlimConfig(
@@ -614,6 +623,11 @@ class TestGetCacheScaleMapper(TestBase):
         self.assertEqual(
             mapper._map_name("model.layers.1.indexer.k_rot"),
             "model.layers.1.mla_attn.mla_attn.indexer.k_rot",
+        )
+        mapped_name = mapper._map_name("model.layers.1.indexer.q_rot")
+        self.assertEqual(
+            mapper._map_name(mapped_name),
+            "model.layers.1.mla_attn.mla_attn.indexer.q_rot",
         )
 
 
