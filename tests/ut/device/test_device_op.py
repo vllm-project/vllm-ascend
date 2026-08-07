@@ -1,9 +1,70 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+
+
+@pytest.mark.parametrize("use_mla_rope", [True, False])
+def test_base_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
+    num_tokens = 2
+    num_heads = 4
+    kv_lora_rank = 8
+    rope_dim = 6
+    hidden_states = torch.randn(num_tokens, 16)
+    cos = torch.randn(num_tokens, 1, 1, rope_dim)
+    sin = torch.randn_like(cos)
+    kv_cache = (
+        torch.randn(4, 1, 1, kv_lora_rank),
+        torch.randn(4, 1, 1, rope_dim),
+    )
+    attn_metadata = SimpleNamespace(
+        num_decode_tokens=num_tokens,
+        decode=SimpleNamespace(cos=cos, sin=sin),
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int32),
+    )
+    atten_obj = SimpleNamespace(
+        fa_quant_layer=False,
+        W_UK_T=torch.randn(num_heads, rope_dim, kv_lora_rank),
+        wd_qkv=mock.MagicMock(),
+        deq_scale_qkv=mock.MagicMock(),
+        gamma1=mock.MagicMock(),
+        beta1=mock.MagicMock(),
+        wu_q=mock.MagicMock(),
+        qb_deq_scl=mock.MagicMock(),
+        gamma2=mock.MagicMock(),
+        quant_scale0=mock.MagicMock(),
+        quant_offset0=mock.MagicMock(),
+        quant_bias_qkv=mock.MagicMock(),
+        quant_scale1=mock.MagicMock(),
+        quant_offset1=mock.MagicMock(),
+        qb_qt_bias=mock.MagicMock(),
+        ctkv_scale=mock.MagicMock(),
+        q_nope_scale=mock.MagicMock(),
+        enable_kv_nz=False,
+        num_heads=num_heads,
+        kv_lora_rank=kv_lora_rank,
+        reorg_decode_q=mock.MagicMock(side_effect=lambda q_nope, q_pe: (q_nope, q_pe)),
+    )
+
+    with mock.patch.object(torch.ops._C_ascend, "mla_preprocess", create=True) as mock_preprocess:
+        BaseDeviceAdaptor.mla_preprocess_only_decode(
+            atten_obj,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            use_mla_rope=use_mla_rope,
+        )
+
+    call_args = mock_preprocess.call_args.args
+    if use_mla_rope:
+        torch.testing.assert_close(call_args[8], cos.view(num_tokens, rope_dim))
+        torch.testing.assert_close(call_args[9], sin.view(num_tokens, rope_dim))
+    else:
+        assert call_args[8] is None
+        assert call_args[9] is None
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
