@@ -46,6 +46,7 @@
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/triangle_paged_sparse_attention/triangle_paged_sparse_attention_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include <c10/core/Device.h>
@@ -2239,6 +2240,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "npu_triangle_paged_sparse_attention("
+        "Tensor query, Tensor key_cache, Tensor value_cache, "
+        "Tensor block_table, int query_start, int seq_len, "
+        "int prompt_len, float scale, Tensor(a!) out) -> Tensor(a!)"
+    );
+    ops.impl(
+        "npu_triangle_paged_sparse_attention",
+        torch::kPrivateUse1,
+        &vllm_ascend::npu_triangle_paged_sparse_attention
+    );
 
     ops.def(
         "npu_kv_quant_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"

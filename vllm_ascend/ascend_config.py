@@ -50,6 +50,11 @@ class AscendConfig:
         self.eplb_config = EplbConfig(eplb_config)
 
         from vllm_ascend import envs as ascend_envs
+        from vllm_ascend.attention.trianglemix import TriangleMixConfig
+
+        self.trianglemix = TriangleMixConfig.from_mapping(
+            additional_config.get("trianglemix", {}),
+        )
 
         self.scheduler_config = SchedulerConfig(
             additional_config,

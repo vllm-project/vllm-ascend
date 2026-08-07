@@ -93,6 +93,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FlashComm1. Please ensure that FlashComm1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
+| `trianglemix`                       | dict | `{}`    | Experimental TriangleMix sparse-prefill path for selected dense-attention layers. Disabled by default and falls back to FIA for unsupported requests. |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
@@ -182,6 +183,34 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
+
+**trianglemix**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Enable TriangleMix for the selected layers. |
+| `layers` | str or list | `""` | Layer indices or inclusive ranges, for example `"5,7,10,15-35"`. |
+| `strict` | bool | `False` | Raise on a custom-operator launch error instead of falling back to official FIA. |
+| `min_sparse_rows` | int | `128` | Minimum sparse-middle query rows required to use the custom path. |
+| `min_saved_qk` | int | `913152` | Minimum estimated skipped Q-K products required to use the custom path. |
+| `split_min_sparse_rows` | int | `192` | Minimum sparse rows when the query chunk also contains a dense prefix or tail. |
+| `split_min_saved_qk` | int | `1299264` | Minimum skipped Q-K products for a mixed dense/sparse query chunk. |
+| `stats_log_interval` | int | `0` | Emit per-layer hit/fallback counters every N calls; `0` disables periodic logging. |
+
+TriangleMix is a prefill-only path. Decode, graph capture, batch sizes greater
+than one, unsupported model geometry, and unsupported parallel configurations
+continue to use FIA. For example:
+
+```python
+{
+    "trianglemix": {
+        "enabled": True,
+        "layers": "5,7,10,15-35",
+        "strict": False,
+        "stats_log_interval": 100,
+    }
+}
+```
 
 **scheduler_config.short_request_first_config**
 

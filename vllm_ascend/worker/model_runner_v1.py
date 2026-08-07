@@ -2957,6 +2957,7 @@ class NPUModelRunner(GPUModelRunner):
             # TODO
             # num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded],
             num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_prompt_tokens_cpu=num_prompt_tokens_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
