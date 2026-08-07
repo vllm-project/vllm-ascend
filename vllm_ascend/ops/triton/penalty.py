@@ -159,5 +159,4 @@ def _apply_all_penalties_triton(
         stride_bin_counts_seq=output_bin_counts.stride(0),
         stride_bin_counts_vocab=output_bin_counts.stride(1),
         BLOCK_SIZE=2048,
-        multibuffer=False,
     )
