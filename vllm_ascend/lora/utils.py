@@ -109,9 +109,8 @@ def refresh_all_lora_classes():
         AscendFusedMoEWithLoRA,
         AscendFusedMoE3DWithLoRA,
     )
-    # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
-    # Append the Ascend classes in a deterministic order.
+    existing_classes = tuple(cls for cls in vllm.lora.utils._all_lora_classes if cls not in ascend_classes)
     vllm.lora.utils._all_lora_classes = (
         *ascend_classes,
-        *vllm.lora.utils._all_lora_classes,
+        *existing_classes,
     )
