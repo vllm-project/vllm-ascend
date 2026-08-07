@@ -641,6 +641,11 @@ class TestAscendMultiConnector(unittest.TestCase):
         connector = SimpleNamespace(
             _requests_to_connector={request.request_id: 0},
             _connectors=[store_connector, mooncake_connector, other_connector],
+            _ktc_kv_transfer_config=[
+                SimpleNamespace(kv_connector="AscendStoreConnector"),
+                SimpleNamespace(kv_connector="MooncakeLayerwiseConnector"),
+                SimpleNamespace(kv_connector="OtherConnector"),
+            ],
         )
 
         AscendMultiConnector.update_state_after_alloc(connector, request, blocks, num_external_tokens=16)
@@ -657,6 +662,10 @@ class TestAscendMultiConnector(unittest.TestCase):
         connector = SimpleNamespace(
             _requests_to_connector={request.request_id: 1},
             _connectors=[store_connector, mooncake_connector],
+            _ktc_kv_transfer_config=[
+                SimpleNamespace(kv_connector="AscendStoreConnector"),
+                SimpleNamespace(kv_connector="MooncakeLayerwiseConnector"),
+            ],
         )
 
         AscendMultiConnector.update_state_after_alloc(connector, request, blocks, num_external_tokens=16)

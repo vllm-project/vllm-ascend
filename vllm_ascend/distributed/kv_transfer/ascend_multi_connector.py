@@ -7,8 +7,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import MooncakeLayerwiseConnector
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -36,7 +34,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
-            elif isinstance(c, MooncakeLayerwiseConnector):
+            elif self._ktc_kv_transfer_config[i].kv_connector == "MooncakeLayerwiseConnector":
                 # Preserve real blocks for Mooncake's producer-side push path,
                 # but do not grant load ownership after it loses FirstWin.
                 c.update_state_after_alloc(request, blocks, 0)
