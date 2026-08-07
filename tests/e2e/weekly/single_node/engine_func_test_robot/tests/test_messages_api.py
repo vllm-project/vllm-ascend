@@ -17,20 +17,20 @@ TOOLS = [
 ]
 
 
-def test_messages_api_basic_chat(api_client):
+def test_messages_api_basic_chat(yaml_api_client):
     """Test case 1: Basic text chat via /v1/messages endpoint."""
     response = completion_request.send_messages_request(
-        api_client,
+        yaml_api_client,
         prompt="Hello!",
         max_tokens=100,
     )
     assertion.assert_messages_response_has_text(response)
 
 
-def test_messages_api_tool_calling(api_client):
+def test_messages_api_tool_calling(yaml_api_client):
     """Test case 2: Tool calling via /v1/messages endpoint."""
     response = completion_request.send_messages_request(
-        api_client,
+        yaml_api_client,
         prompt="What is the weather in Shanghai?",
         max_tokens=100,
         tools=TOOLS,
@@ -38,10 +38,10 @@ def test_messages_api_tool_calling(api_client):
     assertion.assert_messages_response_has_text_or_tool_use(response)
 
 
-def test_messages_api_streaming(api_client):
+def test_messages_api_streaming(yaml_api_client):
     """Test case 3: Streaming response via /v1/messages endpoint."""
     response = completion_request.send_messages_request_stream(
-        api_client,
+        yaml_api_client,
         prompt="Count to 5.",
         max_tokens=50,
     )
@@ -56,10 +56,10 @@ def test_messages_api_streaming(api_client):
         ("Tell me a joke", 150),
     ],
 )
-def test_messages_api_various_prompts(api_client, prompt, max_tokens):
+def test_messages_api_various_prompts(yaml_api_client, prompt, max_tokens):
     """Test messages API with various prompts and max_tokens."""
     response = completion_request.send_messages_request(
-        api_client,
+        yaml_api_client,
         prompt=prompt,
         max_tokens=max_tokens,
     )
