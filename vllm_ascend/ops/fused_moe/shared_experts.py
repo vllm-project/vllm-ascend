@@ -28,6 +28,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
@@ -169,8 +171,11 @@ class AscendSharedExperts:
                     quant_mode=1,
                     swiglu_mode=1,
                     clamp_limit=fused_moe_evts.swiglu_limit,
-                    glu_alpha=fused_moe_evts.swiglu_alpha,
-                    glu_bias=fused_moe_evts.swiglu_beta,
+                    **(
+                        {}
+                        if get_ascend_device_type() == AscendDeviceType.A5
+                        else {"glu_alpha": fused_moe_evts.swiglu_alpha, "glu_bias": fused_moe_evts.swiglu_beta}
+                    ),
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.

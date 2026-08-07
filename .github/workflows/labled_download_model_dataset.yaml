@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update -y && apt-get install git jq -y
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
           pip install modelscope datasets
 
       - name: Show Current Disk Usage

@@ -36,10 +36,9 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
-from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
+from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts, zero_experts_compute
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -116,7 +115,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer: "RoutedExperts",
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -162,20 +161,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=getattr(layer, "ascend_expert_map", None),
-                global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
-                mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
-                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
-                log2phy=getattr(layer, "log2phy", None),
-                pertoken_scale=getattr(layer, "_ascend_pertoken_scale", None),
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                log2phy=layer.log2phy,
+                pertoken_scale=layer.ascend_pertoken_scale,
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.0),
-                swiglu_beta=getattr(layer, "swiglu_beta", 0.0),
+                swiglu_alpha=layer.swiglu_alpha,
+                swiglu_beta=layer.swiglu_beta,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
@@ -242,6 +241,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router = router
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
+        self.n_shared_experts = n_shared_experts
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
@@ -250,9 +251,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.load_counter = None
         self.num_iter = None
         self.moe_load: torch.Tensor | None = None
-        self.ascend_expert_map = None
-        self.log2phy = None
-        self.global_redundant_expert_num = 0
+        self.ascend_expert_map: torch.Tensor | None = None
+        self.log2phy: torch.Tensor | None = None
+        self.global_redundant_expert_num: int = 0
+        self.ascend_pertoken_scale: torch.Tensor | None = None
+        self.ascend_mc2_mask: torch.Tensor | None = None
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
@@ -303,9 +306,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         return flattened_weights
 
     def init_eplb(self, n_shared_experts):
-        ascend_config = get_ascend_config()
-        mix_placement = getattr(ascend_config, "mix_placement", False)
-
         # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
         AscendRoutedExperts.moe_counter += 1
         self.moe_instance_id = AscendRoutedExperts.moe_counter
@@ -318,7 +318,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # a shallow config view with the logical count.
         placement_moe_config = copy(self.moe_config)
         placement_moe_config.num_experts = self.moe_config.num_logical_experts + (
-            n_shared_experts if mix_placement else 0
+            n_shared_experts if self.mix_placement else 0
         )
         allocated_redundancy = self.moe_config.num_experts - self.moe_config.num_logical_experts
         if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
@@ -337,7 +337,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             placement_eplb_config,
             AscendRoutedExperts.moe_counter,
             placement_moe_config,
-            mix_placement,
+            self.mix_placement,
             n_shared_experts,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
@@ -378,10 +378,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
+        # Level-2 sleep discards NPU tensors that are not parameters/buffers.
+        # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
+        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
+        self._promote_attr_to_buffer("log2phy")
+        if self.dynamic_eplb:
+            self._promote_attr_to_buffer("moe_load")
+            if self.multi_stage:
+                self._promote_attr_to_buffer("load_counter")
+
         # Register this MoE layer with EPLB for PP compatibility.
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    def _promote_attr_to_buffer(self, name: str) -> None:
+        """Move an existing tensor attribute onto a Level-2 restorable named buffer."""
+        tensor = getattr(self, name, None)
+        if tensor is None:
+            return
+        delattr(self, name)
+        self.register_buffer(name, tensor)
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         if quant_config is None:
@@ -438,26 +455,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
 
-        forward_context = get_forward_context()
         topk_weights, topk_ids = self.router._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            input_ids=getattr(forward_context, "input_ids", None),
+            input_ids=input_ids,
         )
 
         try:
             _vllm_config = get_current_vllm_config()
-        except AssertionError:
-            _vllm_config = None
-        model_config = None if _vllm_config is None else _vllm_config.model_config
-        if model_config is not None and model_config.enable_return_routed_experts:
-            capturer = getattr(self, "_ascend_routed_experts_capturer", None)
-            if capturer is not None:
-                capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
+
+            model_config = None if _vllm_config is None else _vllm_config.model_config
+            if model_config is not None and model_config.enable_return_routed_experts:
+                capturer = getattr(self, "_ascend_routed_experts_capturer", None)
+                if capturer is not None:
+                    capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
+        except Exception as e:
+            logger.warning("Failed to capture routed experts: %s", e)
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
@@ -523,6 +541,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -555,9 +574,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             hidden_states=hidden_states,
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
+            input_ids=input_ids,
         )
-        self._ascend_pertoken_scale = pertoken_scale
-        self._ascend_mc2_mask = mc2_mask
+        self.ascend_pertoken_scale = pertoken_scale
+        self.ascend_mc2_mask = mc2_mask
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -568,8 +588,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 shared_experts_input=None,
             )
         finally:
-            self._ascend_pertoken_scale = None
-            self._ascend_mc2_mask = None
+            self.ascend_pertoken_scale = None
+            self.ascend_mc2_mask = None
         if zero_expert_result is not None:
             fused_experts_results.routed_out += zero_expert_result
 

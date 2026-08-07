@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -9,10 +9,9 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
@@ -177,8 +176,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.model_config = vllm_config.model_config
         self.device = device
         scheduler_config = vllm_config.scheduler_config
-
-        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
 
         self.num_decodes = 0
         self.num_prefills = 0
@@ -1044,7 +1041,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return attn_metadata
 
 
-class AscendDSACPImpl(DSAAttentionImpl):
+class AscendDSACPImpl(AttentionImplBase[Any]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1122,8 +1119,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.weights_proj = self.indexer.weights_proj
             self.indexer_softmax_scale = self.inderxer_dim**-0.5
 
-            self.indexer_compress = self.indexer.compressor
-
             # indexer_compressor
             self.indexcom_ape = self.indexer.compressor.ape
             self.indexcom_wkv = self.indexer.compressor.wkv
@@ -1131,14 +1126,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.indexcom_norm = self.indexer.compressor.norm
 
             self.indexcom_head_dim = self.indexer.compressor.head_dim
-            self.indexcom_rotate = self.indexer.compressor.rotate
             self.index_topk = self.indexer.index_topk
 
         # compress param
         if self.compressor is not None:
-            self.compressor_head_dim = self.compressor.head_dim
             self.compressor_overlap = self.compressor.overlap
-            self.compressor_rotate = self.compressor.rotate
 
             self.compressor_ape = self.compressor.ape
             self.compressor_wkv = self.compressor.wkv
@@ -1309,7 +1301,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return self.wo_b(o_proj_input)
         return self.wo_b.quant_method.apply(self.wo_b, o_proj_input, bias=None)
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
@@ -1792,6 +1784,3 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return_value=False,
         )
         return topk_idxs
-
-    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor):
-        pass

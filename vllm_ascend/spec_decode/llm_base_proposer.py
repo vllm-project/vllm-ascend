@@ -42,7 +42,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
@@ -145,7 +144,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self.enable_shared_expert_dp = shared_expert_dp_enabled()
 
@@ -1178,6 +1176,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
                         draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+
+                    # Dynamic verify-length path, implemented in AscendDSparkProposer.
+                    # Only the dspark method is handled here since it relies on
+                    # the DSpark confidence head.
+                    if get_ascend_config().dynamic_spec_config.method == "dspark":
+                        self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
