@@ -746,7 +746,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
-        patcher6 = patch("vllm_ascend.ops.fused_moe.comm_utils.async_all_to_all")
+        patcher6 = patch("vllm_ascend.ops.fused_moe.token_dispatcher.async_all_to_all")
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16), MagicMock())
@@ -772,7 +772,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_current_device.return_value = "cpu"
 
         # Mock torch_npu.npu_dynamic_quant
-        patcher10 = patch("torch_npu.npu_dynamic_quant")
+        patcher10 = patch("torch_npu.npu_dynamic_quant", create=True)
         self.mock_npu_dynamic_quant = patcher10.start()
         self.addCleanup(patcher10.stop)
         self.mock_npu_dynamic_quant.return_value = (torch.randn(16, 16), torch.randn(16))

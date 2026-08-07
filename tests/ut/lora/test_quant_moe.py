@@ -73,7 +73,11 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
             f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
             side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
         ) as dynamic_quant,
-        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out]) as gmm1,
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_grouped_matmul",
+            return_value=[gate_up_out],
+            create=True,
+        ) as gmm1,
         patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
         patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out) as gmm2,
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing) as recover_allgather,

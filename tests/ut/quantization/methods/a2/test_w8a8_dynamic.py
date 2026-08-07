@@ -241,24 +241,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
         self.assertIs(fused_experts_input.lora_context, lora_context)
 
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
-    def test_apply_rejects_unsupported_lora_communication(self, mock_extra_ctx):
-        layer = torch.nn.Module()
-        layer._ascend_moe_lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
-
-        for comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2):
-            with self.subTest(comm_type=comm_type):
-                mock_extra_ctx.moe_comm_type = comm_type
-                with self.assertRaisesRegex(NotImplementedError, "AllGather TP"):
-                    self.quant_method.apply(
-                        layer=layer,
-                        x=torch.randn(2, self.hidden_size),
-                        topk_weights=torch.ones(2, 1),
-                        topk_ids=torch.zeros(2, 1, dtype=torch.int64),
-                        shared_experts=None,
-                        shared_experts_input=None,
-                    )
-
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):

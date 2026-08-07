@@ -529,7 +529,7 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     )
     shared_experts.set_lora_context(lora_context)
 
-    with patch.object(shared_experts_module.torch_npu, "npu_dynamic_quant") as dynamic_quant:
+    with patch.object(shared_experts_module.torch_npu, "npu_dynamic_quant", create=True) as dynamic_quant:
         output = shared_experts.forward(hidden_states, events)
 
     assert output is shared_out
