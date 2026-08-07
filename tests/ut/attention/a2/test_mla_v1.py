@@ -1068,7 +1068,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    def test_kimi_k3_no_rope_disables_fused_rotary_preprocess(
+    def test_kimi_k3_no_rope_uses_mlapo_without_fa_quant(
         self,
         mock_get_current_vllm_config,
         mock_enabling_mlapo,
@@ -1109,7 +1109,61 @@ class TestAscendMLAImpl(TestBase):
         )
 
         self.assertFalse(impl.fa_quant_layer)
-        self.assertFalse(impl.enable_mlapo)
+        self.assertTrue(impl.enable_mlapo)
+
+    @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", side_effect=lambda value, enabled: value)
+    @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
+    def test_kimi_k3_forwards_no_rope_to_fused_decode_preprocess(
+        self,
+        mock_device_operator,
+        mock_gather_unpad,
+        mock_save_kv,
+    ):
+        num_tokens = 2
+        self.impl.enable_mlapo = True
+        self.impl.fa_quant_layer = False
+        self.impl.use_mla_rope = False
+        self.impl.num_heads = 2
+        self.impl.v_head_dim = 4
+        hidden_states = torch.randn(num_tokens, 16)
+        attention_output = torch.randn(num_tokens, self.impl.num_heads * self.impl.v_head_dim)
+        projected = torch.randn_like(hidden_states)
+        decode_result = DecodeMLAPreprocessResult(
+            ql_nope=MagicMock(),
+            q_pe=MagicMock(),
+            k_nope=MagicMock(),
+            k_pe=MagicMock(),
+        )
+        mock_device_operator.mla_preprocess_only_decode.return_value = (decode_result, None)
+        self.impl._forward_decode = MagicMock(return_value=attention_output)
+        self.impl.o_proj = MagicMock(return_value=(projected,))
+        attn_metadata = SimpleNamespace(
+            num_actual_tokens=num_tokens,
+            num_decodes=num_tokens,
+            num_prefills=0,
+            num_decode_tokens=num_tokens,
+        )
+        kv_cache = (torch.empty(1, 4), torch.empty(1, 4))
+        output = torch.empty_like(projected)
+
+        with patch("vllm_ascend.attention.mla_v1._EXTRA_CTX", SimpleNamespace(num_tokens=num_tokens)):
+            self.impl.forward(
+                "model.layers.3.self_attn.attn",
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+                output=output,
+            )
+
+        mock_device_operator.mla_preprocess_only_decode.assert_called_once_with(
+            self.impl,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            use_mla_rope=False,
+        )
+        torch.testing.assert_close(output, projected)
 
     @patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
