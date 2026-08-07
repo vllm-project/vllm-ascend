@@ -66,7 +66,11 @@ class AisbenchRunner:
         self.model = model
         self.dataset_path = aisbench_config.get("dataset_path_local")
         if not self.dataset_path:
-            self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
+            self.dataset_path = maybe_download_from_modelscope(
+                aisbench_config["dataset_path"],
+                repo_type="dataset",
+                local_files_only=False if aisbench_config.get("allow_dataset_download") else None,
+            )
         self.model_path = aisbench_config.get("model_path")
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model)
@@ -313,6 +317,7 @@ def maybe_download_from_modelscope(
     download_dir: str | None = None,
     ignore_patterns: str | list[str] | None = None,
     allow_patterns: list[str] | str | None = None,
+    local_files_only: bool | None = None,
 ) -> str:
     """
     Download model/dataset from ModelScope hub.
@@ -323,11 +328,13 @@ def maybe_download_from_modelscope(
     # downloading the same model weights at the same time.
     with get_lock(model, download_dir):
         if not os.path.exists(model):
+            if local_files_only is None:
+                local_files_only = huggingface_hub.constants.HF_HUB_OFFLINE
             model_path = snapshot_download(
                 model_id=model,
                 repo_type=repo_type,
                 cache_dir=download_dir,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                local_files_only=local_files_only,
                 revision=revision,
                 ignore_file_pattern=ignore_patterns,
                 allow_patterns=allow_patterns,

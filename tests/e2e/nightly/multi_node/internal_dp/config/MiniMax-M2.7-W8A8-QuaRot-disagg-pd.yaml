@@ -123,6 +123,9 @@ benchmarks:
     batch_size: 20
     request_rate: 0
     num_warmups: 2
+    # Fetch the GSM8K MiniMax dataset online on first run if it is not yet
+    # cached on the shared runner PVC (one-time ~539MB download).
+    allow_dataset_download: true
     baseline: 1
     threshold: 0.97
     version_threshold: 0.97
@@ -136,6 +139,9 @@ benchmarks:
     batch_size: 50
     request_rate: 0
     num_warmups: 2
+    # Fetch the GSM8K MiniMax dataset online on first run if it is not yet
+    # cached on the shared runner PVC (one-time ~13MB download).
+    allow_dataset_download: true
     baseline: 1
     threshold: 0.97
     version_threshold: 0.97
