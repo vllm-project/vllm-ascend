@@ -136,7 +136,17 @@ def needs_layer_aware_fia_graph_replay() -> bool:
         getattr(hf_text_config, "model_type", None),
         getattr(text_config, "model_type", None),
     )
-    return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
+    # Mixed-attention models cannot rely on metadata insertion order during
+    # graph replay. MiniMax-M3 interleaves dense FIA and sparse-attention
+    # layers, so a captured dense FIA op must resolve metadata by layer name;
+    # otherwise it can be paired with AscendMiniMaxM3SparseMetadata.
+    layer_aware_model_types = {
+        "gemma4",
+        "gemma4_text",
+        "minimax_m3",
+        "minimax_m3_vl",
+    }
+    return any(model_type in layer_aware_model_types for model_type in model_types)
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
