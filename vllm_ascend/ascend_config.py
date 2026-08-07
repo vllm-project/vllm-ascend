@@ -46,6 +46,9 @@ class AscendConfig:
         finegrained_tp_config = additional_config.get("finegrained_tp_config", {})
         self.finegrained_tp_config = FinegrainedTPConfig(finegrained_tp_config, vllm_config)
 
+        dynamic_spec_config = additional_config.get("dynamic_spec_config", {})
+        self.dynamic_spec_config = DynamicSpecConfig(dynamic_spec_config)
+
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
@@ -282,7 +285,26 @@ class AscendConfig:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
         # Enable optimized reduce sampling scheme
+        # NOTE: reduce sample is an experimental feature. It is incompatible with
+        # lmhead TP and PD-disaggregated P nodes (kv_role='kv_producer'); raising
+        # ValueError on those to avoid silent correctness issues. PD-disaggregated
+        # D nodes (kv_role='kv_consumer') are allowed for backward compatibility.
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+        if self.enable_reduce_sample:
+            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+                raise ValueError(
+                    "enable_reduce_sample is incompatible with "
+                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_role == "kv_producer":
+                raise ValueError(
+                    "enable_reduce_sample is not supported on PD-disaggregated "
+                    "scenarios. Please disable enable_reduce_sample."
+                )
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
@@ -290,6 +312,20 @@ class AscendConfig:
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
+
+        self.sparse_kv_offload_config = SparseKVOffloadConfig(
+            self.vllm_config,
+            additional_config.get("sparse_kv_offload_config", {}),
+        )
+        self._validate_sparse_c8_kv_offload_compatibility()
+
+    def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
+        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
+            raise NotImplementedError(
+                "Sparse KV offload does not support the sparse SFA C8 main "
+                "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
+                "supported because the indexer cache remains device-resident."
+            )
 
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
@@ -427,6 +463,42 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+class DynamicSpecConfig:
+    """
+    Configuration Object for dynamic_spec_config from additional_config
+    """
+
+    # Dynamic speculative-length methods. "dspark" relies on the DSpark
+    # confidence head; models without such a head need another method.
+    SUPPORTED_METHODS = ("dspark",)
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # None disables the dynamic speculative-length path.
+        self.method: str | None = config.get("method")
+        # Custom parameters of the selected dynamic method; the expected keys
+        # depend on `method` (e.g. dspark accepts
+        # initial_verify_budget_per_req, budget_update_interval and
+        # budget_threshold). Empty by default, in which case each method
+        # falls back to its own built-in defaults.
+        self.method_params: dict = config.get("method_params", {})
+        self._validate()
+
+    def _validate(self) -> None:
+        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
+            raise ValueError(
+                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
+            )
+        if not isinstance(self.method_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.method_params must be a dict, "
+                f"got {type(self.method_params).__name__}: "
+                f"{self.method_params}"
+            )
 
 
 class FinegrainedTPConfig:
@@ -786,6 +858,10 @@ class EplbConfig:
         "num_redundant_experts": 0,
         "eplb_policy_type": 2,
         "eplb_heat_collection_stage": "all",
+        # Model Runner V2 only. Restricts which batch phase contributes to the
+        # upstream EPLB expert-load window; any prefill request marks the batch
+        # as prefill.
+        "load_collection_phase": "all",
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -833,6 +909,8 @@ class EplbConfig:
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
+        if self.load_collection_phase not in ["all", "prefill", "decode"]:
+            raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
@@ -939,6 +1017,56 @@ class SchedulerConfig:
                 env_key,
             )
         return default
+
+
+class SparseKVOffloadConfig:
+    """
+    Configuration for the Sparse KV cache offloading.
+    """
+
+    def __init__(self, vllm_config: "VllmConfig", user_config: dict[str, Any]):
+        self.enabled = bool(user_config.get("enabled", False))
+        if not self.enabled:
+            return
+
+        self.topk_buffer_size = int(user_config.get("topk_buffer_size", 4096))
+        self.dram_size_per_dp_GB = int(user_config.get("dram_size_per_dp_GB", 128))
+        self.keep_device_kv_cache = bool(user_config.get("keep_device_kv_cache", False))
+
+        if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
+            raise ValueError("Sparse KV offload don't support compress now.")
+        if not hasattr(vllm_config.model_config.hf_text_config, "index_topk"):
+            raise ValueError("Sparse KV offload only support sparse attention model.")
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size > 1:
+            raise ValueError("Sparse KV offload don't support context parallel now.")
+        if parallel_config.pipeline_parallel_size > 1:
+            raise ValueError("Sparse KV offload don't support pipeline parallel now.")
+        if self.keep_device_kv_cache:
+            logger.warning_once(
+                "Init sparse KV offload with keep_device_kv_cache enabled, "
+                "in this case we will still allocate device kv cache "
+                "and can not improve sequence length or batch_size. "
+                "You should only use it for debugging in PD colocate scenario."
+            )
+        else:
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "Sparse KV offload is only supported in PD disaggregate scenario "
+                    "and can only be used in D node. For debugging in PD colocate scenario, "
+                    "you can enable keep_device_kv_cache."
+                )
+        if vllm_config.use_v2_model_runner:
+            raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
+
+        self.topk = vllm_config.model_config.hf_text_config.index_topk
+        if self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.topk_buffer_size < self.topk:
+            raise ValueError(
+                "sparse_kv_offload_config.topk_buffer_size must be >= topk, "
+                f"got topk_buffer_size={self.topk_buffer_size}, topk={self.topk}"
+            )
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

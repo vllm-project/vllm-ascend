@@ -175,7 +175,11 @@ class _FakeKVCacheSpec:
         return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
 
 
-class _FakeFullAttentionSpec(_FakeKVCacheSpec):
+class _FakeAttentionSpec(_FakeKVCacheSpec):
+    pass
+
+
+class _FakeFullAttentionSpec(_FakeAttentionSpec):
     pass
 
 
@@ -321,6 +325,7 @@ _single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
 
 _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
+_kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
@@ -386,6 +391,7 @@ for _pkg, _path in _vllm_ascend_package_paths.items():
         sys.modules[_pkg] = _make_pkg(_pkg, _path)
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
+_distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
 _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
     return_value=0
 )

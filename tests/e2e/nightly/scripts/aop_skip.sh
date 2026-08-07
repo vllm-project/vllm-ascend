@@ -16,7 +16,7 @@ YAML_SUMMARY="${6:-}"
 
 case "$FT" in
   env_failure) REASON="environment issue" ;;
-  *)           REASON="last run > 3 days ago" ;;
+  *)           REASON="last successful baseline is older than the configured threshold" ;;
 esac
 
 echo "================================================"

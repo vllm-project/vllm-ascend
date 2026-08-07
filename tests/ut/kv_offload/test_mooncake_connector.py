@@ -14,7 +14,13 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
@@ -58,6 +64,7 @@ patch(
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 patch("torch.npu.set_device").start()
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
@@ -74,8 +81,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    resolve_remote_layer_idx,
     split_if_not_byte_contiguous,
     string_to_int64_hash,
+    transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
 
@@ -305,6 +314,107 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
 
 class TestMooncakeTransferGroups(unittest.TestCase):
+    def test_m3_index_spec_is_preserved_and_splits_transfer_group(self):
+        main_layer = "model.layers.3.attn"
+        index_layer = f"{main_layer}.index_cache"
+        main_spec = FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            head_size_v=128,
+            dtype=torch.bfloat16,
+        )
+        index_spec = AscendSFAIndexerCacheSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        layer_specs = {
+            main_layer: main_spec,
+            index_layer: index_spec,
+        }
+        self.assertFalse(is_kv_cache_spec_uniform(layer_specs))
+        uniform_spec = UniformTypeKVCacheSpecs(
+            block_size=128,
+            kv_cache_specs=layer_specs,
+        )
+        vllm_config = MockVllmConfig()
+        vllm_config.cache_config.num_gpu_blocks_override = None
+        num_blocks = 10
+        allocated_config = get_kv_cache_config_from_groups(
+            vllm_config,
+            [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
+            available_memory=uniform_spec.page_size_bytes * num_blocks,
+        )
+        allocated_sizes = {tensor.shared_by[0]: tensor.size for tensor in allocated_config.kv_cache_tensors}
+        self.assertEqual(allocated_config.num_blocks, num_blocks)
+        self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
+        self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
+
+        kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=list(layer_specs),
+                    kv_cache_spec=uniform_spec,
+                )
+            ]
+        )
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.hf_text_config.model_type = "minimax_m3"
+        worker.vllm_config.model_config.hf_text_config.num_key_value_heads = 4
+        worker.vllm_config.model_config.get_total_num_kv_heads = MagicMock(return_value=4)
+        worker.total_layers = 60
+        worker.kv_cache_config = kv_cache_config
+        worker._layer_specs = worker._build_layer_specs_from_kv_cache_config(kv_cache_config)
+
+        self.assertIsInstance(index_spec, MLAAttentionSpec)
+        self.assertIs(worker._layer_specs[index_layer], index_spec)
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 2)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_group_id"], 0)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_group_id"], 0)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec_type"], "FullAttentionSpec")
+        self.assertEqual(kv_group2layeridx[0][1], [3])
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec_type"], "AscendSFAIndexerCacheSpec")
+        self.assertEqual(kv_group2layeridx[1][1], [63])
+
+    def test_m3_index_uses_its_own_block_scale_and_non_mla_routing(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.is_deepseek_mla = False
+        worker.num_key_value_heads = 4
+        worker.block_size_scale = [[] for _ in range(64)]
+        worker.block_size_scale[3] = [2]
+        worker.block_size_scale[63] = [1]
+        index_group = {
+            "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
+            "kv_cache_group_id": 0,
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 1},
+            "layer_names": ["model.layers.3.attn.index_cache"],
+        }
+        main_group = {
+            "kv_cache_spec_type": "FullAttentionSpec",
+            "kv_cache_group_id": 0,
+            "kv_cache_spec": {"num_kv_heads": 1, "total_num_kv_heads": 4},
+            "layer_names": ["model.layers.3.attn"],
+        }
+
+        self.assertEqual(worker._get_kernel_block_scale([63]), 1)
+        self.assertFalse(worker._group_use_mla_rank_routing(index_group))
+        self.assertTrue(worker._group_skip_kv_reformat(index_group))
+        self.assertEqual(worker._get_attention_group_num_key_value_heads(index_group), 4)
+        self.assertTrue(
+            transfer_groups_need_independent_block_ids(
+                {0: (main_group, [3]), 1: (index_group, [63])},
+                worker.block_size_scale,
+            )
+        )
+
     def test_attention_group_uses_explicit_total_heads_for_unequal_pd_tp(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.num_key_value_heads = 16
@@ -374,6 +484,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 )
             ]
         )
+        worker._layer_specs = dict(layer_specs)
 
         kv_group2layeridx = worker._build_kv_group2layeridx()
 
@@ -416,6 +527,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
                 )
             ]
         )
+        worker._layer_specs = {layer_name: shared_local_spec for layer_name in layer_names}
 
         kv_group2layeridx = worker._build_kv_group2layeridx()
 
@@ -443,6 +555,20 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertTrue(all(pull.num_group_pulls == 2 for pull in target_pulls))
         self.assertEqual(len(draft_pulls), 1)
         self.assertEqual(draft_pulls[0].num_group_pulls, 1)
+
+    def test_resolve_remote_layer_idx_uses_layer_name(self):
+        group_spec = {"layer_names": ["model.layers.3.self_attn"]}
+        self.assertEqual(
+            resolve_remote_layer_idx(
+                3,
+                group_spec,
+                [3],
+                {"model.layers.3.self_attn": 17},
+            ),
+            17,
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not contain layer"):
+            resolve_remote_layer_idx(3, group_spec, [3], {})
 
     def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)

@@ -256,6 +256,13 @@ void KvQuantSASInfoParser::SetSASShape()
     if (opParamInfo_.cmpSparseIndices.tensor != nullptr) {
         cmpSparseIndicesShape_ = opParamInfo_.cmpSparseIndices.tensor->GetStorageShape();
     }
+    if (opParamInfo_.oriSparseIndices.tensor != nullptr) {
+        oriSparseIndicesShape_ = opParamInfo_.oriSparseIndices.tensor->GetStorageShape();
+        hasOriSparseIndices_ = true;
+        if (oriSparseIndicesShape_.GetDimNum() == DIM_NUM_THREE) {
+            oriSparseIndexWidth_ = oriSparseIndicesShape_.GetDim(DIM_NUM_THREE - 1);
+        }
+    }
 }
 
 ge::graphStatus KvQuantSASInfoParser::GetN1Size()
@@ -474,6 +481,8 @@ void KvQuantSASInfoParser::GenerateInfo(KvQuantSASTilingInfo &sasInfo)
     sasInfo.qkHeadDim = qkHeadDim_;
     sasInfo.qTSize = qTSize_;
     sasInfo.sparseBlockCount = sparseBlockCount_;
+    sasInfo.hasOriSparseIndices = hasOriSparseIndices_;
+    sasInfo.oriSparseIndexWidth = oriSparseIndexWidth_;
 
     sasInfo.qType = qType_;
     sasInfo.oriKvType = oriKvType_;
@@ -622,6 +631,8 @@ ge::graphStatus KvQuantSparseAttnSharedkvTiling::DoOpTiling(KvQuantSASTilingInfo
     tilingData_.baseParams.set_oriWinLeft(tilingInfo->oriWinLeft);
     tilingData_.baseParams.set_oriWinRight(tilingInfo->oriWinRight);
     tilingData_.baseParams.set_sparseBlockSize(tilingInfo->sparseBlockSize);
+    tilingData_.baseParams.set_hasOriSparseIndices(tilingInfo->hasOriSparseIndices);
+    tilingData_.baseParams.set_oriSparseIndexWidth(tilingInfo->oriSparseIndexWidth);
     tilingData_.baseParams.set_dSize(tilingInfo->dSize);
     tilingData_.baseParams.set_dSizeVInput(tilingInfo->dSizeVInput);
 

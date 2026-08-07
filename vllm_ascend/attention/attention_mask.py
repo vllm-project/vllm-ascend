@@ -36,7 +36,6 @@ class AttentionMaskBuilder:
         self.attn_mask_cache = None
         self._seq_len_cached = 0
         self.device = device
-        self.mla_mask = None
         self.chunked_prefill_attn_mask = None
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
@@ -55,16 +54,6 @@ class AttentionMaskBuilder:
             )
         return self.chunked_prefill_attn_mask
 
-    def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:
-        if self.mla_mask is None or self.mla_mask.dtype != dtype:
-            if dtype == torch.float16:
-                mask_value = torch.finfo(torch.float32).min
-            else:
-                mask_value = 1
-            prefill_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
-            self.mla_mask = torch.where(prefill_mask == 1, mask_value, 0).to(dtype)
-        return self.mla_mask
-
     def get_attention_mask(self, causal: bool, model_config: ModelConfig):
         if not causal:
             # FIA applies any provided mask as defaultMask (sparse_mode=0),
@@ -79,7 +68,3 @@ class AttentionMaskBuilder:
             return self.get_attn_mask(2048, torch.bool)
 
         return self.get_splitfuse_attn_mask()
-
-    def get_final_mla_mask(self, model_config: ModelConfig):
-        # Prefill stages use 512x512 mask with appropriate dtype
-        return self.get_mla_mask(model_config.dtype)

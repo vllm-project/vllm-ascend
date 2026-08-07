@@ -120,7 +120,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
 
-        hidden_states, residual = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
+        hidden_states, residual = self.mtp_block(
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=None,
+            input_ids=None,
+        )
 
         # hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
         #                              self.hc_head_scale, self.hc_head_base)

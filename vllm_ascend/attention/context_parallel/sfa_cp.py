@@ -709,8 +709,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
-        torch.distributed.Work | None,
-        list[torch.distributed.Work | None] | None,
     ]:
         result = super()._maybe_store_kvcache_for_c8_n_dsacp(
             k_pe,
@@ -739,6 +737,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         attn_metadata,
         actual_seq_lengths_query,
         actual_seq_lengths_key,
+        block_table=None,
     ):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."

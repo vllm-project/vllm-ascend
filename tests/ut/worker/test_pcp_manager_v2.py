@@ -20,21 +20,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.25.1"):
-    from vllm.v1.worker.gpu.pcp_manager import PCPManager
-
-    import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
-    from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-    from vllm_ascend.worker.v2.pcp_manager import (
-        AscendPCPManager,
-        maybe_build_ascend_pcp_manager,
-    )
+import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.pcp_manager import (
+    AscendPCPManager,
+    maybe_build_ascend_pcp_manager,
+)
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -126,7 +121,6 @@ def _make_global_pcp_batch():
     )
 
 
-@pytest.mark.skipif(vllm_version_is("0.25.1"), reason="requires vllm main branch")
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
     vllm_config = object()
@@ -197,7 +191,6 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
 
 
-@pytest.mark.skipif(vllm_version_is("0.25.1"), reason="requires vllm main branch")
 def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
@@ -215,7 +208,6 @@ def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
     )
 
 
-@pytest.mark.skipif(vllm_version_is("0.25.1"), reason="requires vllm main branch")
 def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
