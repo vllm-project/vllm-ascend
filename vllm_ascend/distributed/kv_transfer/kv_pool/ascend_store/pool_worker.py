@@ -1335,7 +1335,7 @@ class KVPoolWorker:
                     self._allocated_gvas.pop(partial_key, None)
                     request.partial_save_gva_per_group[group_id] = partial_gva
 
-                logger.info(
+                logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
                     "new_keys=%d cached_keys=%d alloc_size=%d",
                     request.req_id,
@@ -1713,7 +1713,6 @@ class KVPoolWorker:
         while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
             self.kv_recv_thread.raise_if_failed()
             logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
-        logger.debug(">>>>>>>>>>>>>>>>>>>> clear load layer %d", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
