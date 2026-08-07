@@ -142,6 +142,57 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
         worker.token_database.process_tokens.assert_not_called()
 
+    def test_registered_layer_layout_includes_mtp_multi_group_and_pp(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 2
+        worker.hf_config = MagicMock(num_hidden_layers=4)
+        caches = [MagicMock(), MagicMock(), MagicMock()]
+        for address, cache in zip((1000, 2000, 3000), caches):
+            cache.data_ptr.return_value = address
+        worker.kv_caches = {
+            "model.layers.2.self_attn": (caches[0],),
+            "model.layers.3.self_attn": (caches[1],),
+            "model.mtp.0.self_attn": (caches[2],),
+        }
+        worker._get_cache_block_metadata = MagicMock(return_value=(160, 160, 160, 1))
+        worker.group_kv_caches_base_addr = {}
+        worker.group_block_len = {}
+        worker.group_block_stride = {}
+        worker.group_num_layers = {}
+
+        worker._infer_cache_group_metadata(0, list(worker.kv_caches))
+        self.assertEqual(worker.group_kv_caches_base_addr[0], [1000, 2000, 3000])
+        self.assertEqual(worker.group_num_layers[0], 3)
+        worker.layer_load_tasks = [[], []]
+        worker.layer_save_tasks = [[], []]
+
+        worker._configure_registered_layerwise_layers(
+            [
+                (
+                    0,
+                    [
+                        "model.layers.2.self_attn",
+                        "model.layers.3.self_attn",
+                        "model.mtp.0.self_attn",
+                    ],
+                ),
+                (1, ["model.layers.2.indexer", "model.layers.3.indexer"]),
+            ]
+        )
+
+        self.assertEqual(worker.num_layers, 3)
+        self.assertEqual(
+            worker.local_layer_to_group_layers,
+            {
+                0: [(0, 0), (1, 0)],
+                1: [(0, 1), (1, 1)],
+                2: [(0, 2)],
+            },
+        )
+        self.assertEqual(worker._extract_physical_layer_index("model.layers.4.self_attn"), 4)
+        self.assertEqual(len(worker.layer_load_tasks), 3)
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""
