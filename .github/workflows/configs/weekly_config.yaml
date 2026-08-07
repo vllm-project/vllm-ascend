@@ -130,7 +130,18 @@ a3:
       - name: GLM-5.2-W4A8C8-128k-1k-90-50-PD
         config_file_path: GLM-5.2-W4A8C8-128k-1k-90-50-PD.yaml
         size: 4
-
+      - name: Minimax_m2.7_in3_5_tpot50
+        config_file_path: Minimax_m2.7_in3_5_tpot50.yaml
+        size: 3
+      - name: Minimax_m2.7_in3_5_tpot20
+        config_file_path: Minimax_m2.7_in3_5_tpot20.yaml
+        size: 3
+      - name: Minimax_m2.7_in64k_1k_prefix90_tpot50
+        config_file_path: Minimax_m2.7_in64k_1k_prefix90_tpot50.yaml
+        size: 2
+      - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
+        config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
+        size: 2
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
@@ -231,6 +242,10 @@ a3:
       - name: qwen_3_6_27b_w8a8_A3
         os: linux-aarch64-a3-16
         config_file_path: qwen_3_6_27b_w8a8_A3.yaml
+      - name: Minimax_m2.7_w8a8_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Minimax_m2.7_w8a8_A3.yaml
+
 310p:
   single_node:
     test_config:
