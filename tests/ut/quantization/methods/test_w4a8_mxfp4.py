@@ -12,11 +12,9 @@ from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
 
 
 class TestAscendW4A8MXFP4LinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.ensure_mxfp4_linear_available")
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.get_current_vllm_config")
-    def setUp(self, mock_vllm, mock_ensure):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ensure.return_value = None
         self.scheme = AscendW4A8MXFPDynamicLinearMethod()
 
     def test_get_weight_various_input_sizes(self):
@@ -79,13 +77,11 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.get_ep_group")
-    @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.ensure_mxfp4_linear_available")
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ensure, mock_ep_group):
+    def setUp(self, mock_ascend, mock_vllm, mock_ep_group):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
-        mock_ensure.return_value = None
         mock_ep_group.return_value = Mock()
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
 
@@ -128,8 +124,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.select_experts")
-    def test_apply_full_params(self, mock_select, mock_ctx, mock_npu):
+    def test_apply_full_params(self, mock_ctx, mock_npu):
         tokens = 4
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 64, 256), dtype=torch.uint8), requires_grad=False)
@@ -141,11 +136,18 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             torch.randint(0, 255, (8, 4, 128, 2), dtype=torch.uint8), requires_grad=False
         )
         layer.swiglu_limit = 0.0
+        layer.activation = "silu"
+        layer.ascend_pertoken_scale = torch.randn(tokens)
+        layer.apply_router_weight_on_input = True
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.log2phy = None
+        layer.ascend_mc2_mask = None
+        layer.swiglu_alpha = 1.0
+        layer.swiglu_beta = 0.0
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
-        router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
-        mock_select.return_value = (topk_weights, topk_ids)
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
         mock_ctx.moe_comm_method = mock_comm
@@ -153,12 +155,9 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.scheme.apply(
             layer,
             x,
-            router_logits,
-            top_k=2,
-            renormalize=True,
-            num_experts=self.num_experts,
-            activation="silu",
-            pertoken_scale=torch.randn(tokens),
-            apply_router_weight_on_input=True,
+            topk_weights,
+            topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()

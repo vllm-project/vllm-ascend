@@ -18,8 +18,6 @@
 name: Schedule Test Coverage
 
 on:
-  schedule:
-    - cron: "55 0 * * *"
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -41,7 +39,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint

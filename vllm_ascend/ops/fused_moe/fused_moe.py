@@ -30,8 +30,6 @@ from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
-    moe_counter = -1
-
     def __init__(
         self,
         layer_name,
@@ -193,6 +191,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
+                    input_ids=input_ids,
                 )
             if self.is_internal_router:
                 gate = self.gate
@@ -212,6 +211,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             fused_moe_results = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
+                input_ids=input_ids,
             )
             routed_out = fused_moe_results.routed_out
 

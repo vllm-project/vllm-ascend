@@ -280,6 +280,45 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             )
         return layer
 
+    def test_get_eplb_weight_views_matches_routed_compute_inputs(self):
+        layer = self.build_layer(is_new_quant_version=True)
+
+        weight_views = self.quant_method.get_eplb_weight_views(layer)
+
+        expected = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            layer.w13_scale_bias,
+            layer.w2_scale_bias,
+        ]
+        self.assertEqual(len(weight_views), len(expected))
+        for actual, expected_view in zip(weight_views, expected):
+            self.assertIs(actual, expected_view)
+
+    def test_get_eplb_weight_views_rejects_incomplete_scale_bias(self):
+        layer = self.build_layer(is_new_quant_version=True)
+        del layer.w2_scale_bias
+
+        with self.assertRaisesRegex(RuntimeError, "w13_scale_bias and w2_scale_bias to be present or absent together"):
+            self.quant_method.get_eplb_weight_views(layer)
+
+    def test_get_eplb_weight_views_rejects_incomplete_scale_bias_lists(self):
+        layer = torch.nn.Module()
+        layer.w13_weight_list = [torch.empty(2, 3) for _ in range(self.experts)]
+        layer.w2_weight_list = [torch.empty(3, 2) for _ in range(self.experts)]
+        layer.w13_weight_scale_list = [torch.empty(3) for _ in range(self.experts)]
+        layer.w2_weight_scale_list = [torch.empty(2) for _ in range(self.experts)]
+        layer.w13_scale_bias_list = [torch.empty(3) for _ in range(self.experts)]
+        layer.w2_scale_bias_list = None
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "w13_scale_bias_list and w2_scale_bias_list to be present or absent together",
+        ):
+            self.quant_method.get_eplb_weight_views(layer)
+
     @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
@@ -314,6 +353,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(per_channel_layer)
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
+
+        self.quant_method.use_expert_weight_list = True
+        list_layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
+        self.quant_method.process_weights_after_loading(list_layer)
+        self.assertFalse(hasattr(list_layer, "w13_weight"))
+        self.assertEqual(len(list_layer.w13_weight_list), self.experts)
+        self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))
+        weight_views = self.quant_method.get_eplb_weight_views(list_layer)
+        self.assertIs(weight_views[0], list_layer.w13_weight_list)
+        self.assertIs(weight_views[-1], list_layer.w2_scale_bias_list)
 
     def test_pack_to_int32_asserts_new_quant_packed_dim(self):
         self.quant_method.new_quant_version = True
@@ -366,10 +415,19 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w2_weight_scale.data.shape, (self.experts, 1, self.output_size))
 
+        self.quant_method.is_per_channel_weight = False
+        self.quant_method.weight_strategy = "group"
+        self.quant_method.use_expert_weight_list = True
+        list_layer = self.build_layer(is_new_quant_version=False)
+        self.quant_method.process_weights_after_loading(list_layer)
+        self.assertFalse(hasattr(list_layer, "w13_weight"))
+        self.assertEqual(len(list_layer.w13_weight_list), self.experts)
+        self.assertEqual(list_layer.w13_weight_list[0].dtype, torch.int8)
+        self.assertTrue(all(weight.storage_offset() == 0 for weight in list_layer.w13_weight_list))
+
     @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w4a8.select_experts")
     @patch("vllm_ascend.quantization.methods.w4a8.build_fused_experts_input")
-    def test_apply_comprehensive(self, mock_build_input, mock_select, mock_ctx):
+    def test_apply_comprehensive(self, mock_build_input, mock_ctx):
         tokens = 4
         num_experts = self.experts
         hidden_size = self.output_size
@@ -379,16 +437,21 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.is_per_channel_weight = True
         layer.swiglu_limit = 1000000
         x = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
-        router_logits = torch.randn(tokens, num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, top_k, dtype=torch.float32)
         topk_ids = torch.randint(0, num_experts, (tokens, top_k), dtype=torch.int64)
         expert_map = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
         mc2_mask = torch.tensor([1, 0, 1, 0], dtype=torch.bool)
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
         log2phy = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
-        e_score_correction_bias = torch.randn(num_experts, dtype=torch.float32)
-
-        mock_select.return_value = (topk_weights, topk_ids)
+        layer.ascend_expert_map = expert_map
+        layer.global_redundant_expert_num = 0
+        layer.log2phy = log2phy
+        layer.ascend_mc2_mask = mc2_mask
+        layer.ascend_pertoken_scale = pertoken_scale
+        layer.activation = "silu"
+        layer.apply_router_weight_on_input = False
+        layer.swiglu_alpha = 1.0
+        layer.swiglu_beta = 0.0
 
         mock_fused_input = Mock()
         mock_fused_input.hidden_states = x
@@ -405,30 +468,11 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         output = self.quant_method.apply(
             layer=layer,
             x=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            renormalize=True,
-            use_grouped_topk=False,
-            num_experts=num_experts,
-            expert_map=expert_map,
-            scoring_func="softmax",
-            routed_scaling_factor=1.0,
-            e_score_correction_bias=e_score_correction_bias,
-            is_prefill=True,
-            enable_force_load_balance=False,
-            log2phy=log2phy,
-            global_redundant_expert_num=0,
-            pertoken_scale=pertoken_scale,
-            activation="silu",
-            apply_router_weight_on_input=False,
-            mc2_mask=mc2_mask,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
         )
-
-        mock_select.assert_called_once()
-        select_call_args = mock_select.call_args
-        self.assertTrue(torch.equal(select_call_args.kwargs["hidden_states"], x))
-        self.assertEqual(select_call_args.kwargs["top_k"], top_k)
-        self.assertEqual(select_call_args.kwargs["num_experts"], num_experts)
 
         mock_build_input.assert_called_once()
         build_kwargs = mock_build_input.call_args.kwargs
@@ -441,22 +485,3 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_comm.fused_experts.assert_called_once()
         self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
         self.assertTrue(torch.equal(output, expected_output))
-
-    def test_apply_asserts_router_logits_expert_mismatch(self):
-        layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
-        x = torch.randn(4, self.output_size, dtype=torch.bfloat16)
-        router_logits = torch.randn(4, self.experts - 1, dtype=torch.float32)
-        expected_message = (
-            "Number of global experts mismatch (excluding redundancy): "
-            f"router_logits.shape[1]={self.experts - 1}, num_logical_experts={self.experts}"
-        )
-
-        with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
-            self.quant_method.apply(
-                layer=layer,
-                x=x,
-                router_logits=router_logits,
-                top_k=2,
-                renormalize=True,
-                num_experts=self.experts,
-            )

@@ -23,7 +23,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 from .methods import AscendLinearScheme, AscendMoEScheme
@@ -164,7 +165,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
             # Return unquantized method if no scheme found
             if linear_scheme is None:
-                return UnquantizedLinearMethod()
+                return AscendUnquantizedLinearMethod()
 
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = linear_scheme

@@ -41,6 +41,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -80,8 +81,12 @@ def _should_keep_nd_for_310p_weight(weight: torch.Tensor) -> bool:
     return is_310p() and weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1)
 
 
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
+
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
+    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
+    supports_tp_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

@@ -42,7 +42,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
@@ -145,7 +144,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self.enable_shared_expert_dp = shared_expert_dp_enabled()
 
@@ -739,6 +737,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -761,6 +760,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD: take the scheduled per-step K as an explicit argument and
+        # set it here -- mirroring vLLM's ``propose(num_speculative_tokens=...)``
+        # (which sets ``self.num_speculative_tokens`` on entry) and unified with
+        # the other proposers (ngram/suffix/medusa/extract) that also receive the
+        # scheduled K through their propose call. The value never exceeds the
+        # configured maximum, so pre-allocated buffers stay valid; K == 0 is
+        # handled just below.
+        self.num_speculative_tokens = num_speculative_tokens
+
+        # Dynamic SD may schedule K == 0 draft tokens for the current batch
+        # size. Return an empty [batch_size, 0] draft so downstream copy/unpack
+        # paths (which key off ``draft_token_ids.shape[1]``) stay consistent.
+        # Mirrors vLLM's llm_base_proposer._propose empty-draft early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=target_token_ids.device,
+                dtype=torch.int64,
+            )
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
@@ -1156,6 +1176,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
                         draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+
+                    # Dynamic verify-length path, implemented in AscendDSparkProposer.
+                    # Only the dspark method is handled here since it relies on
+                    # the DSpark confidence head.
+                    if get_ascend_config().dynamic_spec_config.method == "dspark":
+                        self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
