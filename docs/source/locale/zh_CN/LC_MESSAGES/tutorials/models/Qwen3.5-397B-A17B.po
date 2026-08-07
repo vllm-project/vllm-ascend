@@ -148,9 +148,6 @@ msgid ""
 " and vLLM-Ascend on each node."
 msgstr "如果要部署多节点服务，请在每个节点上安装相同版本的 vLLM 和 vLLM-Ascend。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -832,3 +829,6 @@ msgid ""
 "across layers to reduce decode overhead. | No extra configuration is "
 "required. |"
 msgstr "| RoPE优化 | 默认启用 | 跨层复用位置编码工作以减少解码开销。 | 无需额外配置。 |"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

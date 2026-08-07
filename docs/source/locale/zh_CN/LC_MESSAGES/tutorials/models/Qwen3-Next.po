@@ -96,9 +96,6 @@ msgid ""
 "If deploying a multi-node environment, set up the environment on each node."
 msgstr "如果部署多节点环境，请在每个节点上配置环境。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -341,3 +338,6 @@ msgid ""
 "feature descriptions."
 msgstr ""
 "有关详细的功能描述，请参阅[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

@@ -147,9 +147,6 @@ msgid ""
 "confirming a successful installation."
 msgstr "预期结果：显示 `vllm-ascend` 的版本信息，确认安装成功。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -791,3 +788,6 @@ msgid ""
 msgstr ""
 "| 长上下文<br>(256k+上下文) | 单节点 (A3) | 16 (A3) | Qwen3.5-27B-w8a8 / "
 "Qwen3.6-27B-w8a8 | TP=8 + DP=2 将KV缓存分布在8个NPU上，以最大化可用上下文窗口 |"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
