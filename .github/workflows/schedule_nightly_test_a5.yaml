@@ -46,24 +46,6 @@ on:
         required: false
         default: ''
         type: string
-      aop_enabled:
-        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
-        required: false
-        default: false
-        type: boolean
-      build_type:
-        description: 'Build type: daily or release.'
-        required: false
-        default: 'release'
-        type: choice
-        options:
-          - release
-          - daily
-      cann_version:
-        description: 'CANN version for base image tag'
-        required: false
-        default: '2026.08.03'
-        type: string
 
 permissions:
   contents: read
