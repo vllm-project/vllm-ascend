@@ -1,5 +1,5 @@
 test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_64k/128k"
-model: "gdydems/GLM-5.1-w8a8c8"
+model: "Eco-Tech/GLM-5.1-w8a8c8"
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
@@ -21,7 +21,7 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-      vllm serve gdydems/GLM-5.1-w8a8c8
+      vllm serve Eco-Tech/GLM-5.1-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -52,7 +52,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-      vllm serve gdydems/GLM-5.1-w8a8c8
+      vllm serve Eco-Tech/GLM-5.1-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
