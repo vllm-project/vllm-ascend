@@ -930,12 +930,6 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             )
             vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
-        if getattr(vllm_config.cache_config, "calculate_kv_scales", False):
-            logger.warning(
-                "Parameter is not supported on Ascend NPU. parameter=calculate_kv_scales, action: resetting to False."
-            )
-            vllm_config.cache_config.calculate_kv_scales = False
-
     # ==================== 3. MultiModal Config ====================
     multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
     if multimodal_config:

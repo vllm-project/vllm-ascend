@@ -615,8 +615,10 @@ else:
             init_info: NPUIPCTrainerInitInfo,
             *,
             client: "VLLMWeightSyncClient",
-            source: "WeightSource",
+            source: "WeightSource | None" = None,
         ) -> "NPUIPCTrainerWeightTransferEngine":
+            if source is None:
+                raise ValueError("IPC trainer weight transfer requires a WeightSource.")
             engine = cls(
                 client=client,
                 source=source,
@@ -631,6 +633,7 @@ else:
             return engine
 
         def send_weights(self) -> None:
+            assert self.source is not None
             source = self.source
             if self.is_sender:
                 self.client.start_weight_update()

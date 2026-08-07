@@ -1777,10 +1777,6 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if self.vllm_config.model_config.enable_return_routed_experts:
-            if self.routed_experts_initialized:
-                self.routed_experts_capturer.clear_buffer()
-
         if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
@@ -2083,13 +2079,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
-        # Set cudagraph mode to none if calc_kv_scales is true.
-        # KV scales calculation involves dynamic operations that are incompatible
-        # with CUDA graph capture.
-        if self.calculate_kv_scales:  # type: ignore[has-type]
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False  # type: ignore[has-type]
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -2396,8 +2385,7 @@ class NPUModelRunner(GPUModelRunner):
         # copy stream can D2H later. Both tensors must be private
         # clones because:
         #   - ``routing_data`` source is the shared capturer buffer,
-        #     which is ``clear_buffer()``-ed at the start of the
-        #     next step on the default stream.
+        #     which the next forward overwrites on the default stream.
         #   - ``slot_mapping`` source is our own
         #     ``routed_experts_slot_mapping_device``, which the
         #     next ``_prepare_inputs`` overwrites on the default
@@ -3710,6 +3698,14 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def init_routed_experts_capturer(self) -> None:
+        super().init_routed_experts_capturer()
+        # main2main compat: upstream's module-level bind_routed_experts_capturer
+        # wires capture through the router's set_capture_fn, which the Ascend
+        # MoE path does not invoke. The Ascend capture path reads
+        # routed_experts._ascend_routed_experts_capturer, so re-attach it here.
+        self._bind_routed_experts_capturer(self.routed_experts_capturer)
 
     def _bind_routed_experts_capturer(self, capturer=None) -> None:
         # test_qwen3_moe_routing_replay

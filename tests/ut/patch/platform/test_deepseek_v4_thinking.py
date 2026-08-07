@@ -3,6 +3,8 @@
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import deepseek_v4
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class FakeTokenizer:
     vocab_size = 1
@@ -63,14 +65,28 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(monkeypatch):
 
     cases = [
         ("none", "chat", None),
-        ("minimal", "thinking", "high"),
-        ("low", "thinking", "high"),
-        ("medium", "thinking", "high"),
+        ("minimal", "thinking", "low"),
+        ("low", "thinking", "low"),
+        ("medium", "thinking", "low"),
         ("high", "thinking", "high"),
-        ("xhigh", "thinking", "max"),
+        ("xhigh", "thinking", "high"),
         ("max", "thinking", "max"),
         ("unexpected", "thinking", "high"),
     ]
+    if vllm_version_is("0.26.0"):
+        # main2main compat: on v0.26.0 the deepseek_v4 tokenizer collapses
+        # minimal/low/medium/high into "high" and xhigh into "max"; the
+        # granular "latest" mapping landed on vllm main after 0.26.0.
+        cases = [
+            ("none", "chat", None),
+            ("minimal", "thinking", "high"),
+            ("low", "thinking", "high"),
+            ("medium", "thinking", "high"),
+            ("high", "thinking", "high"),
+            ("xhigh", "thinking", "max"),
+            ("max", "thinking", "max"),
+            ("unexpected", "thinking", "high"),
+        ]
     for reasoning_effort, expected_mode, expected_effort in cases:
         tokenizer.apply_chat_template(
             [{"role": "user", "content": "hi"}],
