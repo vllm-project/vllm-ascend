@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tool-call parser for the Kimi K3 (XTML) chat format.
 
-Vendored from vLLM commit f5a7cce9b6a61f4d995629a7418c7ea822e34a64.
+Vendored from vLLM commit ab98034d4ccccd62e814ebcdc3f3831586b1c8d7.
 """
 
 import json
@@ -130,7 +130,6 @@ class KimiK3ToolParser(ToolParser):
     def _decode_call(self, attrs: str, body: str) -> ToolCall | None:
         call_attrs = self._attrs(attrs)
         tool_name = call_attrs.get("tool", "")
-        tool_index = call_attrs.get("index", "")
         arguments: dict = {}
         for arg_match in self._arg_re.finditer(body):
             arg_attrs = self._attrs(arg_match["attrs"])
@@ -146,14 +145,7 @@ class KimiK3ToolParser(ToolParser):
                     arguments[key] = raw_value
         if not tool_name:
             return None
-        tool_call_id = tool_name
-        if tool_index:
-            try:
-                tool_call_id = f"{tool_name}:{int(tool_index) - 1}"
-            except ValueError:
-                tool_call_id = f"{tool_name}:{tool_index}"
         return ToolCall(
-            id=tool_call_id,
             type="function",
             function=FunctionCall(
                 name=tool_name,

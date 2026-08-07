@@ -24,6 +24,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
+from vllm_ascend.patch.platform.kimi_k3_protocol import (
+    CLOSE_TOKEN,
+    OPEN_TOKEN,
+    SEP_TOKEN,
+)
 from vllm_ascend.patch.platform.patch_kimi_k3_parsers import (
     ARGUMENT_END,
     CALL_END,
@@ -48,7 +53,7 @@ _TOKENIZER_PATH_ENV = "KIMI_K3_TOKENIZER_PATH"
 _KIMI_K3_TOKENIZER_FILE_SHA256 = {
     "tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
     "tokenization_kimi.py": "f28ea66e2d862a2a5814970b2ce40c2f7d8296ff09aed90a7e7def689b906944",
-    "encoding_k3.py": "c3869cdb7c5a81b1ee621e55ba589d8f3ffae83063c1085571ee96e2feb826a8",
+    "encoding_k3.py": "b9cb7ae100fed34b9337f80dacee5abbf7e261fe9b74bc0e76366701d46f5333",
     "tokenizer_config.json": "5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e",
 }
 
@@ -308,10 +313,15 @@ def test_real_renderer_defaults_to_thinking_generation(
 
 
 @pytest.mark.parametrize(
-    ("reasoning_effort", "generation_marker", "has_effort_instruction"),
+    (
+        "reasoning_effort",
+        "generation_marker",
+        "has_effort_instruction",
+        "has_history_reasoning",
+    ),
     [
-        ("high", THINK_START, True),
-        ("none", RESPONSE_START, False),
+        ("high", THINK_START, True, True),
+        ("none", RESPONSE_START, False, False),
     ],
 )
 def test_real_renderer_preserves_multiturn_system_and_reasoning_controls(
@@ -319,6 +329,7 @@ def test_real_renderer_preserves_multiturn_system_and_reasoning_controls(
     reasoning_effort,
     generation_marker,
     has_effort_instruction,
+    has_history_reasoning,
 ):
     tools = [_tool("get_weather")]
     conversation = [
@@ -375,7 +386,86 @@ def test_real_renderer_preserves_multiturn_system_and_reasoning_controls(
     assert 'message role="tool" tool="get_weather" index="1"' in prompt
     assert prompt.endswith(generation_marker)
     assert ('type="thinking-effort"' in prompt) is has_effort_instruction
-    assert "need tool" in prompt
+    assert ("need tool" in prompt) is has_history_reasoning
+
+
+def test_real_renderer_preserves_tool_schema_fields(real_kimi_k3_tokenizer):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": ["integer", "null"],
+                            "default": None,
+                        }
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search records",
+                "parameters": {"type": "object"},
+                "strict": False,
+            },
+        },
+    ]
+
+    prompt_ids = real_kimi_k3_tokenizer.apply_chat_template(
+        [{"role": "user", "content": "find it"}],
+        tools=tools,
+        tokenize=True,
+        thinking=False,
+    )
+    prompt = _decode(real_kimi_k3_tokenizer, prompt_ids)
+
+    assert (
+        '{"function":{"name":"lookup","parameters":{"properties":'
+        '{"limit":{"default":null,"type":["integer","null"]}},'
+        '"type":"object"}},"type":"function"}'
+    ) in prompt
+    assert (
+        '{"function":{"description":"Search records","name":"search",'
+        '"parameters":{"type":"object"},"strict":false},"type":"function"}'
+    ) in prompt
+
+
+def test_real_renderer_preserves_malformed_tool_arguments_as_json_block(
+    real_kimi_k3_tokenizer,
+):
+    malformed = '  {"city":"Beijing"  '
+    conversation = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "weather",
+                        "arguments": malformed,
+                    },
+                }
+            ],
+        }
+    ]
+
+    prompt_ids = real_kimi_k3_tokenizer.apply_chat_template(
+        conversation,
+        tokenize=True,
+        add_generation_prompt=False,
+        thinking=False,
+    )
+    prompt = _decode(real_kimi_k3_tokenizer, prompt_ids)
+
+    assert f'{OPEN_TOKEN}json type="object"{SEP_TOKEN}{malformed}{CLOSE_TOKEN}json{SEP_TOKEN}' in prompt
 
 
 def test_real_segmented_encoding_blocks_prompt_marker_injection(

@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.exceptions import VLLMValidationError
@@ -58,6 +59,37 @@ def test_explicit_kimi_k3_mode_registers_renderer_and_hf_loader():
         OpenAIServingChat._effective_chat_template_kwargs.__module__
         == "vllm.entrypoints.openai.chat_completion.serving"
     )
+
+
+@pytest.mark.parametrize(
+    ("architecture", "tokenizer_mode", "expected"),
+    [
+        ("KimiK3ForConditionalGeneration", "auto", "kimi_k3"),
+        ("KimiK3ForConditionalGeneration", "hf", "hf"),
+        ("LlamaForCausalLM", "auto", "auto"),
+    ],
+)
+def test_kimi_k3_model_config_selects_tokenizer_mode_by_architecture(
+    monkeypatch,
+    architecture,
+    tokenizer_mode,
+    expected,
+):
+    def original_post_init(config, *args, **kwargs):
+        del args, kwargs
+        config._architecture = architecture
+
+    monkeypatch.setattr(
+        ModelConfig,
+        renderer_patch._ORIGINAL_MODEL_CONFIG_POST_INIT_ATTR,
+        original_post_init,
+    )
+    config = object.__new__(ModelConfig)
+    config.tokenizer_mode = tokenizer_mode
+
+    ModelConfig.__post_init__(config)
+
+    assert config.tokenizer_mode == expected
 
 
 def test_renderer_calls_tokenizer_python_encoder_without_jinja():
@@ -516,6 +548,39 @@ def test_auto_tool_choice_survives_vllm_default_merging():
     assert calls[0]["tool_choice"] == "auto"
     assert [tool["function"]["name"] for tool in calls[0]["tools"]] == ["get_time"]
     assert KIMI_K3_PROMPT_TOOL_CHOICE_KEY not in calls[0]
+
+
+def test_named_tool_choice_preserves_full_tool_list_for_python_encoder():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": {"type": "object"},
+            },
+        }
+        for name in ("get_weather", "get_time")
+    ]
+    request = _request(
+        tools=tools,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "get_time"},
+        },
+    )
+
+    renderer_patch.prepare_kimi_k3_chat_template_kwargs(request)
+
+    kwargs = request.chat_template_kwargs
+    assert kwargs is not None
+    assert [tool["function"]["name"] for tool in kwargs["tools"]] == [
+        "get_weather",
+        "get_time",
+    ]
+    assert kwargs["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "get_time"},
+    }
 
 
 @pytest.mark.parametrize(("renderer_cls", "expected_thinking"), [(KimiK3Renderer, True), (object, None)])

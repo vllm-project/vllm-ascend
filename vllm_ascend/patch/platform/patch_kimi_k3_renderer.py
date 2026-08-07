@@ -29,7 +29,7 @@ from __future__ import annotations
 from functools import wraps
 from typing import Any
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -57,6 +57,7 @@ _KIMI_K3_PROMPT_TOOL_CHOICE_PREFIX = "kimi_k3:"
 _KIMI_K3_PROMPT_TOOL_CHOICES = frozenset({"none", "auto", "required"})
 _ORIGINAL_RENDER_CHAT_ATTR = "_ascend_original_kimi_k3_render_chat"
 _ORIGINAL_EFFECTIVE_KWARGS_ATTR = "_ascend_original_kimi_k3_effective_chat_template_kwargs"
+_ORIGINAL_MODEL_CONFIG_POST_INIT_ATTR = "_ascend_original_kimi_k3_model_config_post_init"
 _PREPARED_ATTR = "_kimi_k3_chat_params_prepared"
 _K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {
     "image": {"image_mode": None},
@@ -120,23 +121,6 @@ def _apply_k3_thinking_kwargs(kwargs: dict[str, Any]) -> None:
             parameter="thinking_effort",
             value=thinking_effort,
         )
-
-
-def _tool_name(tool: Any) -> str | None:
-    if isinstance(tool, dict):
-        function = tool.get("function")
-        if isinstance(function, dict):
-            return function.get("name")
-        return getattr(function, "name", None)
-    return getattr(getattr(tool, "function", None), "name", None)
-
-
-def _named_tool_choice(request: ChatCompletionRequest) -> str | None:
-    choice = request.tool_choice
-    function = choice.get("function") if isinstance(choice, dict) else getattr(choice, "function", None)
-    if isinstance(function, dict):
-        return function.get("name")
-    return getattr(function, "name", None)
 
 
 def prepare_kimi_k3_chat_template_kwargs(request: ChatCompletionRequest) -> None:
@@ -216,21 +200,10 @@ def prepare_kimi_k3_chat_template_kwargs(request: ChatCompletionRequest) -> None
 
     template_kwargs["tools"] = request_tools
 
-    named_tool = _named_tool_choice(request)
-    if named_tool:
-        matching_tools = [tool for tool in request_tools if _tool_name(tool) == named_tool]
-        if not matching_tools:
-            raise VLLMValidationError(
-                f"Named Kimi K3 tool choice {named_tool!r} is not declared.",
-                parameter="tool_choice",
-            )
-        template_kwargs["tool_choice"] = "required"
-        template_kwargs["tools"] = matching_tools
+    if request.tool_choice is not None:
+        template_kwargs["tool_choice"] = _model_dump(request.tool_choice)
     else:
-        if isinstance(request.tool_choice, str):
-            template_kwargs["tool_choice"] = request.tool_choice
-        elif request.tool_choice is None:
-            template_kwargs["tool_choice"] = "auto" if template_kwargs.get("tools") else "none"
+        template_kwargs["tool_choice"] = "auto" if template_kwargs.get("tools") else "none"
 
     prompt_tool_choice = template_kwargs.get("tool_choice")
     if isinstance(prompt_tool_choice, str) and prompt_tool_choice in _KIMI_K3_PROMPT_TOOL_CHOICES:
@@ -455,6 +428,29 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             prompt["multi_modal_uuids"] = mm_uuids
 
         return conversation, prompt
+
+
+if not hasattr(ModelConfig, _ORIGINAL_MODEL_CONFIG_POST_INIT_ATTR):
+    setattr(
+        ModelConfig,
+        _ORIGINAL_MODEL_CONFIG_POST_INIT_ATTR,
+        ModelConfig.__post_init__,
+    )
+
+
+@wraps(getattr(ModelConfig, _ORIGINAL_MODEL_CONFIG_POST_INIT_ATTR))
+def _model_config_post_init_with_kimi_k3_tokenizer_mode(
+    self: ModelConfig,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    original = getattr(ModelConfig, _ORIGINAL_MODEL_CONFIG_POST_INIT_ATTR)
+    original(self, *args, **kwargs)
+    if self.tokenizer_mode == "auto" and self._architecture == "KimiK3ForConditionalGeneration":
+        self.tokenizer_mode = KIMI_K3_RENDERER_MODE
+
+
+ModelConfig.__post_init__ = _model_config_post_init_with_kimi_k3_tokenizer_mode
 
 
 if KIMI_K3_RENDERER_MODE not in TokenizerRegistry.tokenizers:

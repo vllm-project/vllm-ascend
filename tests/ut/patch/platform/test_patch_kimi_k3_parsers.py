@@ -19,7 +19,10 @@ import json
 from types import SimpleNamespace
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage, ErrorResponse
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -27,6 +30,7 @@ from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.parser import ParserManager
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
+from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
 from vllm_ascend.patch.platform import patch_kimi_k3_parsers as parser_patch
 from vllm_ascend.patch.platform.kimi_k3_parser import KimiK3Parser
@@ -158,6 +162,34 @@ def test_kimi_k3_parsers_are_registered_and_composed_like_upstream():
     assert reasoning_only.tool_parser_cls is None
 
 
+def test_named_tool_choice_structural_tag_forces_only_selected_tool():
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": name,
+                "parameters": {"type": "object"},
+            },
+        )
+        for name in ("get_weather", "get_time")
+    ]
+    tool_choice = ChatCompletionNamedToolChoiceParam(
+        type="function",
+        function=ChatCompletionNamedFunction(name="get_time"),
+    )
+
+    tag = get_model_structural_tag(
+        model="kimi_k3",
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert 'call tool="get_time"' in str(tag)
+    assert 'call tool="get_weather"' not in str(tag)
+
+
 def test_nonstream_accepts_response_without_message_close():
     reasoning, content, calls = _parser().parse(
         _response("answer"),
@@ -283,6 +315,15 @@ def test_typed_arguments_and_whitespace_tolerant_markers():
     }
 
 
+def test_tool_call_ids_are_unique_across_messages():
+    output = _tools(_call())
+
+    first = KimiK3ToolParser(TOKENIZER).extract_tool_calls(output, _request())
+    second = KimiK3ToolParser(TOKENIZER).extract_tool_calls(output, _request())
+
+    assert first.tool_calls[0].id != second.tool_calls[0].id
+
+
 def test_streaming_split_markers_do_not_leak():
     parser = KimiK3ToolParser(TOKENIZER)
     request = _request()
@@ -374,6 +415,51 @@ def test_reasoning_parser_handles_consumed_prefix_and_stale_close():
     current_open = [1, 2, 3]
     assert not parser.is_reasoning_end([*stale_close, *current_open])
     assert parser.is_reasoning_end([*stale_close, *current_open, *stale_close])
+
+
+def test_reasoning_end_streaming_only_scans_the_step_window():
+    parser = KimiK3ReasoningParser(TOKENIZER)
+    close_ids = [4, 2, 3]
+    open_ids = [1, 2, 3]
+    prompt = [*close_ids, *open_ids, 9, 9, 9]
+
+    assert not parser.is_reasoning_end_streaming([*prompt, 7], [7])
+    assert parser.is_reasoning_end_streaming([*prompt, *close_ids], close_ids)
+    assert "is_reasoning_end_streaming" in KimiK3ReasoningParser.__dict__
+
+
+def test_reasoning_end_streaming_detects_marker_across_step_boundary():
+    parser = KimiK3ReasoningParser(TOKENIZER)
+    close_ids = [4, 2, 3]
+    history = [1, 2, 3, 5, *close_ids[:2]]
+
+    assert not parser.is_reasoning_end_streaming(history, [close_ids[1]])
+    assert parser.is_reasoning_end_streaming(
+        [*history, close_ids[2]],
+        [close_ids[2]],
+    )
+
+
+def test_reasoning_end_streaming_uses_the_newest_marker():
+    parser = KimiK3ReasoningParser(TOKENIZER)
+    close_ids = [4, 2, 3]
+    open_ids = [1, 2, 3]
+    window = [*close_ids, *open_ids]
+
+    assert not parser.is_reasoning_end_streaming(
+        [*open_ids, 5, *window],
+        window,
+    )
+
+
+def test_reasoning_end_streaming_accepts_iterator_delta():
+    parser = KimiK3ReasoningParser(TOKENIZER)
+    close_ids = [4, 2, 3]
+
+    assert parser.is_reasoning_end_streaming(
+        [1, 2, 3, 5, *close_ids],
+        iter(close_ids),
+    )
 
 
 def test_remote_decode_d02_glue_bypasses_parser():
