@@ -40,6 +40,14 @@ _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
 
+# Stand-in for the initialized AscendConfig singleton. ``AscendDSparkProposer``
+# reads ``get_ascend_config().dynamic_spec_config`` during ``__init__``; the
+# tests drive it with the default (non-dspark) dynamic method so no
+# ``method_params`` are applied.
+_MOCK_ASCEND_CONFIG = SimpleNamespace(
+    dynamic_spec_config=SimpleNamespace(method="eagle", method_params={}),
+)
+
 
 class _DSparkProposerTestBase:
     """Shared helpers for ``AscendDSparkProposer`` tests."""
@@ -82,7 +90,13 @@ class _DSparkProposerTestBase:
             proposer._dflash_hidden_states = torch.empty(0)
             proposer.model = SimpleNamespace(get_draft_attn_causal=lambda: [False])
 
-        with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
+        with (
+            patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init),
+            patch(
+                "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+                return_value=_MOCK_ASCEND_CONFIG,
+            ),
+        ):
             proposer = AscendDSparkProposer(vllm_config, device)
 
         num_query_total = num_reqs * proposer.num_query_per_req
@@ -478,7 +492,11 @@ class TestDSparkInitValidation:
             draft_sample_method="greedy",
             hidden_size=hidden,
         )
-        proposer = AscendDSparkProposer(vllm_config, device)
+        with patch(
+            "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+            return_value=_MOCK_ASCEND_CONFIG,
+        ):
+            proposer = AscendDSparkProposer(vllm_config, device)
 
         blk = 1 + num_spec
         max_query_tokens = max_batch * num_spec

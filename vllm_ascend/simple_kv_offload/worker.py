@@ -31,6 +31,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
 from vllm_ascend.simple_kv_offload.copy_backend import NPUDmaCopyBackend
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -64,8 +65,30 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        kv_offload_backend: str = "cpu",
+        disk_path: str | None = None,
+        disk_capacity_bytes: int = 0,
+        disk_buffer_slots: int = 2,
+        use_page_cache: bool = False,
     ) -> None:
-        super().__init__(vllm_config, kv_cache_config, cpu_capacity_bytes)
+        # main2main compat: upstream `SimpleCPUOffloadWorker.__init__` gained
+        # the disk-offload kwargs (`kv_offload_backend`, `disk_*`,
+        # `use_page_cache`) in vllm main after 0.26.0. NPU does not implement
+        # the disk backend (its `register_kv_caches` is fully overridden
+        # below), so the kwargs are only forwarded for interface alignment.
+        if vllm_version_is("0.26.0"):
+            super().__init__(vllm_config, kv_cache_config, cpu_capacity_bytes)
+        else:
+            super().__init__(
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity_bytes,
+                kv_offload_backend,
+                disk_path,
+                disk_capacity_bytes,
+                disk_buffer_slots,
+                use_page_cache,
+            )
         # Replace the CUDA backend created by ``super().__init__``.
         # ``DmaCopyBackend.__init__`` only assigns None defaults — no
         # CUDA resource was allocated, so the transient instance is
