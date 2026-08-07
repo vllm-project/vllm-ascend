@@ -25,6 +25,7 @@ from vllm.config import get_current_vllm_config
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 
 from .base import AscendMoEScheme, QuantType
 from .registry import register_scheme
@@ -247,7 +248,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -267,18 +268,20 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
                 w2=layer.w2_weight_packed,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=getattr(layer, "ascend_expert_map", None),
-                global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
-                mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
-                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
-                log2phy=getattr(layer, "log2phy", None),
-                pertoken_scale=getattr(layer, "_ascend_pertoken_scale", None),
-                activation=getattr(layer, "activation", "silu"),
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                log2phy=layer.log2phy,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 w1_offset=layer.w13_weight_offset,
                 w2_offset=layer.w2_weight_offset,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
+                swiglu_beta=layer.swiglu_beta,
             )
         )
 

@@ -444,11 +444,14 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
         log2phy = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
         layer.ascend_expert_map = expert_map
+        layer.global_redundant_expert_num = 0
         layer.log2phy = log2phy
-        layer._ascend_mc2_mask = mc2_mask
-        layer._ascend_pertoken_scale = pertoken_scale
+        layer.ascend_mc2_mask = mc2_mask
+        layer.ascend_pertoken_scale = pertoken_scale
         layer.activation = "silu"
         layer.apply_router_weight_on_input = False
+        layer.swiglu_alpha = 1.0
+        layer.swiglu_beta = 0.0
 
         mock_fused_input = Mock()
         mock_fused_input.hidden_states = x
