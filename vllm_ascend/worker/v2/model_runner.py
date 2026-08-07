@@ -231,10 +231,11 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.is_last_pp_rank
             and state is not None
+            and state.hidden_states is not None
+            and state.hidden_states.shape[0] < state.input_batch.num_tokens_after_padding
             and _flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
         ):
             num_tokens = state.input_batch.num_tokens_after_padding
-            assert state.hidden_states is not None
             gathered_output = _all_gather_hidden_states_and_aux(
                 (state.hidden_states, state.aux_hidden_states)
                 if state.aux_hidden_states is not None
