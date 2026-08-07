@@ -21,6 +21,8 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables, _load_ptr
 
+from vllm_ascend.worker.v2.triton_dispatcher import pluggable_kernel
+
 
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
@@ -93,6 +95,7 @@ class AscendBlockTables(BlockTables):
         return slot_mappings[:, :num_tokens_padded]
 
 
+@pluggable_kernel
 @triton.jit
 def _compute_slot_mappings_kernel(
     max_num_tokens,
