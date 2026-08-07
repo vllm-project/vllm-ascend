@@ -34,7 +34,7 @@ try:
     from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
 except ModuleNotFoundError:
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
@@ -52,6 +52,7 @@ from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
+_FUSED_QKV_NAME = "fused_qkv"
 
 
 def _zero_padded_spec_output(
@@ -156,6 +157,23 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         gate_lower_bound = kda_config.get("gate_lower_bound")
         self.gate_lower_bound = float(gate_lower_bound) if gate_lower_bound is not None else None
 
+        # KDA uses the same hidden states and TP head layout for Q, K, and V.
+        # Pack their checkpoint shards into one standard QKV linear so MXFP8
+        # performs one dynamic quantization and one quantized matmul.
+        fused_qkv = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.num_heads,
+            self.num_heads,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.{_FUSED_QKV_NAME}",
+        )
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
+        self.fused_qkv = fused_qkv
+
         self.A_log.weight_loader = partial(
             _load_a_log,
             num_heads=self.num_heads,
@@ -221,18 +239,19 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
     ) -> None:
         del positions
         # KDA metadata and its recurrent state describe the complete sequence.
-        # Unlike Qwen GDN, Kimi's independent q/k/v/g projections do not match
-        # SequenceColumnParallelOp's prefix whitelist.  Gather the token shard
-        # once before all projections instead of gathering for every linear.
+        # KDA's gate projections do not match SequenceColumnParallelOp's prefix
+        # whitelist, so gather the token shard once before every projection.
+        # The fused module deliberately uses the ``fused_qkv`` prefix instead
+        # of ``qkv_proj`` to avoid a second automatic gather inside the linear.
         # The multimodal first layer is already full-sized and must not gather.
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states.contiguous(),
             not self.is_vl_first_layer,
         )
         num_tokens = hidden_states.size(0)
-        q = self.q_proj(hidden_states)[0]
-        k = self.k_proj(hidden_states)[0]
-        v = self.v_proj(hidden_states)[0]
+        qkv = self.fused_qkv(hidden_states)[0]
+        projection_size = self.local_num_heads * self.head_dim
+        q, k, v = qkv.split([projection_size] * 3, dim=-1)
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
         raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]

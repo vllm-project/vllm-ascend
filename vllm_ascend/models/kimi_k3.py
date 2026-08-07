@@ -1154,6 +1154,9 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
         stacked_params_mapping = [
+            (".fused_qkv", ".q_proj", "q"),
+            (".fused_qkv", ".k_proj", "k"),
+            (".fused_qkv", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
             (".fused_qkv_a_proj", ".q_a_proj", 0),
@@ -1223,6 +1226,7 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
 
 class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
     packed_modules_mapping = {
+        "fused_qkv": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.w1", "experts.0.w3", "experts.0.w2"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
