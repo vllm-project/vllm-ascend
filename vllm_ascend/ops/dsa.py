@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
@@ -30,7 +31,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
-from vllm_ascend.compilation.breakable_aclgraph import eager_break_during_capture
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,

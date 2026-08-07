@@ -22,6 +22,7 @@
 
 import torch
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -32,7 +33,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.breakable_aclgraph import eager_break_during_capture
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 

@@ -29,12 +29,6 @@ import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 
-# isort: off
-# Must run before any vLLM import can bind eager_break_during_capture and
-# register attention custom ops with the upstream CUDA implementation.
-import vllm_ascend.patch.platform.patch_breakable_cudagraph  # noqa: F401
-# isort: on
-
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
