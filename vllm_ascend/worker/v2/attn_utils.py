@@ -19,6 +19,7 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -96,11 +97,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
 
     if mamba_specs:
-        mamba_page_size = max(spec.page_size_bytes for spec in mamba_specs.values())
+        common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
         for layer_name in attention_layer_names:
             spec = kv_cache_spec[layer_name]
-            if spec.page_size_bytes < mamba_page_size:
-                object.__setattr__(spec, "page_size_padded", mamba_page_size)
+            page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+            # Ascend exposes K and V as separate block-first views even when
+            # the backend's logical cache shape starts with the K/V dimension.
+            # Consequently, padded pages are indexed by their runtime block
+            # stride and are safe for hybrid Attention/Mamba allocations.
+            kv_cache_spec[layer_name] = replace(
+                spec,
+                page_size_padded=page_size_padded,
+                indexes_kv_by_block_stride=True,
+            )
+        for layer_name, spec in mamba_specs.items():
+            if spec.page_size_bytes < common_page_size:
+                mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
     return kv_cache_spec
@@ -556,7 +568,6 @@ def _reshape_kv_cache_v2(
             if layer_name in shared_kv_cache_layers:
                 continue
             kv_cache_spec = layer_kv_cache_spec[layer_name]
-            assert isinstance(kv_cache_spec, AttentionSpec)
 
             raw_cache = kv_cache_raw_tensors[layer_name]
             if is_dsv4_model and isinstance(
