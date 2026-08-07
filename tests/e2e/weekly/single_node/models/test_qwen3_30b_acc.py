@@ -79,7 +79,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "PYTHONHASHSEED": "0",
         "ASCEND_CONNECT_TIMEOUT": "10000",
         "ASCEND_TRANSFER_TIMEOUT": "10000",
-        "ASCEND_BUFFER_POOL": "4:8",
+        "HCCL_INTRA_ROCE_ENABLE": "1",
         "VLLM_USE_V1": "1",
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
