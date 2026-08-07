@@ -35,6 +35,7 @@ def random_sample(
             for i, generator in generators.items():
                 q[i].exponential_(generator=generator)
     torch.npu.current_stream().wait_stream(global_stream())
+    q.record_stream(torch.npu.current_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
