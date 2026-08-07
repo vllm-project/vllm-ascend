@@ -441,9 +441,6 @@ class DeepseekV4MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
             # Keep scaling outside the router path so the order matches
@@ -455,7 +452,7 @@ class DeepseekV4MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
-            tid2eid=self.gate.tid2eid,
+            hash_indices_table=self.gate.tid2eid,
         )
 
     def forward(self, hidden_states: torch.Tensor, input_ids=None) -> torch.Tensor:

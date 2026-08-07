@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from collections.abc import Iterable
 from copy import copy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts, SharedExperts
@@ -33,6 +35,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -55,7 +58,8 @@ class FusedMoEResult:
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        vllm_config = get_current_vllm_config()
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
         self.lora_context = None
 
@@ -70,6 +74,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Ascend uses its own MoE communication and forward_impl path.
         # Do not let upstream modular-kernel initialization replace it.
         return None
+
+    @staticmethod
+    def get_eplb_weight_views(layer) -> list[torch.Tensor]:
+        weights = [layer.w13_weight, layer.w2_weight]
+        if layer.w13_bias is not None:
+            weights.append(layer.w13_bias)
+        if layer.w2_bias is not None:
+            weights.append(layer.w2_bias)
+        return weights
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
@@ -183,6 +196,21 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
+class EplbExpertTensorList(list[torch.Tensor]):
+    """Per-expert tensors exposed through the upstream EPLB weight contract."""
+
+    @property
+    def shape(self) -> torch.Size:
+        return torch.Size((len(self), *self[0].shape))
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if func is torch.empty_like:
+            source = args[0]
+            return cls(torch.empty_like(tensor, **(kwargs or {})) for tensor in source)
+        return NotImplemented
+
+
 class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     """Ascend-owned routed expert container.
 
@@ -213,8 +241,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
         self.router = router
         ascend_config = get_ascend_config()
+        vllm_config = get_current_vllm_config()
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.dynamic_eplb = False
         self.multi_stage = False
         self.load_counter = None
@@ -223,11 +253,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.ascend_expert_map = None
         self.log2phy = None
         self.global_redundant_expert_num = 0
-        self.init_eplb(n_shared_experts)
+        if not self._use_v2_model_runner:
+            self.init_eplb(n_shared_experts)
         self.return_with_event = False
         self.n_shared_experts = n_shared_experts
-
-        vllm_config = get_current_vllm_config()
 
         if (
             self.custom_routing_function is None
@@ -237,6 +266,41 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype
             )
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        try:
+            get_weight_views = self.quant_method.get_eplb_weight_views
+        except AttributeError as exc:
+            raise NotImplementedError(
+                f"{self.quant_method.__class__.__name__} must implement get_eplb_weight_views() for Ascend EPLB."
+            ) from exc
+        weights = list(get_weight_views(self))
+        if not weights:
+            raise NotImplementedError(f"EPLB weight views are not defined for {self.quant_method.__class__.__name__}.")
+        flattened_weights = []
+        for weight in weights:
+            if isinstance(weight, (list, tuple)):
+                if len(weight) != self.local_num_experts:
+                    raise ValueError(
+                        "Every EPLB expert tensor list must contain "
+                        f"local_num_experts ({self.local_num_experts}) tensors, got {len(weight)}."
+                    )
+                if not all(is_weak_contiguous(expert_weight) for expert_weight in weight):
+                    raise ValueError("Every tensor in an Ascend EPLB expert tensor list must be weakly contiguous.")
+                flattened_weights.append(EplbExpertTensorList(weight))
+                continue
+            if weight.shape[0] != self.local_num_experts:
+                raise ValueError(
+                    "The first dimension of every EPLB weight view must equal "
+                    f"local_num_experts ({self.local_num_experts}), got {tuple(weight.shape)}."
+                )
+            if not is_weak_contiguous(weight):
+                raise ValueError("Every Ascend EPLB weight view must be weakly contiguous.")
+            try:
+                flattened_weights.append(weight.view(self.local_num_experts, -1))
+            except RuntimeError as exc:
+                raise ValueError("Every Ascend EPLB expert row must be flattenable without a copy.") from exc
+        return flattened_weights
 
     def init_eplb(self, n_shared_experts):
         ascend_config = get_ascend_config()
@@ -328,8 +392,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         """Return an expert parameter from the refactored weight owner."""
         return getattr(self, name)
 
-    def update_expert_map(self, new_expert_map: torch.Tensor) -> None:
-        """Update both the runner and routed-expert map references."""
+    @property
+    def ascend_expert_map(self) -> torch.Tensor | None:
+        """Return the global-to-local map used by Ascend MoE execution."""
+        if getattr(self, "_use_v2_model_runner", False):
+            return self.expert_map
+        return getattr(self, "_ascend_expert_map", None)
+
+    @ascend_expert_map.setter
+    def ascend_expert_map(self, expert_map: torch.Tensor | None) -> None:
+        object.__setattr__(self, "_ascend_expert_map", expert_map)
+
+    def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
+        """Update the upstream map or preserve the legacy Ascend update API."""
+        if new_expert_map is None:
+            super().update_expert_map()
+            return
         self.ascend_expert_map = new_expert_map
         self.expert_map_manager._expert_map = new_expert_map
 
@@ -495,7 +573,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if zero_expert_result is not None:
             fused_experts_results.routed_out += zero_expert_result
 
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
+        if self._use_v2_model_runner and self.router.eplb_state is not None:
+            expert_tokens = fused_experts_results.expert_tokens
+            group_list_type = fused_experts_results.group_list_type
+            assert expert_tokens is not None and group_list_type is not None, (
+                "expert_tokens and group_list_type must be returned when Model Runner V2 EPLB is enabled."
+            )
+            eplb_state = self.router.eplb_state
+            assert eplb_state.expert_load_view is not None
+            record_local_expert_load(
+                expert_tokens=expert_tokens,
+                group_list_type=group_list_type,
+                expert_load_view=eplb_state.expert_load_view,
+                ep_rank=self.moe_config.ep_rank,
+                ep_size=self.moe_config.ep_size,
+            )
+        elif self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (
