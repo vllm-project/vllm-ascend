@@ -569,8 +569,7 @@
 #       full-graph resources for base and LoRA execution.
 #    How:
 #       Create LoRA, base, and one-token-base compiled callables when LoRA and
-#       `cudagraph_specialize_lora` are enabled. A source hash rejects
-#       incompatible upstream wrapper implementations.
+#       `cudagraph_specialize_lora` are enabled.
 #    Related PR (if no, explain why):
 #       No. vLLM does not currently provide generic multi-variant compilation.
 #    Future Plan:

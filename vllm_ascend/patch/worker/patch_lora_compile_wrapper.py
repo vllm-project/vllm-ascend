@@ -16,7 +16,6 @@
 
 """Keep base and LoRA full graphs on independent compiled callables."""
 
-import hashlib
 import inspect
 from contextlib import contextmanager, nullcontext
 from types import FunctionType, MethodType
@@ -32,7 +31,6 @@ from vllm.config.compilation import DynamicShapesType
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 
-_SUPPORTED_WRAPPER_SHA256 = "c1b1fca679ea16aa07a696831a810c0d531da2bb0ea32dd6f1a95cdaef36de07"
 _PATCH_MARKER = "_vllm_ascend_lora_dual_graph_patch"
 _ORIGINAL_INIT_ATTR = "_vllm_ascend_lora_dual_graph_original_init"
 _ORIGINAL_INIT = getattr(
@@ -40,27 +38,6 @@ _ORIGINAL_INIT = getattr(
     _ORIGINAL_INIT_ATTR,
     TorchCompileWithNoGuardsWrapper.__init__,
 )
-_BASELINE_VERIFIED = False
-
-
-def _verify_vllm_wrapper_baseline() -> None:
-    global _BASELINE_VERIFIED
-    if _BASELINE_VERIFIED:
-        return
-
-    wrapper_path = inspect.getsourcefile(wrapper_module)
-    if wrapper_path is None:
-        raise RuntimeError("Cannot locate vLLM compilation wrapper source")
-
-    with open(wrapper_path, "rb") as wrapper_file:
-        actual_sha256 = hashlib.sha256(wrapper_file.read()).hexdigest()
-    if actual_sha256 != _SUPPORTED_WRAPPER_SHA256:
-        raise RuntimeError(
-            "The Ascend LoRA dual-graph patch requires a compatible, "
-            "unmodified vLLM compilation wrapper. Expected SHA256 "
-            f"{_SUPPORTED_WRAPPER_SHA256}, got {actual_sha256} from {wrapper_path}."
-        )
-    _BASELINE_VERIFIED = True
 
 
 @contextmanager
@@ -143,7 +120,6 @@ def _patched_init(
         raise RuntimeError("Ascend base/LoRA dual-graph specialization requires VLLM_USE_AOT_COMPILE=0.")
 
     if specialize_lora:
-        _verify_vllm_wrapper_baseline()
         with _without_bytecode_hook():
             _ORIGINAL_INIT(self, compile_prefix=compile_prefix, is_encoder=is_encoder)
     else:

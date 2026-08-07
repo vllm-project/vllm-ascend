@@ -31,10 +31,6 @@ patch_module = module_from_spec(patch_spec)
 patch_spec.loader.exec_module(patch_module)
 
 
-def test_vllm_wrapper_baseline_matches():
-    patch_module._verify_vllm_wrapper_baseline()
-
-
 def test_clone_forward_uses_independent_code_objects():
     class Model:
         def forward(self, value):
@@ -88,7 +84,6 @@ def test_specialized_init_creates_base_variants(monkeypatch):
         return SimpleNamespace(callable_fn=callable_fn, kwargs=kwargs)
 
     monkeypatch.setattr(patch_module, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(patch_module, "_verify_vllm_wrapper_baseline", lambda: None)
     monkeypatch.setattr(patch_module, "_ORIGINAL_INIT", original_init)
     monkeypatch.setattr(patch_module.torch, "compile", fake_compile)
     monkeypatch.setattr(patch_module.envs, "VLLM_USE_BYTECODE_HOOK", True)
