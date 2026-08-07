@@ -145,7 +145,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "Ascend950DT series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -437,7 +437,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --served-model-name qwen3.6 \
             --max-num-seqs 32 \
             --max-model-len 262144 \
-            --max-num-batched-tokens 8192 \
+            --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --gpu-memory-utilization 0.90 \
             --no-enable-prefix-caching \
