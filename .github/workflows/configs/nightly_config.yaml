@@ -133,6 +133,10 @@ a3:
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         size: 2
+      - name: multi-node-minimax-m2.7-disagg-pd
+        config_file_path: MiniMax-M2.7-W8A8-QuaRot-disagg-pd.yaml
+        size: 2
+        testcase_timeout: 180
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
