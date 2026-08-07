@@ -16,6 +16,8 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.spec_decode.dynamic_utils.dynamic_scheduler import DynamicSpecScheduler
 
 
 class AscendDSparkProposer(AscendDflashProposer):
