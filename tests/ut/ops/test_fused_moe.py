@@ -341,12 +341,8 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     assert fused_input.routing.apply_router_weight_on_input
     assert fused_input.activation == "gelu"
     assert fused_input.quant.quant_type == QuantType.NONE
-    if moe_comm_type == MoECommType.FUSED_MC2:
-        assert fused_input.weights.w1[0] is layer.w13_weight
-        assert fused_input.weights.w2[0] is layer.w2_weight
-    else:
-        assert fused_input.weights.w1 is layer.w13_weight
-        assert fused_input.weights.w2 is layer.w2_weight
+    # Weights are carried by the routed-expert layer after the MLP refactor.
+    assert fused_input.layer is layer
 
 
 @pytest.mark.parametrize(
