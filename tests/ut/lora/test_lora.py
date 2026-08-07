@@ -10,7 +10,9 @@ from vllm.lora.layers import MergedColumnParallelLinearWithLoRA, MergedQKVParall
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.fused_moe import (
-    AscendFusedMoEWithLoRA,
+    AscendFusedMoEWithLoRA as AscendFusedMoELayerWithLoRA,
+)
+from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     has_lora,
@@ -19,6 +21,8 @@ from vllm_ascend.lora.fused_moe import (
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.lora.utils import (
+    AscendFusedMoE3DWithLoRA,
+    AscendFusedMoEWithLoRA,
     AscendMergedColumnParallelLinearWithLoRA,
     AscendMergedQKVParallelLinearWithLoRA,
     _PackedLoRAAWeightsMixin,
@@ -46,7 +50,7 @@ def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
         patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
         patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
     ):
-        wrapper = AscendFusedMoEWithLoRA(base_layer)
+        wrapper = AscendFusedMoELayerWithLoRA(base_layer)
 
     assert wrapper._lora_stream is None
     assert wrapper._events is None
@@ -131,6 +135,8 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [], 2, 100)
     assert wrapper.no_lora is expected_no_lora
+
+
 @pytest.mark.parametrize("add_inputs", [True, False])
 def test_single_lora_linear_masks_base_rows(add_inputs: bool) -> None:
     token_indices = torch.tensor([0, -1, 0, -1, 0])
@@ -322,12 +328,21 @@ def test_packed_lora_wrappers_extend_only_non_sharded_merged_layers() -> None:
 
 def test_refresh_lora_classes_prioritizes_packed_wrappers() -> None:
     original_classes = vllm.lora.utils._all_lora_classes
+    ascend_classes = (
+        AscendMergedColumnParallelLinearWithLoRA,
+        AscendMergedQKVParallelLinearWithLoRA,
+        AscendFusedMoEWithLoRA,
+        AscendFusedMoE3DWithLoRA,
+    )
+    expected_count = len(ascend_classes) + sum(cls not in ascend_classes for cls in original_classes)
     with patch.object(vllm.lora.utils, "_all_lora_classes", original_classes):
+        refresh_all_lora_classes()
         refresh_all_lora_classes()
         assert vllm.lora.utils._all_lora_classes[:2] == (
             AscendMergedColumnParallelLinearWithLoRA,
             AscendMergedQKVParallelLinearWithLoRA,
         )
+        assert len(vllm.lora.utils._all_lora_classes) == expected_count
 
 
 def test_packed_lora_a_weights_follow_set_and_reset_lifecycle() -> None:
