@@ -243,8 +243,13 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                 input_shape = x.shape
                 x_2d = x.reshape(-1, input_shape[-1])
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x_2d)
-                group_list = torch.tensor(
-                    [quantized_x.shape[0]],
+                # Construct the single-group token count directly on the
+                # device. ``torch.tensor([count], device=x.device)`` performs
+                # a synchronous host-to-device copy, which is forbidden while
+                # ACL Graph is capturing in GLOBAL mode.
+                group_list = torch.full(
+                    (1,),
+                    quantized_x.shape[0],
                     dtype=torch.int64,
                     device=x.device,
                 )

@@ -104,7 +104,14 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         mock_dynamic_quant.return_value = (quantized_x, pertoken_scale)
         mock_grouped_matmul.return_value = [expected_2d]
 
-        output = self.method.apply(layer, x)
+        # A host-backed ``torch.tensor(..., device="npu")`` is illegal during
+        # ACL Graph capture. Keep this unit test sensitive to that regression;
+        # the implementation should create group_list with a device fill op.
+        with patch(
+            "torch.tensor",
+            side_effect=AssertionError("host tensor construction is not graph-safe"),
+        ):
+            output = self.method.apply(layer, x)
 
         self.assertEqual(output.shape, (2, 1, 8))
         mock_dynamic_quant.assert_called_once()
