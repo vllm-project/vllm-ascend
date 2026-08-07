@@ -28,7 +28,12 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+)
 from .registry import register_scheme
 
 
@@ -42,6 +47,15 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
