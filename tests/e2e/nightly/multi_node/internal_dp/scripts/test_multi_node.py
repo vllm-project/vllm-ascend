@@ -269,6 +269,7 @@ def _run_single_version(
             if abort_marker is None:
                 server.hang_until_terminated(f"http://{host}:{config.server_port}/health")
             else:
+                assert version_index is not None, "version_index is required in multi-version mode"
                 _hang_until_version_done(
                     f"http://{host}:{config.server_port}/health",
                     done_marker=_version_done_marker_path(version_index),
