@@ -1,4 +1,4 @@
-# feature_matrix
+# Feature Matrix
 
 The table below shows mutually exclusive features and the support on Ascend hardware, extended from the [vLLM table](https://docs.vllm.ai/en/latest/features/#feature-x-feature).
 
