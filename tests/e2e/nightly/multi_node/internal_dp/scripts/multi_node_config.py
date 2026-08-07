@@ -330,6 +330,7 @@ class MultiNodeConfigLoader:
         versions = cfg.get("versions") or []
         if not isinstance(versions, list):
             raise ValueError("versions must be a list")
+        benchmark_names = set((cfg.get("benchmarks") or {}).keys())
         parsed: list[dict] = []
         for version in versions:
             if not isinstance(version, dict) or not isinstance(version.get("name"), str):
@@ -337,11 +338,24 @@ class MultiNodeConfigLoader:
             env = version.get("env", {})
             if not isinstance(env, dict):
                 raise ValueError(f"versions[{version['name']!r}].env must be a dict")
+            benchmarks = version.get("benchmarks")
+            if benchmarks is not None:
+                if (
+                    not isinstance(benchmarks, list)
+                    or not benchmarks
+                    or not all(isinstance(name, str) for name in benchmarks)
+                ):
+                    raise ValueError(f"versions[{version['name']!r}].benchmarks must be a non-empty list of strings")
+                unknown = [name for name in benchmarks if name not in benchmark_names]
+                if unknown:
+                    raise ValueError(f"versions[{version['name']!r}].benchmarks has unknown cases: {unknown}")
+                benchmarks = list(benchmarks)
             parsed.append(
                 {
                     "name": version["name"],
                     "env": dict(env),
                     "is_baseline": bool(version.get("is_baseline", False)),
+                    "benchmarks": benchmarks,
                 }
             )
         if parsed and sum(1 for version in parsed if version["is_baseline"]) != 1:

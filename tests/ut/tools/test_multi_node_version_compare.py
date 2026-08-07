@@ -39,22 +39,23 @@ def test_compare_version_results_passes() -> None:
         {"case_name": "perf_16k", "case_type": "performance", "dataset_path": "ds2", "version_threshold": 0.97},
     ]
     results = {
-        "v2": [_perf_result(100.0), _perf_result(200.0)],
-        "v1": [_perf_result(99.0), _perf_result(205.0)],
+        "v2": {"perf_128k": _perf_result(100.0), "perf_16k": _perf_result(200.0)},
+        "v1": {"perf_128k": _perf_result(99.0), "perf_16k": _perf_result(205.0)},
     }
     report, passed = compare_version_results(cases, results, "v1", default_threshold=0.97)
     assert passed
     assert len(report) == 2
-    assert report[0]["ratio"] == pytest.approx(round(100.0 / 99.0, 4), abs=1e-9)
-    assert report[1]["ratio"] == pytest.approx(round(200.0 / 205.0, 4), abs=1e-9)
+    by_case = {entry["case_name"]: entry for entry in report}
+    assert by_case["perf_128k"]["ratio"] == pytest.approx(round(100.0 / 99.0, 4), abs=1e-9)
+    assert by_case["perf_16k"]["ratio"] == pytest.approx(round(200.0 / 205.0, 4), abs=1e-9)
     assert all(entry["passed"] for entry in report)
 
 
 def test_compare_version_results_fails_below_threshold() -> None:
     cases = [{"case_name": "perf_16k", "case_type": "performance", "version_threshold": 0.97}]
     results = {
-        "v2": [_perf_result(90.0)],
-        "v1": [_perf_result(100.0)],
+        "v2": {"perf_16k": _perf_result(90.0)},
+        "v1": {"perf_16k": _perf_result(100.0)},
     }
     report, passed = compare_version_results(cases, results, "v1")
     assert not passed
@@ -68,8 +69,8 @@ def test_compare_version_results_skips_non_perf_and_uses_default_threshold() -> 
         {"case_name": "perf", "case_type": "performance"},
     ]
     results = {
-        "v2": [_perf_result(0.0), _perf_result(95.0)],
-        "v1": [_perf_result(0.0), _perf_result(100.0)],
+        "v2": {"perf": _perf_result(95.0)},
+        "v1": {"perf": _perf_result(100.0)},
     }
     report, passed = compare_version_results(cases, results, "v1", default_threshold=0.9)
     assert passed
@@ -80,7 +81,7 @@ def test_compare_version_results_skips_non_perf_and_uses_default_threshold() -> 
 
 def test_compare_version_results_missing_baseline_fails() -> None:
     cases = [{"case_name": "perf", "case_type": "performance"}]
-    report, passed = compare_version_results(cases, {"v2": []}, "v1")
+    report, passed = compare_version_results(cases, {"v2": {}}, "v1")
     assert not passed
     assert "error" in report[0]
 
@@ -88,8 +89,8 @@ def test_compare_version_results_missing_baseline_fails() -> None:
 def test_compare_version_results_missing_candidate_fails() -> None:
     cases = [{"case_name": "perf", "case_type": "performance", "version_threshold": 0.97}]
     results = {
-        "v2": [],
-        "v1": [_perf_result(100.0)],
+        "v2": {},
+        "v1": {"perf": _perf_result(100.0)},
     }
     report, passed = compare_version_results(cases, results, "v1")
     assert not passed
