@@ -394,14 +394,14 @@ class KVPoolScheduler:
             hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
 
         if not hits_per_group:
-            logger.info(
+            logger.debug(
                 "hit_check: req=%s token_len=%d no participating groups (all skipped)",
                 request.request_id,
                 token_len,
             )
             return 0
         hit_tokens = min(hits_per_group)
-        logger.info(
+        logger.debug(
             "hit_check: req=%s token_len=%d hits_per_group=%s hit_tokens=%d",
             request.request_id,
             token_len,
@@ -592,7 +592,7 @@ class KVPoolScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.info(
+        logger.debug(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
@@ -613,7 +613,7 @@ class KVPoolScheduler:
             can_load=force_layerwise_load,
             kvpool_store_skip_tokens=store_skip_tokens,
         )
-        logger.info(
+        logger.debug(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
             "need_to_allocate=%d load_async=%s use_layerwise=%s",
             request.request_id,

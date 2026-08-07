@@ -1427,14 +1427,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_blocks,
                 self.max_transfer_bytes,
             )
-            if physical_layer <= 2 or res != 0:
-                logger.info(
-                    "save_thread: layer=%d groups=%d blocks=%d res=%d",
-                    physical_layer,
-                    len(all_gvas),
-                    len(gvas_array),
-                    res,
-                )
             if res != 0:
                 raise RuntimeError(f"Layerwise {physical_layer} save batch_copy failed with return code {res}")
             if all_save_keys:
@@ -1641,7 +1633,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))
             self.m_store.batch_remove_lease(unique_load_keys)
-            logger.info(
+            logger.debug(
                 "[KVPOOL] load_thread released %d leases after final layer %d",
                 len(unique_load_keys),
                 layer_id,
