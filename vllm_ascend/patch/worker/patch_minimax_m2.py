@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# MiniMax-M2 on Ascend: MoE all_reduce, fused attention, fp8 load dequant.
+# MiniMax-M2 on Ascend: fused attention, fp8 load dequant.
 #
 
 from collections.abc import Iterable
@@ -23,7 +23,6 @@ import torch
 from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Attention,
     MiniMaxM2Model,
-    MiniMaxM2MoE,
 )
 from vllm.platforms import current_platform
 
@@ -40,25 +39,6 @@ FP8_DTYPES = tuple(
     )
     if hasattr(torch, dtype_name)
 )
-
-
-# ---------------------------------------------------------------------------
-# MiniMaxM2MoE.forward: keep router logits in fp32 on NPU.
-# ---------------------------------------------------------------------------
-def _patched_moe_forward(
-    self,
-    hidden_states: torch.Tensor,
-) -> torch.Tensor:
-    num_tokens, hidden_dim = hidden_states.shape
-    hidden_states = hidden_states.view(-1, hidden_dim)
-
-    # router_logits: (num_tokens, n_experts)
-    router_logits, _ = self.gate(hidden_states.to(torch.float32))
-    final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
-    return final_hidden_states.view(num_tokens, hidden_dim)
-
-
-MiniMaxM2MoE.forward = _patched_moe_forward
 
 
 # ---------------------------------------------------------------------------
