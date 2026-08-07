@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from copy import copy
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Literal, overload
 
 import torch
 import torch_npu
@@ -269,6 +270,54 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype
             )
+
+    @overload
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: Literal[False],
+    ) -> None: ...
+
+    @overload
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: Literal[True],
+    ) -> bool: ...
+
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: bool = False,
+    ) -> bool | None:
+        # Ascend W4A8 uses scale_bias as a grouped quantization parameter.
+        # Upstream's expert-bias branch matches every name containing "bias",
+        # which would bypass the grouped-scale TP sharding for these tensors.
+        # Keep upstream's loading implementation, but dispatch scale_bias
+        # through its scale path instead of its expert-bias path.
+        param_name = weight_name.rsplit(".", 1)[-1]
+        if param_name in ("w13_scale_bias", "w2_scale_bias"):
+            weight_name = weight_name.removesuffix("_bias")
+        return super().weight_loader(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name=weight_name,
+            shard_id=shard_id,
+            expert_id=expert_id,
+            return_success=return_success,
+        )
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
