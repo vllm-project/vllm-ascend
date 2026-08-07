@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -43,17 +42,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             self.num_query_per_req = self.num_speculative_tokens
         else:
             self.num_query_per_req = 1 + self.num_speculative_tokens
-
-        if self.max_num_tokens < self.num_query_per_req * self.max_batch_size:
-            required_query_budget = (
-                "num_speculative_tokens * max_num_seqs"
-                if self.sample_from_anchor
-                else "(num_speculative_tokens + 1) * max_num_seqs"
-            )
-            logger.warning(
-                "max_num_batched_tokens must be greater than or equal to %s when using DSpark.",
-                required_query_budget,
-            )
 
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
