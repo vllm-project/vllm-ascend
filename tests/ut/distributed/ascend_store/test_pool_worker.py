@@ -1629,6 +1629,55 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
 
+    def test_mtp_load_uses_safe_extent_not_store_skip_extent(self):
+        worker = self._make_worker()
+        worker.use_eagle = True
+        worker.layerwise_offload = True
+        worker.independent_layers = [0, 1]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=["h0", "h1"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+                kvpool_store_skip_tokens=32,
+            ),
+        )
+
+        worker._process_load_for_layer_batch([request], 1)
+
+        self.assertEqual(worker.layer_load_tasks[1], [])
+
+    def test_mtp_gva_prepare_uses_safe_extent_not_store_skip_extent(self):
+        worker = self._make_gva_worker()
+        worker.use_eagle = True
+        key_info = MagicMock()
+        key_info.size.return_value = 64
+        key_info.gva_list.return_value = [201]
+        worker.m_store.batch_get_key_info.return_value = [key_info]
+        worker.m_store.batch_add_lease.return_value = [0]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids_by_group=[[0, 1]],
+            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+            block_hashes=["h0", "h1"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=16,
+                kvpool_cached_tokens=16,
+                can_load=True,
+                kvpool_store_skip_tokens=32,
+            ),
+        )
+
+        worker._prepare_load_gvas([request])
+
+        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
+        self.assertEqual(len(queried_keys), 1)
+
     def test_full_pool_hit_uses_verified_extent(self):
         worker = self._make_gva_worker()
         worker.independent_layers = [0]
