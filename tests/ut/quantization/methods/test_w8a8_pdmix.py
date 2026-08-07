@@ -6,7 +6,6 @@ from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
-    AscendW8A8PDMixFusedMoeMethod,
     AscendW8A8PDMixLinearMethod,
 )
 
@@ -115,24 +114,3 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_instance.process_weights_after_loading.assert_called_once_with(layer)
         mock_dynamic_instance.process_weights_after_loading.assert_not_called()
         self.assertFalse(layer.is_kv_consumer)
-
-
-class TestAscendW8A8PDMixMoEScheme(TestBase):
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
-    def test_get_dynamic_quant_param(self, mock_ascend, mock_vllm, mock_mc2):
-        mock_mc2.side_effect = AttributeError()
-        mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = MagicMock(eplb_config=MagicMock(dynamic_eplb=False))
-        scheme = AscendW8A8PDMixFusedMoeMethod()
-        num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype = 8, 256, 128, torch.bfloat16
-        result = scheme.get_dynamic_quant_param(
-            num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
-        )
-        # test adds extra params
-        self.assertEqual(result["w2_deq_scale"].shape, (num_experts, hidden_sizes))
-        self.assertEqual(result["w2_deq_scale"].dtype, torch.float32)
-        self.assertEqual(result["w13_deq_scale"].shape, (num_experts, 2 * intermediate_size_per_partition))
-        self.assertEqual(result["w2_input_offset"].dtype, torch.int8)
-        self.assertEqual(result["w13_input_offset"].shape, (num_experts, 1))
