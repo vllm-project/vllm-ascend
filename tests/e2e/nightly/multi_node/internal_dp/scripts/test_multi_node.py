@@ -185,13 +185,18 @@ def _hang_until_version_done(
     done_marker: str,
     abort_marker: str,
     timeout_seconds: int = 2800,
+    max_consecutive_failures: int = 6,
 ) -> None:
-    """Wait until the leader finishes the current version or tears down its server.
+    """Wait until the leader finishes the current version, failing fast on crashes.
 
-    The leader writes the done marker before shutting down its server, so workers
-    never depend on a possibly-transient health failure between versions.
+    The leader writes the done marker before shutting down its server, so a
+    healthy version transition always exits through the marker. If the leader
+    disappears without the marker, raise after several consecutive failed
+    health checks instead of returning normally (which would leave the worker
+    waiting for a leader that will never start the next version).
     """
     start = time.time()
+    consecutive_failures = 0
     while time.time() - start < timeout_seconds:
         _raise_if_aborted(abort_marker)
         if os.path.exists(done_marker):
@@ -201,10 +206,15 @@ def _hang_until_version_done(
             healthy = resp.status_code == 200
         except requests.RequestException:
             healthy = False
-        if not healthy:
-            time.sleep(2)
-            _raise_if_aborted(abort_marker)
-            return
+        if healthy:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                raise RuntimeError(
+                    f"Leader at {health_url} is unreachable for {consecutive_failures} consecutive "
+                    f"health checks without a done marker ({done_marker})"
+                )
         time.sleep(5)
     raise TimeoutError(f"Timed out after {timeout_seconds}s waiting for leader at {health_url}")
 
