@@ -92,7 +92,8 @@ class TestNPUWorker(TestBase):
         )
 
         expected_logical_bytes = 6 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        expected_physical_bytes = 3 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
+        # Both reused slots contain indexer layers; the independent slot does not.
+        expected_physical_bytes = 3 * main_spec.page_size_bytes + 2 * indexer_spec.page_size_bytes
         self.assertEqual((num_layers, num_slots), (6, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
 
