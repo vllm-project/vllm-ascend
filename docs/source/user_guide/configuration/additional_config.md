@@ -93,6 +93,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See [rl_config](#rl_config) for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
 The details of each configuration option are as follows:
@@ -241,6 +242,73 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 | `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be reserved. |
 | `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
 | `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
+
+**rl_config**
+
+`rl_config` is a one-click RL mode switch. When `enabled` is `true`, it applies RL best-practice defaults automatically. When `enabled` is `false`, all other sub-fields are ignored.
+
+Priority: `rl_config` sub-fields > `additional_config` top-level keys > environment variables > code defaults. The only exception is an explicit `VLLM_SERVER_DEV_MODE=0`, which is retained as a security opt-out and produces a warning.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `false` | Master switch for RL mode. When `true`, all RL best-practice defaults below are applied. |
+| `sleep_mode_extra_cleanup` | bool | `false` | Same-device mode. Enables HCCL process-group release + ACL graph workspace cleanup during sleep, returning more NPU memory to the trainer at the cost of increased wakeup latency. Overrides the top-level `enable_sleep_mode_extra_cleanup`. |
+| `weight_nz_mode` | int | `0` | Both modes. Disables the FRACTAL_NZ weight layout conversion (`0`=disable, `1`=quant only, `2`=all). Overrides the top-level `weight_nz_mode`. If both are set to different values, startup fails with a clear error. |
+| `disable_expandable_segments` | bool | `true` | Same-device mode. Removes `expandable_segments` from `PYTORCH_NPU_ALLOC_CONF`, which is mutually exclusive with the CaMemAllocator pool used by sleep mode. No effect in cross-device mode. |
+| `enable_batch_invariant` | bool | `false` | Both modes. Enables batch-invariant deterministic computation: sets `VLLM_BATCH_INVARIANT=1`, `HCCL_DETERMINISTIC=strict`, `LCCL_DETERMINISTIC=1`, and, in the worker, `torch.use_deterministic_algorithms(True)` plus batch-invariant Triton/AscendC operators. Requires building vllm-ascend from source with `COMPILE_CUSTOM_KERNELS=1` and requires `weight_nz_mode=0`. Prevails over a previously set `VLLM_BATCH_INVARIANT`. |
+| `enable_dev_endpoints` | bool | `true` | Online mode. Sets `VLLM_SERVER_DEV_MODE=1` to expose the `/sleep`, `/wake_up`, `/pause`, and `/resume` HTTP endpoints. No effect in offline `LLM()` mode. Set to `false` to opt out. An explicit `VLLM_SERVER_DEV_MODE=0` is respected. |
+
+> **Note**: When `rl_config` and a top-level `additional_config` key are both set to different values for the same field (`weight_nz_mode`, `enable_sleep_mode_extra_cleanup`), startup fails with a clear error. Keep only one of them; `rl_config` is recommended for RL workloads.
+
+**Deployment modes**
+
+- **Same-device mode** (sleep/wake + IPC weight transfer): the inference engine and trainer share the same NPU card. Use `enable_sleep_mode=True` and optionally `sleep_mode_extra_cleanup=True` for extra memory.
+- **Cross-device mode** (pause/resume + HCCL weight transfer): the inference engine and trainer use different NPU cards. Use `--weight-transfer-config '{"backend": "nccl"}'`.
+
+**Example (online, same-device):**
+
+```bash
+vllm serve DeepSeek-V4 \
+    --enable-sleep-mode \
+    --enable-return-routed-experts \
+    --weight-transfer-config '{"backend": "ipc"}' \
+    --additional-config '{"rl_config": {"enabled": true, "enable_batch_invariant": true, "sleep_mode_extra_cleanup": true}}'
+```
+
+**Example (online, cross-device):**
+
+```bash
+vllm serve DeepSeek-V4 \
+    --weight-transfer-config '{"backend": "nccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+**Example (offline):**
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="DeepSeek-V4",
+    enable_sleep_mode=True,  # same-device mode only
+    additional_config={
+        "rl_config": {
+            "enabled": True,
+            "enable_batch_invariant": True,
+        },
+    },
+)
+```
+
+**Migration guide**
+
+| Before | After |
+| ------ | ----- |
+| `export VLLM_ASCEND_ENABLE_NZ=0` | `"rl_config": {"enabled": true}` (or top-level `"weight_nz_mode": 0`) |
+| `export VLLM_SERVER_DEV_MODE=1` | `"rl_config": {"enabled": true}` (or top-level `"enable_dev_endpoints": true`) |
+| `export VLLM_BATCH_INVARIANT=1` + `export HCCL_DETERMINISTIC=strict` + `export LCCL_DETERMINISTIC=1` | `"rl_config": {"enabled": true, "enable_batch_invariant": true}` |
+| top-level `"weight_nz_mode": 0` | `"rl_config": {"enabled": true, "weight_nz_mode": 0}` |
+| top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
 
 ### Example
 

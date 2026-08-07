@@ -1235,6 +1235,23 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
 
+def _disable_expandable_segments() -> None:
+    """Remove the allocator option that conflicts with sleep mode."""
+    npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
+    if not npu_alloc_configs:
+        return
+
+    filtered_configs = [
+        config.strip()
+        for config in npu_alloc_configs.split(",")
+        if config.strip() and not config.strip().startswith("expandable_segments:")
+    ]
+    updated_configs = ",".join(filtered_configs)
+    if updated_configs != npu_alloc_configs:
+        os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
+        logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
+
+
 def _validate_fa3_backend(key, attn_selector_config):
     if not attn_selector_config.use_batch_invariant:
         logger.info(
