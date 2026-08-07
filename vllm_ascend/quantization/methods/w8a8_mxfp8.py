@@ -27,6 +27,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.utils import maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
@@ -130,7 +131,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         else:
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
+        if not getattr(layer, "_mlapo_managed", False):
+            layer.weight.data = maybe_trans_nz(layer.weight.data, customize_dtype=torch.float8_e4m3fn)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
