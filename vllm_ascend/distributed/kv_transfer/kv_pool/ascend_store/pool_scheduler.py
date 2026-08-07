@@ -112,6 +112,9 @@ class KVPoolScheduler:
         self.num_speculative_blocks = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         )
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
+        self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
@@ -575,6 +578,12 @@ class KVPoolScheduler:
             return 0, False
 
         store_skip_tokens = num_external_hit_tokens
+        if self.use_layerwise and self.use_eagle:
+            # TODO(lf): Support loading the trailing block as dirty data.
+            num_external_hit_tokens = max(
+                num_computed_tokens,
+                num_external_hit_tokens - self.lcm_block_size,
+            )
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
@@ -594,7 +603,7 @@ class KVPoolScheduler:
         # In layerwise mode, even when vLLM has local cached tokens, we still
         # need to load KV cache from the pool because layerwise transfer loads
         # per-layer data that may not be in HBM.
-        force_layerwise_load = self.use_layerwise and num_external_hit_tokens > 0
+        force_layerwise_load = self.use_layerwise and store_skip_tokens > 0
         if need_to_allocate <= 0 and not force_layerwise_load:
             return 0, False
 
@@ -641,8 +650,9 @@ class KVPoolScheduler:
 
         if num_external_tokens == 0:
             # No need to load anything
-            self.load_specs[request.request_id].can_load = (
-                self.use_layerwise and self.load_specs[request.request_id].kvpool_cached_tokens > 0
+            load_spec = self.load_specs[request.request_id]
+            self.load_specs[request.request_id].can_load = self.use_layerwise and (
+                load_spec.kvpool_cached_tokens > 0 or bool(load_spec.kvpool_store_skip_tokens)
             )
             logger.debug(
                 "KV pool load spec updated req=%s because num_external_tokens=0 "
