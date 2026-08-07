@@ -1,72 +1,16 @@
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:24.066.654 [runtime.cc:5155]46834 ReportPageFaultProc:Page fault count exceeds the limit, drv devId=3, current page fault count=61819.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:24.066.665 [runtime.cc:5169]46834 ProcPageFault:ProcPageFault start, drv devId=3, get WatchDogDevStatus, ret=0.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:24.066.669 [runtime.cc:5172]46834 ProcPageFault:PageFault occurred, drv devId=3, current page fault count=61819.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:26.907.513 [stars_engine.cc:1557]46835 ProcLogicCqReport:Task run failed, device_id=3, stream_id=47, task_id=2459, sqe_type=7(notify wait), errType=0x20(sq sw status error), sqSwStatus=0x1026001d
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:26.914.391 [device_error_core_proc.cc:1077]46835 AddExceptionRegInfo:add error register: core_id=10, stream_id=99, task_id=29
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:26.914.406 [device_error_core_proc.cc:1117]46835 PrintCoreInfo:The error from device(chipId:3, dieId:0), serial number is 3, there is an exception of fftsplus aicore error, core id is 10, error code = 0x800000, dump info: pc start: 0x124601e0beec, current: 0x124601e0e754, vec error info: 0, mte error info: 0x39030000c8, ifu error info: 0x212c2b6c74180, ccu error info: 0xc020820300000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c142bf1000, aic cond: 0.
-The extend info: errcode:(0x800000, 0, 0) errorStr: MTE accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x30000c8, fixp_error1 info: 0x39, fsmId:0, tslot:5, thread:0, ctxid:0, blk:4, sublk:0, subErrType:4.
-For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:28.121.231 [device_error_core_proc.cc:775]46835 CheckSmmuFault:Get isSmmuFault is 1.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:28.121.235 [device_error_core_proc.cc:1454]46835 ProcessStarsCoreErrorInfo:devId=3, streamId=99, taskId=29, MTE errorCode=0.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:28.121.251 [device_error_core_proc.cc:1077]46835 AddExceptionRegInfo:add error register: core_id=3, stream_id=99, task_id=29
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:28.121.287 [device_error_core_proc.cc:1117]46835 PrintCoreInfo:The error from device(chipId:3, dieId:0), serial number is 4, there is an exception of fftsplus aivector error, core id is 3, error code = 0x800000, dump info: pc start: 0x124601e6fadc, current: 0x124601e7c7b0, vec error info: 0x6917bef70c, mte error info: 0x1f0600007d, ifu error info: 0x212c2b6c74180, ccu error info: 0xcc71a03800000000, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c142bf1000, aic cond: 0.
-The extend info: errcode:(0x800000, 0, 0) errorStr: MTE accesses an invalid GM address or the cross-device memory access times out. fixp_error0 info: 0x600007d, fixp_error1 info: 0x1f, fsmId:0, tslot:5, thread:0, ctxid:0, blk:15, sublk:0, subErrType:4.
-For details, see the troubleshooting document on the Ascend official website. Search for the keyword "AI Core Error".
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.327.972 [device_error_core_proc.cc:775]46835 CheckSmmuFault:Get isSmmuFault is 1.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.327.976 [device_error_core_proc.cc:1454]46835 ProcessStarsCoreErrorInfo:devId=3, streamId=99, taskId=29, MTE errorCode=0.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.004 [model_execute_task.cc:522]46835 ReportErrorInfoForModelExecuteTask:model execute error, retCode=0x91, [the model stream execute failed].
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.048 [model_execute_task.cc:487]46835 PrintErrorInfoForModelExecuteTask:stream_id=47, task_id=2458, sqVirtualAddr=0, head equal tail flag=0.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.052 [model_execute_task.cc:450]46835 PrintErrorModelExecuteTaskFuncCall:funcCallSvmMem=0x124601da6000, funCallMemSize=480.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.130 [model_execute_task.cc:495]46835 PrintErrorInfoForModelExecuteTask:model execute task failed, device_id=3, model stream_id=47, model task_id=2458, flip_num=0, model_id=42, first_task_id=0
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.133 [context_manage.cc:306]46835 SetGlobalFailureErr:SetGlobalFailureErr start, device_id=3, errcode=0X7150026
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.141 [context_manage.cc:317]46835 SetGlobalFailureErr:SetGlobalFailureErr end
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.146 [model_execute_task.cc:538]46835 ReportErrorInfoForModelExecuteTask:Real fault task, device_id=3, sub_model_id=4294967295, stream_id=99, task_id=29, type=0[KERNEL_AICORE].
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.204 [davinci_kernel_task.cc:1076]46835 GetArgsInfo:[AIC_INFO] args(0 to 11) after execute:0xfee00000000, 0x131880000000, 0x12d6a6704000, 0x12d6c05d8000, 0x12e529fc8000, 0x12f6035cc400, 0x131880191200, 0x131880064600, 0x12f6004a2800, 0x12f6004a2400, 0x1329c0000000, 0x12e52a3c8000.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.209 [davinci_kernel_task.cc:1080]46835 GetArgsInfo:tilingKey = 0, print 1 Times totalLen=(12*8), argsSize=96, schemMode=0, blockDim=20
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.220 [davinci_kernel_task.cc:1180]46835 PrintErrorInfoForDavinciTask:[AIC_INFO] after execute:args print end
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.328.315 [davinci_kernel_task.cc:1185]46835 PrintErrorInfoForDavinciTask:[AIC_INFO] after execute:mixCtx print end
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.329.173 [davinci_kernel_task.cc:1210]46835 PrintErrorInfoForDavinciTask:[DFX_INFO]AI Core kernel execution failed, device_id=3, stream_id=99, report_stream_id=47, task_id=29, flip_num=0, fault kernel_name=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8_, fault kernel info ext=none, program id=18, hash=6196053527043017973.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.329.179 [context_manage.cc:306]46835 SetGlobalFailureErr:SetGlobalFailureErr start, device_id=3, errcode=0X7150026
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.329.186 [context_manage.cc:317]46835 SetGlobalFailureErr:SetGlobalFailureErr end
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.329.691 [exception_dumper.cpp:203][tid:46835] [Dump][Exception] Begin to dump exception. dumpScene=aic_err_brief_dump, deviceId=3, streamId=99, taskId=29, exceptionType=2(aicore), kernelName=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8_.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.715 [kernel_symbol_locator.cpp:583][tid:46835] [Dump][Exception] Error register information. coreId=10, coreType=0, AIC_ERR_0=0x800000 AIC_ERR_1=0x0 AIC_ERR_2=0x0 AIC_ERR_3=0x0 AIC_ERR_4=0x0 AIC_ERR_5=0x0 BIU_ERR_0=0x0 BIU_ERR_1=0x0 CCU_ERR_0=0x0 CCU_ERR_1=0xc0208203 CUBE_ERR_0=0x0 CUBE_ERR_1=0x0 IFU_ERR_0=0xb6c74180 IFU_ERR_1=0x212c2 MTE_ERR_0=0x30000c8 MTE_ERR_1=0x39 VEC_ERR_0=0x0 VEC_ERR_1=0x0 FIXP_ERR_0=0x30000c8 FIXP_ERR_1=0x39 AIC_COND_0=0x0 AIC_COND_1=0x0 
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.722 [kernel_pc_fixer.cpp:97][tid:46835] [Dump][Exception] Fix PC with module=MTE, originalPC=0x124601e0e754, fixedPC=0x124601e0e720.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.725 [kernel_symbol_locator.cpp:602][tid:46835] [Dump][Exception] Error PC information. coreId=10, coreType=0, originalStartPC=0x124601e0beec, fixedStartPC=0x124601e00000, originalCurrentPC=0x124601e0e754, fixedCurrentPC=0x124601e0e720, fixedPCOffset=0xe720.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.729 [kernel_symbol_locator.cpp:608][tid:46835] [Dump][Exception] Error symbol information. coreId=10, coreType=0, symbol=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE1ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8__mix_aic+0x2834.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.736 [kernel_symbol_locator.cpp:583][tid:46835] [Dump][Exception] Error register information. coreId=3, coreType=1, AIC_ERR_0=0x800000 AIC_ERR_1=0x0 AIC_ERR_2=0x0 AIC_ERR_3=0x0 AIC_ERR_4=0x0 AIC_ERR_5=0x0 BIU_ERR_0=0x0 BIU_ERR_1=0x0 CCU_ERR_0=0x0 CCU_ERR_1=0xcc71a038 CUBE_ERR_0=0x0 CUBE_ERR_1=0x0 IFU_ERR_0=0xb6c74180 IFU_ERR_1=0x212c2 MTE_ERR_0=0x600007d MTE_ERR_1=0x1f VEC_ERR_0=0x17bef70c VEC_ERR_1=0x69 FIXP_ERR_0=0x600007d FIXP_ERR_1=0x1f AIC_COND_0=0x0 AIC_COND_1=0x0 
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.739 [kernel_pc_fixer.cpp:97][tid:46835] [Dump][Exception] Fix PC with module=MTE, originalPC=0x124601e7c7b0, fixedPC=0x124601e47df4.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.741 [kernel_symbol_locator.cpp:602][tid:46835] [Dump][Exception] Error PC information. coreId=3, coreType=1, originalStartPC=0x124601e6fadc, fixedStartPC=0x124601e00000, originalCurrentPC=0x124601e7c7b0, fixedCurrentPC=0x124601e47df4, fixedPCOffset=0x47df4.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.744 [kernel_symbol_locator.cpp:608][tid:46835] [Dump][Exception] Error symbol information. coreId=3, coreType=1, symbol=_ZN9SplitFuse7FAInferIu6__bf16u6__bf16fLb1ELN12KernelCommon8FaiKenel8MaskTypeE4ELNS2_11inputLayoutE1ELN7Catlass8Epilogue8LseModeTE1ELb0EEEvmPhS8_S8_S8_S8_S8_S8_S8_S8_S8_S8__mix_aiv+0x5ed0.
-[ERROR] IDEDD(46705,):2026-08-01-18:50:29.330.790 [dump_args.cpp:129][tid:46835] No exception dfx info, dfxAddr[(nil)]|dfxSize[0].
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.334.607 [stream.cc:4156]46835 EnterFailureAbort:stream_id=47 enter failure abort.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.334.638 [stars_engine.cc:1447]46835 StarsResumeRtsq:Failed to resume RTSQ. Reason: stop scheduling in abort failure mode, stream_id=47, sq_id=2, sq_head=411, task_id=2459, taskType=14.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.646 [context.cc:2342]46881 CheckStatus:device_id=3 status=118816806 is abnormal.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.654 [api_impl.cc:2149]46881 EventQueryStatus:context is abort, status=0x7150026.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.667 [api_c.cc:794]46881 rtEventQueryStatus:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.672 [error_message_manage.cc:69]46881 FuncErrorReason:rtEventQueryStatus execution failed, reason=aicore exception
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.893 [api_impl.cc:6042]46881 GetDevErrMsg:device_id=3, status=0x7150026 is abnormal.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.897 [api_impl.cc:6121]46881 GetDevMsg:Failed to GetDeviceErrMsg, retCode=0x7150026.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.900 [api_error.cc:4287]46881 GetDevMsg:GetDeviceMsg failed, getMsgType=0.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.905 [api_c_device.cc:578]46881 rtGetDevMsg:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.515.910 [error_message_manage.cc:69]46881 FuncErrorReason:rtGetDevMsg execution failed, reason=aicore exception
-[ERROR] APP(46705,):2026-08-01-18:50:29.517.344 46881 ProcessGroupHCCL.cpp:finishedNPUExecutionInternal:857: "[PTA]:Find exception when finishedNPUExecutionInternal, query:../torch_npu/csrc/core/npu/NPUEvent.cpp:95 NPU function error: acl::AclQueryEventRecordedStatus(event_, &currStatus), error code is 507015
-[ERROR] 2026-08-01-18:50:29 (PID:46705, Device:3, RankID:-1) ERR00100 PTA call acl api failed
-[Error]: The aicore execution is abnormal. 
-        Rectify the fault based on the error information in the ascend log.
-EE9999: Inner Error!
-EE9999[PID: 46705] 2026-08-01-18:50:29.515.680 (EE9999):  rtEventQueryStatus execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
-TraceBack (most recent call last):
-       rtGetDevMsg execution failed, reason=aicore exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:69]
-
-Exception raised from query at ../torch_npu/csrc/core/npu/NPUEvent.cpp:95 (most recent call first):
-frame #0: c10::Error::Error(c10::Sourc
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.952.887 [context.cc:2342]46705 CheckStatus:device_id=3 status=118816806 is abnormal.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.952.904 [context.cc:763]46705 Synchronize:context is abort, status=0x7150026.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.952.941 [api_error.cc:2795]46705 DeviceSynchronize:Device synchronize failed.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.952.962 [api_c_device.cc:236]46705 rtDeviceSynchronizeWithTimeout:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.952.968 [error_message_manage.cc:69]46705 FuncErrorReason:rtDeviceSynchronizeWithTimeout execution failed, reason=aicore exception
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.953.264 [api_impl.cc:6042]46705 GetDevErrMsg:device_id=3, status=0x7150026 is abnormal.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.953.268 [api_impl.cc:6121]46705 GetDevMsg:Failed to GetDeviceErrMsg, retCode=0x7150026.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.953.272 [api_error.cc:4287]46705 GetDevMsg:GetDeviceMsg failed, getMsgType=0.
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.953.284 [api_c_device.cc:578]46705 rtGetDevMsg:ErrCode=507015, desc=[aicore exception], InnerCode=0x7150026
-[ERROR] RUNTIME(46705,):2026-08-01-18:50:29.953.288 [error_message_manage.cc:69]46705 FuncErrorReason:rtGetDevMsg execution failed, reason=aicore exception
+Traceback (most recent call last):
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm/zty/vllm/vllm/v1/executor/multiproc_executor.py", line 996, in worker_busy_loop
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     output = func(*args, **kwargs)
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]              ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/worker.py", line 710, in compile_or_warm_up_model
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     npugraph_memory_bytes = self.model_runner.capture_model()
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 5184, in capture_model
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     _e53_test_fresh_taskgroup()
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/home/code/vllm_ascend/ascend/zty/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 371, in _e53_test_fresh_taskgroup
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     with torch.npu.graph(graph):
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py", line 874, in __enter__
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     self.npu_graph.capture_begin(
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]   File "/usr/local/python3.11.10/lib/python3.11/site-packages/torch_npu/npu/graphs.py", line 625, in capture_begin
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004]     super().capture_begin(pool=pool, capture_error_mode=capture_error_mode, report_shape=True)
+(Worker_TP1 pid=8201) ERROR 08-07 11:34:02 [multiproc_executor.py:1004] RuntimeError: Inplace update to inference tensor outside InferenceMode is not allowed.You can make a clone to get a normal tensor before doing inplace update.See https://github.com/pytorch/rfcs/pull/17 for more details.
