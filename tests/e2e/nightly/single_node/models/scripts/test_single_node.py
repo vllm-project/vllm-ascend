@@ -57,10 +57,18 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
     import requests
 
     url = f"http://{server.host}:{server.port}"
-    max_tokens = config.api_keyword_args.get("max_tokens", 100)
     prompts = config.prompts if config.prompts else ["Hello!"]
+    
+    # Support per-prompt api_keyword_args (list) or shared (dict)
+    if isinstance(config.api_keyword_args, list):
+        api_args_list = config.api_keyword_args
+        if len(api_args_list) != len(prompts):
+            raise ValueError(f"api_keyword_args list length ({len(api_args_list)}) must match prompts length ({len(prompts)})")
+    else:
+        api_args_list = [config.api_keyword_args] * len(prompts)
 
-    for prompt in prompts:
+    for prompt, api_args in zip(prompts, api_args_list):
+        max_tokens = api_args.get("max_tokens", 100) if isinstance(api_args, dict) else 100
         response = requests.post(
             f"{url}/v1/messages",
             headers={"Content-Type": "application/json"},
@@ -81,7 +89,7 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
         assert len(text_content) > 0, f"No text content found in response for prompt '{prompt}'"
         actual_text = text_content[0].get("text", "")
         assert actual_text and actual_text.strip(), f"Empty or whitespace-only text response for prompt '{prompt}'"
-        print(f"Messages API test passed for prompt '{prompt}': {data}")
+        print(f"Messages API test passed for prompt '{prompt}' (max_tokens={max_tokens}): {data}")
 
 
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
