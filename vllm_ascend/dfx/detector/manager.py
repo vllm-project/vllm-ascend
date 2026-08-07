@@ -31,7 +31,6 @@ import torch
 
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
 from vllm_ascend.dfx.detector.base import AnomalyDetector
-from vllm_ascend.dfx.detector.manual_dump import ManualDumpDetector
 from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
 from vllm_ascend.dfx.detector.registry import DetectorRegistry
 from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
@@ -49,7 +48,7 @@ class DetectorManager:
     """Owns detectors and exposes stage hooks only.
 
     Callers (``DfxProcessor`` / runners) use ``check_after_spec`` /
-    ``check_after_sample`` / ``try_manual_dump`` / ``clear_finished`` only.
+    ``check_after_sample`` / ``clear_finished`` only.
     Concrete detectors stay private (``_spec_det`` & co.); ``get`` exists solely
     for alert routing in ``DfxProcessor._handle_alert``.
     """
@@ -85,17 +84,12 @@ class DetectorManager:
             runner=runner,
             tokenizer_provider=tokenizer_provider,
         )
-        self._manual_det = ManualDumpDetector(
-            dfx_config=dfx_config,
-            runner=runner,
-        )
         # Internal ordered registry: iterate for clear_finished; not public.
         self._registry = DetectorRegistry()
         for det in (
             self._spec_det,
             self._token_det,
             self._output_substring_det,
-            self._manual_det,
         ):
             self._registry.register(det)
         # Requests that already produced an anomaly (stop_after_alert): no longer
@@ -227,10 +221,6 @@ class DetectorManager:
         if skip is not None:
             self._mark_alerted(alerts)
         return alerts
-
-    def try_manual_dump(self) -> list[AnomalyAlert]:
-        """Consume ``dump.dump_once`` if set; return alerts (usually 0–1)."""
-        return self._manual_det.check_all()
 
     # ---- helpers ----------------------------------------------------------
 

@@ -17,7 +17,6 @@ from vllm_ascend.dfx.detector.alert import AnomalyAlert
 from vllm_ascend.dfx.detector.base import AnomalyDetector
 from vllm_ascend.dfx.detector.config_backed import ConfigBackedDetector
 from vllm_ascend.dfx.detector.manager import DetectorManager
-from vllm_ascend.dfx.detector.manual_dump import MANUAL_DUMP_REQ_ID, ManualDumpDetector
 from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
 from vllm_ascend.dfx.detector.registry import DetectorRegistry
 from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
@@ -29,8 +28,6 @@ __all__ = [
     "ConfigBackedDetector",
     "DetectorManager",
     "DetectorRegistry",
-    "MANUAL_DUMP_REQ_ID",
-    "ManualDumpDetector",
     "OutputSubstringDetector",
     "SpecAcceptanceDetector",
     "TokenLogprobDetector",

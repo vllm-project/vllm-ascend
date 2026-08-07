@@ -7,7 +7,7 @@
 
 `Dumper`（包 `vllm_ascend/dfx/dumper/`：`core` 编排 + `msprobe` / `pending` mixin）统一动态 dump 与异常检测触发，减少 `model_runner` 中的分散代码，保证 DP/PP/TP 下行为可预测。
 
-Detect 输入过滤见 [dfx_design.md](./dfx_design.md) §2.6 / [dfx_ops.md](./dfx_ops.md) §2.4（`dump_once` 不走过滤）。
+Detect 输入过滤见 [dfx_design.md](./dfx_design.md) §2.6 / [dfx_ops.md](./dfx_ops.md) §2.4（`manual_trigger` 不走过滤）。
 
 ## 2. 代码路径
 
@@ -119,7 +119,7 @@ start → forward → finalize → disable（需 _dump_forward_seen）
 ## 8. 已知限制
 
 1. `forward_seen` 只表示「activate 后调用过 start」，不保证 msprobe 一定写出文件。
-2. ACLGraph：必须在构图前安装 hook 且保持采集开启；DFX 只闸 `step()` 落盘。若仅在 dump 窗口才 `start`，replay 采空（「无 DFX 常开有数、DFX dump_once 无数」）。
+2. ACLGraph：必须在构图前安装 hook 且保持采集开启；DFX 只闸 `step()` 落盘。若仅在 dump 窗口才 `start`，replay 采空（「无 DFX 常开有数、DFX manual_trigger 无数」）。
 3. v1 EC producer 短路径可能在 activate 后用 encoder-only `start→finalize` 消费窗口；普通文本 serving 无此路径。
 4. async / sync+TP>1 下，若未走 fast-path，last PP 每步 CPU `all_reduce`（全员参与）；不能「仅 pending 的 rank 进 collective」。**Fast-path**：热更关且 `dump.enabled=false` 时跳过该 OR（见 §5）。
 5. Sync + TP>1 也走 pending-OR（与 async 相同齐步模型）；仅 Sync + TP=1 可当场 activate。
@@ -130,5 +130,5 @@ start → forward → finalize → disable（需 _dump_forward_seen）
 | 文档 | 内容 |
 |------|------|
 | [dfx_design.md](./dfx_design.md) | 总览 / InputFilterManager |
-| [dfx_ops.md](./dfx_ops.md) | 运维与排障（含 ACLGraph / dump_once） |
+| [dfx_ops.md](./dfx_ops.md) | 运维与排障（含 ACLGraph / manual_trigger） |
 | [async_scheduling_design.md](./async_scheduling_design.md) | async 时序 |

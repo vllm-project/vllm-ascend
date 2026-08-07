@@ -84,7 +84,7 @@ class AnomalyDetector:
     ) -> bool:
         """Whether ``InputFilterManager`` allows detection for this request.
 
-        Manual ``dump_once`` never calls this (unaffected by filters).
+        Manual ``manual_trigger`` never calls this (unaffected by filters).
         """
         from vllm_ascend.dfx.input_filters import InputFilterManager
 
