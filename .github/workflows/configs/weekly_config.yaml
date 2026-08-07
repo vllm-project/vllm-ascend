@@ -110,7 +110,7 @@ a3:
         size: 3
       - name: Minimax_m2.7_in3_5_tpot20
         config_file_path: Minimax_m2.7_in3_5_tpot20.yaml
-        size: 2
+        size: 3
 
 
   double_node:
