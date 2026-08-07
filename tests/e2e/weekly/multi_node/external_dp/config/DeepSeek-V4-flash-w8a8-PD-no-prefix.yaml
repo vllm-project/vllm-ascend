@@ -163,18 +163,6 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 65536
-    temperature: 1.0
-    top_p: 1.0
-    thinking: "true"
-    batch_size: 32
-    baseline: 90
-    threshold: 10
   perf_TPOT50_3_5_1_5:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
