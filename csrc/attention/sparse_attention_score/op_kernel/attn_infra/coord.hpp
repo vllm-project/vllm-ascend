@@ -167,7 +167,7 @@ public:
         return EqualScalarImpl<0>(val);
     }
 
-    // Member access operator
+    // Member acces operator
     HOST_DEVICE
     Index &operator[](int dim)
     {
