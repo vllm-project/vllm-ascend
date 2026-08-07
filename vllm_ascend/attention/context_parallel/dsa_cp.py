@@ -177,8 +177,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.device = device
         scheduler_config = vllm_config.scheduler_config
 
-        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-
         self.num_decodes = 0
         self.num_prefills = 0
         self.num_decode_tokens = 0
@@ -1121,8 +1119,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self.weights_proj = self.indexer.weights_proj
             self.indexer_softmax_scale = self.inderxer_dim**-0.5
 
-            self.indexer_compress = self.indexer.compressor
-
             # indexer_compressor
             self.indexcom_ape = self.indexer.compressor.ape
             self.indexcom_wkv = self.indexer.compressor.wkv
@@ -1130,14 +1126,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self.indexcom_norm = self.indexer.compressor.norm
 
             self.indexcom_head_dim = self.indexer.compressor.head_dim
-            self.indexcom_rotate = self.indexer.compressor.rotate
             self.index_topk = self.indexer.index_topk
 
         # compress param
         if self.compressor is not None:
-            self.compressor_head_dim = self.compressor.head_dim
             self.compressor_overlap = self.compressor.overlap
-            self.compressor_rotate = self.compressor.rotate
 
             self.compressor_ape = self.compressor.ape
             self.compressor_wkv = self.compressor.wkv
@@ -1791,6 +1784,3 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             return_value=False,
         )
         return topk_idxs
-
-    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor):
-        pass
