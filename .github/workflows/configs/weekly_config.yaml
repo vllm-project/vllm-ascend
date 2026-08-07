@@ -105,6 +105,18 @@ a3:
       - name: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD
         config_file_path: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD.yaml
         size: 2
+      - name: Minimax_m2.7_in3_5_tpot50
+        config_file_path: Minimax_m2.7_in3_5_tpot50.yaml
+        size: 3
+      - name: Minimax_m2.7_in3_5_tpot20
+        config_file_path: Minimax_m2.7_in3_5_tpot20.yaml
+        size: 3
+      - name: Minimax_m2.7_in64k_1k_prefix90_tpot50
+        config_file_path: Minimax_m2.7_in64k_1k_prefix90_tpot50.yaml
+        size: 2
+      - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
+        config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
+        size: 2
 
 
   double_node:
