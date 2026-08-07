@@ -325,6 +325,69 @@ def _e48_report(before, after):
     return ok
 
 
+# --- E53 diagnostic: is the CANN graph_task_group machinery corrupted globally
+# (per-device) or only within the vllm capture session (per-stream)?  Captures
+# and replays a task-group FIA graph in a FRESH torch.npu.graph() session AFTER
+# the vllm captures and compares against the eager reference.  If the fresh
+# session works, the corruption is scoped to the vllm capture session → capture
+# FA3 decode graphs in a separate session.  If it fails, the task-group
+# machinery is corrupted globally → CANN-level fix needed.  Set
+# VLLM_ASCEND_DEBUG_E53=1.
+def _e53_test_fresh_taskgroup():
+    q, k, v, actual_q, actual_kv, scale, H, HKV = _e48_build_tensors()
+    torch.npu.synchronize()
+
+    # Eager reference.
+    ref, _ = torch_npu.npu_fused_infer_attention_score(
+        query=q, key=k, value=v, block_table=None,
+        input_layout="TND", block_size=128,
+        actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
+        num_key_value_heads=HKV, num_heads=H, scale=scale, sparse_mode=0,
+    )
+
+    # Workspace (matches full_graph_fia's use of get_max_workspace).
+    workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+        query=q, key=k, value=v, atten_mask=None, block_table=None,
+        input_layout="TND", block_size=128,
+        actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
+        num_key_value_heads=HKV, num_heads=H,
+        sparse_mode=0, pre_tokens=2147483647, next_tokens=2147483647,
+        scale=scale,
+    )
+    out_buf = torch.empty_like(q)
+    lse_buf = torch.empty(1, dtype=torch.float32, device="npu")
+
+    def _fia_out():
+        torch_npu.npu_fused_infer_attention_score.out(
+            query=q, key=k, value=v, atten_mask=None, block_table=None,
+            input_layout="TND", block_size=128,
+            actual_seq_lengths=actual_q, actual_seq_lengths_kv=actual_kv,
+            num_key_value_heads=HKV, num_heads=H, scale=scale, sparse_mode=0,
+            workspace=workspace, out=[out_buf, lse_buf],
+        )
+
+    # Capture in a FRESH session on the current (default) stream.
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        stream = torch_npu.npu.current_stream()
+        torch.npu.graph_task_group_begin(stream)
+        _fia_out()
+        handle = torch.npu.graph_task_group_end(stream)
+    torch.npu.synchronize()
+
+    # Rebind params to the SAME inputs, then replay.
+    torch.npu.graph_task_update_begin(torch_npu.npu.current_stream(), handle)
+    _fia_out()
+    torch.npu.graph_task_update_end(torch_npu.npu.current_stream())
+    torch.npu.synchronize()
+    graph.replay()
+    torch.npu.synchronize()
+
+    max_diff = float((out_buf - ref).abs().max().item())
+    print(f"[E53] fresh task-group graph replay vs eager: match={max_diff <= 1e-3}, "
+          f"max_abs_diff={max_diff}")
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -5114,6 +5177,11 @@ class NPUModelRunner(GPUModelRunner):
             torch.npu.synchronize()
             _e48_report(e48_before, e48_after)
             _E48_DONE = True
+        if os.environ.get("VLLM_ASCEND_DEBUG_E53") == "1":
+            # E53: fresh task-group graph capture+replay AFTER the vllm captures
+            # (tests whether the graph_task_group machinery is corrupted
+            # globally or only within the vllm capture session).
+            _e53_test_fresh_taskgroup()
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
