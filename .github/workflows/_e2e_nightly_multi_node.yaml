@@ -6,7 +6,7 @@ on:
       soc_version:
         required: true
         type: string
-        description: use a2 or a3
+        description: use a2 or a3 or a5
       runner:
         required: false
         type: string
