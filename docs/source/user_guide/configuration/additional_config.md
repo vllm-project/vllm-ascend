@@ -72,8 +72,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
+| `dump_config_isolate_by_dp`         | bool | `True`  | Whether to materialize a per-DP msprobe config when `VLLM_DP_RANK` exists. When enabled, each DP uses its own config copy under the source config directory (`<source_dir>/dp<rank>/...`) and `dump_path` is auto-suffixed with `dp<rank>` to avoid cross-DP dump_enable interference and mixed dump outputs. Operate on the `dp<rank>` copy for hot updates. If the source `dump_config_path` is missing, startup fails (no silent fallback to shared path). Set `False` only if you intentionally want all DPs to share one msprobe config/path. |
 | `dfx_config_path` / `dfx-config`    | str  | `None`  | Path to DFX runtime JSON (`dump` / `ascend_log` / `report` / `detector` / `input_filter`). Default: `<cwd>/dfx/config/dfx_config.json`. Hot reload: per-DP leader read + in-DP broadcast, or local file poll. `report.save_sensitive_info` defaults to `false` (lengths only in anomaly reports). `report.print_sampling_meta` defaults to `false` (`[SamplingMeta]` log on anomaly arm when true). |
-| `dfx_config_reload_interval`        | float| `0`     | DFX JSON hot-reload period in seconds. Default `0` (disabled). Set `> 0` to enable periodic refresh. Also written into JSON as `reload_interval_seconds` for visibility; the startup value remains authoritative. **Required `> 0` for `dump.dump_once`.** |
+| `dfx_config_isolate_by_dp`          | bool | `True`  | Whether to materialize a per-DP DFX config when `VLLM_DP_RANK` exists. With explicit `dfx_config_path`/`dfx-config`, each DP uses `<source_dir>/dp<rank>/<dfx_config_name>`. With default path, each DP uses `<cwd>/dfx/config/dp<rank>/dfx_config.json`. Operate on the `dp<rank>` copy for hot updates. If an explicit source config path is missing, startup fails (no silent fallback to shared path). Set `False` to intentionally share one DFX JSON across DPs. |
+| `dfx_config_reload_interval`        | float| `0`     | DFX JSON hot-reload period in seconds. Default `0` (disabled). Set `> 0` to enable periodic refresh. Also written into JSON as `reload_interval_seconds` for visibility; the startup value remains authoritative. **Required `> 0` for `dump.manual_trigger`.** |
 | `dfx_report_dir`                    | str  | `None`  | Directory for short anomaly reports. Default: sibling `dfx/report` next to the config dir. |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
@@ -194,10 +196,10 @@ thread that file-polls the JSON and applies `ascend_log` (`level` + `debug`) via
 write the file. Initial levels are applied at AscendConfig construction; the thread
 re-applies after subsequent file changes. Workers keep step-driven sync only.
 
-Inside the DFX JSON, `dump.dump_once: true` is consumed by `ManualDumpDetector` on the next
-successful hot-reload (then persisted back to `false`). The alert arms one msprobe dump without
+Inside the DFX JSON, `dump.manual_trigger: true` is consumed by `ManualTriggerManager` on the next
+successful hot-reload (then persisted back to `false`). The trigger arms one msprobe dump without
 consuming `max_times` or cooldown; it still requires `dump.enabled` and an initialized debugger.
-**Requires `dfx_config_reload_interval > 0`** — with interval `0`, editing `dump_once` in the
+**Requires `dfx_config_reload_interval > 0`** — with interval `0`, editing `manual_trigger` in the
 JSON has no effect.
 
 Optional detect-time input filters via top-level `"input_filter": { "filters": [...] }`
@@ -207,7 +209,7 @@ and type-specific fields: `input_token_id_prefix` (`prefixes`), `prompt_length`
 (`op` + `value` / `min`/`max`), `prompt_contains_token_ids` (`token_ids`,
 `match`=`any`|`subsequence`). Detect only when all includes match and no exclude matches.
 Prefix matching is only via `type: input_token_id_prefix` (no separate prefixes field).
-Manual `dump_once` bypasses filters.
+Manual `dump.manual_trigger` bypasses filters.
 
 To capture prompt token ids for writing filters, set
 `input_filter.print_input_token_ids_once: true` (requires reload interval `> 0`). On the

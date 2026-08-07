@@ -15,6 +15,7 @@
 
 import json
 import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
+    AscendConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
@@ -392,17 +394,182 @@ class TestAscendConfig(TestBase):
         test_vllm_config = VllmConfig()
         dump_config = {"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}
         test_vllm_config.additional_config = {"dump_config": dump_config}
+        with tempfile.TemporaryDirectory() as td:
+            with patch("os.getcwd", return_value=td):
+                ascend_config = init_ascend_config(test_vllm_config)
+                self.assertIsNotNone(ascend_config.dump_config_path)
+                assert ascend_config.dump_config_path is not None
+                expected_path = os.path.join(td, ".vllm_ascend", "msprobe", "msprobe_dump_config.json")
+                self.assertEqual(ascend_config.dump_config_path, expected_path)
+                self.assertTrue(os.path.exists(ascend_config.dump_config_path))
+                with open(ascend_config.dump_config_path, encoding="utf-8") as file:
+                    persisted = json.load(file)
+                self.assertEqual(persisted, dump_config)
 
-        ascend_config = init_ascend_config(test_vllm_config)
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dump_config_isolated_by_dp_rank(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        dump_config = {"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}
+        test_vllm_config.additional_config = {"dump_config": dump_config}
+        with tempfile.TemporaryDirectory() as td:
+            with patch("os.getcwd", return_value=td):
+                with patch.dict(os.environ, {"VLLM_DP_RANK": "1"}, clear=False):
+                    ascend_config = init_ascend_config(test_vllm_config)
+
+                self.assertIsNotNone(ascend_config.dump_config_path)
+                assert ascend_config.dump_config_path is not None
+                expected_path = os.path.join(td, ".vllm_ascend", "msprobe", "dp1", "msprobe_dump_config.json")
+                shared_path = os.path.join(td, ".vllm_ascend", "msprobe", "msprobe_dump_config.json")
+                self.assertEqual(ascend_config.dump_config_path, expected_path)
+                self.assertFalse(os.path.exists(shared_path))
+                with open(ascend_config.dump_config_path, encoding="utf-8") as file:
+                    persisted = json.load(file)
+                self.assertEqual(persisted["dump_path"], "/tmp/msprobe_dump/dp1")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dump_config_path_isolated_by_dp_rank(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            src_path = os.path.join(td, "msprobe_dump_config.json")
+            with open(src_path, "w", encoding="utf-8") as f:
+                json.dump({"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}, f)
+
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"dump_config_path": src_path}
+
+            with patch.dict(os.environ, {"VLLM_DP_RANK": "2"}, clear=False):
+                ascend_config = init_ascend_config(test_vllm_config)
+
         self.assertIsNotNone(ascend_config.dump_config_path)
         assert ascend_config.dump_config_path is not None
-        expected_path = os.path.join(os.getcwd(), ".vllm_ascend", "msprobe", "msprobe_dump_config.json")
+        expected_path = os.path.join(os.path.dirname(src_path), "dp2", "msprobe_dump_config.json")
         self.assertEqual(ascend_config.dump_config_path, expected_path)
-        self.assertTrue(os.path.exists(ascend_config.dump_config_path))
         with open(ascend_config.dump_config_path, encoding="utf-8") as file:
             persisted = json.load(file)
-        self.assertEqual(persisted, dump_config)
+        self.assertEqual(persisted["dump_path"], "/tmp/msprobe_dump/dp2")
 
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_can_disable_dump_config_isolation(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            src_path = os.path.join(td, "msprobe_dump_config.json")
+            with open(src_path, "w", encoding="utf-8") as f:
+                json.dump({"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}, f)
+
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {
+                "dump_config_path": src_path,
+                "dump_config_isolate_by_dp": False,
+            }
+
+            with patch.dict(os.environ, {"VLLM_DP_RANK": "3"}, clear=False):
+                ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.dump_config_path, src_path)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dfx_config_path_isolated_by_dp_rank(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            src_path = os.path.join(td, "dfx_config.json")
+            with open(src_path, "w", encoding="utf-8") as f:
+                json.dump({"sync_mode": "broadcast", "dump": {"enabled": False}}, f)
+
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"dfx_config_path": src_path}
+
+            with patch.dict(os.environ, {"VLLM_DP_RANK": "2"}, clear=False):
+                ascend_config = init_ascend_config(test_vllm_config)
+
+            self.assertIsNotNone(ascend_config.dfx_config_path)
+            assert ascend_config.dfx_config_path is not None
+            expected_path = os.path.join(os.path.dirname(src_path), "dp2", "dfx_config.json")
+            self.assertEqual(ascend_config.dfx_config_path, expected_path)
+            with open(ascend_config.dfx_config_path, encoding="utf-8") as file:
+                persisted = json.load(file)
+            self.assertEqual(persisted["sync_mode"], "broadcast")
+            self.assertIn("dump", persisted)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_can_disable_dfx_config_isolation(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            src_path = os.path.join(td, "dfx_config.json")
+            with open(src_path, "w", encoding="utf-8") as f:
+                json.dump({"sync_mode": "broadcast", "dump": {"enabled": False}}, f)
+
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {
+                "dfx_config_path": src_path,
+                "dfx_config_isolate_by_dp": False,
+            }
+
+            with patch.dict(os.environ, {"VLLM_DP_RANK": "3"}, clear=False):
+                ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.dfx_config_path, src_path)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_default_dfx_path_isolated_by_dp_rank(self, mock_fix_incompatible_config):
+        with tempfile.TemporaryDirectory() as td:
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {}
+
+            with patch("os.getcwd", return_value=td):
+                with patch.dict(os.environ, {"VLLM_DP_RANK": "4"}, clear=False):
+                    ascend_config = init_ascend_config(test_vllm_config)
+
+            expected_path = os.path.join(td, "dfx", "config", "dp4", "dfx_config.json")
+            self.assertEqual(ascend_config.dfx_config_path, expected_path)
+            self.assertTrue(os.path.exists(expected_path))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dump_config_path_missing_fails_when_isolating(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "dump_config_path": "/tmp/not_found_msprobe_dump_config.json",
+            "dump_config_isolate_by_dp": True,
+        }
+
+        with patch.dict(os.environ, {"VLLM_DP_RANK": "0"}, clear=False):
+            with self.assertRaises(FileNotFoundError):
+                init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_dfx_config_path_missing_fails_when_isolating(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "dfx_config_path": "/tmp/not_found_dfx_config.json",
+            "dfx_config_isolate_by_dp": True,
+        }
+
+        with patch.dict(os.environ, {"VLLM_DP_RANK": "0"}, clear=False):
+            with self.assertRaises(FileNotFoundError):
+                init_ascend_config(test_vllm_config)
+
+    def test_is_materialize_writer_tp_pp_election(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(AscendConfig._is_materialize_writer())
+
+        with patch.dict(os.environ, {"VLLM_PP_RANK": "0", "VLLM_TP_RANK": "0"}, clear=True):
+            self.assertTrue(AscendConfig._is_materialize_writer())
+
+        with patch.dict(os.environ, {"VLLM_PP_RANK": "0", "VLLM_TP_RANK": "1"}, clear=True):
+            self.assertFalse(AscendConfig._is_materialize_writer())
+
+        with patch.dict(os.environ, {"PP_RANK": "1", "TP_RANK": "0"}, clear=True):
+            self.assertFalse(AscendConfig._is_materialize_writer())
+
+        with patch.dict(os.environ, {"VLLM_TP_RANK": "1"}, clear=True):
+            self.assertFalse(AscendConfig._is_materialize_writer())
+
+        # PP0 + TP1 via alternate env name must not elect writer.
+        with patch.dict(os.environ, {"VLLM_PP_RANK": "0", "TP_RANK": "1"}, clear=True):
+            self.assertFalse(AscendConfig._is_materialize_writer())
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_dump_config_and_path_conflict(self, mock_fix_incompatible_config):

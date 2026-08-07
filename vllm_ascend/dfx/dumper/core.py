@@ -31,6 +31,7 @@ logger = init_logger_ascend(__name__)
 if TYPE_CHECKING:
     from vllm_ascend.dfx.detector.alert import AnomalyAlert
     from vllm_ascend.dfx.detector.base import AnomalyDetector
+    from vllm_ascend.dfx.manual_trigger import TriggerEvent
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
@@ -82,7 +83,7 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         # entry ORs last-PP TP pending (early PP skipped; no PP broadcast).
         self._pending_dump = False
         self._pending_dump_req_id: str | None = None
-        # Manual dump_once: activate without consuming max_times / cooldown.
+        # Manual trigger: activate without consuming max_times / cooldown.
         self._pending_dump_skip_quota = False
 
         self._apply_observability_switches()
@@ -183,6 +184,17 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         if detector is not None:
             detector.on_alert_armed(alert)
         return True
+
+    def handle_manual_trigger(self, trigger: TriggerEvent) -> bool:
+        """Arm / activate dump from a control-plane manual trigger event."""
+        if trigger is None or not trigger.req_id:
+            return False
+        return self.enable_msprobe_dump_if_needed(
+            trigger.req_id,
+            req_idx=None,
+            skip_related_check=True,
+            consume_quota=trigger.consume_quota,
+        )
 
     def anomaly_check_skip_reason(self) -> str | None:
         """None if detectors may run; otherwise a short skip reason for logs.

@@ -16,6 +16,7 @@
 from unittest.mock import MagicMock, patch
 
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
+from vllm_ascend.dfx.manual_trigger import TriggerEvent
 from vllm_ascend.dfx.processor import DfxProcessor
 
 
@@ -51,27 +52,27 @@ def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
     proc.runner.input_batch = MagicMock(req_ids=["r1", "r2"])
     proc.dfx_config = MagicMock()
     proc.dfx_config.sync_dfx_config.return_value = True
-    proc.dfx_config.dump_once.return_value = True
+    proc.dfx_config.manual_trigger.return_value = True
     proc.dfx_config.dump_enabled.return_value = True
     proc.dfx_config.print_input_token_ids_once.return_value = False
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dfx_config.report_print_sampling_meta.return_value = True
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.dumper = MagicMock()
-    proc.dumper.handle_anomaly_alert.return_value = True
+    proc.dumper.handle_manual_trigger.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
     proc.detectors = MagicMock()
+    proc.manual_triggers = MagicMock()
     proc.save_sample_param = MagicMock()
     proc._get_report_tokenizer = MagicMock(return_value=None)
-    alert = AnomalyAlert(
-        anomaly_type="manual_dump_once",
-        req_id="__manual_dump_once__",
+    trigger = TriggerEvent(
+        trigger_type="manual_trigger",
+        req_id="__manual_trigger__",
         consume_quota=False,
-        detail={"source": "dump.dump_once"},
+        detail={"source": "dump.manual_trigger"},
     )
-    proc.detectors.try_manual_dump.return_value = [alert]
-    proc.detectors.get.return_value = MagicMock()
+    proc.manual_triggers.consume_once.return_value = trigger
 
     with patch("vllm_ascend.dfx.processor.RequestIoSnapshotManager") as mgr_cls:
         mgr = MagicMock()
@@ -82,7 +83,7 @@ def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
         assert proc.refresh_config() is True
 
     proc.dumper.apply_dfx_config.assert_called_once()
-    proc.dumper.handle_anomaly_alert.assert_called_once()
+    proc.dumper.handle_manual_trigger.assert_called_once_with(trigger)
     assert proc.save_sample_param.call_count == 2
     proc.save_sample_param.assert_any_call("r1")
     proc.save_sample_param.assert_any_call("r2")
@@ -96,44 +97,46 @@ def test_dfx_processor_refresh_no_change_skips_apply():
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.dfx_config = MagicMock()
     proc.dfx_config.sync_dfx_config.return_value = False
-    proc.dfx_config.dump_once.return_value = False
+    proc.dfx_config.manual_trigger.return_value = False
     proc.dfx_config.print_input_token_ids_once.return_value = False
     proc.dumper = MagicMock()
     proc.detectors = MagicMock()
+    proc.manual_triggers = MagicMock()
+    proc.manual_triggers.consume_once.return_value = None
 
     assert proc.refresh_config() is False
     proc.dumper.apply_dfx_config.assert_not_called()
     proc.dumper.sync_dump_limits_from_config.assert_not_called()
     proc.detectors.refresh_all.assert_not_called()
-    proc.detectors.try_manual_dump.assert_not_called()
+    proc.manual_triggers.consume_once.assert_called_once()
 
 
-def test_dfx_processor_refresh_drains_dump_once_even_when_unchanged():
+def test_dfx_processor_refresh_drains_manual_trigger_even_when_unchanged():
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.runner = MagicMock(tp_rank=0)
     proc.runner.input_batch = MagicMock(req_ids=["r1"])
     proc.dfx_config = MagicMock()
     proc.dfx_config.sync_dfx_config.return_value = False
-    proc.dfx_config.dump_once.return_value = True
+    proc.dfx_config.manual_trigger.return_value = True
     proc.dfx_config.dump_enabled.return_value = True
     proc.dfx_config.print_input_token_ids_once.return_value = False
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dfx_config.report_print_sampling_meta.return_value = False
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.dumper = MagicMock()
-    proc.dumper.handle_anomaly_alert.return_value = True
+    proc.dumper.handle_manual_trigger.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
     proc.detectors = MagicMock()
+    proc.manual_triggers = MagicMock()
     proc._get_report_tokenizer = MagicMock(return_value=None)
-    alert = AnomalyAlert(
-        anomaly_type="manual_dump_once",
-        req_id="__manual_dump_once__",
+    trigger = TriggerEvent(
+        trigger_type="manual_trigger",
+        req_id="__manual_trigger__",
         consume_quota=False,
-        detail={"source": "dump.dump_once"},
+        detail={"source": "dump.manual_trigger"},
     )
-    proc.detectors.try_manual_dump.return_value = [alert]
-    proc.detectors.get.return_value = MagicMock()
+    proc.manual_triggers.consume_once.return_value = trigger
 
     with patch("vllm_ascend.dfx.processor.RequestIoSnapshotManager") as mgr_cls:
         mgr = MagicMock()
@@ -144,8 +147,8 @@ def test_dfx_processor_refresh_drains_dump_once_even_when_unchanged():
         assert proc.refresh_config() is False
 
     proc.dumper.apply_dfx_config.assert_not_called()
-    proc.detectors.try_manual_dump.assert_called_once()
-    proc.dumper.handle_anomaly_alert.assert_called_once()
+    proc.manual_triggers.consume_once.assert_called_once()
+    proc.dumper.handle_manual_trigger.assert_called_once_with(trigger)
     proc.report_writer.write.assert_called_once()
 
 
@@ -281,23 +284,25 @@ def test_sync_for_step_calls_refresh_then_dump_or():
     proc.sync_dump_pending_or.assert_called_once_with(allow_arm=False)
 
 
-def test_refresh_config_skips_dump_once_arm_when_not_allow_arm():
-    """Dummy wave must not consume dump_once (no arm → leave JSON true)."""
+def test_refresh_config_skips_manual_trigger_arm_when_not_allow_arm():
+    """Dummy wave must not consume manual_trigger (no arm → leave JSON true)."""
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.dfx_config = MagicMock()
     proc.dfx_config.sync_dfx_config.return_value = False
-    proc.dfx_config.dump_once.return_value = True
+    proc.dfx_config.manual_trigger.return_value = True
     proc.dfx_config.print_input_token_ids_once.return_value = False
     proc.dumper = MagicMock()
     proc.report_writer = MagicMock()
     proc.detectors = MagicMock()
-    proc._handle_alert = MagicMock()
+    proc.manual_triggers = MagicMock()
+    proc.manual_triggers.consume_once.return_value = None
+    proc._handle_manual_trigger = MagicMock()
 
     proc.refresh_config(allow_arm=False)
 
-    proc.detectors.try_manual_dump.assert_not_called()
-    proc._handle_alert.assert_not_called()
-    proc.dfx_config.consume_dump_once.assert_not_called()
+    proc.manual_triggers.consume_once.assert_called_once_with(allow_arm=False)
+    proc._handle_manual_trigger.assert_not_called()
+    proc.dfx_config.consume_manual_trigger.assert_not_called()
 
 
 def test_maybe_print_input_token_ids_once_logs_and_consumes():

@@ -12,7 +12,7 @@
 | 3. Dump / 观测开关 | `dumper/`（`Dumper` + mixins） | msprobe dump 生命周期；`ascend_log` 开关 |
 | 4. Report | `report.py`（`DfxReportWriter`） | 异常短日志落盘到 `dfx/report/` |
 | 5. Processor | `processor.py`（`DfxProcessor`） | runner 侧编排（构造 / refresh / check / report）；刷新 `InputFilterManager` |
-| 6. Input filter | `input_filters.py`（`InputFilterManager`） | detect 前输入过滤（单例；`dump_once` 不走） |
+| 6. Input filter | `input_filters.py`（`InputFilterManager`） | detect 前输入过滤（单例；`manual_trigger` 不走） |
 | 7. I/O snapshot | `io_snapshot.py`（`RequestIoSnapshotManager`） | report 时挂 prompt/output（单例；非 model_runner） |
 
 对外入口：`from vllm_ascend.dfx import Dumper`（以及 `DfxProcessor` / `DfxRuntimeConfig` 等）。
@@ -78,7 +78,7 @@ Worker: runner.dfx = DfxProcessor(runner)
 - **禁止**满编跨 DP `world` 热更：请求结束后常出现「仅一侧 EngineCore 再 dummy」→ 会死锁。
 - **跨 DP 不自动同步 config**：要两边生效就改两边各自可读的 JSON（或共享盘同一路径）。
 - **禁止**把 config sync 折叠进「仅 last-PP」的 dump 路径；也**不要**塞进 `_dummy_run`。
-- `save()` / `dump_once` 清盘：仅 JSON writer；非 writer 忽略写盘。
+- `save()` / `manual_trigger` 清盘：仅 JSON writer；非 writer 忽略写盘。
 
 ### 2.2.1 非 worker（API / EngineCore）
 
@@ -105,7 +105,7 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
     "enabled": false,
     "max_times": 0,
     "cooldown_seconds": 300,
-    "dump_once": false
+    "manual_trigger": false
   },
   "ascend_log": { "level": "INFO", "debug": [] },
   "report": {
@@ -151,7 +151,7 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
 
 | 段 | 含义 |
 |----|------|
-| `dump` | `enabled`（默认 `false`，dump sink）/ `max_times`（仅 auto-arm）/ `cooldown_seconds`；`dump_once` 见运维页。与 detector 正交 |
+| `dump` | `enabled`（默认 `false`，dump sink）/ `max_times`（仅 auto-arm）/ `cooldown_seconds`；`manual_trigger` 见运维页。与 detector 正交 |
 | `ascend_log` | `level`：`vllm_ascend` 包根 logger 级别。`debug`：模块白名单（相对路径，如 `["dfx"]` → `vllm_ascend.dfx`）强制 DEBUG。走 Ascend 专用 handler（不受 `VLLM_LOGGING_LEVEL` 的 `vllm` handler 过滤）。无 `enabled` |
 | `report` | `save_sensitive_info`：默认 `false` 只存 `*_token_count`（不写 token ids）；`true` 时落盘 id（受 `max_*` 截断）并可 decode。`decode_token_ids`：默认 `true`，`save_sensitive_info=true` 时把 `*_token_ids` decode 成 `*_text` / 逐步 `*_texts`。`max_prompt_token_ids` / `max_output_token_ids` 默认 1000，`0`=不截断。`print_sampling_meta`：默认 `false` |
 | `detector` | 共享 `stop_after_alert`（默认 `true`：某请求一旦检出异常即停止检测该请求，防止同一异常反复写 report）+ 各检测器嵌套段（`spec_acceptance` / `token_logprob` / `output_substring`），每段含 `enabled` 与阈值 |
@@ -165,7 +165,7 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
   - **已**配路径 → `defaults ← JSON`；leader 若文件已存在则不盲目重写，文件缺失时写出；
   - 启动日志打印最终 `path=`（AscendConfig + worker Processor）。
 - **热更合并**：仅 `defaults ← JSON`。
-- **`dump_once`**：依赖热更；`dfx_config_reload_interval` 必须 `> 0`。操作与排障见 [dfx_ops.md](./dfx_ops.md)。
+- **`manual_trigger`**：依赖热更；`dfx_config_reload_interval` 必须 `> 0`。操作与排障见 [dfx_ops.md](./dfx_ops.md)。
 
 ### 2.5 命名
 
@@ -178,7 +178,7 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
 
 ### 2.6 InputFilterManager（detect 输入过滤）
 
-配置在顶层 `input_filter.filters`（**检测阶段**；不挡 dump arm / `dump_once`）。
+配置在顶层 `input_filter.filters`（**检测阶段**；不挡 dump arm / `manual_trigger`）。
 
 **术语**：一条 *filter config* = JSON 里一个 `{type, mode, …}` 对象；  
 `DfxRuntimeConfig.input_filter_configs()` 返回校验后的 config 列表，再交给  
@@ -190,7 +190,7 @@ Worker 仍走 `execute_model` / idle `execute_dummy_batch` → `sync_for_step`�
 | `mode=include` | 链上**全部** include 须命中 |
 | `mode=exclude` | **任一** exclude 命中则拒绝 |
 | 缺 prompt | 过滤已配置时默认拒绝（安全） |
-| `dump_once` / `ManualDumpDetector` | **不**调用 `InputFilterManager` |
+| `manual_trigger` / `ManualTriggerManager` | **不**调用 `InputFilterManager` |
 | 刷新入口 | 仅 `DfxProcessor` init + `refresh_config` → `InputFilterManager.apply_from_config` |
 
 支持的 `type`：
@@ -228,14 +228,19 @@ Detector 通过基类 `_passes_input_filter` → `InputFilterManager.get().allow
 | `SpecAcceptanceDetector` | `detector/spec_acceptance.py` | `spec_acceptance` |
 | `TokenLogprobDetector` | `detector/token_logprob.py` | `token_logprob` |
 | `OutputSubstringDetector` | `detector/output_substring.py` | `output_substring` |
-| `ManualDumpDetector` | `detector/manual_dump.py` | `manual_dump_once` |
+
+## 3.1 Manual Trigger
+
+| 类 | 文件 | `trigger_type` |
+|----|------|----------------|
+| `ManualTriggerManager` | `manual_trigger.py` | `manual_trigger` |
+| `TriggerEvent` | `manual_trigger.py` | 控制面事件结构 |
 
 基类约定：
 
-- `DetectorManager`：构造并私有持有各 detector；对外仅 `check_after_spec` / `check_after_sample` / `try_manual_dump`
+- `DetectorManager`：构造并私有持有各 detector；对外仅 `check_after_spec` / `check_after_sample`
 - `AnomalyDetector.refresh_from_config()`：默认空实现；`_precheck` 每 check 调用一次
 - `ConfigBackedDetector`：从 live `DfxRuntimeConfig.detector.<section_key>` 拉 `enabled` + `_apply_detector_values`（Spec / Token / OutputSubstring 等阈值型 detector）
-- `ManualDumpDetector`：仍直接继承 `AnomalyDetector`（one-shot 触发，非阈值传感器）
 - `check_all` / `check_one`：返回 `list[AnomalyAlert]` / `AnomalyAlert | None`（**不**调用 Dumper）
 - `on_alert_armed(alert)`：dump 成功后的可选日志钩子
 - **Spec 检测条件**：runner 上存在 `speculative_config`（MTP/Eagle 等），**不**依赖仅 hybrid/Mamba 才置位的 `need_accepted_tokens`
@@ -246,8 +251,10 @@ Detector 通过基类 `_passes_input_filter` → `InputFilterManager.get().allow
 ```text
 runner.dfx = DfxProcessor(runner)
   ├─ sync_for_step()  # = refresh_config() + sync_dump_pending_or()
+  ├─ refresh_config() 中 ManualTriggerManager.consume_once() -> TriggerEvent
+  │     └─ _handle_manual_trigger -> dumper.handle_manual_trigger
   ├─ clear_finished / check_after_spec / check_after_sample
-  │     └─ DetectorManager（内部 Spec / Token / OutputSubstring / Manual）
+  │     └─ DetectorManager（内部 Spec / Token / OutputSubstring）
   └─ _handle_alert → (dump.on? arm dump : on_alert_armed) + report per dump/report policy
 ```
 
@@ -261,7 +268,7 @@ runner.dfx = DfxProcessor(runner)
 - 检测器（SpecAcceptance / TokenLogprob / OutputSubstring）：[anomaly_detection_design.md](./anomaly_detection_design.md)
 - dump 齐步：[dumper_design.md](./dumper_design.md)
 - Async 时序：[async_scheduling_design.md](./async_scheduling_design.md)
-- 运维 / `dump_once` / 过滤：[dfx_ops.md](./dfx_ops.md)
+- 运维 / `manual_trigger` / 过滤：[dfx_ops.md](./dfx_ops.md)
 
 ## 4. Dump（Dumper）
 
@@ -272,17 +279,17 @@ runner.dfx = DfxProcessor(runner)
 
 0. `dfx.sync_for_step()` = `refresh_config()` + `sync_dump_pending_or()`
 1. `refresh_config()` → `sync_dfx_config()`（仅当 `dfx_config_reload_interval > 0`；**全 rank**）+ 刷新 `InputFilterManager`
-2. 若 config 变更：`dumper.apply_dfx_config()`（dump 限额 / `ascend_log`）；`ManualDumpDetector` → alert（`consume_quota=False`）
+2. 若 config 变更：`dumper.apply_dfx_config()`（dump 限额 / `ascend_log`）；并在 `refresh_config()` 统一执行 `ManualTriggerManager.consume_once()`（`consume_quota=False`）
 3. `sync_dump_pending_or()`（仅 last-PP TP；**不含** config / report）。热更关且 `dump.enabled=false` 时走 fast-path，跳过 TP OR（见 [dumper_design.md](./dumper_design.md) §5）；**同一 EngineCore 内各 TP 的启动 `dump.enabled` 必须一致**，否则可能一侧 skip、一侧 `all_reduce` 挂死。
 
 Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `InputFilterManager`（均在 processor）。
 
 门控（异常检测）：至少一路 `detector.<name>.enabled` 开，且 rank 合法；**不依赖** `dump.enabled` / `max_times`。另受 §2.6 过滤。`dump.enabled=true` 且 dump pending/active 时跳过再检，避免重叠 arm。  
-门控（自动 dump）：`dump.enabled` + 配额 / 冷却；`max_times == 0` 时不 auto-arm（detect / `dump_once` 仍可）。  
-约束：detect 与 dump **正交** — 可 detect-only、detect+dump、或 **manual-only**（`dump.enabled=true`、无 detector，仅 `dump_once`）。无 detector 时 dump 开只会 warn，不强制改配置。  
-`dump_once` 由 `ManualDumpDetector` 消费；要求 `dump.enabled` + debugger，**不要求** detector；不受 `max_times` / cooldown / InputFilterManager 限制。`dump.enabled=false` 时不消费 flag。  
-`dump_once` arm 成功后写 **一份** `manual_dump_once` report：`detail.requests[]` 快照当前 batch **全部**请求的 I/O（与单请求 anomaly report 不同；普通异常触发 dump 仍只写单请求 report）。  
-**前提**：`additional_config.dfx_config_reload_interval > 0`（热更为关时改 JSON 的 `dump_once` 不会生效）。
+门控（自动 dump）：`dump.enabled` + 配额 / 冷却；`max_times == 0` 时不 auto-arm（detect / `manual_trigger` 仍可）。  
+约束：detect 与 dump **正交** — 可 detect-only、detect+dump、或 **manual-only**（`dump.enabled=true`、无 detector，仅 `manual_trigger`）。无 detector 时 dump 开只会 warn，不强制改配置。  
+`manual_trigger` 由 `ManualTriggerManager` 消费；要求 `dump.enabled` + debugger，**不要求** detector；不受 `max_times` / cooldown / InputFilterManager 限制。`dump.enabled=false` 时不消费 flag。  
+`manual_trigger` arm 成功后写 **一份** `manual_trigger` report：`detail.requests[]` 快照当前 batch **全部**请求的 I/O（与单请求 anomaly report 不同；普通异常触发 dump 仍只写单请求 report）。  
+**前提**：`additional_config.dfx_config_reload_interval > 0`（热更为关时改 JSON 的 `manual_trigger` 不会生效）。
 
 ## 5. Report
 

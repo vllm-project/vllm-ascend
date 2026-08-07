@@ -18,7 +18,7 @@
 Design (multi-DP safe — avoid full-world collectives):
 
 1. **One writer / monitor per EngineCore (per DP replica)**
-   Reads & writes the JSON (``ensure_persisted`` / ``save`` / ``dump_once`` clear).
+   Reads & writes the JSON (``ensure_persisted`` / ``save`` / ``manual_trigger`` clear).
    Prefer ``inner_dp_world`` first rank; else TP0∧PP0 when ``dp_size>1``; else
    global world rank0 / ``RANK==0``.
 
@@ -83,12 +83,13 @@ _DEFAULTS: dict[str, Any] = {
         # Dump arming sink (default off). Orthogonal to detectors: detect-only,
         # dump+detect, and manual-only (dump on, no detector) are all valid.
         "enabled": False,
-        # Auto-arm quota only; 0 = no auto dump. Does not affect detect or dump_once.
+        # Auto-arm quota only; 0 = no auto dump. Does not affect detect or manual_trigger.
         "max_times": 0,
         "cooldown_seconds": 5 * 60,
-        # Manual one-shot: set true in JSON → next real execute_model arms dump, then cleared.
-        # Needs dump.enabled=true and reload_interval > 0. Skips max_times / cooldown.
-        "dump_once": False,
+        # Manual one-shot latch: set true in JSON → next real execute_model arms dump,
+        # then cleared. Needs dump.enabled=true and reload_interval > 0.
+        # Skips max_times / cooldown / input filters.
+        "manual_trigger": False,
     },
     "ascend_log": {
         "level": "INFO",
@@ -427,7 +428,7 @@ class DfxRuntimeConfig:
             logger.info_once(
                 "[DFX runtime_config] hot-reload disabled "
                 "(set additional_config.dfx_config_reload_interval > 0 to enable; "
-                "default is 0; dump.dump_once also requires interval > 0)"
+                "default is 0; dump.manual_trigger also requires interval > 0)"
             )
 
     def _read_json_object(self) -> dict[str, Any]:
@@ -650,6 +651,8 @@ class DfxRuntimeConfig:
         "token_logprob",
         "output_substring",
     )
+    # Allowed keys under ``dump`` (reject typos such as legacy dump_once).
+    DUMP_KEYS: frozenset[str] = frozenset(_DEFAULTS["dump"])
 
     @staticmethod
     def detectors_enabled_in(data: dict[str, Any]) -> bool:
@@ -689,13 +692,13 @@ class DfxRuntimeConfig:
         if self.dump_enabled() and not self.any_detector_enabled():
             logger.warning(
                 "[DFX runtime_config] dump.enabled=true with no auto detector — "
-                "auto dump will not trigger; dump_once still works %s",
+                "auto dump will not trigger; dump.manual_trigger still works %s",
                 _process_role_tag(),
             )
         elif self.dump_enabled() and self.any_detector_enabled() and self.dump_max_times() <= 0:
             logger.info(
                 "[DFX runtime_config] dump.enabled=true max_times=0 — "
-                "detect runs; auto-arm off; dump_once still works %s",
+                "detect runs; auto-arm off; dump.manual_trigger still works %s",
                 _process_role_tag(),
             )
 
@@ -705,13 +708,13 @@ class DfxRuntimeConfig:
     def dump_cooldown_seconds(self) -> int:
         return int(self.dump.get("cooldown_seconds", 300))
 
-    def dump_once(self) -> bool:
-        """Manual one-shot dump request from JSON (``dump.dump_once``).
+    def manual_trigger(self) -> bool:
+        """Manual one-shot dump latch from JSON (``dump.manual_trigger``).
 
         Only observed after a successful hot-reload; requires
         ``dfx_config_reload_interval > 0``.
         """
-        return bool(self.dump.get("dump_once", False))
+        return bool(self.dump.get("manual_trigger", False))
 
     def input_filter_configs(self) -> list[dict[str, Any]]:
         """Normalized ``input_filter.filters`` for ``InputFilterManager``."""
@@ -757,31 +760,32 @@ class DfxRuntimeConfig:
             )
         return True
 
-    def consume_dump_once(self) -> bool:
-        """If ``dump_once`` is true, clear it and return True.
+    def consume_manual_trigger(self) -> bool:
+        """If ``manual_trigger`` is true, clear it and return True.
 
         All ranks clear in-memory; only the JSON writer (leader / single
         process) persists ``false``.
         """
-        if not self.dump_once():
+        if not self.manual_trigger():
             return False
-        self.dump["dump_once"] = False
+        self.dump["manual_trigger"] = False
         if _is_json_writer():
-            if self.save({"dump": {"dump_once": False}}):
+            if self.save({"dump": {"manual_trigger": False}}):
                 logger.info(
-                    "[DFX runtime_config] dump_once consumed → false path=%s %s",
+                    "[DFX runtime_config] manual_trigger consumed → false path=%s %s",
                     self.config_path,
                     _process_role_tag(),
                 )
             else:
                 logger.warning(
-                    "[DFX runtime_config] dump_once cleared in-memory but failed to persist path=%s %s",
+                    "[DFX runtime_config] manual_trigger cleared in-memory but failed to "
+                    "persist path=%s %s",
                     self.config_path,
                     _process_role_tag(),
                 )
         else:
             logger.info(
-                "[DFX runtime_config] dump_once cleared in-memory (non-writer) %s",
+                "[DFX runtime_config] manual_trigger cleared in-memory (non-writer) %s",
                 _process_role_tag(),
             )
         return True
@@ -914,11 +918,11 @@ class DfxRuntimeConfig:
                     # Content diffs are logged inside ``_apply_loaded``.
                     if self._maybe_reload_local():
                         self.apply_ascend_log_level()
-                        if self.dump_once():
+                        if self.manual_trigger():
                             logger.info(
-                                "[DFX runtime_config] dump_once=true seen on non-worker "
-                                "reload — dump arms only on worker execute_model "
-                                "(send a request). path=%s",
+                                "[DFX runtime_config] dump.manual_trigger=true seen on "
+                                "non-worker reload — dump arms only on worker "
+                                "execute_model (send a request). path=%s",
                                 self.config_path,
                             )
                 except Exception as exc:
@@ -1130,17 +1134,17 @@ class DfxRuntimeConfig:
                 self.interaction_mode_summary(),
             )
             self._warn_interaction_quirks()
-            if self.dump_once():
+            if self.manual_trigger():
                 if self.dump_enabled():
                     logger.info(
-                        "[DFX runtime_config] dump_once=true loaded — next worker "
-                        "execute_model will consume and arm dump %s",
+                        "[DFX runtime_config] dump.manual_trigger=true loaded — next "
+                        "worker execute_model will consume and arm dump %s",
                         _process_role_tag(),
                     )
                 else:
                     logger.warning(
-                        "[DFX runtime_config] dump_once=true but dump.enabled=false — "
-                        "will not consume until dump.enabled=true %s",
+                        "[DFX runtime_config] dump.manual_trigger=true but "
+                        "dump.enabled=false — will not consume until dump.enabled=true %s",
                         _process_role_tag(),
                     )
         elif announce:
@@ -1157,7 +1161,7 @@ class DfxRuntimeConfig:
 
         Under the config lock, re-read disk first so a stale in-memory snapshot
         cannot wipe concurrent hand-edits (e.g. ``dump.max_times``) when only
-        flushing ``dump_once``.
+        flushing ``manual_trigger``.
         """
         if not _is_json_writer():
             logger.debug(
@@ -1227,6 +1231,19 @@ class DfxRuntimeConfig:
         enabled = data["dump"].get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             raise ValueError("dump.enabled must be bool")
+        unknown_dump = sorted(set(data["dump"]) - DfxRuntimeConfig.DUMP_KEYS)
+        if unknown_dump:
+            raise ValueError(
+                f"dump has unknown key(s) {unknown_dump}; "
+                f"allowed={sorted(DfxRuntimeConfig.DUMP_KEYS)}"
+            )
+        manual_trigger = data["dump"].get("manual_trigger")
+        if manual_trigger is not None and not isinstance(manual_trigger, bool):
+            # Accept 0/1 from hand-edited JSON; reject other types.
+            if manual_trigger in (0, 1):
+                data["dump"]["manual_trigger"] = bool(manual_trigger)
+            else:
+                raise ValueError("dump.manual_trigger must be bool")
         save_sensitive = data["report"].get("save_sensitive_info")
         if save_sensitive is not None and not isinstance(save_sensitive, bool):
             if save_sensitive in (0, 1):
@@ -1254,13 +1271,6 @@ class DfxRuntimeConfig:
             if int(max_val) < 0:
                 raise ValueError(f"report.{max_key} must be >= 0")
             data["report"][max_key] = int(max_val)
-        dump_once = data["dump"].get("dump_once")
-        if dump_once is not None and not isinstance(dump_once, bool):
-            # Accept 0/1 from hand-edited JSON; reject other types.
-            if dump_once in (0, 1):
-                data["dump"]["dump_once"] = bool(dump_once)
-            else:
-                raise ValueError("dump.dump_once must be bool")
         print_once = data["input_filter"].get("print_input_token_ids_once")
         if print_once is not None and not isinstance(print_once, bool):
             if print_once in (0, 1):
