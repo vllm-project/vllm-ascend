@@ -4,16 +4,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
+from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
+    _moe_lora_projection_enabled,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     has_lora,
-    _moe_lora_projection_enabled,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
 )
@@ -275,6 +275,7 @@ def test_moe_lora_apply_uses_projection_specific_enable_masks() -> None:
 def test_moe_lora_projection_masks_follow_adapter_lifecycle() -> None:
     layer = object.__new__(AscendFusedMoEWithLoRA)
     BaseLayerWithLoRA.__init__(layer)
+    layer.moe_config = SimpleNamespace(moe_parallel_config=SimpleNamespace(use_ep=False))
     layer._w13_slices = 2
 
     def create_weights(module, max_loras, lora_config, model_config=None):

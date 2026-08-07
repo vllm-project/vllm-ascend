@@ -54,7 +54,6 @@ def has_lora(lora_context) -> bool:
 
 
 def _moe_lora_projection_enabled(lora_b: list[torch.Tensor], w13_num_slices: int) -> tuple[bool, bool]:
-    """Return whether routed w13 and w2 have any non-zero B weights."""
     if len(lora_b) == 2:
         w13_lora_b, w2_lora_b = lora_b
         return bool(torch.count_nonzero(w13_lora_b).item()), bool(torch.count_nonzero(w2_lora_b).item())
