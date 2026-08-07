@@ -489,6 +489,7 @@
     - tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py
     - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
+    - tests/e2e/pull_request/eight_card/test_glm5_2.py
     - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
 - name: spec_decode_dspark
@@ -499,6 +500,7 @@
     - vllm_ascend/models/deepseek_v4_dspark.py
   tests:
     - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+    - tests/e2e/pull_request/eight_card/test_glm5_2.py
 
 - name: spec_decode_ngram
   optional: false
@@ -826,6 +828,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 450
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
+  tests/e2e/pull_request/eight_card/test_glm5_2.py: 3600
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 370
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 840
