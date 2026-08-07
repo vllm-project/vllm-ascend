@@ -175,6 +175,10 @@ FULL_FEATURE_MODEL_CASES = [
                 "enable_flashcomm1": True,
                 "enable_dsa_cp": True,
             },
+            "speculative_config": {
+                "num_speculative_tokens": 3,
+                "method": "mtp",
+            },
         },
     ),
 ]
