@@ -17,8 +17,6 @@ from vllm_ascend.ops.linear import AscendQKVParallelLinear
 
 
 class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
-    """Keep packed LoRA-A weights in sync for the single-adapter GEMM path."""
-
     def create_lora_weights(
         self,
         max_loras: int,
