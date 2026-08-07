@@ -132,6 +132,7 @@ def _build_serve_cmd(config: MultiNodeConfig) -> dict[str, Any]:
 
 def _save_benchmark_results_json(
     config: MultiNodeConfig,
+    cases: list[dict],
     results: list[Any],
     version: str | None = None,
 ) -> None:
@@ -139,7 +140,7 @@ def _save_benchmark_results_json(
     runner = os.environ.get("VLLM_CI_RUNNER", "")
 
     # Filter out None benchmark cases; results align with the non-None ones in order
-    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    valid_items = [(case["case_name"], case) for case in cases]
 
     tasks = [build_task_entry(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)]
 
@@ -230,10 +231,12 @@ def _run_single_version(
     envs: dict[str, str] | None = None,
     version: str | None = None,
     version_index: int | None = None,
-    results_by_version: dict[str, list[Any]] | None = None,
+    results_by_version: dict[str, dict[str, Any]] | None = None,
     abort_marker: str | None = None,
+    benchmark_cases: list[dict] | None = None,
 ) -> None:
     node_envs = envs if envs is not None else config.envs
+    cases = benchmark_cases if benchmark_cases is not None else config.benchmark_cases
     with (
         ProxyLauncher(
             nodes=config.nodes,
@@ -261,12 +264,12 @@ def _run_single_version(
             results = run_aisbench_cases(
                 model=config.model,
                 port=port,
-                aisbench_cases=config.benchmark_cases,
+                aisbench_cases=cases,
                 host_ip=host,
             )
-            _save_benchmark_results_json(config, results, version=version)
+            _save_benchmark_results_json(config, cases, results, version=version)
             if results_by_version is not None and version is not None:
-                results_by_version[version] = results
+                results_by_version[version] = {case["case_name"]: result for case, result in zip(cases, results)}
             if version_index is not None:
                 Path(_version_done_marker_path(version_index)).touch()
         else:
@@ -301,12 +304,23 @@ async def test_multi_node() -> None:
         return
 
     abort_marker = _abort_marker_path()
-    results_by_version: dict[str, list[Any]] = {}
+    results_by_version: dict[str, dict[str, Any]] = {}
     try:
         for version_index, version in enumerate(config.versions):
             version_name = version["name"]
             version_envs = {**config.envs, **version["env"]}
-            logger.info("Starting version %s with env overrides: %s", version_name, version["env"])
+            selected = version.get("benchmarks")
+            version_cases = (
+                config.benchmark_cases
+                if selected is None
+                else [case for case in config.benchmark_cases if case["case_name"] in set(selected)]
+            )
+            logger.info(
+                "Starting version %s with env overrides: %s, cases: %s",
+                version_name,
+                version["env"],
+                [case["case_name"] for case in version_cases],
+            )
             _run_single_version(
                 config,
                 envs=version_envs,
@@ -314,6 +328,7 @@ async def test_multi_node() -> None:
                 version_index=version_index,
                 results_by_version=results_by_version,
                 abort_marker=abort_marker,
+                benchmark_cases=version_cases,
             )
     except Exception:
         if config.is_master:

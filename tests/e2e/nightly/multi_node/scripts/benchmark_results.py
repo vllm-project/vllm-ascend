@@ -38,15 +38,16 @@ def get_output_throughput(result: Any) -> float | None:
 
 def compare_version_results(
     benchmark_cases: list[dict],
-    results_by_version: dict[str, list[Any]],
+    results_by_version: dict[str, dict[str, Any]],
     baseline_version_name: str,
     default_threshold: float = 0.97,
 ) -> tuple[list[dict], bool]:
     """Compare candidate versions against a baseline for every performance case.
 
-    Each value in ``results_by_version`` must be aligned with ``benchmark_cases``,
-    i.e. the list returned by ``run_aisbench_cases``. Returns a per-case report
-    and whether all candidate/baseline throughput ratios meet their thresholds.
+    ``results_by_version`` maps version name to ``{case_name: result}`` so
+    different versions may run different benchmark subsets. Returns a per-case
+    report and whether all candidate/baseline throughput ratios meet their
+    thresholds.
     """
     report: list[dict] = []
     passed = True
@@ -60,15 +61,16 @@ def compare_version_results(
         return report, False
 
     baseline_results = results_by_version[baseline_version_name]
-    for idx, case in enumerate(benchmark_cases):
+    for case in benchmark_cases:
         if case.get("case_type") != "performance":
             continue
-        case_name = case.get("case_name", f"case_{idx}")
+        case_name = case.get("case_name", "")
+        if not case_name:
+            continue
         threshold = case.get("version_threshold", default_threshold)
-        baseline_ott = get_output_throughput(baseline_results[idx]) if idx < len(baseline_results) else None
+        baseline_ott = get_output_throughput(baseline_results.get(case_name))
         for candidate_name in candidate_names:
-            candidate_results = results_by_version[candidate_name]
-            candidate_ott = get_output_throughput(candidate_results[idx]) if idx < len(candidate_results) else None
+            candidate_ott = get_output_throughput(results_by_version[candidate_name].get(case_name))
             entry = {
                 "case_name": case_name,
                 "dataset_path": case.get("dataset_path", ""),
