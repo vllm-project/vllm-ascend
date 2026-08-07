@@ -201,10 +201,10 @@ class KVPoolScheduler:
                     self.num_layers,
                     extra_config,
                 )
-                if reuse_layout.layer_entries:
+                if reuse_layout.layer_cache_specs:
                     self.num_layers = max(
                         self.num_layers,
-                        max(reuse_layout.layer_entries) + 1,
+                        max(reuse_layout.layer_cache_specs) + 1,
                     )
                 self.layerwise_offload = reuse_layout.has_layer_reuse
             else:
