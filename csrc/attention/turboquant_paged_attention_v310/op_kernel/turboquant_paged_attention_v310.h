@@ -91,7 +91,8 @@ public:
         pipe->InitBuffer(cbBuf_, (2 * (1 << BITS)) * sizeof(float));
         pipe->InitBuffer(outBuf_, d * sizeof(half));
         pipe->InitBuffer(redBuf_, d * sizeof(float));   // ReduceSum dst (must not alias src)
-        pipe->InitBuffer(wrkBuf_, d * sizeof(float));   // ReduceSum workLocal (must not alias src/dst)
+        pipe->InitBuffer(wrkBuf_, d * sizeof(float));
+        pipe->InitBuffer(dbgBuf_, d * sizeof(float));   // variant==10 dot dump; nothing else touches it   // ReduceSum workLocal (must not alias src/dst)
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
@@ -144,6 +145,7 @@ private:
         LocalTensor<int32_t> codes = codeBuf_.Get<int32_t>();
         LocalTensor<float> red = redBuf_.Get<float>();
         LocalTensor<float> wrk = wrkBuf_.Get<float>();
+        LocalTensor<float> dbg = dbgBuf_.Get<float>();
 
         // q -> fp32, then into the rotated basis (once per head, not per key)
         LocalTensor<half> qh16 = outBuf_.Get<half>();
@@ -265,6 +267,11 @@ private:
                 } else {
                     score = tmp.GetValue(0) * kNorm * t_->scale;
                 }
+                if (t_->variant == 10u) {
+                    // capture the EXACT value the score uses; must read the same
+                    // buffer ReduceSum writes (tmp in the aliased form)
+                    dbg.SetValue(tk, tmp.GetValue(0));
+                }
 
                 // ---- online softmax update ---------------------------------
                 const float newMax = (score > runMax) ? score : runMax;
@@ -312,6 +319,16 @@ private:
         if (t_->variant != 6u && runSum > 0.0f) {
             Muls(acc, acc, 1.0f / runSum, d);
             PipeBarrier<PIPE_V>();
+        }
+        if (t_->variant == 10u) {
+            LocalTensor<half> dh = outBuf_.Get<half>();
+            Cast(dh, dbg, RoundMode::CAST_NONE, d);
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID4);
+            DataCopy(outGm_[(b * t_->numHeads + qh) * d], dh, d);
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID5);
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID5);
+            return;
         }
         // Pi is self-inverse: one rotation returns the output to the original basis
         if (t_->variant != 6u) {
@@ -412,7 +429,7 @@ private:
     GlobalTensor<int32_t> btGm_, seqGm_;
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
-        outBuf_, redBuf_, wrkBuf_;
+        outBuf_, redBuf_, wrkBuf_, dbgBuf_;
     LocalTensor<float> signs_, cb_;
 };
 

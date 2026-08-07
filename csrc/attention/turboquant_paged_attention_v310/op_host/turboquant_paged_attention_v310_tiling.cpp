@@ -55,7 +55,27 @@ ge::graphStatus TurboquantPagedAttentionV310Tiling::ParseInputs()
     const int64_t *variantAttr = attrs->GetAttrPointer<int64_t>(2);
     const int64_t *cbAttr = attrs->GetAttrPointer<int64_t>(3);
     bits_ = (bitsAttr != nullptr) ? static_cast<uint32_t>(*bitsAttr) : 3U;
-    tilingData_.scale = (scaleAttr != nullptr) ? *scaleAttr : 0.0625f;
+    /*
+     * SCALE PLUMBING (measured bug).
+     * The float attr does not survive the attr path on this op: passing
+     * scale = 0.0625 / 0.25 / 1.0 / 0.0 from Python all produced BIT-IDENTICAL
+     * output, with cos(out, mean(V)) = 0.9945 -- i.e. the kernel saw a scale of
+     * zero, every score collapsed to 0, softmax went uniform and the output was
+     * just mean(V). That alone accounts for the full-suite failure (0.690 vs
+     * 0.991 achievable) and for why identical-key and injected-score probes all
+     * passed. The int attrs (bits, variant, codebook_mode) plumb correctly, so
+     * this is specific to the float attr.
+     *
+     * Attention scale is 1/sqrt(head_dim) by definition, so derive it. The attr
+     * is still honoured when it reads back sane, which keeps a caller-supplied
+     * scale working if the float path is fixed later.
+     */
+    const float derivedScale = 1.0f / std::sqrt(static_cast<float>(tilingData_.headDim));
+    float attrScale = (scaleAttr != nullptr) ? *scaleAttr : 0.0f;
+    if (!(attrScale > 0.0f) || !std::isfinite(attrScale)) {
+        attrScale = derivedScale;
+    }
+    tilingData_.scale = attrScale;
     tilingData_.variant = (variantAttr != nullptr) ? static_cast<uint32_t>(*variantAttr) : 0U;
     tilingData_.codebookMode = (cbAttr != nullptr) ? static_cast<uint32_t>(*cbAttr) : 0U;
 
