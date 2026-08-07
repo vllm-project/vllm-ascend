@@ -28,7 +28,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
 - `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
 - `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4).
-- `DeepSeek-V3.1-w8a8c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
+- `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
 - `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
