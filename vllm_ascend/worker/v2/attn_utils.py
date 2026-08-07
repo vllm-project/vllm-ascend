@@ -330,9 +330,6 @@ def _reshape_kv_cache_v2(
     kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     vllm_config = get_current_vllm_config()
-    is_kv_consumer = (
-        vllm_config.kv_transfer_config.is_kv_consumer if vllm_config.kv_transfer_config is not None else False
-    )
 
     kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for group in attn_groups:
@@ -382,7 +379,7 @@ def _reshape_kv_cache_v2(
                 v_shape = (mla_num_blocks, mla_block_size, num_kv_heads, v_dim)
 
             k_cache_dtype = v_cache_dtype = kv_cache_spec.dtype
-            if is_kv_consumer and enable_fa_quant(vllm_config):
+            if enable_fa_quant(vllm_config):
                 k_cache_dtype, v_cache_dtype = vllm_config.quant_config.get_kv_quant_dtype(
                     layer_name, kv_cache_spec.dtype, vllm_config.model_config
                 )

@@ -153,6 +153,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
 class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W8A8_DYNAMIC."""
 
+    supports_eplb = True
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W8A8
 
@@ -163,10 +164,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not vllm_config.model_config.enforce_eager
         )
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_expert_weight_list = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
         self.in_dtype = vllm_config.model_config.dtype
-        self.supports_eplb = True
-
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
@@ -227,7 +229,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             and get_ascend_config().enable_fused_mc2 == 1
             and act_name != "swigluoai_uninterleave"
         )
-        if self.dynamic_eplb:
+        if self.use_expert_weight_list:
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
@@ -259,7 +261,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1=w1,
                 w2=w2,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
+                dynamic_eplb=self.use_expert_weight_list,
                 expert_map=getattr(layer, "ascend_expert_map", None),
                 global_redundant_expert_num=getattr(layer, "global_redundant_expert_num", 0),
                 mc2_mask=getattr(layer, "_ascend_mc2_mask", None),
@@ -277,6 +279,48 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             )
         )
         return final_hidden_states
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+        if hasattr(layer, "w13_weight_list"):
+            weights = [
+                layer.w13_weight_list,
+                layer.w2_weight_list,
+                layer.w13_weight_scale_fp32_list,
+                layer.w2_weight_scale_list,
+            ]
+            fused_w1_scale = getattr(layer, "fused_w1_scale_list", None)
+            fused_w2_scale = getattr(layer, "fused_w2_scale_list", None)
+            if (fused_w1_scale is None) != (fused_w2_scale is None):
+                raise RuntimeError(
+                    "FUSED_MC2 EPLB requires fused_w1_scale_list and fused_w2_scale_list "
+                    "to be present or absent together."
+                )
+            if fused_w1_scale is not None and fused_w2_scale is not None:
+                weights.extend([fused_w1_scale, fused_w2_scale])
+            return weights
+
+        weights = [
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale_fp32,
+            layer.w2_weight_scale,
+        ]
+        fused_w1_scale = getattr(layer, "fused_w1_scale", None)
+        fused_w2_scale = getattr(layer, "fused_w2_scale", None)
+        if (fused_w1_scale is None) != (fused_w2_scale is None):
+            raise RuntimeError(
+                "FUSED_MC2 EPLB requires fused_w1_scale and fused_w2_scale to be present or absent together."
+            )
+        if fused_w1_scale is not None and fused_w2_scale is not None:
+            num_local_experts = layer.w13_weight.shape[0]
+            weights.extend(
+                [
+                    fused_w1_scale.view(num_local_experts, -1),
+                    fused_w2_scale.view(num_local_experts, -1),
+                ]
+            )
+        return weights
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -296,7 +340,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
 
-        if self.dynamic_eplb:
+        if self.use_expert_weight_list:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
             layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_fp32_list = [

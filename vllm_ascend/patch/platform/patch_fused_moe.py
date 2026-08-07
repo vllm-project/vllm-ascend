@@ -28,21 +28,28 @@
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
 from collections.abc import Callable
+from inspect import signature
+from types import MethodType
 from typing import Any
 
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
+from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 from vllm_ascend.utils import is_310p
+
+_EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoE
 _DefaultAscendMoERunner: Any
-_DefaultAscendRoutedExperts: Any
+_DefaultAscendRoutedExperts: type[RoutedExperts]
 _IS_310P = is_310p()
 
 if _IS_310P:
@@ -56,6 +63,36 @@ else:
 
     _DefaultAscendMoERunner = AscendMoERunner
     _DefaultAscendRoutedExperts = AscendRoutedExperts
+
+
+def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    eplb_state = self.eplb_state
+    if eplb_state is None:
+        return topk_ids
+    self._validate_eplb_state()
+    expert_replica_routing_table = eplb_state.expert_replica_routing_table
+    if expert_replica_routing_table is None:
+        raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
+    return torch.ops.vllm.ascend_eplb_map_to_physical(topk_ids, expert_replica_routing_table)
+
+
+def _adapt_eplb_router(router, enable_eplb: bool) -> None:
+    """Attach only the Ascend EPLB state and mapping operation."""
+    if not enable_eplb or getattr(router, _EPLB_ROUTER_ADAPTED, False):
+        return
+
+    if router.eplb_state is None:
+        router.eplb_state = AscendEplbLayerState()
+    elif not isinstance(router.eplb_state, AscendEplbLayerState):
+        router.eplb_state = AscendEplbLayerState.from_upstream(router.eplb_state)
+
+    original_apply_mapping = type(router)._apply_eplb_mapping
+    if tuple(signature(original_apply_mapping).parameters) != ("self", "topk_ids"):
+        raise RuntimeError(
+            f"Unsupported vLLM MoE router contract: {type(router).__name__}._apply_eplb_mapping signature changed."
+        )
+    router._apply_eplb_mapping = MethodType(_ascend_apply_eplb_mapping, router)
+    setattr(router, _EPLB_ROUTER_ADAPTED, True)
 
 
 def _ascend_FusedMoE(
@@ -102,6 +139,11 @@ def _ascend_FusedMoE(
             )
         enable_eplb = True
         num_redundant_experts = configured_redundancy or upstream_redundancy
+    # Keep the upstream hash table as the source of truth and share it with
+    # the legacy Ascend quant-method path until that path also routes solely
+    # through the Router.
+    hash_indices_table_for_legacy_path = hash_indices_table if hash_indices_table is not None else tid2eid
+    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,
@@ -117,14 +159,15 @@ def _ascend_FusedMoE(
             zero_expert_type=zero_expert_type,
             num_logical_experts=num_experts,
             hash_indices_table=hash_indices_table,
-            tid2eid=tid2eid,
+            tid2eid=hash_indices_table_for_legacy_path,
+            eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
         )
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
     routed_experts_args["router"] = router
     routed_experts_args["n_shared_experts"] = n_shared_experts
-    if tid2eid is not None:
-        routed_experts_args["tid2eid"] = tid2eid
-    return _original_FusedMoE(
+    if hash_indices_table_for_legacy_path is not None:
+        routed_experts_args["tid2eid"] = hash_indices_table_for_legacy_path
+    runner = _original_FusedMoE(
         *args,
         num_experts=num_experts,
         top_k=top_k,
@@ -149,6 +192,8 @@ def _ascend_FusedMoE(
         routed_experts_args=routed_experts_args,
         **kwargs,
     )
+    _adapt_eplb_router(runner.router, enable_router_eplb)
+    return runner
 
 
 _fused_moe_layer.FusedMoE = _ascend_FusedMoE

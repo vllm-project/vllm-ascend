@@ -173,6 +173,8 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
       hidden_sizes]``.
     """
 
+    supports_eplb = False
+
     quant_type: QuantType = QuantType.W4A16
 
     def __init__(self) -> None:
@@ -181,7 +183,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
 
     def get_weight(
         self,
