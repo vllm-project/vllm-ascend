@@ -199,6 +199,40 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
 
 
 @pytest.mark.parametrize(
+    ("enable_fused_mc2", "quant_type", "ep_world_size", "local_experts", "expected"),
+    [
+        (1, "w8a8_dynamic", 2, 8, MoECommType.FUSED_MC2),
+        (1, "w8a8_dynamic", 2, 2, MoECommType.ALLGATHER),
+        (1, "w8a8_dynamic", 16, 8, MoECommType.MC2),
+        (0, "w8a8_dynamic", 2, 8, MoECommType.ALLGATHER),
+        (1, "w4a8_dynamic", 2, 8, MoECommType.ALLGATHER),
+        (1, None, 2, 8, MoECommType.ALLGATHER),
+    ],
+)
+def test_select_moe_comm_method_a2_fused_w8a8(
+    monkeypatch,
+    enable_fused_mc2,
+    quant_type,
+    ep_world_size,
+    local_experts,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A2,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=enable_fused_mc2,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=ep_world_size,
+        num_experts=ep_world_size * local_experts,
+        quant_type=quant_type,
+    )
+
+    assert afc.select_moe_comm_method(16, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
     ("num_tokens", "expected"),
     [
         (128, MoECommType.MC2),
