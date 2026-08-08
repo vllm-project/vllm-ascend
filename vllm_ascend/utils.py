@@ -33,6 +33,7 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from pydantic import TypeAdapter
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -878,7 +879,9 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
     if _ENABLE_SP is None or refresh:
         if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
+            # This path can run before the AscendConfig singleton exists. Use
+            # the same pydantic bool coercion instead of bool("false") == True.
+            _ENABLE_SP = TypeAdapter(bool).validate_python(additional_config["enable_flashcomm1"])
         else:
             try:
                 _ENABLE_SP = get_ascend_config().enable_flashcomm1

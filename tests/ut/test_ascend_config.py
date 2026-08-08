@@ -16,6 +16,7 @@
 import json
 import os
 from types import SimpleNamespace
+from unittest import skip
 from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
@@ -183,6 +184,25 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
         self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_with_legacy_scheduler_keys(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "recompute_scheduler_enable": "false",
+            "short_request_first_config": {"enabled": "true", "threshold": "512"},
+            "profiling_chunk_config": {"enabled": "false"},
+            "batch_job_sched_config": {"enabled": "false"},
+        }
+
+        scheduler_config = init_ascend_config(test_vllm_config).scheduler_config
+
+        self.assertFalse(scheduler_config.recompute_scheduler_enable)
+        self.assertTrue(scheduler_config.short_request_first_config.enabled)
+        self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
+        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
+        self.assertFalse(scheduler_config.batch_job_sched_config.enabled)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -562,6 +582,27 @@ class TestSchedulerConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "scheduler_config must be a dict, got list"):
             SchedulerConfig.from_additional_config({"scheduler_config": []})
 
+    def test_unknown_nested_scheduler_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SchedulerConfig.from_additional_config(
+                {"scheduler_config": {"short_request_first_confgi": {"enabled": True}}}
+            )
+
+    def test_scheduler_switches_get_bool_validation(self):
+        config = SchedulerConfig.from_additional_config(
+            {
+                "scheduler_config": {
+                    "enable_balance_scheduling": "false",
+                    "recompute_scheduler_enable": "false",
+                }
+            }
+        )
+
+        self.assertFalse(config.enable_balance_scheduling)
+        self.assertFalse(config.recompute_scheduler_enable)
+        with self.assertRaises(ValueError):
+            SchedulerConfig.from_additional_config({"scheduler_config": {"enable_balance_scheduling": 2}})
+
     def test_nested_config_overrides_all_scheduler_settings(self):
         config = SchedulerConfig.from_additional_config(
             {
@@ -707,6 +748,30 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_a_family_additional_config_gets_typed_validation(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {
+            "enable_flashcomm1": "false",
+            "enable_fused_mc2": "0",
+            "enable_mlapo": "false",
+            "msmonitor_use_daemon": "false",
+            "enable_transpose_kv_cache_by_block": "false",
+            "weight_nz_mode": "2",
+        }
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.enable_flashcomm1)
+        self.assertEqual(config.enable_fused_mc2, 0)
+        self.assertFalse(config.enable_mlapo)
+        self.assertFalse(config.msmonitor_use_daemon)
+        self.assertFalse(config.enable_transpose_kv_cache_by_block)
+        self.assertEqual(config.weight_nz_mode, 2)
+        self.assertFalse(enable_sp(vc))
+
+    @skip("Deprecated env compatibility will be removed; additional_config is the supported path.")
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_mlapo_env_false_no_longer_crashes(self, mock_fix):
         # Regression: `export VLLM_ASCEND_ENABLE_MLAPO=false` used to crash
         # startup with ValueError (int("false")). The before-validator reads
@@ -746,6 +811,45 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         self.assertFalse(config.enable_dsa_cp)
         self.assertEqual(config.draft_window_size, 4096)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.utils.enable_sp", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_user_input_derived_field_survives_factory(self, mock_fix, mock_enable_sp, mock_sparse):
+        vc = VllmConfig()
+        vc.parallel_config.enable_expert_parallel = True
+        vc.parallel_config.tensor_parallel_size = 2
+        vc.additional_config = {"enable_shared_expert_dp": True}
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_shared_expert_dp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_vllm_config_is_factory_dependency_not_config_field(self, mock_fix):
+        vc = VllmConfig()
+
+        config = init_ascend_config(vc)
+
+        self.assertNotIn("vllm_config", config.__pydantic_fields__)
+        self.assertFalse(hasattr(config, "vllm_config"))
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_private_sparse_layer_state_is_derived_on_factory_path(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.quant_config = SimpleNamespace(
+            quant_description={"model.layers.3.self_attn.indexer.quant_type": "INT8_DYNAMIC"}
+        )
+        vc.additional_config = {"enable_sparse_li_c8": True}
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
+        self.assertFalse(config.is_sparse_li_c8_layer("model.layers.4.self_attn.indexer.k_cache"))
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
