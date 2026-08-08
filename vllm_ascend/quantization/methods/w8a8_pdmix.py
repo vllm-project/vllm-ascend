@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 from vllm.config import get_current_vllm_config
+from vllm.logger import logger
 
 from .base import AscendLinearScheme
 from .registry import register_scheme
@@ -87,6 +88,13 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
 
 @register_scheme("W8A8_MIX", "moe")
 class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
+    def __init__(self):
+        logger.warning_once(
+            "W8A8_MIX (pd-mix) MoE quantization is deprecated and will be removed in the next release. "
+            "Please migrate to alternative quantization methods."
+        )
+        super().__init__()
+
     def get_dynamic_quant_param(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:

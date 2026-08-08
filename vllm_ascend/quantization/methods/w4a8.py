@@ -23,6 +23,7 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
@@ -91,6 +92,10 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     """
 
     def __init__(self):
+        logger.warning_once(
+            "W4A8_DYNAMIC linear quantization is deprecated and will be removed in the next release. "
+            "Please migrate to alternative quantization methods."
+        )
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
@@ -351,6 +356,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         # NOTE: the weights are quantized from bf16 to int4 through a per-channel quantization process
         self.is_per_channel_weight = self.group_size == 0
+        if not self.is_per_channel_weight:
+            logger.warning_once(
+                "W4A8_DYNAMIC MoE per-group quantization is deprecated and will be removed in the next release. "
+                "Please migrate to alternative quantization methods."
+            )
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         # NOTE: new quantize weights: 2 int4 pack into int8
         self.new_quant_version = quant_version == "1.0.0"
