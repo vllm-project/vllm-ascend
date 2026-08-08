@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-07 10:56+0000\n"
+"POT-Creation-Date: 2026-08-08 10:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -278,15 +278,6 @@ msgstr "DeepSeek V4-Flash"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:22
 #: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "DeepSeek V4-Pro"
-msgstr "DeepSeek V4-Pro"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:22
-msgid "DeepSeek-V3.1"
-msgstr "DeepSeek-V3.1"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:22
-#: ../../source/user_guide/support_matrix/supported_models.md:33
 #: ../../source/user_guide/support_matrix/supported_models.md:55
 #: ../../source/user_guide/support_matrix/supported_models.md:57
 #: ../../source/user_guide/support_matrix/supported_models.md:135
@@ -294,6 +285,33 @@ msgstr "DeepSeek-V3.1"
 #: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "✅"
 msgstr "✅"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+msgid "Native mixed MXFP8/MXFP4 weights"
+msgstr "原生混合MXFP8/MXFP4权重"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "1M"
+msgstr "1M"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)"
+msgstr "[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeek V4-Pro"
+msgstr "DeepSeek V4-Pro"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+msgid "[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)"
+msgstr "[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+msgid "DeepSeek-V3.1"
+msgstr "DeepSeek-V3.1"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:22
 #: ../../source/user_guide/support_matrix/supported_models.md:33
@@ -309,6 +327,15 @@ msgstr "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
 msgid "GLM-5.1"
 msgstr "GLM-5.1"
 
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "200k"
+msgstr "200k"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+msgid "[GLM-5.1](../../tutorials/models/GLM5.md)"
+msgstr "[GLM-5.1](../../tutorials/models/GLM5.md)"
+
 #: ../../source/user_guide/support_matrix/supported_models.md
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 #: ../../source/user_guide/support_matrix/supported_models.md:55
@@ -317,14 +344,6 @@ msgstr "GLM-5.1"
 #: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "A2/A3"
 msgstr "A2/A3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "1M"
-msgstr "1M"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)"
-msgstr "[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "[DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)"
@@ -432,10 +451,6 @@ msgstr "[GLM-4.x](../../tutorials/models/GLM4.x.md)"
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "GLM-5/5.1"
 msgstr "GLM-5/5.1"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "200k"
-msgstr "200k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "[GLM-5](../../tutorials/models/GLM5.md)"
