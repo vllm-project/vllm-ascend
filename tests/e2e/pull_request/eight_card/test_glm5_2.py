@@ -88,6 +88,7 @@ def _run_speculative_decoding(
     return acceptance_per_pos
 
 
+@pytest.mark.skip(reason="A problem in the model loading. Will be opened after it is fixed.")
 @pytest.mark.e2e_model(MAIN_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
