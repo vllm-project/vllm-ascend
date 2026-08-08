@@ -46,11 +46,13 @@ class AscendModelState(DefaultModelState):
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
+            num_input_tokens = input_batch.num_tokens_after_padding
         else:
             # For piecewise cudagraphs and eager, use unpadded sizes.
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+            num_input_tokens = input_batch.num_tokens
+
+        num_actual_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
@@ -58,7 +60,9 @@ class AscendModelState(DefaultModelState):
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
-            num_tokens=num_tokens,
+            num_tokens=num_input_tokens,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,

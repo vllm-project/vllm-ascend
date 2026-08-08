@@ -56,7 +56,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -75,8 +75,15 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=False,
-                expert_map=getattr(layer, "ascend_expert_map", None),
-                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
+                swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=layer.swiglu_alpha,
+                swiglu_beta=layer.swiglu_beta,
             ),
         )
         return final_hidden_states

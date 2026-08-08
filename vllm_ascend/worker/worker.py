@@ -41,7 +41,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -254,42 +253,9 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
-        model = self.model_runner.model
-        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            weight_models = [model]
-            speculative_config = self.vllm_config.speculative_config
-            if speculative_config is not None and speculative_config.method == "mtp":
-                drafter = getattr(self.model_runner, "drafter", None)
-                draft_model = getattr(drafter, "model", None)
-                if draft_model is not None and draft_model is not model:
-                    weight_models.append(draft_model)
-
-            # Unquantized Ascend MoE stores weights in an execution layout
-            # after loading. Restore the loadable layout for every model that
-            # receives online updates. The MTP drafter is a separate model and
-            # must follow the same wake-up preparation as the target.
-            for weight_model in weight_models:
-                for name, param in weight_model.named_parameters():
-                    if "w2_weight" in name and param.shape[2] == hidden_size:
-                        parts = name.split(".")
-                        param_name = parts[-1]
-                        parent_module = weight_model.get_submodule(".".join(parts[:-1]))
-
-                        # Preserve weight_loader for subsequent online updates.
-                        w2_data = param.transpose(1, 2)
-                        replace_parameter(parent_module, param_name, w2_data)
-                    elif "w13_weight" in name and param.shape[1] == hidden_size:
-                        parts = name.split(".")
-                        param_name = parts[-1]
-                        parent_module = weight_model.get_submodule(".".join(parts[:-1]))
-
-                        # Preserve weight_loader for subsequent online updates.
-                        w13_data = param.transpose(1, 2)
-                        replace_parameter(parent_module, param_name, w13_data)
-
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
+            model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)

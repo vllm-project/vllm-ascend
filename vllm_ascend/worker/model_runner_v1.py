@@ -86,6 +86,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
+    DraftTokenIds,
     ECConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
@@ -1752,6 +1753,24 @@ class NPUModelRunner(GPUModelRunner):
                 self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
             self.draft_token_ids_event.record()
 
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        out = super().take_draft_token_ids()
+        per_req_k = getattr(self.drafter, "_dspark_num_verify_tokens", None)
+        if per_req_k is None:
+            return out
+        per_req_k = [
+            max(0, min(int(k), self.num_spec_tokens))
+            for k in per_req_k
+        ]
+        cut_tokens = DraftTokenIds(
+            req_ids=out.req_ids,
+            draft_token_ids=[
+                tokens[:k]
+                for tokens, k in zip(out.draft_token_ids, per_req_k)
+            ],
+        )
+        return cut_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2093,7 +2112,6 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
-                input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
             self.maybe_get_kv_connector_output(
@@ -3426,7 +3444,6 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
-                input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
