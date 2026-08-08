@@ -34,12 +34,11 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -47,7 +46,6 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
-    get_storage_block_size,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import AscendDeviceType, calc_split_factor, get_ascend_device_type
@@ -86,48 +84,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         kv_cache_spec[layer_name] = spec
 
     return kv_cache_spec
-
-
-def prepare_kernel_block_sizes(
-    kv_cache_config: KVCacheConfig,
-    attn_groups: list[list[AttentionGroup]],
-) -> list[int]:
-    """Select kernel block sizes, preserving upstream behavior outside DSV4.
-
-    DeepSeek V4 is the only Ascend model whose scheduler block size describes
-    more raw tokens than the number of rows stored in one physical cache page.
-    Its NPU kernels consume the physical row count, so select their block size
-    against ``storage_block_size``. All other cache specs continue to use the
-    upstream ``kv_cache_spec.block_size`` selection contract unchanged.
-    """
-    kernel_block_sizes = []
-    for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        kv_cache_spec = kv_cache_group.kv_cache_spec
-        dispatch_spec = kv_cache_spec
-        if isinstance(dispatch_spec, UniformTypeKVCacheSpecs):
-            dispatch_spec = next(iter(dispatch_spec.kv_cache_specs.values()))
-        if isinstance(dispatch_spec, EncoderOnlyAttentionSpec):
-            continue
-        if isinstance(dispatch_spec, AttentionSpec):
-            group_backends = [group.backend for group in attn_groups[group_id]]
-            kv_manager_block_size = kv_cache_spec.block_size
-            if isinstance(dispatch_spec, AscendMLAAttentionSpec) and dispatch_spec.model_version == "deepseek_v4":
-                # DSV4 exposes logical raw-token coverage to the scheduler, but
-                # Ascend kernels address rows in the compressed physical page.
-                # Keeping the kernel size physical also preserves ModelRunner
-                # V1's block-table, slot-mapping, and cache-reshape contract.
-                kv_manager_block_size = get_storage_block_size(kv_cache_spec)
-            kernel_block_sizes.append(
-                select_common_block_size(
-                    kv_manager_block_size,
-                    group_backends,
-                )
-            )
-        elif isinstance(dispatch_spec, MambaSpec):
-            kernel_block_sizes.append(dispatch_spec.block_size)
-        else:
-            raise NotImplementedError(f"unknown kv cache spec {kv_cache_spec}")
-    return kernel_block_sizes
 
 
 def build_attn_metadata(
@@ -236,7 +192,6 @@ def build_attn_metadata(
                         prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
                         decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                        block_size=get_storage_block_size(attn_group.kv_cache_spec),
                     )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,

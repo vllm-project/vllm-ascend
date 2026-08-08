@@ -20,33 +20,16 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.dsa_v1 import (
+    AscendDSAC4Backend,
+    AscendDSAC128Backend,
+    AscendDSASWABackend,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
 )
-
-
-def get_dsv4_block_sizes():
-    # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
-    _DSV4_BLOCK_SIZES = {
-        128: [[128, 128, 8, 32], [16640, 131072]],
-        64: [[64, 64, 4, 16], [8320, 65536]],
-        32: [[32, 32, 2, 8], [4160, 32768]],
-    }
-    _DSV4_BLOCK_SIZES_A5 = {
-        128: [[128, 128, 8, 16], [16896, 81920]],
-        64: [[64, 64, 4, 8], [8448, 40960]],
-        32: [[32, 32, 2, 4], [4224, 20480]],
-    }
-    if get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5
-    else:
-        return _DSV4_BLOCK_SIZES
-
-
-DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -108,7 +91,12 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
-        self.attn_backend = AscendDSABackend
+        if self.compress_ratio == 4:
+            self.attn_backend = AscendDSAC4Backend
+        elif self.compress_ratio == 128:
+            self.attn_backend = AscendDSAC128Backend
+        else:
+            self.attn_backend = AscendDSASWABackend
 
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (
@@ -182,7 +170,11 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         cached_head_size = (
             (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
         )
-        storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        # Keep this import lazy: deepseek_v4 imports ops.dsa, which imports this
+        # layer while the model module is still being initialized.
+        from vllm_ascend.models.deepseek_v4 import get_dsv4_block_sizes
+
+        storage_block_size = get_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.

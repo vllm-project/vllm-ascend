@@ -13,9 +13,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.dsa_v1 import (
-    AscendDSABackend,
+    AscendDSAC4Backend,
+    AscendDSAC4StateBackend,
+    AscendDSAC128Backend,
+    AscendDSAC128StateBackend,
     AscendDSAMetadataBuilder,
+    AscendDSASWABackend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.models import deepseek_v4
@@ -124,7 +129,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         ],
     )
     attn_group = AttentionGroup(
-        backend=AscendDSABackend,
+        backend=AscendDSAC4Backend,
         layer_names=[layer_name],
         kv_cache_spec=spec,
         kv_cache_group_id=0,
@@ -138,7 +143,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         attn_groups=[[attn_group]],
         device=torch.device("cpu"),
         cache_dtype=cache_config.cache_dtype,
-        kernel_block_sizes=[spec.storage_block_size],
+        kernel_block_sizes=[spec.block_size],
         vllm_config=vllm_config,
     )
 
@@ -175,11 +180,11 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         self.common_ratio_to_sas_metadata = kwargs["common_ratio_to_sas_metadata"]
         call = {
             "common_attn_metadata": common_attn_metadata,
-            "block_size": kwargs["block_size"],
             "prefill_ratio_to_sas_metadata": self.prefill_ratio_to_sas_metadata,
             "decode_ratio_to_sas_metadata": self.decode_ratio_to_sas_metadata,
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
         }
+        assert "block_size" not in kwargs
         self.calls.append(call)
         for cache_name in (
             "prefill_ratio_to_sas_metadata",
@@ -210,7 +215,7 @@ def _make_dsa_metadata_groups():
     attn_groups = [
         [
             AttentionGroup(
-                backend=AscendDSABackend,
+                backend=(AscendDSAC4Backend if spec.compress_ratio == 4 else AscendDSAC128Backend),
                 layer_names=[layer_name],
                 kv_cache_spec=spec,
                 kv_cache_group_id=group_id,
@@ -233,7 +238,7 @@ def _make_dsa_metadata_groups():
     return layer_names, specs, calls, attn_groups, kv_cache_config
 
 
-def test_prepare_kernel_block_sizes_only_uses_storage_size_for_dsv4():
+def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
     spec = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -244,7 +249,7 @@ def test_prepare_kernel_block_sizes_only_uses_storage_size_for_dsv4():
     attn_groups = [
         [
             AttentionGroup(
-                backend=AscendDSABackend,
+                backend=AscendDSAC4Backend,
                 layer_names=["model.layers.0.self_attn"],
                 kv_cache_spec=spec,
                 kv_cache_group_id=0,
@@ -262,10 +267,41 @@ def test_prepare_kernel_block_sizes_only_uses_storage_size_for_dsv4():
         ],
     )
 
-    # Even though this synthetic non-DSV4 spec has a smaller storage size,
-    # preserve upstream's logical block-size selection for non-DSV4 groups.
     assert spec.storage_block_size == 32
-    assert attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [128]
+    assert upstream_attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [spec.block_size]
+
+
+@pytest.mark.parametrize(
+    ("device_type", "expected_c128_state_sizes"),
+    [
+        (AscendDeviceType.A2, [8, 16, 32]),
+        (AscendDeviceType.A5, [4, 8, 16]),
+    ],
+)
+def test_dsv4_backends_declare_role_specific_logical_sizes(
+    monkeypatch,
+    device_type,
+    expected_c128_state_sizes,
+):
+    monkeypatch.setattr(
+        dsa_v1,
+        "get_ascend_device_type",
+        lambda: device_type,
+    )
+
+    assert AscendDSAC4Backend.get_supported_kernel_block_sizes() == [128, 256, 512]
+    assert AscendDSAC128Backend.get_supported_kernel_block_sizes() == [4096, 8192, 16384]
+    assert AscendDSASWABackend.get_supported_kernel_block_sizes() == [32, 64, 128]
+    assert AscendDSAC4StateBackend.get_supported_kernel_block_sizes() == [2, 4, 8]
+    assert AscendDSAC128StateBackend.get_supported_kernel_block_sizes() == expected_c128_state_sizes
+
+    c4_cache = SimpleNamespace(compress_ratio=4)
+    c128_cache = SimpleNamespace(compress_ratio=128)
+    assert deepseek_v4.AscendDeepseekV4IndexerCache.get_attn_backend(c4_cache) is AscendDSAC4Backend
+    assert deepseek_v4.AscendDeepseekV4IndexerCache.get_attn_backend(c128_cache) is AscendDSAC128Backend
+    assert deepseek_v4.AscendDeepseekV4SWACache.get_attn_backend(SimpleNamespace()) is AscendDSASWABackend
+    assert deepseek_v4.AscendCompressorStateCache.get_attn_backend(c4_cache) is AscendDSAC4StateBackend
+    assert deepseek_v4.AscendCompressorStateCache.get_attn_backend(c128_cache) is AscendDSAC128StateBackend
 
 
 @pytest.mark.parametrize(
@@ -282,9 +318,6 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     expected_input_tokens,
 ):
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
-    assert attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [
-        spec.storage_block_size for spec in specs
-    ]
     block_tables = (
         torch.zeros((4, 1), dtype=torch.int32),
         torch.zeros((4, 1), dtype=torch.int32),
@@ -334,7 +367,6 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
 
     assert set(metadata) == set(layer_names)
-    assert [call["block_size"] for call in calls] == [spec.storage_block_size for spec in specs]
     assert len(calls) == 2
     for call in calls:
         common_metadata = call["common_attn_metadata"]

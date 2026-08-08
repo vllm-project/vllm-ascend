@@ -218,7 +218,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
-    get_storage_block_size,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -3043,7 +3042,6 @@ class NPUModelRunner(GPUModelRunner):
                     prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
                     decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                    block_size=get_storage_block_size(attn_group.kv_cache_spec),
                 )
 
             if (for_cudagraph_capture
@@ -4333,12 +4331,8 @@ class NPUModelRunner(GPUModelRunner):
 
                     if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_kernel_block_sizes()[0]
-                        if current_kv_cache_spec.storage_block_size != current_kv_cache_spec.block_size:
-                            # DeepSeek V4 compressed caches must use the kernel
-                            # size selected from their physical storage size.
-                            block_size = self.kernel_block_sizes[group.kv_cache_group_id][0]
 
-                        block_size_chunk = current_kv_cache_spec.storage_block_size // block_size
+                        block_size_chunk = current_kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk,
                             block_size,
@@ -4477,8 +4471,7 @@ class NPUModelRunner(GPUModelRunner):
             for group in kv_cache_config.kv_cache_groups
             if not isinstance(group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
-        manager_block_sizes = [group.kv_cache_spec.block_size for group in non_encoder_groups]
-        block_sizes = [get_storage_block_size(group.kv_cache_spec) for group in non_encoder_groups]
+        block_sizes = [group.kv_cache_spec.block_size for group in non_encoder_groups]
 
         # Generate kernel_block_sizes that matches each block_size
         # For attention backends that support virtual block splitting,
@@ -4499,7 +4492,7 @@ class NPUModelRunner(GPUModelRunner):
                 # the backend.
                 attn_groups = self.attn_groups[kv_cache_group_id]
                 backends = [attn_group.backend for attn_group in attn_groups]
-                kv_manager_block_size = get_storage_block_size(kv_cache_group.kv_cache_spec)
+                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
                 selected_kernel_size = select_common_block_size(
                     kv_manager_block_size, backends
                 )
@@ -4514,12 +4507,11 @@ class NPUModelRunner(GPUModelRunner):
 
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        for kv_cache_group, manager_block_size in zip(
-            non_encoder_groups, manager_block_sizes, strict=True
-        ):
+        for kv_cache_group in non_encoder_groups:
             max_num_blocks_per_req = cdiv(
                 max_model_len,
-                manager_block_size * get_decode_context_model_parallel_world_size(),
+                kv_cache_group.kv_cache_spec.block_size
+                * get_decode_context_model_parallel_world_size(),
             )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
