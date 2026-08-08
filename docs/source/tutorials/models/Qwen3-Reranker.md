@@ -113,6 +113,48 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
+### 5.1 Chat Template
+
+The Qwen3-Reranker model requires a specific chat template for proper formatting. Create a file named `qwen3_reranker.jinja` with the following content:
+
+```jinja
+<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+<|im_start|>user
+<Instruct>: {{
+    instruction
+    | default(
+        instruct
+        | default(
+            messages
+            | selectattr("role", "eq", "system")
+            | map(attribute="content")
+            | first
+            | default("Given a search query, retrieve relevant candidates that answer the query", true),
+            true
+        ),
+        true
+    )
+}}<Query>: {{
+    messages
+    | selectattr("role", "eq", "query")
+    | map(attribute="content")
+    | first
+}}
+<Document>: {{
+    messages
+    | selectattr("role", "eq", "document")
+    | map(attribute="content")
+    | first
+}}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+```
+
+Save this file to a location of your choice (e.g., `./qwen3_reranker.jinja`).
+
 === "A3/A2 series"
 
     ```shell
@@ -121,6 +163,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
         --runner pooling \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
+        --chat-template ./qwen3_reranker.jinja \
         --port 8000 \
         --max-model-len 1024
     ```
@@ -133,6 +176,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
         --runner pooling \
         --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
+        --chat-template ./qwen3_reranker.jinja \
         --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
         --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
         --dtype float16 \
@@ -155,42 +199,21 @@ Once your server is started, you can verify by follow command:
 
 Service Verification:
 
-```python
-import requests
+When `--chat-template` is configured as above, you can send plain `query` and `documents` without manually building templates:
 
-url = "http://127.0.0.1:8000/v1/rerank"
-
-# Please use the query_template and document_template to format the query and
-# document for better reranker results.
-
-prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
-suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-
-query_template = "{prefix}<Instruct>: {instruction}\n<Query>: {query}\n"
-document_template = "<Document>: {doc}{suffix}"
-
-instruction = (
-    "Given a web search query, retrieve relevant passages that answer the query"
-)
-
-query = "What is the capital of China?"
-
-documents = [
+```bash
+curl http://127.0.0.1:8000/v1/rerank \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{
+  "model": "Qwen/Qwen3-Reranker-0.6B",
+  "query": "What is the capital of China?",
+  "documents": [
     "The capital of China is Beijing.",
-    "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
-]
-
-documents = [
-    document_template.format(doc=doc, suffix=suffix) for doc in documents
-]
-
-response = requests.post(url,
-                         json={
-                             "query": query_template.format(prefix=prefix, instruction=instruction, query=query),
-                             "documents": documents,
-                         }).json()
-
-print(response)
+    "Nanjing is a city of China.",
+    "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
+  ]
+}'
 ```
 
 Expected Result:
@@ -202,25 +225,33 @@ The service returns HTTP 200 OK with a JSON response containing the `relevance_s
     "id": "score-xxx",
     "model": "Qwen/Qwen3-Reranker-0.6B",
     "usage": {
-        "prompt_tokens": 193,
-        "total_tokens": 193
+        "prompt_tokens": 270,
+        "total_tokens": 270
     },
     "results": [
         {
             "index": 0,
             "document": {
-                "text": "<Document>: The capital of China is Beijing.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "text": "The capital of China is Beijing.",
                 "multi_modal": null
             },
-            "relevance_score": 0.9994981288909912
+            "relevance_score": 0.9691112041473389
         },
         {
             "index": 1,
             "document": {
-                "text": "<Document>: Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "text": "Nanjing is a city of China.",
                 "multi_modal": null
             },
-            "relevance_score": 0.00000506485957885161
+            "relevance_score": 0.25337138772010803
+        },
+        {
+            "index": 2,
+            "document": {
+                "text": "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+                "multi_modal": null
+            },
+            "relevance_score": 0.01036941446363926
         }
     ]
 }
