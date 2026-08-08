@@ -76,7 +76,7 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
         use_sequence_parallel_moe=False,
     )
 
-    monkeypatch.setattr(deepseek_v4_module, "FusedMoE", fused_moe)
+    monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
     monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
