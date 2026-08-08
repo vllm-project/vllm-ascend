@@ -1,0 +1,24 @@
+model_name: "BAAI/bge-reranker-v2-m3"
+model_type: "vllm-reranker"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.85
+  trust_remote_code: true
+  runner: "pooling"
+  enforce_eager: true
+
+tasks:
+- name: "basic_score_validation"
+  metrics:
+  - name: "score_positive"
+    value: 0.9998
+  - name: "score_negative"
+    value: 0.00043
+
+num_fewshot: 0
+apply_chat_template: false
+batch_size: "auto"
