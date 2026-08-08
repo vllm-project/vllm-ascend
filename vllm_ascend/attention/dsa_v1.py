@@ -206,6 +206,7 @@ class AscendDSAPrefillMetadata:
     ori_win_left: int | None = None
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
+    fresh_prefill: bool = False
 
 
 @dataclass
@@ -239,6 +240,21 @@ class AscendDSADecodeMetadata:
     ori_win_left: int | None = None
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
+    uniform_query_len: int | None = None
+
+
+def classify_uniform_query_len(query_start_loc_cpu: torch.Tensor) -> int | None:
+    """Return the common positive query length, or ``None`` when mixed."""
+    query_lens = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
+    if not query_lens or query_lens[0] <= 0:
+        return None
+    first = query_lens[0]
+    return first if all(query_len == first for query_len in query_lens) else None
+
+
+def classify_fresh_prefill(seq_lens_cpu: torch.Tensor, query_lens_cpu: torch.Tensor) -> bool:
+    """Classify a prefill batch entirely from host-side metadata."""
+    return seq_lens_cpu.numel() > 0 and torch.equal(seq_lens_cpu, query_lens_cpu)
 
 
 @dataclass
@@ -315,6 +331,7 @@ def build_dspark_swa_indices(
     seq_lens: torch.Tensor,
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
+    blocks_per_phys_block: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
@@ -331,7 +348,13 @@ def build_dspark_swa_indices(
         )
     if query_start_loc is None or seq_lens is None:
         raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
+    if blocks_per_phys_block <= 0 or block_size % blocks_per_phys_block != 0:
+        raise ValueError(
+            "DSpark blocks_per_phys_block must be a positive divisor of block_size: "
+            f"factor={blocks_per_phys_block}, block_size={block_size}."
+        )
 
+    logical_block_size = block_size // blocks_per_phys_block
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     prefix_lens = seq_lens - query_lens
     start_pos = (prefix_lens - int(window_size)).clamp(min=0)
@@ -342,13 +365,15 @@ def build_dspark_swa_indices(
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    block_nums = pos // block_size
+    block_nums = pos // logical_block_size
     # Clamp to valid block-table columns so gather never goes OOB on the
     # out-of-range columns (their results are discarded by col_mask anyway).
     safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
-    block_offsets = pos % block_size
-    block_ids = torch.gather(block_table, 1, safe_nums)
-    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    logical_block_offsets = pos % logical_block_size
+    logical_block_ids = torch.gather(block_table, 1, safe_nums)
+    physical_block_ids = logical_block_ids // blocks_per_phys_block
+    physical_offsets = (logical_block_ids % blocks_per_phys_block) * logical_block_size + logical_block_offsets
+    slot_ids = (physical_block_ids * block_size + physical_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
@@ -579,6 +604,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["sin"] = sin
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
+            if common_attn_metadata._seq_lens_cpu is not None:
+                self.seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+            elif common_attn_metadata.seq_lens_cpu is not None:
+                self.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+            else:
+                self.seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu()
+            self.common_ratio_to_sas_metadata["seq_lens_cpu"] = self.seq_lens_cpu
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -596,6 +628,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
+            self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
             self.query_lens = self.common_ratio_to_sas_metadata["query_lens"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -657,15 +690,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.prefill_ratio_to_sas_metadata.get("prefill_input_positions", None) is None:
             input_positions = common_attn_metadata.positions[: self.num_actual_tokens].long()
             max_query_len = self.query_lens[reqs_start:].max().item()
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-            elif common_attn_metadata.seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            else:
-                _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
-            max_seq_lens = _seq_lens_cpu[reqs_start:].max().item()
+            max_seq_lens = self.seq_lens_cpu[reqs_start:].max().item()
             self.prefill_ratio_to_sas_metadata["input_positions"] = input_positions
             self.prefill_ratio_to_sas_metadata["max_query_len"] = max_query_len
             self.prefill_ratio_to_sas_metadata["max_seq_lens"] = max_seq_lens
@@ -707,6 +732,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     reqs_start + num_prefills_actual : reqs_start + num_prefill,
                     ...,
                 ].fill_(0)
+
+        prefill_query_lens_cpu = self.query_lens[reqs_start : reqs_start + num_prefills_actual]
+        prefill_seq_lens_cpu = self.seq_lens_cpu[reqs_start : reqs_start + num_prefills_actual]
+        fresh_prefill = classify_fresh_prefill(prefill_seq_lens_cpu, prefill_query_lens_cpu)
 
         layer_name = f"c{self.compressor_ratio}"
         full_compress_cos, full_compress_sin = None, None
@@ -812,7 +841,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
+            self.prefill_ratio_to_sas_metadata["qli"] = DeviceOperator.get_dsa_qli_metadata_op()(
                 actual_seq_lengths_query=prefill_query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[reqs_start:].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -857,6 +886,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=qli_metadata,
             cu_c4_cmp_seqlen_list=cu_c4_cmp_seqlen_list,
             cu_c128_cmp_seqlen_list=cu_c128_cmp_seqlen_list,
+            fresh_prefill=fresh_prefill,
         )
 
     def build_decode_metadata(
@@ -877,14 +907,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: self.num_decodes + 1]
 
-            # Prefer _seq_lens_cpu (always available, updated during draft
-            # iterations) over seq_lens_cpu (None in async spec decode mode).
-            if common_attn_metadata._seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-            elif common_attn_metadata.seq_lens_cpu is not None:
-                _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            else:
-                _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            _seq_lens_cpu = self.seq_lens_cpu
             max_seq_lens = _seq_lens_cpu[: self.num_decodes].max().item()
             seq_lens_list = _seq_lens_cpu[: self.num_decodes].tolist()
             self.decode_ratio_to_sas_metadata["query_start_loc_cpu"] = query_start_loc_cpu
@@ -895,6 +918,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
             self.decode_ratio_to_sas_metadata["max_seqlen_kv"] = max_seqlen_kv
             self.decode_ratio_to_sas_metadata["max_seqlen_q"] = max_seqlen_q
+            uniform_query_len = classify_uniform_query_len(query_start_loc_cpu)
+            self.decode_ratio_to_sas_metadata["uniform_query_len"] = uniform_query_len
 
             seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
             start_pos_decode = self.seq_lens[: self.num_decodes] - seq_lens_q
@@ -909,6 +934,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens_list = self.decode_ratio_to_sas_metadata["seq_lens_list"]
             max_seqlen_kv = self.decode_ratio_to_sas_metadata["max_seqlen_kv"]
             max_seqlen_q = self.decode_ratio_to_sas_metadata["max_seqlen_q"]
+            uniform_query_len = self.decode_ratio_to_sas_metadata["uniform_query_len"]
             start_pos_decode = self.decode_ratio_to_sas_metadata["start_pos_decode"]
 
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_DECODE)
@@ -1043,7 +1069,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
         if self.decode_ratio_to_sas_metadata.get("qli") is None:
-            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
+            self.decode_ratio_to_sas_metadata["qli"] = DeviceOperator.get_dsa_qli_metadata_op()(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[: self.num_decodes].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1088,6 +1114,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_reqs_actual=num_decodes_actual,
             sas_metadata=self.decode_sas_metadata,
             qli_metadata=self.decode_qli_metadata,
+            uniform_query_len=uniform_query_len,
         )
         return decode_metadata
 
@@ -1275,6 +1302,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         block_table = common_attn_metadata.block_table_tensor
         if not common_attn_metadata.causal:
             assert num_decodes is not None
+            blocks_per_phys_block = 1
+            if get_ascend_device_type() == AscendDeviceType._310P:
+                from vllm_ascend._310p.attention.dense_dsa import (
+                    infer_blocks_per_phys_block_from_shape,
+                )
+
+                blocks_per_phys_block = infer_blocks_per_phys_block_from_shape(
+                    block_table[:num_decodes],
+                    self.block_size,
+                    self.vllm_config.model_config.max_model_len,
+                )
             dspark_swa_indices, _ = build_dspark_swa_indices(
                 block_table[:num_decodes],
                 self.speculative_config.num_speculative_tokens,
@@ -1283,6 +1321,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc[: num_decodes + 1],
                 seq_lens[:num_decodes],
                 num_decode_tokens,
+                blocks_per_phys_block=blocks_per_phys_block,
             )
             dspark_swa_indices = dspark_swa_indices[:num_decode_tokens_typed]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
@@ -1679,7 +1718,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...] | None,
-        attn_metadata: DSAMetadataList,
+        attn_metadata: DSAMetadataList | None,
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:

@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import ctypes
 import gc
 
 import psutil
@@ -24,20 +25,84 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
+from vllm_ascend._310p.deepseek_v4 import (
+    DSV4_OP_TIMEOUT_SECONDS,
+    is_deepseek_v4_model,
+)
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
+    def _uses_dsv4_310p_path(self) -> bool:
+        return is_deepseek_v4_model(self.vllm_config.model_config)
+
+    def _set_dsv4_op_timeout(self) -> None:
+        if not self._uses_dsv4_310p_path():
+            return
+
+        ascendcl = ctypes.CDLL("libascendcl.so")
+        set_timeout = ascendcl.aclrtSetOpExecuteTimeOut
+        set_timeout.argtypes = [ctypes.c_uint32]
+        set_timeout.restype = ctypes.c_int
+        result = int(set_timeout(DSV4_OP_TIMEOUT_SECONDS))
+        if result != 0:
+            raise RuntimeError(f"aclrtSetOpExecuteTimeOut({DSV4_OP_TIMEOUT_SECONDS}) failed with error {result}.")
+        logger.info_once(
+            "Set Ascend op execution timeout to %d seconds for DeepSeek V4 weight conversion.",
+            DSV4_OP_TIMEOUT_SECONDS,
+            scope="local",
+        )
+
+    def _prewarm_dsv4_hccl_groups(self) -> None:
+        """Initialize lazy HCCL communicators before converted experts fill HBM."""
+        if not self._uses_dsv4_310p_path():
+            return
+
+        from vllm.distributed import get_ep_group, get_tp_group
+
+        probe = torch.zeros(1, dtype=torch.float16, device=self.device)
+        warmed: set[str] = set()
+        for name, group in (("tp", get_tp_group()), ("ep", get_ep_group())):
+            unique_name = getattr(group, "unique_name", name)
+            if unique_name in warmed or group.world_size <= 1:
+                continue
+            group.all_reduce(probe)
+            warmed.add(unique_name)
+        torch.npu.synchronize()
+        logger.info_once(
+            "Preinitialized TP/EP HCCL communicators before DeepSeek V4 expert conversion.",
+            scope="local",
+        )
+
     def init_device(self):
         self.device = self._init_device()
         torch_npu.npu.set_compile_mode(jit_compile=False)
+
+        self._set_dsv4_op_timeout()
+        self._prewarm_dsv4_hccl_groups()
 
         init_workspace_manager(self.device, num_ubatches=1)
 
         self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
         logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+
+    def load_model(self) -> None:
+        super().load_model()
+        if self._uses_dsv4_310p_path():
+            # Eager conversion or preconverted loading replaces the initial
+            # checkpoint-facing Parameter storage.
+            # Release the now-unreferenced packed buffers from the caching
+            # allocator before KV cache allocation and the first request.
+            gc.collect()
+            torch.npu.empty_cache()
+            free_memory, _ = torch.npu.mem_get_info()
+            logger.info_once(
+                "Released stale packed-expert allocator blocks after W8A8 conversion; %.2f GiB device memory is free.",
+                free_memory / GiB_bytes,
+                scope="local",
+            )
 
     def save_sharded_state(
         self,
@@ -70,6 +135,18 @@ class NPUWorker310(NPUWorker):
         bytes.
         """
         GiB = lambda b: b / GiB_bytes
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            self.model_runner.profile_run()
+            kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(kv_cache_memory_bytes)
+            self.available_kv_cache_memory_bytes = int(kv_cache_memory_bytes)
+            logger.info_once(
+                "Using %.2f GiB KV cache memory as explicitly configured after model warmup; "
+                "skipping only 310P memory accounting.",
+                GiB(kv_cache_memory_bytes),
+                scope="local",
+            )
+            return int(kv_cache_memory_bytes)
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(

@@ -24,10 +24,27 @@
 
 import torch
 import torch_npu
-from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEAllGatherCombineMetadata, MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput, TokenDispatcherWithAllGather
+
+
+def remap_global_expert_ids_310(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map global expert IDs to local slots for the 310P routing operator.
+
+    The CANN 310P ``npu_moe_init_routing_v2`` implementation requires
+    ``expert_num`` to be the local expert count and ignores
+    ``active_expert_range`` when global IDs are supplied.  Non-local routes are
+    mapped to slot zero only to keep the fixed expanded shape; their combine
+    weights are masked to zero, so their computed values never contribute.
+    """
+    mapped = expert_map[topk_ids]
+    local_mask = mapped >= 0
+    local_ids = torch.where(local_mask, mapped, torch.zeros_like(mapped))
+    return local_ids.to(topk_ids.dtype), local_mask
 
 
 class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
@@ -52,24 +69,21 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
-            mask = expert_map[topk_ids] != -1
+            routing_topk_ids, mask = remap_global_expert_ids_310(topk_ids, expert_map)
             topk_weights = topk_weights * mask
-            first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
-            last_expert_idx = first_expert_idx + self.num_experts_local
         else:
-            first_expert_idx = 0
-            last_expert_idx = self.num_experts_local
+            routing_topk_ids = topk_ids
 
         assert hidden_states.shape[-1] % 16 == 0, (
             f"The last dim of hidden_states {hidden_states.shape[-1]} should be aligned with 16."
         )
         sorted_hidden_states, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
             hidden_states,
-            topk_ids,
+            routing_topk_ids,
             active_num=num_tokens * self.top_k,
             expert_num=self.num_experts_local,
             drop_pad_mode=0,
-            active_expert_range=[first_expert_idx, last_expert_idx],
+            active_expert_range=[0, self.num_experts_local],
             quant_mode=-1,
             row_idx_type=0,
         )

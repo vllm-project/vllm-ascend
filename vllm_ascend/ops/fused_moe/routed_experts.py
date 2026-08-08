@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_ep_group
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -40,7 +41,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -198,6 +199,21 @@ class EplbExpertTensorList(list[torch.Tensor]):
         return NotImplemented
 
 
+def sync_live_ep_rank(moe_config: FusedMoEConfig, ep_rank: int) -> None:
+    """Refresh rank fields that may be stale after rfork worker creation."""
+    moe_config.moe_parallel_config.ep_rank = int(ep_rank)
+
+
+def resolve_live_ep_rank() -> int:
+    """Resolve the current worker EP rank without cached coordinator fields."""
+    ep_group = get_ep_group()
+    global_rank = int(torch.distributed.get_rank())
+    try:
+        return tuple(int(rank) for rank in ep_group.ranks).index(global_rank)
+    except (AttributeError, ValueError):
+        return int(torch.distributed.get_rank(group=ep_group.device_group))
+
+
 class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     """Ascend-owned routed expert container.
 
@@ -292,6 +308,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         return flattened_weights
 
     def init_eplb(self, n_shared_experts):
+        if is_310p():
+            # The 310P rfork parent can construct every FusedMoEConfig with
+            # EP rank 0. Worker-local distributed groups are authoritative.
+            cached_ep_rank = int(get_ep_group().rank_in_group)
+            live_ep_rank = resolve_live_ep_rank()
+            sync_live_ep_rank(self.moe_config, live_ep_rank)
+            logger.info_once(
+                "Resolved 310P worker-local EP rank: cached=%d, live=%d, global=%d.",
+                cached_ep_rank,
+                live_ep_rank,
+                int(torch.distributed.get_rank()),
+                scope="local",
+            )
+
         # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
         AscendRoutedExperts.moe_counter += 1
         self.moe_instance_id = AscendRoutedExperts.moe_counter
@@ -419,7 +449,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     @property
     def ep_rank(self) -> int:
-        return self.moe_config.ep_rank
+        return resolve_live_ep_rank() if is_310p() else self.moe_config.ep_rank
 
     def clear_moe_load(self) -> None:
         assert self.moe_load is not None
