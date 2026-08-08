@@ -970,7 +970,7 @@ def init_ascend_config(vllm_config):
 
     # Keys that must NOT flow from additional_config into AscendConfig.
     # These are stripped so that only user-configurable keys reach pydantic,
-    # where extra="forbid" can catch typos (e.g. enable_cpu_bindng).
+    # where extra="forbid" can reject unknown options.
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",

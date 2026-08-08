@@ -605,7 +605,7 @@ class TestSparseKVOffloadConfig(TestBase):
 
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):
-            SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"enabeld": False})
+            SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"unknown_option": False})
 
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "sparse_kv_offload_config must be a dict"):
@@ -641,14 +641,12 @@ class TestSchedulerConfig(TestBase):
 
     def test_unknown_nested_scheduler_key_is_rejected(self):
         with self.assertRaises(ValueError):
-            SchedulerConfig.from_additional_config(
-                {"scheduler_config": {"short_request_first_confgi": {"enabled": True}}}
-            )
+            SchedulerConfig.from_additional_config({"scheduler_config": {"unknown_option": {"enabled": True}}})
 
     def test_unknown_profiling_chunk_key_is_rejected(self):
         with self.assertRaises(ValueError):
             SchedulerConfig.from_additional_config(
-                {"scheduler_config": {"profiling_chunk_config": {"need_timng": False}}}
+                {"scheduler_config": {"profiling_chunk_config": {"unknown_option": False}}}
             )
 
     def test_unknown_batch_job_key_is_rejected(self):
@@ -1031,6 +1029,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # filtered by __pydantic_fields__ which stripped typos silently; now
         # only _NON_USER_INPUT_KEYS is stripped, so typos reach pydantic and are rejected.
         vc = VllmConfig()
-        vc.additional_config = {"enable_cpu_bindng": True}  # typo: bindng
+        vc.additional_config = {"unknown_option": True}
         with self.assertRaises(ValueError):
             init_ascend_config(vc)
