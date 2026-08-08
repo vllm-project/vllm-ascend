@@ -120,7 +120,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     vllm serve Qwen/Qwen3-Reranker-0.6B \
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
         --runner pooling \
-        --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
+        --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
         --port 8000 \
         --max-model-len 1024
     ```
@@ -132,7 +132,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     vllm serve Qwen/Qwen3-Reranker-0.6B \
         --served-model-name Qwen/Qwen3-Reranker-0.6B \
         --runner pooling \
-        --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
+        --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
         --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
         --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
         --dtype float16 \
@@ -256,7 +256,7 @@ Here are two accuracy evaluation methods.
                                     dtype="float16",
                                     enforce_eager=True,
                                     max_model_len=10240,
-                                    hf_overrides={"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": True})
+                                    hf_overrides={"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": True})
 
         cache = mteb.ResultCache("/home/data/mteb_data")
         tasks = mteb.get_tasks(
