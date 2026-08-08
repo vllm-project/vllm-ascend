@@ -21,13 +21,12 @@ plugin so loading a K3 checkpoint never depends on executing model code from
 the checkpoint repository.
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 from transformers.configuration_utils import PretrainedConfig
 from vllm.logger import logger
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
-K3_DSPARK_BLOCK_SIZE = 7
 K3_DSPARK_HIDDEN_ACT = "silu"
 K3_DSPARK_MAX_POSITION_EMBEDDINGS = 32768
 K3_DSPARK_USE_MLA_ROPE = True
@@ -67,11 +66,11 @@ class K3DSparkConfig(PretrainedConfig):
     """Configuration contract for Kimi K3 MLA DSpark checkpoints."""
 
     model_type = "k3_dspark"
+    has_no_defaults_at_init: ClassVar[bool] = True
 
-    # These defaults are part of the released draft architecture. Keeping
-    # them on the concrete config class preserves direct attribute access even
-    # when older checkpoints omit the corresponding serialized fields.
-    block_size: int = K3_DSPARK_BLOCK_SIZE
+    # This default is part of the released draft architecture. Keeping it on
+    # the concrete config class preserves direct attribute access when older
+    # checkpoints omit the corresponding serialized field.
     max_position_embeddings: int = K3_DSPARK_MAX_POSITION_EMBEDDINGS
 
     hidden_size: int

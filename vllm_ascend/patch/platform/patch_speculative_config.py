@@ -177,18 +177,6 @@ def _dspark_post_init(self):
         # gqa backend dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
-        architectures = getattr(draft_hf_config, "architectures", ()) or ()
-        if getattr(draft_hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures:
-            block_size = getattr(draft_hf_config, "block_size", None)
-            if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size <= 0:
-                raise ValueError("Qwen3/GQA DSpark requires a positive integer block_size in the draft config.")
-            if self.num_speculative_tokens != block_size:
-                raise ValueError(
-                    "Qwen3/GQA DSpark requires num_speculative_tokens to match "
-                    f"the trained block_size ({block_size}); got "
-                    f"{self.num_speculative_tokens}."
-                )
-
         # Upstream DSpark normalization rewrites the config's model_type and
         # architecture in place. The concrete config class remains intact, so
         # restore K3 from that explicit type contract instead of probing for
@@ -197,12 +185,6 @@ def _dspark_post_init(self):
             draft_hf_config.model_type = K3DSparkConfig.model_type
             draft_hf_config.architectures = ["K3DSparkModel"]
             self.update_arch_()
-            if self.num_speculative_tokens != draft_hf_config.block_size:
-                raise ValueError(
-                    "K3 dspark requires num_speculative_tokens to match the "
-                    f"trained block_size ({draft_hf_config.block_size}); got "
-                    f"{self.num_speculative_tokens}."
-                )
 
 
 SpeculativeConfig.hf_config_override = hf_config_override

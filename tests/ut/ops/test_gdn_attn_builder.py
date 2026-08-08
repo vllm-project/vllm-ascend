@@ -732,7 +732,36 @@ def test_full_graph_k7_dummy_row_has_zero_length_and_valid_accepted_sentinel():
     )
 
 
-def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
+@pytest.mark.parametrize(
+    ("replay_batch", "replay_num_accepted_tokens", "replay_num_decode_draft_tokens"),
+    [
+        pytest.param(
+            BatchSpec(
+                seq_lens=[1, 1, 0, 0],
+                query_lens=[1, 1, 0, 0],
+                name="full_graph_non_spec_decode_replay",
+            ),
+            torch.ones(4, dtype=torch.int32),
+            torch.full((4,), -1, dtype=torch.int32),
+            id="non_spec_decode",
+        ),
+        pytest.param(
+            BatchSpec(
+                seq_lens=[8, 8, 0, 0],
+                query_lens=[8, 8, 0, 0],
+                name="full_graph_dummy_prefill_replay",
+            ),
+            None,
+            None,
+            id="dummy_prefill",
+        ),
+    ],
+)
+def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(
+    replay_batch: BatchSpec,
+    replay_num_accepted_tokens: torch.Tensor | None,
+    replay_num_decode_draft_tokens: torch.Tensor | None,
+):
     capture_batch = BatchSpec(
         seq_lens=[4, 4],
         query_lens=[4, 4],
@@ -766,11 +795,6 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) > 0
     assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) > 0
 
-    replay_batch = BatchSpec(
-        seq_lens=[1, 1, 0, 0],
-        query_lens=[1, 1, 0, 0],
-        name="full_graph_replay_without_spec",
-    )
     replay_common_metadata = create_common_attn_metadata(
         batch_spec=replay_batch,
         block_size=16,
@@ -779,8 +803,8 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
     replay_metadata = builder.build(
         0,
         replay_common_metadata,
-        num_accepted_tokens=torch.ones(4, dtype=torch.int32),
-        num_decode_draft_tokens_cpu=torch.full((4,), -1, dtype=torch.int32),
+        num_accepted_tokens=replay_num_accepted_tokens,
+        num_decode_draft_tokens_cpu=replay_num_decode_draft_tokens,
     )
 
     assert replay_metadata.spec_sequence_masks is None
@@ -831,6 +855,8 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
     builder.non_spec_state_indices_tensor.fill_(77)
     builder.non_spec_query_start_loc.fill_(77)
     builder.non_spec_actual_seq_lengths.fill_(77)
+    if num_speculative_tokens == 0:
+        builder.spec_state_indices_tensor.fill_(77)
 
     attn_metadata = builder.build(
         0,
@@ -851,6 +877,10 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
             dtype=torch.int32,
         ),
     )
+    if num_speculative_tokens == 0:
+        # A model without speculative decoding must not enter the captured
+        # spec-task reset path. Its real non-spec decode above remains live.
+        assert torch.all(builder.spec_state_indices_tensor == 77)
     decode_metadata = attn_metadata.non_spec_decode_metadata
     conv1d_metadata = decode_metadata.causal_conv1d
     assert conv1d_metadata.query_start_loc.data_ptr() == attn_metadata.non_spec_query_start_loc.data_ptr()

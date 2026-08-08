@@ -712,6 +712,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_indices,
             )
 
+        # A FULL graph may retain a captured speculative conv/recurrent task
+        # even when the current replay contains only non-spec prefill work.
+        # Refresh its stable inputs for every no-spec replay, not only for the
+        # pure non-spec decode branch below. Otherwise a DP idle dummy can
+        # replay the preceding request's state indices and mutate live Mamba
+        # checkpoints after that request has finished.
+        if self.use_full_cuda_graph and self.use_spec_decode and num_spec_decodes == 0:
+            self._reset_spec_decode_graph_inputs(m.num_reqs)
+
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
         prefill_query_start_loc: torch.Tensor | None = None
@@ -837,8 +846,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
             graph_batch_size = m.num_reqs
-            if self.use_spec_decode:
-                self._reset_spec_decode_graph_inputs(graph_batch_size)
             (
                 non_spec_state_indices_tensor,
                 non_spec_query_start_loc,
