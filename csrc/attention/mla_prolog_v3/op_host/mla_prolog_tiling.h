@@ -454,7 +454,7 @@ private:
     ge::DataType mmDateType_ = ge::DT_BF16;
     bool enableDequantOpt_ = false;
     bool enableGroupComputeOpt_ = false; // 低延时场景算例分组标记
-    bool enableRope_ = true;             // rope开关，仅 MlaPrologV3 在 DAV_3510 生效
+    bool enableRope_ = true;             // rope开关，MlaPrologV3 在 A2/A3/A5 均可关（rope null 推断）
 
     size_t ubSize_ = 0;
     size_t l1Size_ = 0;
