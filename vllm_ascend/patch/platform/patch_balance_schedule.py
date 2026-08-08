@@ -78,13 +78,24 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import SchedulerConfig, init_ascend_config
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
+    # AscendConfig is normally initialized by platform configuration, but this
+    # hook can run earlier in a freshly spawned Engine Core process. Parse only
+    # the scheduler sub-config in that startup window: deciding which process
+    # class to construct must not initialize the complete AscendConfig singleton.
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        return bool(get_ascend_config().scheduler_config.enable_balance_scheduling)
+    except RuntimeError:
+        pass
     if vllm_config is None:
         return False
-    return init_ascend_config(vllm_config).scheduler_config.enable_balance_scheduling
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    return SchedulerConfig.from_additional_config(additional_config).enable_balance_scheduling
 
 
 class BalanceScheduler(Scheduler):
