@@ -243,6 +243,46 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
 
+    def test_get_dispatch_mc2_kwargs_accepts_512_experts_including_eplb_redundancy(self):
+        self.dispatcher.need_comm_alg = True
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(1, 128),
+            topk_weights=torch.randn(1, 1),
+            topk_ids=torch.zeros((1, 1), dtype=torch.int64),
+            expert_map=torch.arange(480, dtype=torch.int32),
+            global_redundant_expert_num=32,
+        )
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertEqual(kwargs["moe_expert_num"], 512)
+
+    def test_get_dispatch_mc2_kwargs_rejects_more_than_512_experts_including_eplb_redundancy(self):
+        self.dispatcher.need_comm_alg = True
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(1, 128),
+            topk_weights=torch.randn(1, 1),
+            topk_ids=torch.zeros((1, 1), dtype=torch.int64),
+            expert_map=torch.arange(480, dtype=torch.int32),
+            global_redundant_expert_num=33,
+        )
+
+        with self.assertRaisesRegex(ValueError, "513.*including EPLB redundancy"):
+            self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+    def test_get_dispatch_mc2_kwargs_does_not_apply_hierarchy_limit_when_disabled(self):
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(1, 128),
+            topk_weights=torch.randn(1, 1),
+            topk_ids=torch.zeros((1, 1), dtype=torch.int64),
+            expert_map=torch.arange(480, dtype=torch.int32),
+            global_redundant_expert_num=33,
+        )
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertEqual(kwargs["moe_expert_num"], 513)
+
     def test_token_permutation_dispatch(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)

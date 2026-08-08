@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import MAX_MC2_HIERARCHY_COMM_EXPERTS, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
@@ -183,6 +183,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
+        if self.need_comm_alg and self.moe_expert_num > MAX_MC2_HIERARCHY_COMM_EXPERTS:
+            raise ValueError(
+                "enable_mc2_hierarchy_comm supports at most "
+                f"{MAX_MC2_HIERARCHY_COMM_EXPERTS} experts, but got {self.moe_expert_num} effective experts "
+                "including EPLB redundancy "
+                f"({len(expert_map)} expert map entries + {global_redundant_expert_num} redundant experts)."
+            )
         expert_token_nums_type = _get_expert_token_nums_type(token_dispatch_input)
         kwargs_mc2 = {
             "x": hidden_states,

@@ -446,6 +446,74 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.assert_called_once_with(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch("os.environ", {})
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_rejects_mc2_hierarchy_comm_on_a5(
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
+    ):
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.enable_mc2_hierarchy_comm = True
+        mock_init_ascend.return_value = ascend_config
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.get_num_experts.return_value = 512
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+
+        with pytest.raises(NotImplementedError, match="only supported on A2 and A3"):
+            platform.NPUPlatform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("os.environ", {})
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_rejects_mc2_hierarchy_comm_above_512_experts(
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
+    ):
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.enable_mc2_hierarchy_comm = True
+        mock_init_ascend.return_value = ascend_config
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.get_num_experts.return_value = 513
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+
+        with pytest.raises(ValueError, match="at most 512 experts"):
+            platform.NPUPlatform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch("os.environ", {})
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_accepts_mc2_hierarchy_comm_with_512_experts_on_a2_and_a3(
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
+    ):
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
+            with self.subTest(device_type=device_type):
+                mock_soc_version.return_value = device_type
+                ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+                ascend_config.enable_mc2_hierarchy_comm = True
+                mock_init_ascend.return_value = ascend_config
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.model_config.get_num_experts.return_value = 512
+
+                platform.NPUPlatform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
