@@ -16,22 +16,32 @@ set(CMAKE_SKIP_RPATH TRUE)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../../cmake/intf.cmake)
 
 set(ATTENTION_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../../attention)
+file(GLOB ARCH35_CHECKER_SRC_FILES
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/checkers/*checker*.cpp
+)
 set(src_files
   ${ATTENTION_SRC}/common/op_host/fia_tiling_info.cpp
-  ${ATTENTION_SRC}/common/op_host/arch32/fia_tiling_nonquant_mla.cpp
-  ${ATTENTION_SRC}/common/op_host/arch32/fia_tiling_nonquant.cpp
-  ${ATTENTION_SRC}/common/op_host/arch32/fia_tiling_empty_tensor.cpp
+  ${ATTENTION_SRC}/common/op_host/arch22/fia_tiling_nonquant_mla.cpp
+  ${ATTENTION_SRC}/common/op_host/arch22/fia_tiling_nonquant.cpp
+  ${ATTENTION_SRC}/common/op_host/arch22/fia_tiling_empty_tensor.cpp
   ${ATTENTION_SRC}/common/op_host/fia_tiling_shape.cpp
   ${ATTENTION_SRC}/common/op_host/split_core.cpp
+  ${ATTENTION_SRC}/common/op_host/split_core_v2.cpp
   ${ATTENTION_SRC}/fused_infer_attention_score/op_host/fused_infer_attention_score_tiling.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_check.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_check_single_para.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_check_existence.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_check_feature.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_check_consistency.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_info_parser.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch32/fused_infer_attention_score_tiling_v3.cpp
-  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch35/fused_infer_attention_score_tiling_v2.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/fused_infer_attention_score_tiling_info_parser.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch22/fused_infer_attention_score_tiling_check.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch22/fused_infer_attention_score_tiling_check_single_para.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch22/fused_infer_attention_score_tiling_check_existence.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch22/fused_infer_attention_score_tiling_check_feature.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch22/fused_infer_attention_score_tiling_check_consistency.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch22/fused_infer_attention_score_tiling_v3.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch35/fused_infer_attention_score_tiling_v4.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch35/fused_infer_attention_score_tiling_impl.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fused_infer_attention_score_tiling_arch38.cpp
+  ${ATTENTION_SRC}/common/op_host/arch35/fia_tiling_nonquant_gqa.cpp
+  ${ATTENTION_SRC}/common/op_host/arch35/fia_tiling_fullquant_mx.cpp
+  ${ATTENTION_SRC}/common/op_host/arch35/fia_tiling_fullquant_gqa.cpp
+  ${ARCH35_CHECKER_SRC_FILES}
   ${ATTENTION_SRC}/prompt_flash_attention/op_host/prompt_flash_attention_tiling.cpp
   ${ATTENTION_SRC}/prompt_flash_attention/op_host/prompt_flash_attention_tiling_v2.cpp
   ${ATTENTION_SRC}/incre_flash_attention/op_host/incre_flash_attention_tiling.cpp
@@ -84,6 +94,8 @@ if (BUILD_OPEN_PROJECT)
   target_include_directories(opmaster PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/include
     ${ASCEND_CANN_PACKAGE_PATH}/include/base
+    ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include
+    ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include/op_common
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/op_common
     ${ASCEND_CANN_PACKAGE_PATH}/include/aicpu
@@ -158,6 +170,7 @@ endif ()
 
 target_compile_definitions(opmaster PRIVATE
   _FORTIFY_SOURCE=2
+  LOG_CPP
   google=ascend_private
   DEVICE_OP_TILING_LIB
   BUILT_IN_TILING_SINK
@@ -169,6 +182,7 @@ target_compile_definitions(opmaster PRIVATE
 )
 
 target_compile_options(opmaster PRIVATE
+  -include${CMAKE_CURRENT_SOURCE_DIR}/../../include/cann_compat.h
   -O2
   -fstack-protector-all
   -fvisibility-inlines-hidden
