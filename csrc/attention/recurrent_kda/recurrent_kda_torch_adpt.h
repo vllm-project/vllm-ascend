@@ -67,8 +67,8 @@ at::Tensor recurrent_kda(
                 "recurrent_kda: token and head dimensions must be positive.");
     TORCH_CHECK(hv % h == 0,
                 "recurrent_kda: HV must be divisible by H.");
-    TORCH_CHECK(k_dim == 128 && v_dim == 128,
-                "recurrent_kda: the Kimi K3 integration requires K=V=128.");
+    TORCH_CHECK(k_dim == 128 && (v_dim == 128 || v_dim == 256),
+                "recurrent_kda: the Kimi K3 integration requires K=128 and V=128 or 256.");
     TORCH_CHECK((is_tnd && value.size(0) == total_tokens && gate.size(0) == total_tokens &&
                  beta.size(0) == total_tokens && gate.size(1) == hv && gate.size(2) == k_dim &&
                  beta.size(1) == hv) ||
@@ -119,7 +119,10 @@ at::Tensor recurrent_kda(
     const at::Tensor& accepted = c10::value_or_else(
         num_accepted_tokens, [] { return at::Tensor(); });
     const char* layout = is_tnd ? "TND" : "BSND";
-    bool output_final_state = true;
+    // vLLM consumes the cache mutation through initial_state and returns only
+    // the attention output. Avoid materializing a second full state tensor.
+    bool output_final_state = false;
+    bool inplace_final_state = true;
     bool state_v_first = true;
     EXEC_NPU_CMD(
         aclnnRecurrentKda,
@@ -137,6 +140,7 @@ at::Tensor recurrent_kda(
         layout,
         scale,
         output_final_state,
+        inplace_final_state,
         use_qk_l2norm_in_kernel,
         use_gate_in_kernel,
         use_beta_sigmoid_in_kernel,
@@ -144,7 +148,8 @@ at::Tensor recurrent_kda(
         safe_gate,
         lower_bound,
         state_v_first,
-        output);
+        output,
+        final_state);
     return output;
 }
 

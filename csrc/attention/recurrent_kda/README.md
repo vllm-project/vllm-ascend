@@ -32,7 +32,7 @@ out = torch.ops._C_ascend.recurrent_kda(
     - `safe_gate=False`：`gate = -exp(A_log) * softplus(g + dt_bias)`。
     - `safe_gate=True`：`gate = lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`。
 - `use_beta_sigmoid_in_kernel=True` 时，kernel 使用 `sigmoid(beta)`；若 `allow_neg_eigval=True`，再乘 2。
-- `_C_ascend`/aclnn 入口支持非连续 state，并通过临时连续 tensor 回写原 view。
+- `_C_ascend`/aclnn 入口保留非连续 state 的 storage、stride 和 offset，kernel 按真实 stride 直接读写；仅允许 slot/head 外层维存在间隔，内部二维 state 矩阵必须行主序稠密。
 
 每个 token 的 recurrent 更新为：
 
@@ -52,5 +52,5 @@ o_t = S @ (q_t * scale)
   末项不得超过输入 token capacity，各相邻差值必须不超过 8。末项小于 capacity 时，仅有效 token
   对应的输出和 state 更新有定义，padding tail 输出不作保证。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
-- 仅支持 `state_v_first=True`，state layout 为 `[state_capacity,HV,V,K]`；底层 aclnn 接口要求显式传入可变 state。
-- `HV` 必须能被 `H` 整除；`H/HV <= 256`。底层 kernel 支持 `K=128,V=128/256`，当前 Kimi K3 torch 入口收窄为 `K=V=128`。
+- Kimi K3 Torch 入口固定 `state_v_first=True`，state layout 为 `[state_capacity,HV,V,K]`；底层 aclnn/kernel 同时支持 V-first 和 `[state_capacity,HV,K,V]` 的 K-first 布局。
+- `HV` 必须能被 `H` 整除；`H/HV <= 256`。底层 kernel 与 Kimi K3 Torch 入口均支持 `K=128,V=128/256`。
