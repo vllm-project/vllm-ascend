@@ -448,7 +448,7 @@ Parameter descriptions:
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_USE_V1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
+        export ASCEND_ENABLE_USE_FABRIC_MEM=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -524,7 +524,7 @@ Parameter descriptions:
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_USE_V1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
+        export ASCEND_ENABLE_USE_FABRIC_MEM=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -600,7 +600,7 @@ Parameter descriptions:
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_USE_V1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
+        export ASCEND_ENABLE_USE_FABRIC_MEM=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
@@ -674,7 +674,7 @@ Parameter descriptions:
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_USE_V1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export ASCEND_BUFFER_POOL=4:8
+        export ASCEND_ENABLE_USE_FABRIC_MEM=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \

@@ -66,7 +66,7 @@ env_common: &env_common
   PYTHONHASHSEED: "0"
   ASCEND_CONNECT_TIMEOUT: "10000"
   ASCEND_TRANSFER_TIMEOUT: "10000"
-  ASCEND_BUFFER_POOL: "4:8"
+  HCCL_INTRA_ROCE_ENABLE: "1"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
 
 env_prefill: &env_prefill
