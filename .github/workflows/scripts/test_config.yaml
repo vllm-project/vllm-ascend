@@ -255,7 +255,9 @@
     - vllm_ascend/distributed/weight_transfer
   tests:
     - tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py
+    - tests/e2e/pull_request/one_card/lora/test_rl_lora_ipc_weight_transfer.py
     - tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py
+    - tests/e2e/pull_request/two_card/lora/test_rl_lora_hccl_weight_transfer.py
 
 # KV Offload
 - name: kv_offload
@@ -786,6 +788,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 340
   tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 190
+  tests/e2e/pull_request/one_card/lora/test_rl_lora_ipc_weight_transfer.py: 600
   tests/e2e/pull_request/one_card/test_qwen3_0_6b.py: 220
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 330
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 410
@@ -819,6 +822,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 400
   tests/e2e/pull_request/two_card/test_sp_pass.py: 260
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 110
+  tests/e2e/pull_request/two_card/lora/test_rl_lora_hccl_weight_transfer.py: 600
   tests/e2e/pull_request/two_card/test_xlite.py: 360
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 410
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 510
