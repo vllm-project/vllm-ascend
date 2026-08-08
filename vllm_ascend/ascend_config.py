@@ -325,10 +325,11 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
         if self.enable_shared_expert_dp:
-            assert enable_sp(vllm_config=vc, enable_shared_expert_dp=True)
+            sp_enabled = enable_sp(vllm_config=vc, enable_shared_expert_dp=True, ascend_config=self)
+            assert sp_enabled
 
         # FLASHCOMM1 max_num_batched_tokens divisibility writeback
-        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
+        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc, ascend_config=self):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
             if vc.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
                 vc.scheduler_config.max_num_batched_tokens = (
@@ -1020,6 +1021,12 @@ def init_ascend_config(vllm_config):
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
+        # Publish the fully validated singleton before invalidating derived
+        # process caches. The next runtime read rebuilds them from new_config;
+        # failed construction leaves the previous singleton/cache untouched.
+        from vllm_ascend.utils import clear_enable_sp
+
+        clear_enable_sp()
     else:
         logger.warning("Ascend config instance is not fully initialized. action: skip singleton cache update. ")
     return new_config

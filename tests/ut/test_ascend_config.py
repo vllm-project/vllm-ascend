@@ -438,13 +438,22 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_sp_falls_back_to_env_without_current_config(self, mock_check_and_update_config):
+    def test_enable_sp_requires_initialized_typed_config(self, mock_check_and_update_config):
         clear_enable_sp()
-        with (
-            patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}),
-            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError),
-        ):
-            self.assertTrue(enable_sp())
+        with self.assertRaises(RuntimeError):
+            enable_sp()
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_sp_does_not_reread_raw_additional_config(self, mock_check_and_update_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_flashcomm1": "false"}
+        init_ascend_config(test_vllm_config)
+
+        test_vllm_config.additional_config["enable_flashcomm1"] = True
+        clear_enable_sp()
+
+        self.assertFalse(enable_sp(test_vllm_config))
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -506,17 +515,21 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_recreates_for_new_vllm_config(self, mock_fix_incompatible_config):
         first_vllm_config = VllmConfig()
         first_vllm_config.additional_config = {
+            "enable_flashcomm1": True,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": False,
-            }
+            },
         }
         first_ascend_config = init_ascend_config(first_vllm_config)
         self.assertFalse(first_ascend_config.ascend_compilation_config.enable_npugraph_ex)
+        self.assertTrue(enable_sp(first_vllm_config))
 
         second_vllm_config = VllmConfig()
+        second_vllm_config.additional_config = {"enable_flashcomm1": False}
         second_ascend_config = init_ascend_config(second_vllm_config)
         self.assertIsNot(first_ascend_config, second_ascend_config)
         self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
+        self.assertFalse(enable_sp(second_vllm_config))
 
 
 class TestShortRequestFirstConfig(TestBase):

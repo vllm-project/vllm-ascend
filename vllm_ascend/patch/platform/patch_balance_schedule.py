@@ -78,22 +78,13 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-from vllm_ascend.ascend_config import SchedulerConfig, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
-    # Primary source of truth is AscendConfig. The additional_config fallback
-    # covers the startup window where AscendConfig may not yet be initialized
-    # (see the TODO that used to live here); once AscendConfig init is moved
-    # earlier it can go away.
-    try:
-        from vllm_ascend.ascend_config import get_ascend_config
-
-        return bool(get_ascend_config().scheduler_config.enable_balance_scheduling)
-    except Exception:
-        pass
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    return SchedulerConfig.from_additional_config(additional_config).enable_balance_scheduling
+    if vllm_config is None:
+        return False
+    return init_ascend_config(vllm_config).scheduler_config.enable_balance_scheduling
 
 
 class BalanceScheduler(Scheduler):

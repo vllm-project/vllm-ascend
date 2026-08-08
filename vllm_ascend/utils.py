@@ -37,7 +37,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, validate_additional_config_bool
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -863,39 +863,25 @@ def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 
 
-def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
+def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False, *, ascend_config=None) -> bool:
+    """Return the validated sequence-parallel switch.
+
+    ``ascend_config`` is supplied only while ``init_ascend_config`` is
+    validating a newly constructed instance, before it is published as the
+    process singleton. Runtime callers always consume the singleton. The
+    retained ``vllm_config`` argument is API compatibility only and is never
+    used to re-read raw ``additional_config``.
+    """
     global _ENABLE_SP
-    if vllm_config is None:
-        try:
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = (
-        validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
-        if additional_config
-        else False
-    )
-
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            # This path can run before the AscendConfig singleton exists. Use
-            # the same pydantic bool coercion instead of bool("false") == True.
-            _ENABLE_SP = validate_additional_config_bool(
-                additional_config["enable_flashcomm1"], "additional_config.enable_flashcomm1"
-            )
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-
-        if not _ENABLE_SP and enable_shared_expert_dp:
-            _ENABLE_SP = True
+    if ascend_config is not None:
+        enabled = ascend_config.enable_flashcomm1 or ascend_config.enable_shared_expert_dp
+        if not ascend_config.enable_flashcomm1 and enable_shared_expert_dp:
             logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
+        return bool(enabled)
+
+    if _ENABLE_SP is None:
+        config = get_ascend_config()
+        _ENABLE_SP = config.enable_flashcomm1 or config.enable_shared_expert_dp
 
     return bool(_ENABLE_SP)
 
