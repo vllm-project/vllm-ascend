@@ -34,6 +34,7 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
 from vllm_ascend.utils import is_310p
 
 
@@ -65,7 +66,7 @@ _GDN_PATCH_TARGET = _GDNBaseCls
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
-        if "qwen3_5" in self.config.model_type:
+        if "qwen3_5" in self.config.model_type and isinstance(self.rotary_emb, AscendMRotaryEmbedding):
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
