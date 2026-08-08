@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -10,6 +10,7 @@ from torch import nn
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
+from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
@@ -588,6 +589,64 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
+
+
+def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+        down_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+    )
+    shared_experts.multistream_overlap = False
+    shared_experts.quant_type = QuantType.W8A8
+    hidden_states = torch.randn(2, 4)
+    part1_out = torch.randn(2, 8)
+    shared_out = torch.randn(2, 4)
+    shared_experts.part1 = MagicMock(return_value=part1_out)
+    shared_experts.part2 = MagicMock(return_value=shared_out)
+    current_stream = MagicMock()
+    lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+    events = SimpleNamespace(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
+    )
+
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(
+        shared_experts_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+    shared_experts.set_lora_context(lora_context)
+
+    with patch.object(shared_experts_module.torch_npu, "npu_dynamic_quant", create=True) as dynamic_quant:
+        output = shared_experts.forward(hidden_states, events)
+
+    assert output is shared_out
+    dynamic_quant.assert_not_called()
+    shared_experts.part1.assert_called_once_with(hidden_states)
+    shared_experts.part2.assert_called_once_with(hidden_states, part1_out)
+
+
+@pytest.mark.parametrize("has_shared_experts", [False, True])
+def test_set_lora_context_updates_experts(has_shared_experts):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.routed_experts = SimpleNamespace()
+    shared_experts = MagicMock() if has_shared_experts else None
+    runner.ascend_shared_experts = shared_experts
+    lora_context = object()
+
+    runner.set_lora_context(lora_context)
+
+    assert runner.routed_experts._ascend_moe_lora_context is lora_context
+    if shared_experts is not None:
+        shared_experts.set_lora_context.assert_called_once_with(lora_context)
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])

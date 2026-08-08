@@ -181,6 +181,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context
+        if self.ascend_shared_experts is not None:
+            self.ascend_shared_experts.set_lora_context(lora_context)
 
     def _forward_impl(
         self,
