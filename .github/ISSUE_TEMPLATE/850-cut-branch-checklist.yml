@@ -1,0 +1,118 @@
+name: Cut Branch Checklist
+description: Generate a cut branch checklist issue when cutting a new release branch.(Used for release team)
+title: "[Cut Branch]: Cut branch checklist for releases/v"
+
+body:
+- type: textarea
+  attributes:
+    description: >
+      Brief info for the new branch cut.
+    label: Cut Branch Info
+    value: >
+      **Upstream vLLM Version**: 
+
+      **Release Branch**: 
+
+      **Target Release Version**: 
+
+      **Target Date**: 
+
+      **Release Manager**: 
+
+      **Prepared Head Commit**: 
+
+- type: textarea
+  attributes:
+    description: >
+      Ensure main branch readiness before cutting branch.
+    label: Pre-Branch Cut Preparation
+    value: >
+      - [ ] P0/P1 PR Clearance: Ensure all blocking PRs and critical updates targeting the matched vLLM version are merged into main
+
+      - [ ] Main Branch Health Check: Verify that the latest main nightly CI run is GREEN
+
+      - [ ] Freeze Notification: Announce branch-cut timing and code freeze in the community channel
+
+- type: textarea
+  attributes:
+    description: >
+      Git operations to cut the branch.
+    label: Git Branch Operations
+    value: >
+      - [ ] Cut branch from main at the prepared commit point
+
+        ```bash
+        git checkout main && git pull origin main
+        git checkout -b releases/<release_branch_name> <git_commit_hash>
+        git push origin releases/<release_branch_name>
+        ```
+
+- type: textarea
+  attributes:
+    description: >
+      CI/CD configuration changes on the release branch.
+    label: Release Branch CI Updates (on release branch)
+    value: >
+      - [ ] pr_test.yaml: Remove main_commit from run-selected-tests and run-selected-tests-upstream job matrices (keep release_tag only)
+
+      - [ ] pr_e2e_command.yml: Remove main_commit from trigger-selected-tests job matrix (keep release_tag only)
+
+      - [ ] Version Bump: Update internal version strings in setup files or vllm_ascend/__init__.py
+
+- type: textarea
+  attributes:
+    description: >
+      CI/CD configuration changes on the main branch.
+    label: Main Branch CI Updates (on main)
+    value: >
+      - [ ] schedule_release_code_and_wheel.yml: Append new version option
+
+      - [ ] nightly_image_build.yaml: Append new branch option to releases/<release_branch_name>
+
+      - [ ] schedule_image_build_and_push.yaml: Append new tag and branch options
+
+      - [ ] labeled_doctest.yaml: Append the new branch/version to doc_versions list
+
+- type: textarea
+  attributes:
+    description: >
+      Sync metadata, documentation and repository settings.
+    label: Documentation & Repository Alignment
+    value: >
+      - [ ] Update release metadata and dependency variables (vllm_version, vllm_ascend_version) in mkdocs.yml
+
+      - [ ] Update version comparison table in README.md and README.zh.md
+
+      - [ ] Update Ascend NPU & vLLM compatibility matrix in docs/source/community/versioning_policy.md
+
+      - [ ] Update cherry-pick command branch examples in docs/source/community/slash-commands.md (--branch releases/<release_branch_name>)
+
+      - [ ] Enable Branch Protection Rules on GitHub for releases/<release_branch_name> (Require approvals, restrict force push)
+
+- type: textarea
+  attributes:
+    description: >
+      Configure and track cherry-picks / backports for this release branch during the freeze period.
+    label: Cherry-Pick & Backport Tracking
+    value: >
+      - [ ] Cherry-pick Bot Configured: Verify `/cherry-pick releases/<release_branch_name>` or backport workflow works on main
+
+      - [ ] **Must-have PRs / Bugfixes to Cherry-pick**:
+        - [ ] PR #1234: <PR_Title_or_Bug_Description>
+        - [ ] PR #5678: <PR_Title_or_Bug_Description>
+
+- type: textarea
+  attributes:
+    description: >
+      Verify CI builds and hand over to official Release Flow.
+    label: Verification & Handover
+    value: >
+      - [ ] All mandatory Cherry-pick PRs are merged into releases/<release_branch_name>
+
+      - [ ] Trigger manual dry-run for image/wheel builds on release branch to ensure no path/version issues
+
+      - [ ] Confirm backport workflow is operational during freeze
+
+      - [ ] Create official Release Checklist issue for this release branch
+
+      - [ ] Close this issue
