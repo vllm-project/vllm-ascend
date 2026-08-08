@@ -1,0 +1,66 @@
+name: buildkit-dockerfile-test-group1
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/buildkit-dockerfile-test-group1.yaml'
+      - 'Dockerfile'
+      - 'Dockerfile.310p'
+      - 'Dockerfile.310p.openEuler'
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: "${{ matrix.dockerfile }} (${{ matrix.runner_info.arch }})"
+    runs-on: ${{ matrix.runner_info.runner }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - Dockerfile
+          - Dockerfile.310p
+          - Dockerfile.310p.openEuler
+        runner_info:
+          - {runner: linux-aarch64-cpu-4-buildkit, arch: arm64}
+          - {runner: linux-amd64-cpu-4-buildkit, arch: amd64}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Determine SOC_VERSION
+        id: vars
+        run: |
+          case "${{ matrix.dockerfile }}" in
+            Dockerfile|Dockerfile.openEuler)
+              echo "soc_version=ascend910b1" >> $GITHUB_OUTPUT
+              ;;
+            Dockerfile.310p|Dockerfile.310p.openEuler)
+              echo "soc_version=ascend310p1" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/test-buildkit:${{ matrix.dockerfile }}-${{ matrix.runner_info.arch }}-${{ github.sha }}
+          build-args: |
+            APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
+            PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
+            PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
+            ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
+            GIT_PROXY=https://gh-proxy.test.osinfra.cn/
+            VLLM_ASCEND_IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend-ci
+            SOC_VERSION=${{ steps.vars.outputs.soc_version }}
+            COMPILE_CUSTOM_KERNELS=0
+          provenance: false
