@@ -76,6 +76,7 @@ class AscendMetadataForDecode:
     num_computed_tokens_of_dcp: list[list[int]] | None = None
     block_tables: torch.Tensor = None
     dcp_mtp_attn_mask: torch.Tensor = None
+    query_lens: list[int] | None = None
 
 
 @dataclass
@@ -162,6 +163,7 @@ class AscendAttentionDCPMetadataBuilder(
                 num_computed_tokens_of_dcp=np.asarray(dcp_metadata.num_computed_tokens_of_dcp)[:num_decodes],
                 block_tables=block_table[:num_decodes],
                 dcp_mtp_attn_mask=dcp_metadata.dcp_mtp_attn_mask,
+                query_lens=query_lens[:num_decodes].tolist(),
             )
 
         return {
@@ -169,6 +171,35 @@ class AscendAttentionDCPMetadataBuilder(
             "decode_meta": decode_metadata,
         }
 
+def pad_decode_query_to_bsnd(
+        query: torch.Tensor,
+        query_lens: list[int],
+        max_q: int,
+) -> torch.Tensor:
+    num_decodes = len(query_lens)
+    num_heads, head_size = query.shape[1], query.shape[-1]
+    out = query.new_zeros((num_decodes, max_q, num_heads, head_size))
+    offset = 0
+    for i, qlen in enumerate(query_lens):
+        if qlen > 0:
+            out[i, :qlen] = query[offset : offset + qlen]
+            offset += qlen
+    return out
+
+def _compact_bsnd_out(
+    attn_out: torch.Tensor,
+    attn_lse: torch.Tensor,
+    decode_q_lens: list[int],
+    max_q: int,
+):
+    num_decodes = len(decode_q_lens)
+    out_q = attn_out.view(num_decodes, max_q, *attn_out.shape[1:])
+    out_l = attn_lse.view(num_decodes, max_q, *attn_lse.shape[1:])
+    pieces_o, pieces_l = [], []
+    for i, qlen in enumerate(decode_q_lens):
+        pieces_o.append(out_q[i, :qlen])
+        pieces_l.append(out_l[i, :qlen])
+    return torch.cat(pieces_o, dim=0), torch.cat(pieces_l, dim=0)
 
 class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
     @staticmethod
@@ -250,7 +281,11 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
                 input_layout = "TND"
                 if speculative_config is not None:
                     input_layout = "BSND"
-                    actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
+                    if isinstance(actual_seq_lengths_q, list) and actual_seq_lengths_q:
+                        actual_seq_lengths_q = [actual_seq_lengths_q[0]]+ [
+                            actual_seq_lengths_q[i] - actual_seq_lengths_q[i-1]
+                            for i in range(1, len(actual_seq_lengths_q))
+                        ]
 
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
@@ -295,15 +330,25 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         attn_mask = None
         input_layerout = "TND"
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes]
+        is_uniform = True
+        decode_q_lens: list[int] | None = None
+        max_q = 0
         if self.vllm_config.speculative_config is not None:
             input_layerout = "BSND"
             num_decodes = attn_metadata.num_decodes
             if attn_metadata.decode_meta.dcp_mtp_attn_mask is not None:
                 attn_mask = attn_metadata.decode_meta.dcp_mtp_attn_mask
             else:
-                attn_mask = None
-            query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
-            actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
+                attn_mask = None 
+            decode_q_lens = attn_metadata.decode_meta.query_lens
+            spec = self.vllm_config.speculative_config
+            max_q = 1 + (spec.num_speculative_tokens if spec is not None else 0)
+            is_uniform = attn_metadata.num_decode_tokens == num_decodes * max_q
+            if is_uniform:
+                query = query.view(num_decodes, max_q, query.shape[1], query.shape[-1])
+            else:
+                query = pad_decode_query_to_bsnd(query, decode_q_lens, max_q)
+            actual_seq_lengths_q = decode_q_lens
 
         common_kwargs = {
             "num_heads": num_heads,
@@ -386,6 +431,13 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         if input_layerout == "BSND":
             attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
             attn_lse = attn_lse.transpose(1, 2).reshape(-1, attn_lse.shape[1], 1)
+            if not is_uniform:
+                attn_out, attn_lse = _compact_bsnd_out(
+                    attn_out,
+                    attn_lse,
+                    decode_q_lens,
+                    max_q
+                )
         return self._merge_dcp_attention_output(
             attn_out,
             attn_lse,
