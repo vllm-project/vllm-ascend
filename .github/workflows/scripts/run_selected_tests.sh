@@ -146,8 +146,8 @@ run_pytest_target() {
     failed_logs+=("${target}|${log_file}")
     if [ "${record_timing}" != true ]; then
       print_summary
-      exit "${status}"
     fi
+    overall_status=1
   fi
 }
 
@@ -191,8 +191,8 @@ run_pytest_batch() {
     failed_logs+=("${target}|${log_file}")
     if [ "${record_timing}" != true ]; then
       print_summary
-      exit "${status}"
     fi
+    overall_status=1
   fi
 }
 
