@@ -258,18 +258,21 @@ def test_kimi_k3_tp16_recurrent_kda_non_contiguous_state_pool():
     )
 
     state_pool = torch.full(
-        (state_capacity, 2, heads, dim, dim),
+        (state_capacity + 1, 2, heads, dim, dim),
         7.0,
         dtype=torch.float32,
         device=device,
     )
-    state_view = state_pool[:, 0]
+    # Model-runner cache slots may be a strided view with a non-zero storage
+    # offset. Keep the adjacent layer as a guard against an incorrect write.
+    state_view = state_pool[1:, 0]
     state_view.copy_(state_cpu.to(device))
-    guard_layer = state_pool[:, 1].clone()
+    guard_layer = state_pool[1:, 1].clone()
     state_before = state_view.clone()
     state_stride = state_view.stride()
     state_storage = state_view.untyped_storage().data_ptr()
     assert not state_view.is_contiguous()
+    assert state_view.storage_offset() > 0
 
     out = torch.ops._C_ascend.recurrent_kda(
         q_cpu.to(device),
@@ -296,7 +299,7 @@ def test_kimi_k3_tp16_recurrent_kda_non_contiguous_state_pool():
     assert state_view.untyped_storage().data_ptr() == state_storage
     torch.testing.assert_close(out.cpu(), ref_out, rtol=0.02, atol=0.02)
     torch.testing.assert_close(state_view.cpu(), ref_state, rtol=0.02, atol=0.02)
-    torch.testing.assert_close(state_pool[:, 1], guard_layer, rtol=0, atol=0)
+    torch.testing.assert_close(state_pool[1:, 1], guard_layer, rtol=0, atol=0)
     used_slots = set(state_indices_cpu.tolist())
     untouched_slots = [slot for slot in range(state_capacity) if slot not in used_slots]
     torch.testing.assert_close(

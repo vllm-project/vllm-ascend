@@ -115,11 +115,13 @@ at::Tensor recurrent_kda(
                 "recurrent_kda: lower_bound must be in [-5,0) for safe gate.");
 
     at::Tensor output = at::empty_like(value);
-    at::Tensor final_state = at::empty_like(initial_state);
+    at::Tensor final_state = initial_state;
     const at::Tensor& accepted = c10::value_or_else(
         num_accepted_tokens, [] { return at::Tensor(); });
     const char* layout = is_tnd ? "TND" : "BSND";
-    bool output_final_state = true;
+    // vLLM consumes the cache mutation through initial_state and returns only
+    // the attention output. Avoid materializing a second full state tensor.
+    bool output_final_state = false;
     bool inplace_final_state = true;
     bool state_v_first = true;
     EXEC_NPU_CMD(
