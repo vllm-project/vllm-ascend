@@ -62,7 +62,6 @@ import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
 import vllm.v1.engine.core as _engine_core_mod
-from pydantic import TypeAdapter
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -79,7 +78,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import SchedulerConfig, init_ascend_config
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -94,12 +93,7 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     except Exception:
         pass
     additional_config = getattr(vllm_config, "additional_config", None) or {}
-    scheduler_config = additional_config.get("scheduler_config")
-    if isinstance(scheduler_config, dict) and "enable_balance_scheduling" in scheduler_config:
-        return TypeAdapter(bool).validate_python(scheduler_config["enable_balance_scheduling"])
-    if "enable_balance_scheduling" in additional_config:
-        return TypeAdapter(bool).validate_python(additional_config["enable_balance_scheduling"])
-    return False
+    return SchedulerConfig.from_additional_config(additional_config).enable_balance_scheduling
 
 
 class BalanceScheduler(Scheduler):

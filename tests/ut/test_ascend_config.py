@@ -588,6 +588,12 @@ class TestSchedulerConfig(TestBase):
                 {"scheduler_config": {"short_request_first_confgi": {"enabled": True}}}
             )
 
+    def test_unknown_profiling_chunk_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SchedulerConfig.from_additional_config(
+                {"scheduler_config": {"profiling_chunk_config": {"need_timng": False}}}
+            )
+
     def test_scheduler_switches_get_bool_validation(self):
         config = SchedulerConfig.from_additional_config(
             {
@@ -850,6 +856,60 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
         self.assertFalse(config.is_sparse_li_c8_layer("model.layers.4.self_attn.indexer.k_cache"))
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_sparse_sfa_c8": "true"}
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_sfa_c8)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_kv_nz_uses_vllm_config_preconditions(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.model_config = SimpleNamespace(is_deepseek_mla=True, architectures=[], enforce_eager=True)
+        vc.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
+        vc.additional_config = {"enable_kv_nz": "true"}
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_kv_nz)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_eplb_string_false_survives_factory(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"eplb_config": {"dynamic_eplb": "false"}}
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.eplb_config.dynamic_eplb)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_refresh_string_false_reuses_cached_config(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"refresh": "false"}
+
+        first = init_ascend_config(vc)
+        second = init_ascend_config(vc)
+
+        self.assertIs(first, second)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_refresh_rejects_non_boolean_integer(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"refresh": 2}
+
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

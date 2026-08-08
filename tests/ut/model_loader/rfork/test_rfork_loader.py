@@ -418,6 +418,12 @@ def test_rfork_detects_dynamic_eplb_config():
             additional_config=None,
         )
     )
+    assert not _is_dynamic_eplb_enabled(
+        SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_eplb=False),
+            additional_config={"eplb_config": {"dynamic_eplb": "false"}},
+        )
+    )
 
 
 def test_rfork_dynamic_eplb_uses_default_loader(monkeypatch):
