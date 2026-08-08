@@ -116,6 +116,7 @@ class ReqMeta:
     """Request metadata required by the initial Mooncake pull path."""
 
     local_block_ids: BlockIds
+    local_num_prompt_tokens: int
     num_external_tokens: int
     num_computed_tokens: int
     remote_block_ids: BlockIds
@@ -124,7 +125,7 @@ class ReqMeta:
     remote_engine_id: str
     remote_request_id: str
     remote_num_prompt_tokens: int
-    local_full_block_ids: BlockIds = tuple()
+    local_full_block_ids: BlockIds
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -139,12 +140,14 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self,
         request_id: str,
         local_block_ids: BlockIds,
+        local_num_prompt_tokens: int,
         num_external_tokens: int,
         kv_transfer_params: dict[str, Any],
         local_full_block_ids: BlockIds | None = None,
     ) -> None:
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
+            local_num_prompt_tokens=local_num_prompt_tokens,
             num_external_tokens=num_external_tokens,
             num_computed_tokens=kv_transfer_params.get("num_computed_tokens", 0),
             remote_block_ids=kv_transfer_params["remote_block_ids"],
