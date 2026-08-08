@@ -118,8 +118,9 @@ def build_fused_experts_input(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1: torch.Tensor | list[torch.Tensor],
-    w2: torch.Tensor | list[torch.Tensor],
+    w1: torch.Tensor | list[torch.Tensor] | None = None,
+    w2: torch.Tensor | list[torch.Tensor] | None = None,
+    layer=None,
     quant_type: QuantType,
     dynamic_eplb: bool,
     expert_map: torch.Tensor | None = None,
@@ -200,6 +201,7 @@ def build_fused_experts_input(
             ),
             is_per_channel_weight=is_per_channel_weight,
         ),
+        layer=layer,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
@@ -239,6 +241,7 @@ def build_mlp_compute_input(
         dynamic_scale=token_dispatch_output.dynamic_scale,
         topk_scales=token_dispatch_output.topk_scales,
         weights=fused_experts_input.weights,
+        layer=fused_experts_input.layer,
         quant=fused_experts_input.quant,
         fusion=fused_experts_input.quant.quant_type
         in (
