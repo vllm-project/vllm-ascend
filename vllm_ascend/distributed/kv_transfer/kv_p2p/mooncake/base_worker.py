@@ -21,16 +21,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -157,30 +148,6 @@ class MooncakeBaseConnectorWorker:
                 self.layer_name_to_group_index[layer_name] = group_index
                 self.layer_name_to_spec_index[layer_name] = spec_index
 
-    @staticmethod
-    def _get_spec_transfer_properties(
-        spec: KVCacheSpec,
-    ) -> tuple[int, int | None]:
-        """Return the block size and head size required for KV transfer."""
-        if not isinstance(spec, AttentionSpec):
-            return spec.block_size, None
-
-        if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
-            return spec.block_size, 1
-        elif isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
-            return spec.block_size, spec.num_kv_heads
-        elif isinstance(spec, MambaSpec):
-            mamba_shapes = spec.shapes
-            if len(mamba_shapes) == 2:
-                head_size = mamba_shapes[0][1]
-            elif len(mamba_shapes) == 1:
-                head_size = mamba_shapes[0][1] if len(mamba_shapes[0]) == 2 else mamba_shapes[0][0]
-            else:
-                raise NotImplementedError("Mooncake Connector does not support current MambaSpec type now.")
-            return spec.block_size, head_size
-        else:
-            raise NotImplementedError("Mooncake Connector does not support {%s} now.", type(spec).__name__)
-
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -190,14 +157,11 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
-        spec_properties = [self._get_spec_transfer_properties(spec) for spec in self.kv_cache_specs]
-        spec_block_sizes = [properties[0] for properties in spec_properties]
-        spec_num_heads = [properties[1] for properties in spec_properties]
+        spec_block_sizes = [spec.block_size for spec in self.kv_cache_specs]
 
         layer_names: list[str] = []
         group_indices: list[int] = []
         spec_indices: list[int] = []
-        kernel_block_sizes: list[int] = spec_block_sizes.copy()
         kv_caches_base_addr: list[list[int]] = []
         block_strides_per_layer: list[list[int]] = []
         block_lens_per_layer: list[list[int]] = []
@@ -241,28 +205,6 @@ class MooncakeBaseConnectorWorker:
                 block_lens_per_layer.append(block_lens)
                 block_shapes_per_layer.append(block_shapes)
                 block_size_scales_per_layer.append(block_size_scales)
-                cur_layer_spec_idx = self.layer_name_to_spec_index[layer_name]
-                spec_block_size = spec_block_sizes[cur_layer_spec_idx]
-                layer_kernel_block_sizes = {spec_block_size // scale for scale in block_size_scales}
-                if len(layer_kernel_block_sizes) != 1:
-                    raise ValueError(
-                        f"Layer {layer_name!r} has inconsistent kernel block sizes {sorted(layer_kernel_block_sizes)}."
-                    )
-                kernel_block_size = layer_kernel_block_sizes.pop()
-                if (
-                    kernel_block_sizes[cur_layer_spec_idx] == spec_block_sizes[cur_layer_spec_idx]
-                    and kernel_block_size < spec_block_sizes[cur_layer_spec_idx]
-                ):
-                    kernel_block_sizes[cur_layer_spec_idx] = kernel_block_size
-                if (
-                    kernel_block_sizes[cur_layer_spec_idx] != spec_block_sizes[cur_layer_spec_idx]
-                    and kernel_block_size != kernel_block_sizes[cur_layer_spec_idx]
-                ):
-                    raise ValueError(
-                        "Layer %s has kernel block size %s different from global kernel block size %s",
-                        kernel_block_size,
-                        kernel_block_sizes[cur_layer_spec_idx],
-                    )
 
         unexpected_layers = kv_caches.keys() - configured_layer_names
         if unexpected_layers:
@@ -278,8 +220,6 @@ class MooncakeBaseConnectorWorker:
             block_size=self.block_size,
             num_blocks=self.num_blocks,
             spec_block_sizes=spec_block_sizes,
-            kernel_block_sizes=kernel_block_sizes,
-            spec_num_heads=spec_num_heads,
             layer_names=layer_names,
             group_indices=group_indices,
             spec_indices=spec_indices,

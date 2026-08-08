@@ -85,8 +85,6 @@ class MooncakePullRecvingThread(threading.Thread):
 
         self.block_size = local_metadata.block_size
         self.spec_block_sizes = local_metadata.spec_block_sizes
-        self.kernel_block_sizes = local_metadata.kernel_block_sizes
-        self.spec_num_heads = local_metadata.spec_num_heads
         self.layer_names = local_metadata.layer_names
         self.group_indices = local_metadata.group_indices
         self.spec_indices = local_metadata.spec_indices
@@ -119,8 +117,7 @@ class MooncakePullRecvingThread(threading.Thread):
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
         self.remote_metadata: SizedDict[str, MooncakeTransferMetadataGroups] = SizedDict()
         # Candidate producer TP ranks, cached independently for each engine:
-        # engine_id -> remote_pp_rank -> (local_spec_index, remote_spec_index)
-        # -> candidate_groups
+        # engine_id -> remote_pp_rank -> (local_layer_index, remote_layer_index) -> candidate_groups
         self.remote_tp_rank_groups: SizedDict[str, dict[int, dict[tuple[int, int], list[list[int]]]]] = SizedDict()
         # engine_id -> remote_pp_rank -> [[local_layer_index, remote_layer_index], ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
@@ -206,50 +203,37 @@ class MooncakePullRecvingThread(threading.Thread):
         dict[int, dict[tuple[int, int], list[list[int]]]],
         dict[int, list[tuple[int, int]]],
     ]:
-        """Build per-PP spec candidates and matching layer index pairs.
-
-        TP candidates are constructed once for each local spec present under a
-        remote PP rank. Layer traversal is used only to record
-        [local_layer_index, remote_layer_index] pairs for later address
-        planning.
-        """
+        """Build per-PP layer candidates and matching layer index pairs."""
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
         layer_pairs_by_pp_rank: dict[int, list[tuple[int, int]]] = {}
-        local_layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(self.layer_names)}
         matched_local_layer_indices: set[int] = set()
 
         for remote_pp_rank, pp_metadata in sorted(remote_metadata.metadata_by_pp_rank.items()):
             layer_index_pairs: list[tuple[int, int]] = []
-            spec_index_mapping: dict[int, int] = {}
-            for remote_layer_index, layer_name in enumerate(pp_metadata.layer_names):
-                local_layer_index = local_layer_index_by_name.get(layer_name)
-                if local_layer_index is None:
+            groups_by_layer_pair: dict[tuple[int, int], list[list[int]]] = {}
+            remote_layer_index_by_name = {
+                layer_name: layer_index for layer_index, layer_name in enumerate(pp_metadata.layer_names)
+            }
+            for local_layer_index, layer_name in enumerate(self.layer_names):
+                remote_layer_index = remote_layer_index_by_name.get(layer_name)
+                if remote_layer_index is None:
                     continue
 
-                layer_index_pairs.append((local_layer_index, remote_layer_index))
+                layer_pair = (local_layer_index, remote_layer_index)
+                layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
                 local_spec_index = self.spec_indices[local_layer_index]
-                remote_spec_index = pp_metadata.spec_indices[remote_layer_index]
-                mapped_remote_spec_index = spec_index_mapping.get(local_spec_index)
-                if mapped_remote_spec_index is not None and mapped_remote_spec_index != remote_spec_index:
-                    raise ValueError(
-                        f"Mooncake local spec {local_spec_index} maps to multiple producer specs "
-                        f"under PP rank {remote_pp_rank}: {mapped_remote_spec_index} and {remote_spec_index}"
-                    )
-                spec_index_mapping[local_spec_index] = remote_spec_index
-
-            layer_pairs_by_pp_rank[remote_pp_rank] = layer_index_pairs
-            groups_by_pp_rank[remote_pp_rank] = {
-                (local_spec_index, remote_spec_index): self._get_spec_remote_tp_rank_groups(
-                    local_spec_index,
-                    remote_spec_index,
+                groups_by_layer_pair[layer_pair] = self._get_layer_remote_tp_rank_groups(
+                    local_layer_index,
+                    remote_layer_index,
                     self.kv_cache_specs[local_spec_index],
                     pp_metadata,
                     remote_metadata.tp_size,
                     remote_metadata.dcp_size,
                 )
-                for local_spec_index, remote_spec_index in sorted(spec_index_mapping.items())
-            }
+
+            layer_pairs_by_pp_rank[remote_pp_rank] = layer_index_pairs
+            groups_by_pp_rank[remote_pp_rank] = groups_by_layer_pair
 
         missing_local_layer_indices = set(range(len(self.layer_names))) - matched_local_layer_indices
         if missing_local_layer_indices:
@@ -261,40 +245,43 @@ class MooncakePullRecvingThread(threading.Thread):
             )
         return groups_by_pp_rank, layer_pairs_by_pp_rank
 
-    def _get_spec_remote_tp_rank_groups(
+    def _get_layer_remote_tp_rank_groups(
         self,
-        local_spec_index: int,
-        remote_spec_index: int,
+        local_layer_index: int,
+        remote_layer_index: int,
         spec: KVCacheSpec,
         remote_metadata: MooncakePPTransferMetadata,
         remote_tp_size: int,
         remote_dcp_size: int,
     ) -> list[list[int]]:
-        """Infer the spec's TP strategy and build its remote rank groups."""
+        """Infer one matched layer's TP strategy and remote rank groups."""
         if isinstance(spec, MambaSpec):
             return self._get_mamba_remote_tp_rank_groups(remote_tp_size)
-        if remote_spec_index >= len(remote_metadata.spec_num_heads):
-            raise ValueError(
-                f"Mooncake local spec {local_spec_index} maps to missing producer spec {remote_spec_index}"
-            )
 
         fixed_total_num_kv_heads = None
         if isinstance(spec, (AscendSFAIndexerCacheSpec, SlidingWindowMLASpec)):
             local_dcp_size = remote_dcp_size = 1
+            local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
         elif isinstance(spec, MLAAttentionSpec):
             local_dcp_size = self.dcp_size
+            local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
+        # For FA or SWA with kv_heads > 1, must use HND kv_cache layout.
         elif isinstance(spec, SlidingWindowSpec):
             local_dcp_size = remote_dcp_size = 1
+            local_num_kv_heads = self.block_shapes[local_layer_index][0][0]
+            remote_num_kv_heads = remote_metadata.block_shapes[remote_layer_index][0][0]
         elif isinstance(spec, FullAttentionSpec):
             local_dcp_size = self.dcp_size
+            local_num_kv_heads = self.block_shapes[local_layer_index][0][0]
+            remote_num_kv_heads = remote_metadata.block_shapes[remote_layer_index][0][0]
         else:
             raise NotImplementedError(f"Mooncake pull has no TP grouping rule for KV cache spec {type(spec).__name__}")
 
         total_num_kv_heads = self._infer_total_num_kv_heads(
-            local_num_kv_heads=spec.num_kv_heads,
-            remote_num_kv_heads=remote_metadata.spec_num_heads[remote_spec_index],
+            local_num_kv_heads=local_num_kv_heads,
+            remote_num_kv_heads=remote_num_kv_heads,
             remote_tp_size=remote_tp_size,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
