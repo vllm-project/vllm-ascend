@@ -1,0 +1,12 @@
+model_name: "Eco-Tech/Kimi-K2.5-W4A8"
+hardware: "Atlas A3 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "accuracy"
+    value: 0.9462
+- name: "textvqa"
+  metrics:
+  - name: "accuracy"
+    value: 0.8029
+trust_remote_code: True
