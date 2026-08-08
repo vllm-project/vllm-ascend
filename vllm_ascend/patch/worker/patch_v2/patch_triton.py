@@ -17,6 +17,9 @@ from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
 )
 from vllm_ascend.worker.v2.structured_outputs import _apply_grammar_bitmask_kernel
 
+from vllm_ascend.ops.triton.v2.sample.apply_top_k_top_p_triton import apply_top_k_top_p_triton
+
+# triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
 # because sampler.py and speculator.py are imported before this patch, they must be overridden
 sampler.gumbel_sample = gumbel_sample
@@ -35,3 +38,5 @@ rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
 dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
 metrics_logits.libdevice = triton.language.extra.cann.libdevice
+# triton ops that filed in ops/triton
+sampler.apply_top_k_top_p = apply_top_k_top_p_triton
