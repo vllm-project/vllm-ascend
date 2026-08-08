@@ -386,7 +386,7 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_BUFFER_POOL=4:8
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export MMC_LOCAL_CONFIG_PATH=<PATH_TO_MMC_LOCAL_CONF>
@@ -477,7 +477,7 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_BUFFER_POOL=4:8
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve <KIMI_K3_MODEL_PATH> \

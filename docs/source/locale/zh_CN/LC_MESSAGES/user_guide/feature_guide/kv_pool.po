@@ -336,18 +336,12 @@ msgstr ""
 "alignment-a3--ascend_enable_use_fabric_mem1) — 内存大小必须按1GB对齐。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "If any dependency above is not met"
-msgstr "如果上述任一依赖不满足"
+msgid "RoCE-based deployment"
+msgstr "基于 RoCE 的部署"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "`export ASCEND_BUFFER_POOL=4:8`"
-msgstr "`export ASCEND_BUFFER_POOL=4:8`"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md
-msgid ""
-"Configures the number and size of buffers on the NPU Device for aggregation "
-"and KV transfer (e.g., `4:8` means 4 buffers of 8MB)."
-msgstr "配置NPU设备上用于聚合和KV传输的缓冲区数量和大小（例如，`4:8` 表示4个8MB的缓冲区）。"
+msgid "Required when the deployment uses the RoCE path."
+msgstr "当部署使用 RoCE 路径时需要设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "800 I/T A2 series"
@@ -549,9 +543,10 @@ msgstr "将命令中的 localhost、端口和模型权重路径配置为您自�
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:411
 msgid ""
-"Note: For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, it is recommended"
-" to perform a warm-up phase before running actual performance benchmarks."
-msgstr "注意：对于启用了 `ASCEND_BUFFER_POOL` 的 MooncakeStore，建议在实际性能基准测试前执行预热阶段。"
+"Note: For MooncakeStore with RoCE-based Device-to-Device communication "
+"enabled, it is recommended to perform a warm-up phase before running actual "
+"performance benchmarks."
+msgstr "注意：对于启用了基于 RoCE 的设备间通信的 MooncakeStore，建议在实际性能基准测试前进行预热阶段。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:413
 msgid ""

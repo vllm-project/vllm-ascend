@@ -213,9 +213,8 @@ configuration.
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/\
 latest/python/site-packages:$LD_LIBRARY_PATH
 export MOONCAKE_CONFIG_PATH="/vllm-workspace/mooncake.json"
-# NPU buffer pool: quantity:size(MB)
-# Allocates 4 buffers of 8MB each for KV transfer
-export ASCEND_BUFFER_POOL=4:8
+# Enable RoCE path for A2 series
+export HCCL_INTRA_ROCE_ENABLE=1
 
 vllm serve <path_to_your_model>/Qwen2.5-72B-Instruct/ \
 --served-model-name qwen \
