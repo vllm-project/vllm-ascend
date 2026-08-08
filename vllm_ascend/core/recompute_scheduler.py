@@ -50,6 +50,13 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+# delta for dyntra_lb: reuse the load-balancing policy mixin and scheduler diagnostics.
+from vllm_ascend.core.dyntra_lb_scheduler import (
+    DyntraLBPolicyMixin,
+    diagnostics_enabled,
+    print_scheduler_summary,
+)
+
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -133,6 +140,16 @@ class RecomputeScheduler(Scheduler):
         blocks, num_local, shared_prefix_boundary = kv_cache_manager.get_computed_blocks(request)
         return blocks, num_local, shared_prefix_boundary, False
 
+    # delta for dyntra_lb: provide an overridable no-op hook for applying a cross-rank plan.
+    def _apply_load_balance_modifications(self) -> None:
+        """Apply optional scheduling-policy changes before running requests."""
+        return
+
+    # delta for dyntra_lb: provide an overridable no-op hook for filtering waiting-request admission.
+    def _can_admit_waiting_request(self, request: Request) -> bool:
+        """Return whether an optional policy allows this waiting request."""
+        return True
+
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
         KV Connector: update request state after async recv is finished.
@@ -198,6 +215,9 @@ class RecomputeScheduler(Scheduler):
         preempted_reqs: list[Request] = []
         preempted_req_data: list[PreemptedRequestData] = []
         recomputed_reqs: list[RecomputeReqInfo] = []
+
+        # delta for dyntra_lb: apply cross-rank request migrations before allocating this scheduling step.
+        self._apply_load_balance_modifications()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -494,6 +514,12 @@ class RecomputeScheduler(Scheduler):
                             "[RecomputeScheduler] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
+                # delta for dyntra_lb: admit only waiting requests selected by the current load-balancing plan.
+                if not self._can_admit_waiting_request(request):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
@@ -936,6 +962,9 @@ class RecomputeScheduler(Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        # delta for dyntra_lb: emit per-step queue and KV-block diagnostics when explicitly enabled.
+        if diagnostics_enabled(self.vllm_config):
+            print_scheduler_summary(self, scheduler_output)
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -1288,3 +1317,13 @@ class RecomputeScheduler(Scheduler):
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+
+# delta for dyntra_lb: combine the synchronous recompute scheduler with the DyntraLB policy.
+class DyntraLBRecomputeScheduler(DyntraLBPolicyMixin, RecomputeScheduler):
+    pass
+
+
+# delta for dyntra_lb: combine async recompute scheduling with the same DyntraLB policy.
+class AsyncDyntraLBRecomputeScheduler(DyntraLBPolicyMixin, AsyncRecomputeScheduler):
+    pass

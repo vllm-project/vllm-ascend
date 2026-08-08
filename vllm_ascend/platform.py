@@ -602,6 +602,32 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
                 )
 
+        dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
+        if dyntra_lb_config.enabled:
+            if scheduler_extension_config.enable_balance_scheduling:
+                raise ValueError("DyntraLB cannot be used with enable_balance_scheduling.")
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role != "kv_consumer":
+                raise ValueError(
+                    "DyntraLB is only supported on PD-disaggregated D nodes "
+                    f"(kv_role='kv_consumer', but got kv_role={kv_role!r})."
+                )
+            if parallel_config.data_parallel_size <= 1:
+                raise ValueError("DyntraLB requires data_parallel_size > 1.")
+            if parallel_config.nnodes_within_dp > 1:
+                raise ValueError(
+                    "DyntraLB only supports decoder instances that run on a "
+                    "single node; got "
+                    f"nnodes_within_dp={parallel_config.nnodes_within_dp}."
+                )
+            if scheduler_extension_config.profiling_chunk_config.enabled:
+                raise ValueError("DyntraLB cannot be used with profiling_chunk_config.")
+            if not scheduler_extension_config.recompute_scheduler_enable:
+                vllm_config.scheduler_config.scheduler_cls = _get_dyntra_lb_scheduler_cls(
+                    async_scheduling=vllm_config.scheduler_config.async_scheduling
+                )
+
         if scheduler_extension_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -621,7 +647,12 @@ class NPUPlatform(Platform):
             else:
                 from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
+                async_scheduling = vllm_config.scheduler_config.async_scheduling
                 recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+                recompute_scheduler_config.scheduler_cls = _get_recompute_scheduler_cls(
+                    async_scheduling=async_scheduling,
+                    dyntra_lb_enabled=dyntra_lb_config.enabled,
+                )
                 vllm_config.scheduler_config = recompute_scheduler_config
 
         # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
@@ -1247,6 +1278,26 @@ def _prune_capture_sizes_for_950(vllm_config):
         len(original_sizes),
         MAX_CAPTURE_SIZES_FOR_950,
     )
+
+
+def _get_recompute_scheduler_cls(
+    *,
+    async_scheduling: bool,
+    dyntra_lb_enabled: bool,
+) -> str:
+    if dyntra_lb_enabled:
+        if async_scheduling:
+            return "vllm_ascend.core.recompute_scheduler.AsyncDyntraLBRecomputeScheduler"
+        return "vllm_ascend.core.recompute_scheduler.DyntraLBRecomputeScheduler"
+    if async_scheduling:
+        return "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler"
+    return "vllm_ascend.core.recompute_scheduler.RecomputeScheduler"
+
+
+def _get_dyntra_lb_scheduler_cls(*, async_scheduling: bool) -> str:
+    if async_scheduling:
+        return "vllm_ascend.core.dyntra_lb_scheduler.AsyncDyntraLBScheduler"
+    return "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler"
 
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
