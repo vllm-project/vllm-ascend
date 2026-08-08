@@ -88,6 +88,7 @@ def _run_speculative_decoding(
     return acceptance_per_pos
 
 
+@pytest.mark.skip(reason="No confidence_head tensors were found in the checkpoint, fix me")
 @pytest.mark.e2e_model(MAIN_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",

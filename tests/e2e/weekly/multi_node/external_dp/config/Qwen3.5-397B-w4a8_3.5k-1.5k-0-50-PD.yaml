@@ -45,7 +45,7 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      ASCEND_BUFFER_POOL: "4:8"
+      HCCL_INTRA_ROCE_ENABLE: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"

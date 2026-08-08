@@ -270,7 +270,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                log2phy=layer.log2phy,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
                 mxfp_act_quant_type=torch.float8_e4m3fn,
