@@ -21,22 +21,30 @@
 namespace NsCausalConv1dCommon {
 
 constexpr int32_t MAX_WIDTH = 4;
-constexpr int32_t MAX_BLOCK_DIM = 4096;
+constexpr int32_t MAX_BLOCK_DIM = 3072;
 constexpr int32_t RING_SLOTS = 5;
 
-__aicore__ inline int32_t SlotCurr(int32_t t)
-{
-    return (t + 3) % RING_SLOTS;
+// This function should only be called if one KNOWS that the input is non-negative.
+template <uint32_t N>
+__aicore__ inline constexpr int32_t UnsignedMod(int32_t num) {
+    const uint32_t uNum = static_cast<uint32_t>(num);
+    const int32_t retVal = static_cast<int32_t>(uNum % N);
+    return retVal;
 }
 
-__aicore__ inline int32_t SlotHist(int32_t t, int32_t i)
+__aicore__ inline constexpr int32_t SlotCurr(int32_t t)
 {
-    return (t + 3 - i) % RING_SLOTS;
+    return UnsignedMod<RING_SLOTS>(t + 3);
 }
 
-__aicore__ inline int32_t SlotPrefetch(int32_t t)
+__aicore__ inline constexpr int32_t SlotHist(int32_t t, int32_t i)
 {
-    return (t + 4) % RING_SLOTS;
+    return UnsignedMod<RING_SLOTS>(t + 3 - i);
+}
+
+__aicore__ inline constexpr int32_t SlotPrefetch(int32_t t)
+{
+    return UnsignedMod<RING_SLOTS>(t + 4);
 }
 
 struct CalcBufLayout {
