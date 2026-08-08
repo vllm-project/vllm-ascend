@@ -53,6 +53,8 @@ TILING_DATA_FIELD_DEF(uint32_t, cmpMaskMode)
 TILING_DATA_FIELD_DEF(int32_t, oriWinLeft)
 TILING_DATA_FIELD_DEF(int32_t, oriWinRight)
 TILING_DATA_FIELD_DEF(uint32_t, sparseBlockSize)
+TILING_DATA_FIELD_DEF(bool, hasOriSparseIndices)
+TILING_DATA_FIELD_DEF(uint32_t, oriSparseIndexWidth)
 TILING_DATA_FIELD_DEF(uint32_t, dSize)
 TILING_DATA_FIELD_DEF(uint32_t, dSizeVInput)
 END_TILING_DATA_DEF

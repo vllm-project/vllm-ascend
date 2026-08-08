@@ -22,9 +22,44 @@ from typing import Any
 import torch
 
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.tp_weight_switch import (
+    TPWeightGatherPart,
+    TPWeightGatherSpec,
+    TPWeightRepeatPart,
+    TPWeightRepeatSpec,
+    TPWeightSwitchMixin,
+    TPWeightSwitchState,
+)
+
+__all__ = [
+    "AscendAttentionScheme",
+    "AscendLinearScheme",
+    "AscendMoEScheme",
+    "QuantType",
+    "TPWeightGatherPart",
+    "TPWeightGatherSpec",
+    "TPWeightRepeatPart",
+    "TPWeightRepeatSpec",
+    "TPWeightSwitchMixin",
+    "TPWeightSwitchState",
+]
 
 
-class AscendLinearScheme(ABC):
+def get_moe_num_logical_experts(
+    layer: torch.nn.Module,
+    num_experts: int,
+    global_redundant_expert_num: int = 0,
+    num_shared_experts: int = 0,
+) -> int:
+    moe_config = getattr(layer, "moe_config", None)
+    num_logical_experts = getattr(moe_config, "num_logical_experts", None)
+    if num_logical_experts is not None:
+        return int(num_logical_experts)
+
+    return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
+class AscendLinearScheme(TPWeightSwitchMixin, ABC):
     """Base class for all linear quantization schemes.
 
     Subclasses must implement get_weight() and apply() methods.

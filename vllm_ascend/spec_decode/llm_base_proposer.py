@@ -1176,6 +1176,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
                         draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+
+                    # Dynamic verify-length path, implemented in AscendDSparkProposer.
+                    # Only the dspark method is handled here since it relies on
+                    # the DSpark confidence head.
+                    if get_ascend_config().dynamic_spec_config.method == "dspark":
+                        self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():

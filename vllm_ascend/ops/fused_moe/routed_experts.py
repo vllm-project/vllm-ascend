@@ -378,10 +378,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
+        # Level-2 sleep discards NPU tensors that are not parameters/buffers.
+        # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
+        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
+        self._promote_attr_to_buffer("log2phy")
+        if self.dynamic_eplb:
+            self._promote_attr_to_buffer("moe_load")
+            if self.multi_stage:
+                self._promote_attr_to_buffer("load_counter")
+
         # Register this MoE layer with EPLB for PP compatibility.
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    def _promote_attr_to_buffer(self, name: str) -> None:
+        """Move an existing tensor attribute onto a Level-2 restorable named buffer."""
+        tensor = getattr(self, name, None)
+        if tensor is None:
+            return
+        delattr(self, name)
+        self.register_buffer(name, tensor)
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         if quant_config is None:
@@ -438,15 +455,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
 
-        forward_context = get_forward_context()
         topk_weights, topk_ids = self.router._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            input_ids=getattr(forward_context, "input_ids", None),
+            input_ids=input_ids,
         )
 
         try:
@@ -524,6 +541,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         *,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -556,6 +574,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             hidden_states=hidden_states,
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
+            input_ids=input_ids,
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask

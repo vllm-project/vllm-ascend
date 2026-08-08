@@ -23,84 +23,97 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
+from vllm_ascend.quantization.tp_weight_switch import (
+    TPWeightGatherSpec,
+    TPWeightSwitchMixin,
+)
+
+
+class _OProjLinearMethod(TPWeightSwitchMixin):
+    supports_tp_weight_switch = True
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+
+
+class _UnsupportedOProjLinearMethod(TPWeightSwitchMixin):
+    pass
 
 
 class TestAscendSFAOProjTPParams(TestBase):
     class _OProj(torch.nn.Module):
-        def __init__(self):
+        def __init__(self, linear_method):
             super().__init__()
+            self.input_size = 8
+            self.input_size_per_partition = 4
+            self.output_size = 3
+            self.output_size_per_partition = 3
             self.weight = torch.nn.Parameter(torch.randn(4, 3), requires_grad=False)
-            self.aclnn_input_scale = torch.nn.Parameter(torch.randn(3), requires_grad=False)
-            self.weight_scale_second = torch.nn.Parameter(torch.randn(4, 2), requires_grad=False)
-            self.weight_scale_second.input_dim = 1
-            self.weight_offset_second = torch.nn.Parameter(torch.randn(4, 2), requires_grad=False)
-            self.weight_offset_second.input_dim = 1
-            self.extra_input_scale = torch.nn.Parameter(torch.randn(4, 2), requires_grad=False)
-            self.extra_input_scale.input_dim = 1
-            self.weight_scale = torch.nn.Parameter(torch.randn(4), requires_grad=False)
+            self.weight_scale = torch.nn.Parameter(torch.randn(2, 3), requires_grad=False)
+            self.quant_method = linear_method
 
     def setUp(self):
         AscendSFAImpl.o_proj_full_pools.clear()
 
-    def _make_impl(self):
+    def _make_impl(self, linear_method=None):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.tp_size = 2
-        impl.o_proj = self._OProj()
-        impl._is_o_proj_unquantized = lambda: False
+        impl.o_proj = self._OProj(linear_method or _OProjLinearMethod())
+        impl._o_proj_tp_weight_switch_enabled = False
+        impl.o_proj_tp_weight_state = None
         return impl
 
-    def test_o_proj_tp_params_alias_original_storage(self):
+    def test_enable_o_proj_switch_uses_mixin_state_and_is_idempotent(self):
         impl = self._make_impl()
-        o_proj = impl.o_proj
+        original_weight_ptr = impl.o_proj.weight.data_ptr()
+        original_scale_ptr = impl.o_proj.weight_scale.data_ptr()
 
-        impl._init_o_proj_tp_full_params()
+        impl._enable_o_proj_tp_full_weight_switch()
 
-        self.assertEqual(impl.o_proj_tp_weight.data_ptr(), o_proj.weight.data_ptr())
-        self.assertEqual(
-            impl.o_proj_tp_aclnn_input_params["aclnn_input_scale"].data_ptr(),
-            o_proj.aclnn_input_scale.data_ptr(),
-        )
-        self.assertEqual(
-            impl.o_proj_tp_input_sharded_quant_params["weight_scale_second"].data_ptr(),
-            o_proj.weight_scale_second.data_ptr(),
-        )
-        self.assertEqual(
-            impl.o_proj_tp_input_sharded_quant_params["weight_offset_second"].data_ptr(),
-            o_proj.weight_offset_second.data_ptr(),
-        )
-        self.assertEqual(
-            impl.o_proj_tp_input_sharded_quant_params["extra_input_scale"].data_ptr(),
-            o_proj.extra_input_scale.data_ptr(),
-        )
-        self.assertNotIn("weight_scale", impl.o_proj_tp_input_sharded_quant_params)
+        state = impl.o_proj_tp_weight_state
+        self.assertTrue(impl._o_proj_tp_weight_switch_enabled)
+        self.assertEqual(state.gather_parts["weight"].tp_tensor.data_ptr(), original_weight_ptr)
+        self.assertEqual(state.gather_parts["weight_scale"].tp_tensor.data_ptr(), original_scale_ptr)
+        self.assertEqual(state.gather_parts["weight"].full_tensor.shape, (8, 3))
+        self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (4, 3))
+        self.assertEqual(len(AscendSFAImpl.o_proj_full_pools), 2)
+
+        impl._enable_o_proj_tp_full_weight_switch()
+        self.assertIs(impl.o_proj_tp_weight_state, state)
 
     def test_o_proj_full_weight_forward_restores_tp_storage(self):
         impl = self._make_impl()
-        impl._init_o_proj_tp_full_params()
+        impl._enable_o_proj_tp_full_weight_switch()
+        state = impl.o_proj_tp_weight_state
         original_weight_ptr = impl.o_proj.weight.data_ptr()
-        original_scale_ptr = impl.o_proj.weight_scale_second.data_ptr()
-        full_weight_ptr = impl.o_proj_full_pool.data_ptr()
-        full_scale_ptr = impl.o_proj_full_input_sharded_quant_params["weight_scale_second"].data_ptr()
+        original_scale_ptr = impl.o_proj.weight_scale.data_ptr()
+        full_weight_ptr = state.gather_parts["weight"].full_tensor.data_ptr()
+        full_scale_ptr = state.gather_parts["weight_scale"].full_tensor.data_ptr()
 
         def _apply_with_full_weight(_attn_output):
             self.assertEqual(impl.o_proj.weight.data_ptr(), full_weight_ptr)
-            self.assertEqual(impl.o_proj.weight_scale_second.data_ptr(), full_scale_ptr)
-            return torch.ones(2, 4)
+            self.assertEqual(impl.o_proj.weight_scale.data_ptr(), full_scale_ptr)
+            return torch.ones(2, 3)
 
         impl._apply_o_proj_full_weight = MagicMock(side_effect=_apply_with_full_weight)
 
         output, require_o_proj_forward = impl._handle_o_proj_weight_switch_and_forward(
-            attn_output=torch.randn(2, 3),
-            output=torch.empty(2, 4),
-            o_proj_full_handle=None,
-            o_proj_full_param_handles=[],
+            attn_output=torch.randn(2, 8),
+            output=torch.empty(2, 3),
             should_shard_weight=True,
         )
 
         self.assertEqual(impl.o_proj.weight.data_ptr(), original_weight_ptr)
-        self.assertEqual(impl.o_proj.weight_scale_second.data_ptr(), original_scale_ptr)
+        self.assertEqual(impl.o_proj.weight_scale.data_ptr(), original_scale_ptr)
         self.assertFalse(require_o_proj_forward)
-        self.assertTrue(torch.equal(output, torch.ones(2, 4)))
+        self.assertTrue(torch.equal(output, torch.ones(2, 3)))
+
+    def test_enable_o_proj_switch_rejects_unsupported_method(self):
+        impl = self._make_impl(_UnsupportedOProjLinearMethod())
+
+        with self.assertRaisesRegex(RuntimeError, "TP weight-switch capable"):
+            impl._enable_o_proj_tp_full_weight_switch()
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
@@ -112,6 +125,7 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl.enable_sparse_sfa_c8 = False
         impl.is_kv_producer = False
         impl.preprocess_type = PreprocessType.NATIVE
+        impl.tp_size = 2
         impl.q_lora_rank = 8
         impl.kv_lora_rank = 4
         impl.qk_rope_head_dim = 2
