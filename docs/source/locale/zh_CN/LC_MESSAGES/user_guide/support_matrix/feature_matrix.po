@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-31 09:58+0000\n"
+"POT-Creation-Date: 2026-08-07 10:56+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,7 +21,7 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:1
-msgid "feature_matrix"
+msgid "Feature Matrix"
 msgstr "功能矩阵"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:3

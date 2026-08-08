@@ -224,7 +224,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":32}}'
+      - '{"recompute_scheduler_enable": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-08-05 06:27+0000\n"
+"POT-Creation-Date: 2026-08-07 10:56+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -65,6 +65,8 @@ msgid "Core Supported Models"
 msgstr "核心支持的模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:135
 msgid "Ascend 950 Products"
 msgstr "Ascend 950 产品"
 
@@ -280,8 +282,28 @@ msgid "DeepSeek V4-Pro"
 msgstr "DeepSeek V4-Pro"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:22
-msgid "DeepSeek V3.1"
-msgstr "DeepSeek V3.1"
+msgid "DeepSeek-V3.1"
+msgstr "DeepSeek-V3.1"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "240k"
+msgstr "240k"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
+msgstr "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:22
 msgid "GLM-5.1"
@@ -295,25 +317,6 @@ msgstr "GLM-5.1"
 #: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "A2/A3"
 msgstr "A2/A3"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-#: ../../source/user_guide/support_matrix/supported_models.md:55
-#: ../../source/user_guide/support_matrix/supported_models.md:99
-#: ../../source/user_guide/support_matrix/supported_models.md:114
-#: ../../source/user_guide/support_matrix/supported_models.md:144
-#: ../../source/user_guide/support_matrix/supported_models.md:156
-msgid "🔵"
-msgstr "🔵"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-#: ../../source/user_guide/support_matrix/supported_models.md:55
-#: ../../source/user_guide/support_matrix/supported_models.md:57
-#: ../../source/user_guide/support_matrix/supported_models.md:99
-#: ../../source/user_guide/support_matrix/supported_models.md:144
-#: ../../source/user_guide/support_matrix/supported_models.md:156
-#: ../../source/user_guide/support_matrix/supported_models.md:158
-msgid "✅"
-msgstr "✅"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "1M"
@@ -330,14 +333,6 @@ msgstr "[DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)"
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "DeepSeek V3/3.1"
 msgstr "DeepSeek V3/3.1"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "240k"
-msgstr "240k"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
-msgstr "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "DeepSeek V3.2"
@@ -386,6 +381,16 @@ msgstr "[Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md)"
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "Qwen3-Coder-30B-A3B"
 msgstr "Qwen3-Coder-30B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "🔵"
+msgstr "🔵"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "[Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md)"
@@ -453,8 +458,8 @@ msgid "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
 msgstr "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
-msgid "DeepseekOCR2"
-msgstr "DeepseekOCR2"
+msgid "DeepSeekOCR2"
+msgstr "DeepSeekOCR2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:33
 msgid "[DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md)"
@@ -731,9 +736,37 @@ msgid "Qwen3.5-397B-A17B"
 msgstr "Qwen3.5-397B-A17B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
+msgid "Ascend 950DT"
+msgstr "昇腾950DT"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "1010000"
+msgstr "1010000"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
+msgstr "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:135
 #: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "Qwen3.6-27B"
 msgstr "Qwen3.6-27B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "262144"
+msgstr "262144"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid ""
+"[Qwen3.5-27B / "
+"Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
+msgstr ""
+"[Qwen3.5-27B / "
+"Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:144
 #: ../../source/user_guide/support_matrix/supported_models.md:158
@@ -750,34 +783,14 @@ msgid "Qwen3-VL-30B-A3B/Qwen3-VL-235B-A22B"
 msgstr "Qwen3-VL-30B-A3B/Qwen3-VL-235B-A22B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:144
-msgid "262144"
-msgstr "262144"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:144
 msgid ""
 "[Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)/[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
 msgstr ""
 "[Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)/[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:144
-msgid "1010000"
-msgstr "1010000"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:144
-msgid "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
-msgstr "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:144
 msgid "Qwen3.5-27B / Qwen3.6-27B"
 msgstr "Qwen3.5-27B / Qwen3.6-27B"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:144
-msgid ""
-"[Qwen3.5-27B / "
-"Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
-msgstr ""
-"[Qwen3.5-27B / "
-"Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:144
 #: ../../source/user_guide/support_matrix/supported_models.md:158
