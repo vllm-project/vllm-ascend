@@ -2307,16 +2307,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self._finalize_dump_data()
 
-        # DSpark may still have draft work in an NPU side stream here. Keep a
-        # conservative correctness fence until that producer stream exposes a
-        # completion event that the Mamba postprocess stream can wait on.
-        if (
-            self.need_accepted_tokens
-            and self.speculative_config is not None
-            and self.speculative_config.use_dspark()
-        ):
-            torch.npu.synchronize()
-
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
             with (
