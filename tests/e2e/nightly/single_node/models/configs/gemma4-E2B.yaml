@@ -1,0 +1,58 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_model: &model "google/gemma-4-E2B-it"
+
+_envs: &envs
+  VLLM_USE_MODELSCOPE: "true"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_BUFFSIZE: "1024"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+  VLLM_RPC_TIMEOUT: "6000"
+
+_server_cmd: &server_cmd
+  - "--no-enable-prefix-caching"
+  - "--tensor-parallel-size"
+  - "1"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "32768"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "8"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--trust-remote-code"
+
+_api_keyword_args: &api_keyword_args
+  max_tokens: 64
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 64
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Gemma4-E2B-A3-full-decode-graph"
+    model: *model
+    envs:
+      <<: *envs
+    prompts:
+      - "Explain briefly why ACLGraph output should match eager output."
+    api_keyword_args:
+      <<: *api_keyword_args
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["none"],"cudagraph_capture_sizes":[1,2,4,8]}'
+    test_content:
+      - "chat_completion"
