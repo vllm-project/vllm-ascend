@@ -147,13 +147,17 @@ static const std::string VALUE_NAME = "value";
 static const std::string SPARSE_INDICES_NAME = "sparse_indices";
 static const std::string BLOCK_TABLE_NAME = "block_table";
 static const std::string ATTEN_OUT_NAME = "attention_out";
+static const std::string SOFTMAX_MAX_NAME = "softmax_max";
+static const std::string SOFTMAX_SUM_NAME = "softmax_sum";
 
 const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {QUERY_NAME,                  {ge::DT_FLOAT16, ge::DT_BF16}},
     {KEY_NAME,                    {ge::DT_INT8, ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT8}},
     {VALUE_NAME,                  {ge::DT_INT8, ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT8}},
     {ATTEN_OUT_NAME,              {ge::DT_FLOAT16, ge::DT_BF16}},
-    {SPARSE_INDICES_NAME,         {ge::DT_INT32}}
+    {SPARSE_INDICES_NAME,         {ge::DT_INT32}},
+    {SOFTMAX_MAX_NAME,            {ge::DT_FLOAT}},
+    {SOFTMAX_SUM_NAME,            {ge::DT_FLOAT}}
 };
 
 const std::map<std::string, std::vector<QSFALayout>> LAYOUT_SUPPORT_MAP = {
@@ -851,6 +855,16 @@ ge::graphStatus QSFATilingCheck::CheckSingleParaSparseIndices() const
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus QSFATilingCheck::CheckSoftmaxMax() const
+{
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus QSFATilingCheck::CheckSoftmaxSum() const
+{
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus QSFATilingCheck::CheckSinglePara() const
 {
     if (ge::GRAPH_SUCCESS != CheckSingleParaQuery() ||
@@ -859,6 +873,8 @@ ge::graphStatus QSFATilingCheck::CheckSinglePara() const
         ge::GRAPH_SUCCESS != CheckSingleParaNumHeads() ||
         ge::GRAPH_SUCCESS != CheckSingleParaKvHeadNums() ||
         ge::GRAPH_SUCCESS != CheckSingleParaSparseMode() ||
+        ge::GRAPH_SUCCESS != CheckSoftmaxMax() ||
+        ge::GRAPH_SUCCESS != CheckSoftmaxSum() ||
         ge::GRAPH_SUCCESS != CheckSingleParaSparseBlockSize()) {
         return ge::GRAPH_FAILED;
     }
@@ -962,6 +978,12 @@ void QSFATilingCheck::SetQSFAShapeCompare()
     keyShapeCmp_ = opParamInfo_.key.shape->GetStorageShape();
     valueShapeCmp_ = opParamInfo_.value.shape->GetStorageShape();
     attenOutShapeCmp_ = opParamInfo_.attenOut.shape->GetStorageShape();
+    if (opParamInfo_.softmaxMax.shape != nullptr) {
+        softmaxMaxShapeCmp_ = opParamInfo_.softmaxMax.shape->GetStorageShape();
+    }
+    if (opParamInfo_.softmaxSum.shape != nullptr) {
+        softmaxSumShapeCmp_ = opParamInfo_.softmaxSum.shape->GetStorageShape();
+    }
 }
 
 ge::graphStatus QSFATilingCheck::CheckBlockTable() const
@@ -969,7 +991,7 @@ ge::graphStatus QSFATilingCheck::CheckBlockTable() const
     if (kvStorageMode_ != KvStorageMode::PAGE_ATTENTION) {
         OP_CHECK_IF(opParamInfo_.blockTable.tensor != nullptr,
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, BLOCK_TABLE_NAME.c_str(),
-                Ops::Base::ToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
+                GetShapeStr(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
                 "When the layout_kv is " + QSFALayoutToSerialString(kvLayout_) + ", block_table should be null."),
             return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
@@ -978,7 +1000,7 @@ ge::graphStatus QSFATilingCheck::CheckBlockTable() const
     uint32_t blockTableBatch = opParamInfo_.blockTable.tensor->GetStorageShape().GetDim(0);
     OP_CHECK_IF(blockTableBatch != bSize_,
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, BLOCK_TABLE_NAME.c_str(),
-            Ops::Base::ToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
+            GetShapeStr(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
             "The first dim of " + BLOCK_TABLE_NAME + " should be equal to batch size " + std::to_string(bSize_)),
         return ge::GRAPH_FAILED);
 
@@ -1647,6 +1669,10 @@ void QSFAInfoParser::GetOutputParaInfo()
 {
     opParamInfo_.attenOut.desc = context_->GetOutputDesc(OUTPUT_INDEX);
     opParamInfo_.attenOut.shape = context_->GetOutputShape(OUTPUT_INDEX);
+    opParamInfo_.softmaxMax.desc = context_->GetOutputDesc(SOFTMAXMAX_INDEX);
+    opParamInfo_.softmaxMax.shape = context_->GetOutputShape(SOFTMAXMAX_INDEX);
+    opParamInfo_.softmaxSum.desc = context_->GetOutputDesc(SOFTMAXSUM_INDEX);
+    opParamInfo_.softmaxSum.shape = context_->GetOutputShape(SOFTMAXSUM_INDEX);
 }
 
 ge::graphStatus QSFAInfoParser::GetAttrParaInfo()
@@ -1669,7 +1695,6 @@ ge::graphStatus QSFAInfoParser::GetAttrParaInfo()
     opParamInfo_.tileSize = attrs->GetAttrPointer<int64_t>(TILE_SIZE_ATTR_INDEX);
     opParamInfo_.ropeHeadDim = attrs->GetAttrPointer<int64_t>(ROPE_HEAD_DIM_ATTR_INDEX);
     opParamInfo_.returnSoftmaxLse = attrs->GetAttrPointer<bool>(RETURN_SOFTMAX_LSE_ATTR_INDEX);
-    OP_LOGE("ccccc"," ============ tiling入口 ============");
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1821,7 +1846,7 @@ ge::graphStatus QSFAInfoParser::GetMaxBlockNumPerBatch()
     }
     if (opParamInfo_.blockTable.tensor->GetStorageShape().GetDim(1) <= 0) {
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, "block_table",
-            Ops::Base::ToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
+            GetShapeStr(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
             "block_table's second dim should be greater than 0.");
         return ge::GRAPH_FAILED;
     }
@@ -2025,7 +2050,7 @@ void QSFAInfoParser::FillTilingInfoAttrsAndLayouts(QSFATilingInfo &qsfaInfo)
     qsfaInfo.nextTokens = *opParamInfo_.nextTokens;
     qsfaInfo.tileSize = *opParamInfo_.tileSize;
     qsfaInfo.ropeHeadDim = *opParamInfo_.ropeHeadDim;
-    qsfaInfo.returnSoftmaxLse = *opParamInfo_.returnSoftmaxLse;
+    qsfaInfo.returnSoftmaxLse = (opParamInfo_.returnSoftmaxLse != nullptr) ? *opParamInfo_.returnSoftmaxLse : false;
 
     qsfaInfo.qLayout = qLayout_;
     qsfaInfo.topkLayout = topkLayout_;
