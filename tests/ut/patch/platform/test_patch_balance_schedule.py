@@ -134,6 +134,20 @@ def test_balance_config_fallback_accepts_legacy_top_level_config():
         assert _balance_scheduling_enabled(vllm_config) is True
 
 
+@pytest.mark.parametrize(
+    "additional_config",
+    [
+        {"scheduler_config": {"enable_balance_scheduling": "false"}},
+        {"enable_balance_scheduling": "false"},
+    ],
+)
+def test_balance_config_fallback_coerces_string_false(additional_config):
+    vllm_config = SimpleNamespace(additional_config=additional_config)
+
+    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
+        assert _balance_scheduling_enabled(vllm_config) is False
+
+
 @pytest.mark.parametrize("balance_enabled", [False, True])
 def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balance_enabled):
     def fake_scheduler_init(self, *args, **kwargs):

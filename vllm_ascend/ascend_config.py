@@ -28,11 +28,6 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-else:
-    # At runtime VllmConfig is not imported (avoids heavy/circular import), but
-    # pydantic must resolve the field type name. Treat it as Any so pydantic
-    # stores the reference without recursive validation (arbitrary_types_allowed).
-    VllmConfig = Any
 
 
 @config
@@ -206,12 +201,12 @@ class AscendConfig:
     c8_enable_reshape_optim: bool = False
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
-    enable_flashcomm1: Any = False
-    enable_fused_mc2: Any = 0
-    enable_mlapo: Any = True
-    msmonitor_use_daemon: Any = False
-    enable_transpose_kv_cache_by_block: Any = True
-    weight_nz_mode: Any = 1
+    enable_flashcomm1: bool = False
+    enable_fused_mc2: int = 0
+    enable_mlapo: bool = True
+    msmonitor_use_daemon: bool = False
+    enable_transpose_kv_cache_by_block: bool = True
+    weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -781,8 +776,8 @@ class SchedulerConfig:
     typed fields that pydantic coerces from nested dicts.
     """
 
-    enable_balance_scheduling: Any = False
-    recompute_scheduler_enable: Any = False
+    enable_balance_scheduling: bool = False
+    recompute_scheduler_enable: bool = False
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
@@ -817,16 +812,20 @@ class SchedulerConfig:
                 return additional_config[config_key]
             return default
 
-        return cls(
+        resolved = {
             # VLLM_ASCEND_BALANCE_SCHEDULING is being sunset; do not carry its
             # environment fallback into the new construction path.
-            enable_balance_scheduling=_resolve("enable_balance_scheduling", False),
-            recompute_scheduler_enable=_resolve("recompute_scheduler_enable", False),
+            "enable_balance_scheduling": _resolve("enable_balance_scheduling", False),
+            "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.
-            short_request_first_config=_resolve("short_request_first_config", {}),
-            profiling_chunk_config=_resolve("profiling_chunk_config", {}),
-            batch_job_sched_config=_resolve("batch_job_sched_config", {}),
-        )
+            "short_request_first_config": _resolve("short_request_first_config", {}),
+            "profiling_chunk_config": _resolve("profiling_chunk_config", {}),
+            "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
+        }
+        # Forward nested unknown keys to pydantic so extra="forbid" reports
+        # typos instead of the resolver silently dropping them.
+        resolved.update({key: value for key, value in scheduler_config.items() if key not in resolved})
+        return cls(**resolved)  # type: ignore[arg-type]
 
 
 class SparseKVOffloadConfig:
@@ -945,8 +944,13 @@ def init_ascend_config(vllm_config):
         "_sparse_li_c8_layer_ids",
         "_sparse_li_c8_layer_names",
         "_sparse_li_c8_layer_filter_enabled",
-        # SchedulerConfig-internal top-level legacy key (SchedulerConfig resolves it internally)
+        # SchedulerConfig-internal top-level legacy keys (resolved internally,
+        # then replaced by the typed scheduler_config passed above).
         "enable_balance_scheduling",
+        "recompute_scheduler_enable",
+        "short_request_first_config",
+        "profiling_chunk_config",
+        "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
 
