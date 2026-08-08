@@ -40,8 +40,10 @@ class AscendRMSNorm(RMSNorm):
         self.bias_loaded = False
 
         # quantization with anti_method m4 will generate none-zero norm bias
-        if vllm_config.quant_config is not None and any(
-            "norm.bias" in name for name in vllm_config.quant_config.quant_description
+        if vllm_config.quant_config is not None and (
+            getattr(vllm_config.quant_config, "has_norm_bias", None)
+            if hasattr(vllm_config.quant_config, "has_norm_bias")
+            else any("norm.bias" in name for name in vllm_config.quant_config.quant_description)
         ):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
             self.bias.weight_loader = self._bias_weight_loader
