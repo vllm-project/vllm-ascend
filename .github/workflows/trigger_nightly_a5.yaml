@@ -1,0 +1,54 @@
+name: Trigger Nightly‑A5 from /nightly comment
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  trigger:
+    name: Parse comment & PR info
+    runs-on: linux-amd64-cpu-8-hk
+    if: |
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/nightly ')
+    outputs:
+      pr_branch: ${{ steps.pr_meta.outputs.pr_branch }}
+      pr_sha: ${{ steps.pr_meta.outputs.pr_sha }}
+      test_cases: ${{ steps.parse_comment.outputs.test_cases }}
+    env:
+      COMMENT_BODY: ${{ github.event.comment.body }}
+    steps:
+      - name: Get PR head branch & commit sha
+        id: pr_meta
+        run: |
+          PR_URL="${{ github.event.issue.pull_request.url }}"
+          PR_HEAD=$(curl -s "$PR_URL")
+          PR_BRANCH=$(echo "$PR_HEAD" | jq -r '.head.ref')
+          PR_SHA=$(echo "$PR_HEAD" | jq -r '.head.sha')
+          echo "pr_branch=${PR_BRANCH}" >> $GITHUB_OUTPUT
+          echo "pr_sha=${PR_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Parse test‑cases from comment body
+        id: parse_comment
+        run: |
+          RAW="${COMMENT_BODY#/nightly }"
+          TEST_CASES=$(echo "$RAW" | tr '\n' ',' | sed -e 's/,,*/,/g' -e 's/^,//' -e 's/,$//')
+          echo "test_cases=${TEST_CASES}" >> $GITHUB_OUTPUT
+          echo "parsed test_cases: ${TEST_CASES}"
+
+  run-nightly-a5:
+    name: Execute Nightly‑A5
+    needs: trigger
+    uses: ./.github/workflows/schedule_nightly_test_a5.yaml
+    with:
+      vllm_ascend_branch: ${{ needs.trigger.outputs.pr_branch }}
+      vllm_ascend_ref: ${{ needs.trigger.outputs.pr_sha }}
+      test_cases: ${{ needs.trigger.outputs.test_cases }}
+      skip_build_image: false
+      aop_enabled: false
+      build_type: release
+      cann_version: "2026.08.03"
+    secrets: inherit
