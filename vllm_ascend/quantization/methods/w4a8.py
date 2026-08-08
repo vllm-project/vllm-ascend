@@ -231,7 +231,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
         tp_rank: int | None = None,
     ) -> torch.Tensor:
@@ -240,9 +240,15 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                 # QuantMatmul cannot consume the A3 per-channel INT4 WeightNZ
                 # representation. Model this projection as one grouped expert
                 # instead, which keeps both the int8 activation and int4 weight.
-                input_shape = x.shape
-                x_2d = x.reshape(-1, input_shape[-1])
-                quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x_2d)
+                if isinstance(x, tuple):
+                    quantized_x, pertoken_scale = x
+                    input_shape = quantized_x.shape
+                    output_dtype = torch.bfloat16
+                else:
+                    input_shape = x.shape
+                    x_2d = x.reshape(-1, input_shape[-1])
+                    quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x_2d)
+                    output_dtype = x.dtype
                 # Construct the single-group token count directly on the
                 # device. ``torch.tensor([count], device=x.device)`` performs
                 # a synchronous host-to-device copy, which is forbidden while
@@ -251,7 +257,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                     (1,),
                     quantized_x.shape[0],
                     dtype=torch.int64,
-                    device=x.device,
+                    device=quantized_x.device,
                 )
 
                 scale_bias = layer.scale_bias
@@ -271,7 +277,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                     group_list=group_list,
                     group_type=0,
                     group_list_type=1,
-                    output_dtype=x.dtype,
+                    output_dtype=output_dtype,
                 )[0]
                 if bias is not None:
                     output = output + bias

@@ -515,33 +515,42 @@ def test_per_channel_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     assert down_call.kwargs["output_dtype"] == hidden_states.dtype
 
 
-def test_per_channel_w4a8_shared_experts_use_weight_only_fallback(monkeypatch):
+def test_per_channel_w4a8_shared_situ_uses_single_expert_gmm_fusion(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     gate_up = torch.randn(2, 8, dtype=torch.bfloat16)
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2, dtype=torch.float32)
+    quantized_situ = torch.ones(2, 4, dtype=torch.int8)
+    situ_scale = torch.ones(2, dtype=torch.float32)
     down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up_proj = MagicMock(return_value=(gate_up, None))
+    gate_up_proj.weight_scale = torch.ones(8, dtype=torch.int64)
+    gate_up_proj.weight_scale_fp32 = torch.ones(8, dtype=torch.float32)
+    down_proj = MagicMock(return_value=(down_out, None))
+    down_proj.weight_scale = torch.ones(4, dtype=torch.int64)
+    down_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
     runner._shared_experts = SimpleNamespace(
-        gate_up_proj=SimpleNamespace(
-            weight_scale=torch.ones(8),
-            weight_scale_fp32=torch.ones(8),
-        ),
-        down_proj=SimpleNamespace(
-            weight_scale=torch.ones(4),
-            weight_scale_fp32=torch.ones(4),
-        ),
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
         act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
     )
-    runner._shared_experts_part1 = MagicMock(return_value=gate_up)
-    runner._shared_experts_part2 = MagicMock(return_value=down_out)
+    runner._shared_experts_part1 = MagicMock()
+    runner._shared_experts_part2 = MagicMock()
     runner.quant_type = QuantType.W4A8
     runner.multistream_overlap_shared_expert = False
     events = fused_moe_module.FusedMoEEvents(
         before_routed_experts=MagicMock(),
-        before_dispatch=MagicMock(),
+        after_routed_experts=MagicMock(),
+        before_gmm2=MagicMock(),
         before_combine=MagicMock(),
     )
     quant_matmul = MagicMock()
+    dynamic_quant = MagicMock(return_value=(quantized_input, input_scale))
+    custom_ops = SimpleNamespace(
+        dequant_situ_quant=MagicMock(return_value=(quantized_situ, situ_scale)),
+    )
 
     monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
@@ -552,6 +561,8 @@ def test_per_channel_w4a8_shared_experts_use_weight_only_fallback(monkeypatch):
         MagicMock(return_value=MagicMock()),
     )
     monkeypatch.setattr(fused_moe_module.torch_npu, "npu_quant_matmul", quant_matmul)
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_dynamic_quant", dynamic_quant, raising=False)
+    monkeypatch.setattr(fused_moe_module.torch.ops, "_C_ascend", custom_ops)
     monkeypatch.setattr(
         fused_moe_module,
         "_EXTRA_CTX",
@@ -564,8 +575,23 @@ def test_per_channel_w4a8_shared_experts_use_weight_only_fallback(monkeypatch):
     output = runner._forward_shared_experts(hidden_states, events)
 
     assert output is down_out
-    runner._shared_experts_part1.assert_called_once_with(hidden_states)
-    runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
+    dynamic_quant.assert_called_once_with(hidden_states)
+    gate_up_proj.assert_called_once()
+    gate_quantized, gate_scale = gate_up_proj.call_args.args[0]
+    assert gate_quantized is quantized_input
+    assert gate_scale is input_scale
+    situ_call = custom_ops.dequant_situ_quant.call_args.kwargs
+    assert situ_call["x"] is gate_up
+    assert situ_call["weight_scale"] is None
+    assert situ_call["activation_scale"] is None
+    assert situ_call["beta"] == 4.0
+    assert situ_call["linear_beta"] == 25.0
+    down_proj.assert_called_once()
+    down_quantized, down_scale = down_proj.call_args.args[0]
+    assert down_quantized is quantized_situ
+    assert down_scale is situ_scale
+    runner._shared_experts_part1.assert_not_called()
+    runner._shared_experts_part2.assert_not_called()
     quant_matmul.assert_not_called()
 
 
