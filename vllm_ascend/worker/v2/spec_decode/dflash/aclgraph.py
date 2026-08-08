@@ -86,7 +86,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
-
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
@@ -112,7 +112,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
-                self.speculator.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,
