@@ -415,6 +415,40 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     assert manager.block_size == mamba_spec.block_size
 
 
+@pytest.mark.parametrize(
+    ("total_computed_tokens", "num_local_computed_tokens", "expected_blocks"),
+    [
+        pytest.param(24, 16, 5, id="partial-local-hit-with-external-tokens"),
+        pytest.param(16, 16, 4, id="no-external-tokens"),
+    ],
+)
+def test_ascend_mamba_allocation_uses_exact_local_hit_length(
+    monkeypatch,
+    total_computed_tokens: int,
+    num_local_computed_tokens: int,
+    expected_blocks: int,
+) -> None:
+    manager = AscendMambaManager.__new__(AscendMambaManager)
+    manager.block_size = 16
+    base_manager = AscendMambaManager.__bases__[0]
+    monkeypatch.setattr(
+        base_manager,
+        "get_num_blocks_to_allocate",
+        lambda *args, **kwargs: 4,
+    )
+
+    actual = manager.get_num_blocks_to_allocate(
+        request_id="request",
+        num_tokens=32,
+        new_computed_blocks=[MagicMock()],
+        total_computed_tokens=total_computed_tokens,
+        num_local_computed_tokens=num_local_computed_tokens,
+        num_tokens_main_model=32,
+    )
+
+    assert actual == expected_blocks
+
+
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
     """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
     (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
