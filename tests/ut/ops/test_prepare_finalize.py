@@ -9,6 +9,7 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -205,3 +206,22 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    def test_allgather_ep_w4a8_mxfp_keeps_bf16_for_dispatch(self, mock_dynamic_mx_quant, mock_all_gather):
+        mock_all_gather.side_effect = lambda tensor, *args, **kwargs: tensor
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+
+        hidden_states = torch.randn(3, 8, dtype=torch.bfloat16)
+        router_logits = torch.randn(3, 2, dtype=torch.bfloat16)
+
+        prepare_output = layer._prepare_with_ep_group(
+            hidden_states,
+            router_logits,
+            quant_type=QuantType.W4A8MXFP,
+        )
+
+        mock_dynamic_mx_quant.assert_not_called()
+        self.assertIs(prepare_output.hidden_states, hidden_states)
+        self.assertIsNone(prepare_output.pertoken_scale)
