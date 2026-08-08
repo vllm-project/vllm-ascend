@@ -17,10 +17,10 @@
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import torch
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
@@ -41,12 +41,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
     cache_graph_workspace,
-    enable_cp,
+    enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -62,7 +61,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import is_950, weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -75,25 +74,22 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
-        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
-        # rectify this when vllm disable the assertion.
-        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPImpl
+        if enable_dcp():
+            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 
-            return AscendAttentionCPImpl
+            return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if enable_cp():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPMetadataBuilder
+        if enable_dcp():
+            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
 
-            return AscendAttentionCPMetadataBuilder
+            return AscendAttentionDCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
     @staticmethod
@@ -162,7 +158,6 @@ class AscendMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
     # Number of tokens excluding padding.
-    num_actual_tokens_pcp_padded: int = 0
     num_actual_tokens: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
@@ -195,11 +190,6 @@ class AscendMetadata:
     # and 1st slot in block 1, respectively.
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
-    # pcp
-    prefill: AscendMetadataForPrefill | None = None
-    # dcp
-    decode_meta: AscendMetadataForDecode | None = None
-
     causal: bool = True
     # runner_type in model_config.
     model_runner_type: str = ""
@@ -219,6 +209,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
+    metadata_cls: type[AscendMetadata] = AscendMetadata
 
     def __init__(
         self,
@@ -266,6 +257,33 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    def _split_decodes_and_prefills(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> tuple[int, int, int, int]:
+        return split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+        )
+
+    def _build_backend_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        block_table: torch.Tensor,
+        query_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> dict[str, Any]:
+        """Extension point for layouts such as DCP.
+
+        The base builder owns common token classification, padding, masks and
+        cache metadata. Specialized backends only add their phase-specific
+        metadata here.
+        """
+        return {}
+
     def build(
         self,
         common_prefix_len: int,
@@ -276,8 +294,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = self._split_decodes_and_prefills(
+            common_attn_metadata
         )
 
         block_table = common_attn_metadata.block_table_tensor
@@ -343,7 +361,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        attn_metadata = AscendMetadata(
+        backend_metadata = self._build_backend_metadata(
+            common_attn_metadata,
+            block_table=block_table,
+            query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
+            seq_lens=seq_lens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+        )
+        attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
@@ -360,6 +386,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            **backend_metadata,
         )
         return attn_metadata
 
@@ -448,7 +475,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens,
         vllm_config,
         speculative_config=None,
-        num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
@@ -626,7 +652,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
-                attn_keys = list(attn_metadata.keys())
+                # Only standard (FIA) attention layers have captured graph
+                # params here; linear/GDN layers (GDNAttentionMetadata) are
+                # updated separately by update_conv1d_graph_params. So we filter by `seq_lens_list`
+                attn_keys = [k for k in attn_metadata if hasattr(attn_metadata[k], "seq_lens_list")]
                 if not use_layer_aware_replay:
                     # In some speculative methods (such as DFlash), the order of
                     # attn_keys in the Target model will be disrupted instead of
@@ -1280,8 +1309,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode = 3
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
-                key,
-                value,
+                key.contiguous(),
+                value.contiguous(),
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
@@ -1331,6 +1360,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
+                # ChunkedPrefill mixing prefill+decode: split into a per-phase
+                # FIA call each (A5 only).
+                if (
+                    is_950()
+                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                    and attn_metadata.num_decodes > 0
+                    and attn_metadata.num_prefills > 0
+                ):
+                    return self._forward_fia_chunked_prefill_split(
+                        query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
+                    )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1356,6 +1396,87 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def _forward_fia_chunked_prefill_split(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        current_key: torch.Tensor,
+        current_value: torch.Tensor,
+        block_size: int,
+        block_table: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """ChunkedPrefill with mixed prefill/decode: run decode and prefill in
+        separate FIA calls. split_decodes_and_prefills has reordered the batch
+        so decodes occupy [0, num_decode_tokens) and prefills the rest
+        """
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        seq_lens_list = attn_metadata.seq_lens_list
+        num_tokens = int(actual_seq_qlen[-1])
+
+        # decode part
+        if num_decode_tokens > 0:
+            decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+                query=query[:num_decode_tokens],
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table[:num_decodes],
+                input_layout="TND",
+                block_size=block_size,
+                # cumulative offset from 0; leading num_decodes entries used as-is
+                actual_seq_lengths=actual_seq_qlen[:num_decodes],
+                actual_seq_lengths_kv=seq_lens_list[:num_decodes],
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                current_key=key,
+                current_value=value,
+                attn_metadata=attn_metadata,
+                is_prefill_no_cache=False,
+                sparse_mode=3,
+            )
+            output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
+
+        # prefill part
+        if attn_metadata.num_prefills > 0:
+            # rebase cumulative q offsets to start at 0 for the prefill slice
+            prefill_seq_qlen = [
+                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
+            ]
+            prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
+                query=query[num_decode_tokens:num_tokens],
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table[num_decodes:],
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=prefill_seq_qlen,
+                actual_seq_lengths_kv=seq_lens_list[num_decodes:],
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                current_key=key,
+                current_value=value,
+                attn_metadata=attn_metadata,
+                is_prefill_no_cache=False,
+                sparse_mode=3,
+            )
+            n_prefill = num_tokens - num_decode_tokens
+            output[num_decode_tokens:num_tokens] = prefill_out.view(n_prefill, self.num_heads, self.head_size)
         return output
 
     def forward_paged_attention(
@@ -1592,11 +1713,14 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+
+            # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
+            # therefore, the graph-mode condition needs to be evaluated earlier.
+            if _EXTRA_CTX.capturing:
+                attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
+                output[:num_tokens] = attn_output[:num_tokens]
+                return output
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
             elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                 return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)

@@ -50,6 +50,10 @@ TITLES = {
         "en": "EPLB Swift Balancer",
         "zh": "EPLB 快速均衡器",
     },
+    "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
+        "en": "Model Runner V2 EPLB Architecture",
+        "zh": "Model Runner V2 EPLB 架构",
+    },
     "developer_guide/Design_Documents/npugraph_ex.md": {"en": "NPUGraph Ex", "zh": "NPUGraph 扩展"},
     "developer_guide/Design_Documents/patch.md": {"en": "Patch", "zh": "补丁"},
     "developer_guide/Design_Documents/quantization.md": {"en": "Quantization", "zh": "量化"},
@@ -84,14 +88,6 @@ TITLES = {
     "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
-    },
-    "tutorials/features/long_sequence_context_parallel_multi_node.md": {
-        "en": "Long Sequence Context Parallel (Multi Node)",
-        "zh": "长序列上下文并行（多节点）",
-    },
-    "tutorials/features/long_sequence_context_parallel_single_node.md": {
-        "en": "Long Sequence Context Parallel (Single Node)",
-        "zh": "长序列上下文并行（单节点）",
     },
     "tutorials/features/pd_colocated_mooncake_multi_instance.md": {
         "en": "PD Colocated (Mooncake, Multi-Instance)",
@@ -130,6 +126,7 @@ TITLES = {
         "zh": "LLaVA-OneVision-Qwen2-0.5B-OV",
     },
     "tutorials/models/MiniMax-M2.md": {"en": "MiniMax-M2", "zh": "MiniMax-M2"},
+    "tutorials/models/MiniMax-M3.md": {"en": "MiniMax-M3", "zh": "MiniMax-M3"},
     "tutorials/models/Minitron-8B-Base.md": {"en": "Minitron-8B-Base", "zh": "Minitron-8B-Base"},
     "tutorials/models/Mixtral-8x7B-Instruct-v0.1.md": {
         "en": "Mixtral-8x7B-Instruct-v0.1",
@@ -168,8 +165,8 @@ TITLES = {
     },
     "tutorials/models/Qwen3.5-397B-A17B.md": {"en": "Qwen3.5-397B-A17B", "zh": "Qwen3.5-397B-A17B"},
     "tutorials/models/Qwen3.6-35B-A3B.md": {"en": "Qwen3.6-35B-A3B", "zh": "Qwen3.6-35B-A3B"},
-    "tutorials/models/Qwen3_embedding.md": {"en": "Qwen3 Embedding", "zh": "Qwen3 Embedding"},
-    "tutorials/models/Qwen3_reranker.md": {"en": "Qwen3 Reranker", "zh": "Qwen3 Reranker"},
+    "tutorials/models/Qwen3-Embedding.md": {"en": "Qwen3-Embedding", "zh": "Qwen3-Embedding"},
+    "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
     "user_guide/configuration/env_vars.md": {"en": "Environment Variables", "zh": "环境变量"},
@@ -203,6 +200,10 @@ TITLES = {
     "user_guide/feature_guide/quantization.md": {"en": "Quantization", "zh": "量化"},
     "user_guide/feature_guide/rfork.md": {"en": "RFork", "zh": "RFork"},
     "user_guide/feature_guide/sequence_parallelism.md": {"en": "Sequence Parallelism", "zh": "序列并行"},
+    "user_guide/feature_guide/short_request_first.md": {
+        "en": "ShortRequestFirst Prefill Scheduling",
+        "zh": "ShortRequestFirst 预填充调度",
+    },
     "user_guide/feature_guide/sleep_mode.md": {"en": "Sleep Mode", "zh": "休眠模式"},
     "user_guide/feature_guide/speculative_decoding.md": {"en": "Speculative Decoding", "zh": "推测解码"},
     "user_guide/feature_guide/structured_output.md": {"en": "Structured Output", "zh": "结构化输出"},

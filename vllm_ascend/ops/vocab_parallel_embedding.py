@@ -39,7 +39,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
-from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
+from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable, vllm_version_is
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -253,33 +253,87 @@ class AscendParallelLMHead(ParallelLMHead):
     """
     Register ParallelLMHead as a custom op for Ascend."""
 
-    def __init__(
-        self,
-        num_embeddings: int,
-        embedding_dim: int,
-        bias: bool = False,
-        params_dtype: torch.dtype | None = None,
-        org_num_embeddings: int | None = None,
-        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        AscendVocabParallelEmbedding.__init__(
-            self, num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
-        )
+    # main2main compat: `disable_tp` was added to upstream
+    # ParallelLMHead.__init__() in vllm main after 0.26.0. Ascend NPU
+    # uses its own TP logic via lmhead_tp_enable(), so the parameter is
+    # only accepted for interface alignment.
+    # Remove the version gate once 0.26.0 support is dropped.
+    if vllm_version_is("0.26.0"):
 
-        self.quant_config = quant_config
-        if bias:
-            self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
+        def __init__(
+            self,
+            num_embeddings: int,
+            embedding_dim: int,
+            bias: bool = False,
+            params_dtype: torch.dtype | None = None,
+            org_num_embeddings: int | None = None,
+            padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+        ):
+            AscendVocabParallelEmbedding.__init__(
+                self,
+                num_embeddings,
+                embedding_dim,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
             )
-        else:
-            self.register_parameter("bias", None)
+
+            self.quant_config = quant_config
+            if bias:
+                self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
+                set_weight_attrs(
+                    self.bias,
+                    {
+                        "output_dim": 0,
+                        "weight_loader": self.weight_loader,
+                    },
+                )
+            else:
+                self.register_parameter("bias", None)
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            num_embeddings: int,
+            embedding_dim: int,
+            bias: bool = False,
+            params_dtype: torch.dtype | None = None,
+            org_num_embeddings: int | None = None,
+            padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config: QuantizationConfig | None = None,
+            prefix: str = "",
+            *,
+            disable_tp: bool = False,
+        ):
+            self.disable_tp = disable_tp
+
+            AscendVocabParallelEmbedding.__init__(
+                self,
+                num_embeddings,
+                embedding_dim,
+                params_dtype,
+                org_num_embeddings,
+                padding_size,
+                quant_config,
+                prefix,
+            )
+
+            self.quant_config = quant_config
+            if bias:
+                self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
+                set_weight_attrs(
+                    self.bias,
+                    {
+                        "output_dim": 0,
+                        "weight_loader": self.weight_loader,
+                    },
+                )
+            else:
+                self.register_parameter("bias", None)
 
 
 class AscendLogitsProcessor(LogitsProcessor):
@@ -287,6 +341,14 @@ class AscendLogitsProcessor(LogitsProcessor):
     Register LogitsProcessor as a custom op for Ascend.
     Added the feature of lmheadTP in pure dp scenario
     """
+
+    def _apply_head(
+        self,
+        lm_head: AscendParallelLMHead,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return super()._apply_head(lm_head, hidden_states, embedding_bias)
 
     def _get_logits(
         self,
@@ -307,7 +369,7 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
-        logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
+        logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = get_lmhead_tp_group().all_to_all(logits)
@@ -326,7 +388,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = self._gather_logits(logits)

@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import contextmanager
+from dataclasses import replace
+
 import numpy as np
 import torch
+import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
+from vllm.config import CompilationMode
+from vllm.forward_context import get_forward_context
 
 
 def update_num_computed_tokens_for_batch_change(
@@ -163,3 +169,51 @@ class SlidingWindowAdapter:
             if src is not None:
                 _windowed_cpu = src - ((src + k_future - w).clamp(min=0) // b) * b
                 setattr(common_attn_metadata, name, _windowed_cpu)
+
+
+@contextmanager
+def patch_tensor_parallel_group(tp_group):
+    """Temporarily swap the global TP group for draft-model spec decode.
+
+    vllm-ascend local implementation for swapping the global TP group so the
+    draft model can run with a TP degree that differs from the target model.
+    """
+    old_tp_group = _ps.get_tp_group()
+    _ps._TP_STATE_PATCHED = True
+    _ps._TP = tp_group
+    try:
+        yield
+    finally:
+        _ps._TP_STATE_PATCHED = False
+        _ps._TP = old_tp_group
+
+
+# TODO: Remove it when the bug of fx-graph is solved
+# patch vllm_config to be in CompilationMode.NONE temporarily
+@contextmanager
+def _maybe_eager_context(vllm_config):
+    target_compilation_config = vllm_config.compilation_config
+    draft_compilation_config = replace(
+        target_compilation_config,
+        mode=CompilationMode.NONE,
+    )
+    # Model layers use these registries even when compilation is disabled.
+    draft_compilation_config.static_forward_context = target_compilation_config.static_forward_context
+    draft_compilation_config.static_all_moe_layers = target_compilation_config.static_all_moe_layers
+    vllm_config.compilation_config = draft_compilation_config
+    try:
+        yield
+    finally:
+        vllm_config.compilation_config = target_compilation_config
+
+
+# `sp` should be disabled when running MarkovHead
+@contextmanager
+def _disable_flash_comm_v1_context():
+    forward_context = get_forward_context()
+    _raw_flash_comm_v1 = forward_context.flash_comm_v1_enabled
+    try:
+        forward_context.flash_comm_v1_enabled = False
+        yield
+    finally:
+        forward_context.flash_comm_v1_enabled = _raw_flash_comm_v1

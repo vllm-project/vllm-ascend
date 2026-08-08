@@ -49,7 +49,7 @@ from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
+from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
@@ -181,7 +181,7 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
     if int(envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2) != 0:
         raise AssertionError(
             "Ascend MoE LoRA cannot patch FusedMC2 path "
-            "(dispatch_ffn_combine is a single fused C++ op). "
+            "(dispatch_ffn_combine/mega_moe is a single fused C++ op). "
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:

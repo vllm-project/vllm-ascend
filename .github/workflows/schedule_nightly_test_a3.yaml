@@ -53,6 +53,19 @@ on:
         required: false
         default: false
         type: boolean
+      build_type:
+        description: 'Build type: daily or release.'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      cann_version:
+        description: 'CANN version for base image tag'
+        required: false
+        default: '2026.08.03'
+        type: string
 
 permissions:
   contents: read
@@ -170,10 +183,16 @@ jobs:
     with:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
+      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      cann_version: ${{ inputs.cann_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
+      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   multi-node-tests:
     name: multi-node
@@ -269,6 +288,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a3
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
@@ -298,6 +318,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a3
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -343,3 +364,23 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
+
+  remove-taints:
+    name: Remove node taints
+    needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
+    if: >-
+      always() &&
+      inputs.request_id == '' &&
+      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+    runs-on: linux-aarch64-a3-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+    steps:
+      - name: Decode kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+
+      - name: Remove dedicated taint from test nodes
+        run: |
+          kubectl taint nodes ${{ vars.A3_TAINT_NODES }} dedicated- || true

@@ -126,7 +126,6 @@ def build_fused_experts_input(
     global_redundant_expert_num: int = 0,
     mc2_mask: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
-    log2phy: torch.Tensor | None = None,
     pertoken_scale: torch.Tensor | None = None,
     activation: str = "silu",
     need_trans: bool = False,
@@ -146,11 +145,19 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     swiglu_limit: float | None = 0.0,
+    swiglu_alpha: float | None = 1.0,
+    swiglu_beta: float | None = 0.0,
     lora_context=None,
 ) -> MoEFusedExpertsInput:
     if swiglu_limit is None:
         swiglu_limit = 0.0
+    if swiglu_alpha is None:
+        swiglu_alpha = 1.0
+    if swiglu_beta is None:
+        swiglu_beta = 0.0
     assert swiglu_limit is not None
+    assert swiglu_alpha is not None
+    assert swiglu_beta is not None
 
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -173,7 +180,6 @@ def build_fused_experts_input(
             global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            log2phy=log2phy,
             pertoken_scale=pertoken_scale,
         ),
         activation=activation,
@@ -193,6 +199,8 @@ def build_fused_experts_input(
             is_per_channel_weight=is_per_channel_weight,
         ),
         swiglu_limit=swiglu_limit,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
         lora_context=lora_context,
     )
 
@@ -244,6 +252,8 @@ def build_mlp_compute_input(
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
         swiglu_limit=fused_experts_input.swiglu_limit,
+        swiglu_alpha=fused_experts_input.swiglu_alpha,
+        swiglu_beta=fused_experts_input.swiglu_beta,
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
         lora_context=fused_experts_input.lora_context,

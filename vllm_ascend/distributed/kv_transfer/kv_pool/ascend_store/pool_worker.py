@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import threading
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -38,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
+    block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
@@ -61,6 +63,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     _circular_shift,
     record_failed_blocks,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    LayerwiseReuseLayout,
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_layerwise_kv_cache_specs,
+    get_layerwise_physical_layer_index,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -74,6 +83,12 @@ from vllm_ascend.memcache_comm_fence import (
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
 # multi-layer load time.
 LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
+
+# A partial snapshot can be visible to readers before the rank responsible for
+# saving it has published its final layer.
+MEMCACHE_UNMATCHED_STATE = -3101
+PARTIAL_LEASE_RETRY_COUNT = 10
+PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 
 
 class KVPoolWorker:
@@ -143,7 +158,7 @@ class KVPoolWorker:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.hash_block_size
+        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
@@ -283,7 +298,7 @@ class KVPoolWorker:
             self.metadata, self.grouped_block_size, partitions, self.use_hybrid, self.hash_block_size
         )
         self.cache_coordinator = self._build_cache_coordinator(vllm_config)
-        self.token_database.set_cache_coordinator(self.cache_coordinator)
+        self.token_database.cache_coordinator = self.cache_coordinator
 
     def _init_backend(self, parallel_config, extra_config) -> None:
         backend = backend_map.get(self.backend.lower())
@@ -294,19 +309,15 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        if self.backend.lower() == "memcache":
-            self.m_store = real_backend(  # type: ignore[misc]
-                parallel_config,
-                lazy_init=True,
-            )
-        else:
-            backend_kwargs = {}
-            if self.backend.lower() == "mooncake":
-                backend_kwargs["lazy_init"] = self.use_compress
-            self.m_store = real_backend(  # type: ignore[misc]
-                parallel_config,
-                **backend_kwargs,
-            )
+        backend_kwargs = {}
+        # lazy_init is enabled only for DSV4 compress models. The backend further
+        # gates this based on hardware: Mooncake requires ASCEND_ENABLE_FABRIC_MEM=1
+        # (A3 fabric memory), and Memcache requires device_sdma protocol.
+        backend_kwargs["lazy_init"] = self.use_compress
+        self.m_store = real_backend(  # type: ignore[misc]
+            parallel_config,
+            **backend_kwargs,
+        )
 
     def _init_kv_events(self, vllm_config) -> None:
         kv_event_config = vllm_config.kv_events_config
@@ -328,21 +339,49 @@ class KVPoolWorker:
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
-        # group (not the index in layer_names). Multiple layer_names at the
-        # same physical layer (e.g. indexer.k_cache + attn) are treated as
-        # multiple cache tensors of ONE layer (caches_per_layer > 1).
+        # group (not the index in layer_names). Multiple cache names at the
+        # same physical layer are treated as entries of one layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
+        self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+
+        if self.kv_cache_config is not None:
+            base_layers = getattr(
+                self.hf_config,
+                "num_hidden_layers",
+                self.num_layers,
+            )
+            physical_layers = {
+                self._extract_physical_layer_index(layer_name)
+                for group_spec in self.kv_cache_config.kv_cache_groups
+                for layer_name in group_spec.layer_names
+            }
+            if physical_layers:
+                effective_num_layers = max(self.num_layers, max(physical_layers) + 1)
+                if effective_num_layers != self.num_layers:
+                    logger.info(
+                        "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
+                        self.num_layers,
+                        effective_num_layers,
+                    )
+                    self.num_layers = effective_num_layers
+            if self.use_gva_layerwise:
+                self._layerwise_reuse_layout = build_layerwise_reuse_layout(
+                    get_layerwise_kv_cache_specs(self.kv_cache_config),
+                    base_layers,
+                    self._extra_config,
+                )
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                # Map each unique physical layer to a sequential layer_idx_in_group
-                phys_to_layer_idx: dict[int, int] = {}
+                physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
                     if physical_layer >= self.num_layers:
                         continue
-                    if physical_layer not in phys_to_layer_idx:
-                        phys_to_layer_idx[physical_layer] = len(phys_to_layer_idx)
+                    physical_layers.add(physical_layer)
+                phys_to_layer_idx = {
+                    physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
+                }
 
                 # Add one entry per unique physical layer (no duplicates)
                 for physical_layer, layer_idx_in_group in phys_to_layer_idx.items():
@@ -352,11 +391,10 @@ class KVPoolWorker:
                         existing.append(entry)
 
                 logger.info(
-                    "layerwise group %d: %d layer_names, %d unique physical layers, caches_per_layer=%d",
+                    "layerwise group %d: %d layer_names, %d unique physical layers",
                     group_id,
                     len(group_spec.layer_names),
                     len(phys_to_layer_idx),
-                    len(group_spec.layer_names) // max(1, len(phys_to_layer_idx)),
                 )
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
@@ -365,7 +403,26 @@ class KVPoolWorker:
         self.layer_save_finished_events: list[threading.Event] | None = None
 
         self.next_layer_to_submit = 0
-        self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
+        self.layerwise_offload = False
+        self.independent_layers: list[int] = []
+        self.prefetch_layer_map: dict[int, int] = {}
+        if self.use_gva_layerwise:
+            if self._layerwise_reuse_layout is None:
+                cache_layout = build_layerwise_cache_layout(
+                    self.num_layers,
+                    self._extra_config,
+                )
+                self.layerwise_offload = cache_layout.has_layer_reuse
+                self.independent_layers = cache_layout.independent_layers
+                self.prefetch_layer_map = cache_layout.prefetch_layer_map
+                self.num_prefetch_layers = cache_layout.num_prefetch_layers
+            else:
+                self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
+                self.independent_layers = self._layerwise_reuse_layout.independent_layers
+                self.prefetch_layer_map = self._layerwise_reuse_layout.prefetch_layer_map
+                self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
+        else:
+            self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
@@ -380,10 +437,7 @@ class KVPoolWorker:
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
             group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-            if group_block_len and group_num_layers > 0:
-                group_page_size = sum(group_block_len) // group_num_layers
-            else:
-                group_page_size = self.page_size_bytes
+            group_page_size = sum(group_block_len) if group_block_len else self.page_size_bytes
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
@@ -405,7 +459,8 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-            if self.use_gva_layerwise and self.kv_role in ["kv_producer", "kv_both"]:
+            can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
+            if self.use_gva_layerwise and can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
@@ -428,7 +483,7 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
-            elif self.kv_role in ["kv_producer", "kv_both"]:
+            elif can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
                     self.m_store,
@@ -489,7 +544,7 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
@@ -506,11 +561,13 @@ class KVPoolWorker:
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
                     ready_event,
+                    invalid_block_ids=self._invalid_block_ids,
+                    invalid_block_ids_lock=self._invalid_block_ids_lock,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -640,42 +697,40 @@ class KVPoolWorker:
             return cache.storage().data_ptr()
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        import regex as re
-
-        m = re.search(r"layers\.(\d+)", layer_name)
-        if m:
-            return int(m.group(1))
-        # MTP layers have names like "mtp.0.self_attn.xxx" without "layers."
-        # prefix. Map them after the main model layers.
-        if ".mtp." in f".{layer_name}.":
-            m = re.search(r"mtp\.(\d+)", layer_name)
-            if m:
-                num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
-                return num_hidden_layers + int(m.group(1))
-        m = re.search(r"(\d+)", layer_name)
-        return int(m.group(1)) if m else 0
+        base_layers = getattr(
+            self.hf_config,
+            "num_hidden_layers",
+            self.num_layers,
+        )
+        return get_layerwise_physical_layer_index(layer_name, base_layers)
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
-        physical_layers = set()
+        layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers:
+            if phys >= self.num_layers and self.num_kv_cache_groups > 1:
                 continue
-            physical_layers.add(phys)
-            cache_or_caches = self.kv_caches[layer_name]
-            for cache in self._as_cache_tuple(cache_or_caches):
-                base_addr = cache.data_ptr()
-                block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-                group_addrs.append(base_addr)
-                group_block_lens.append(block_len)
-                group_block_strides.append(block_stride)
+            layer_names_by_physical.setdefault(phys, []).append(layer_name)
+
+        layer_cache_entry_offsets = [0]
+        for phys in sorted(layer_names_by_physical):
+            for layer_name in sorted(layer_names_by_physical[phys]):
+                cache_or_caches = self.kv_caches[layer_name]
+                for cache in self._as_cache_tuple(cache_or_caches):
+                    base_addr = cache.data_ptr()
+                    block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+                    group_addrs.append(base_addr)
+                    group_block_lens.append(block_len)
+                    group_block_strides.append(block_stride)
+            layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
-        self.group_num_layers[group_id] = len(physical_layers)
+        self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
+        self.group_num_layers[group_id] = len(layer_names_by_physical)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
@@ -716,6 +771,7 @@ class KVPoolWorker:
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
+        self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: self._get_group_family(self.kv_cache_group_families, group_id)
@@ -774,6 +830,8 @@ class KVPoolWorker:
                 original_num_layers,
                 self.num_layers,
             )
+            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
 
         self.page_size_bytes = sum(self.block_len)
         self.token_database.set_group_buffers(
@@ -783,6 +841,7 @@ class KVPoolWorker:
             cache_role="kv",
             group_cache_families=self.group_kv_cache_families,
             group_num_layers=self.group_num_layers,
+            group_layer_cache_entry_offsets=self.group_layer_cache_entry_offsets,
         )
 
         if self.tp_mismatch:
@@ -800,8 +859,8 @@ class KVPoolWorker:
 
         # Initialize store, register buffers, and start transfer threads
         # directly here (like main) — no separate init_backend handshake.
-        if hasattr(self.m_store, "init_store"):
-            self.m_store.init_store()
+        if self.use_gva_layerwise:
+            self.m_store.ensure_initialized()
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
@@ -865,16 +924,25 @@ class KVPoolWorker:
                 group_block_size = self.grouped_block_size[group_id]
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
                 skip_null = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
-                for start, end, key, block_id in self.token_database.process_tokens_with_block_ids(
+
+                def chunk_filter(start: int, group_id=group_id, load_masks=load_masks) -> bool:
+                    return self.token_database.mask_allows_chunk(load_masks, group_id, start)
+
+                for (
+                    start,
+                    end,
+                    key,
+                    _block_hash,
+                    block_id,
+                ) in self.token_database.process_token_key_strings_with_block_ids(
                     token_len,
                     request.block_hashes,
                     block_ids,
                     mask_num,
                     kv_cache_group_id=group_id,
                     skip_null_blocks=skip_null,
+                    chunk_filter=chunk_filter,
                 ):
-                    if not self.token_database.mask_allows_chunk(load_masks, group_id, start):
-                        continue
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
                         end,
@@ -882,7 +950,7 @@ class KVPoolWorker:
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
-                    key_list.append(key.to_string())
+                    key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
@@ -958,31 +1026,32 @@ class KVPoolWorker:
                 continue
             save_start_block = request.save_start_token // block_size
             save_end_block = request.save_end_token // block_size
+            group_block_hashes = get_block_hashes(
+                request.block_hashes,
+                block_size,
+                self.hash_block_size,
+            )
+            partial_block_index = self._get_partial_block_index(
+                request.target_token_len,
+                block_size,
+                len(group_block_hashes),
+                self.layerwise_offload,
+            )
             # Skip blocks that are hit in the KV pool — their KV is already
             # in the pool (loaded via load_prepare), so re-saving would write
             # to a READABLE blob and fail with MMC_UNMATCHED_KEY.
             if request.load_spec is not None and request.load_spec.can_load:
-                hit_full_blocks = request.load_spec.kvpool_cached_tokens // block_size
+                pool_hit_tokens = (
+                    request.load_spec.kvpool_store_skip_tokens
+                    if request.load_spec.kvpool_store_skip_tokens is not None
+                    else request.load_spec.kvpool_cached_tokens
+                )
+                hit_full_blocks = pool_hit_tokens // block_size
                 save_start_block = max(save_start_block, hit_full_blocks)
-            # Skip blocks already saved in previous requests (GVA cached
-            # locally). The overall hit_tokens is min(hits_per_group), so
-            # individual groups may have more saved blocks than the overall
-            # hit suggests. Without this skip, batch_copy would re-write to
-            # already-written blobs, causing -3107 which corrupts the blob
-            # state and cascades to load failures (-3101/-3102).
-            if self.use_gva_layerwise and save_start_block < save_end_block:
-                group_block_hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
-                while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(
-                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
-                    )
-                    if key in self._allocated_gvas:
-                        save_start_block += 1
-                    else:
-                        break
-            if save_start_block >= save_end_block and request.partial_block_index is None:
+            if partial_block_index is None:
+                partial_block_index = request.partial_block_index
+            if save_start_block >= save_end_block and partial_block_index is None:
                 continue
-            partial_block_index = request.partial_block_index
             request_block_ranges.append(
                 LayerBlockRange(
                     request=request,
@@ -1013,16 +1082,37 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            cached_tokens = request.load_spec.kvpool_cached_tokens
-            load_start_block = request.load_spec.vllm_cached_tokens // block_size
-            cached_full_blocks = cached_tokens // block_size
-            full_blocks = min(cached_full_blocks, len(request.block_hashes))
-            needs_last_block_at_boundary = (
-                cached_tokens > 0 and cached_tokens % block_size == 0 and full_blocks < cached_full_blocks
+            cached_tokens = (
+                request.load_spec.kvpool_store_skip_tokens
+                if request.load_spec.kvpool_store_skip_tokens is not None
+                else request.load_spec.kvpool_cached_tokens
             )
-            if request.last_block_gva is not None and (cached_tokens % block_size != 0 or needs_last_block_at_boundary):
-                partial_block_index = cached_full_blocks if cached_tokens % block_size != 0 else cached_full_blocks - 1
-            else:
+            group_block_hashes = get_block_hashes(
+                request.block_hashes,
+                block_size,
+                self.hash_block_size,
+            )
+            load_start_block = (
+                request.load_spec.vllm_cached_tokens // block_size
+                if not self.layerwise_offload or layer_id in self.independent_layers
+                else 0
+            )
+            cached_full_blocks = cached_tokens // block_size
+            full_blocks = min(cached_full_blocks, len(group_block_hashes))
+            partial_block_index = self._get_partial_block_index(
+                cached_tokens,
+                block_size,
+                len(group_block_hashes),
+                self.layerwise_offload,
+            )
+            if not self.layerwise_offload or layer_id in self.independent_layers:
+                partial_block_index = None
+            partial_gva = (
+                request.partial_load_gva_per_group[group_id]
+                if group_id < len(request.partial_load_gva_per_group)
+                else request.last_block_gva
+            )
+            if partial_gva is None or partial_gva <= 0:
                 partial_block_index = None
             if partial_block_index is not None and partial_block_index < load_start_block:
                 partial_block_index = None
@@ -1046,6 +1136,22 @@ class KVPoolWorker:
                 )
             )
 
+    @staticmethod
+    def _get_partial_block_index(
+        token_count: int,
+        block_size: int,
+        hash_count: int,
+        enabled: bool,
+    ) -> int | None:
+        if not enabled or token_count <= 0:
+            return None
+        full_blocks, remainder = divmod(token_count, block_size)
+        if remainder:
+            return full_blocks
+        if full_blocks > hash_count:
+            return full_blocks - 1
+        return None
+
     def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
         """Generate GVA key for layerwise transfer.
 
@@ -1057,6 +1163,32 @@ class KVPoolWorker:
             return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
         else:
             return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+
+    def _make_layerwise_partial_key(
+        self,
+        request: ReqMeta,
+        group_id: int,
+        block_index: int,
+        end_token: int,
+    ) -> str:
+        return f"{self.model_name}@partial@{request.req_id}@{group_id}@{block_index}@{end_token}@{self.head_or_tp_rank}"
+
+    def _refresh_allocated_gvas(self, keys: list[str]) -> None:
+        """Drop local GVA entries whose MemCache blobs were evicted."""
+        cached_keys = list(dict.fromkeys(key for key in keys if key in self._allocated_gvas))
+        if not cached_keys:
+            return
+        exists_states = self.m_store.batch_is_exist(cached_keys)
+        if len(exists_states) != len(cached_keys):
+            raise RuntimeError(
+                "MemCache exists check returned unexpected number of states: "
+                f"expected={len(cached_keys)}, actual={len(exists_states)}"
+            )
+        for key, exists in zip(cached_keys, exists_states):
+            if exists == 0:
+                self._allocated_gvas.pop(key, None)
+            elif exists != 1:
+                raise RuntimeError(f"MemCache exists check failed for {key}: state={exists}")
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
@@ -1076,23 +1208,18 @@ class KVPoolWorker:
             if request.can_save is None or not request.can_save:
                 continue
             block_hashes = request.block_hashes
-            if not block_hashes:
-                continue
 
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
+            all_group_save_keys: list[str] = []
+            request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
                 ratio = max(infer_cache_family_ratio(cache_family), 1)
                 effective_block_size = group_block_size * ratio
-                group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
                 group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-                if group_block_len and group_num_layers > 0:
-                    group_page_size = sum(group_block_len) // group_num_layers
-                else:
-                    group_page_size = self.page_size_bytes
-                alloc_size = group_page_size * group_num_layers
+                alloc_size = sum(group_block_len) if group_block_len else self.page_size_bytes
 
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
                 block_ids_by_group = (
@@ -1106,10 +1233,25 @@ class KVPoolWorker:
                 save_start_block = request.save_start_token // effective_block_size
                 save_end_block = request.save_end_token // effective_block_size
                 if request.load_spec is not None and request.load_spec.can_load:
-                    hit_full_blocks = request.load_spec.kvpool_cached_tokens // effective_block_size
+                    pool_hit_tokens = (
+                        request.load_spec.kvpool_store_skip_tokens
+                        if request.load_spec.kvpool_store_skip_tokens is not None
+                        else request.load_spec.kvpool_cached_tokens
+                    )
+                    hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
-                # Skip blocks already saved (GVA cached locally from previous
-                # request). See _process_save_for_layer_batch for rationale.
+                candidate_keys = [
+                    self._make_layerwise_gva_key(
+                        group_id,
+                        block_hash_to_str(group_block_hashes[block_idx]),
+                    )
+                    for block_idx in range(
+                        save_start_block,
+                        min(save_end_block, len(group_block_hashes)),
+                    )
+                ]
+                self._refresh_allocated_gvas(candidate_keys)
+                # Skip blocks that are still present and readable in MemCache.
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
                     key = self._make_layerwise_gva_key(
                         group_id, block_hash_to_str(group_block_hashes[save_start_block])
@@ -1145,8 +1287,45 @@ class KVPoolWorker:
                             sum(1 for g in new_gvas if g <= 0),
                         )
                     for pos, key, gva in zip(new_positions, new_keys, new_gvas):
-                        block_gvas[pos] = gva
-                        self._allocated_gvas[key] = gva
+                        if gva > 0:
+                            block_gvas[pos] = gva
+                            self._allocated_gvas[key] = gva
+                            all_group_save_keys.append(key)
+
+                partial_block_index = self._get_partial_block_index(
+                    request.target_token_len,
+                    effective_block_size,
+                    len(group_block_hashes),
+                    self.layerwise_offload,
+                )
+                if partial_block_index is not None and partial_block_index < len(block_ids_by_group):
+                    partial_key = self._make_layerwise_partial_key(
+                        request,
+                        group_id,
+                        partial_block_index,
+                        request.target_token_len,
+                    )
+                    partial_gva = self._allocated_gvas.get(partial_key)
+                    if partial_gva is None:
+                        allocated = self.m_store.batch_alloc(
+                            [partial_key],
+                            [alloc_size],
+                        )
+                        partial_gva = allocated[0] if allocated else 0
+                        if partial_gva > 0:
+                            self._allocated_gvas[partial_key] = partial_gva
+                            all_group_save_keys.append(partial_key)
+                        else:
+                            logger.error(
+                                "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
+                                request.req_id,
+                                group_id,
+                                partial_block_index,
+                                partial_gva,
+                            )
+                    # Partial keys are request-scoped; do not retain them forever.
+                    self._allocated_gvas.pop(partial_key, None)
+                    request.partial_save_gva_per_group[group_id] = partial_gva
 
                 logger.info(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
@@ -1171,6 +1350,7 @@ class KVPoolWorker:
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
 
             if all_group_gvas:
+                request.save_keys = all_group_save_keys
                 request.block_gvas_by_group_np = all_group_gvas
                 request.block_ids_by_group_np = all_group_block_ids
                 request.block_gvas_np = all_group_gvas[0]
@@ -1191,11 +1371,16 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            cached_tokens = request.load_spec.kvpool_cached_tokens
+            cached_tokens = (
+                request.load_spec.kvpool_store_skip_tokens
+                if request.load_spec.kvpool_store_skip_tokens is not None
+                else request.load_spec.kvpool_cached_tokens
+            )
             block_hashes = request.block_hashes
 
             all_group_load_gvas: list[np.ndarray] = []
             all_group_load_keys: list[str] = []
+            request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
@@ -1203,7 +1388,9 @@ class KVPoolWorker:
                 effective_block_size = group_block_size * ratio
 
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
-                load_start_block = request.load_spec.vllm_cached_tokens // effective_block_size
+                load_start_block = (
+                    0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // effective_block_size
+                )
                 cached_full_blocks = cached_tokens // effective_block_size
                 full_blocks = min(cached_full_blocks, len(group_block_hashes))
 
@@ -1212,9 +1399,23 @@ class KVPoolWorker:
                     if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
                     else request.block_ids_np
                 )
-                full_len = len(block_ids_by_group) if block_ids_by_group is not None else 0
+                if block_ids_by_group is None:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
+                full_len = len(block_ids_by_group)
 
-                if load_start_block >= full_blocks:
+                partial_block_index = self._get_partial_block_index(
+                    cached_tokens,
+                    effective_block_size,
+                    len(group_block_hashes),
+                    self.layerwise_offload,
+                )
+                if partial_block_index is not None and (
+                    partial_block_index < load_start_block or partial_block_index >= full_len
+                ):
+                    partial_block_index = None
+
+                if load_start_block >= full_blocks and partial_block_index is None:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
@@ -1222,19 +1423,118 @@ class KVPoolWorker:
                     self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
                     for i in range(load_start_block, full_blocks)
                 ]
+                block_indices = list(range(load_start_block, full_blocks))
+                if partial_block_index is not None:
+                    keys.append(
+                        self._make_layerwise_partial_key(
+                            request,
+                            group_id,
+                            partial_block_index,
+                            cached_tokens,
+                        )
+                    )
+                    block_indices.append(partial_block_index)
                 if not keys:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
                 key_infos = self.m_store.batch_get_key_info(keys)
-                lease_results = self.m_store.batch_add_lease(keys, LAYERWISE_READ_LEASE_TTL_MS)
                 gvas = []
-                for ki in key_infos:
+                valid_gva_indices = []
+                invalid_block_ids: list[int] = []
+                for ki, key, block_idx in zip(key_infos, keys, block_indices):
                     sizes = ki.size()
-                    gvas.append(ki.gva_list()[0] if sizes and sizes > 0 else 0)
-                all_group_load_keys.extend(keys)
+                    gva = ki.gva_list()[0] if sizes and sizes > 0 else 0
+                    gvas.append(gva)
+                    if gva > 0:
+                        valid_gva_indices.append(len(gvas) - 1)
+                    else:
+                        if block_idx < len(block_ids_by_group):
+                            invalid_block_ids.append(int(block_ids_by_group[block_idx]))
+                        logger.warning(
+                            "load_gvas: req=%s group=%d got invalid gva=%d (size=%d), block_id=%s load failed",
+                            request.req_id,
+                            group_id,
+                            gva,
+                            sizes if sizes else 0,
+                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
+                        )
 
-                logger.info(
+                # Only call batch_add_lease for keys with valid size
+                valid_keys = [keys[index] for index in valid_gva_indices]
+                if valid_keys:
+                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
+                    if len(lease_results) != len(valid_keys):
+                        raise RuntimeError(
+                            "MemCache lease returned unexpected number of results: "
+                            f"expected={len(valid_keys)}, actual={len(lease_results)}"
+                        )
+                    leased_keys = []
+                    for gva_index, lease_res in zip(valid_gva_indices, lease_results):
+                        block_idx = block_indices[gva_index]
+                        if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
+                            partial_key = keys[gva_index]
+                            for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
+                                time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
+                                retry_results = self.m_store.batch_add_lease(
+                                    [partial_key],
+                                    LAYERWISE_READ_LEASE_TTL_MS,
+                                )
+                                if len(retry_results) != 1:
+                                    raise RuntimeError(
+                                        "MemCache partial lease retry returned "
+                                        f"unexpected number of results: {len(retry_results)}"
+                                    )
+                                lease_res = retry_results[0]
+                                if lease_res != MEMCACHE_UNMATCHED_STATE:
+                                    break
+                        block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
+                        if lease_res == 0:
+                            leased_keys.append(keys[gva_index])
+                        else:
+                            gvas[gva_index] = 0
+                            if block_id is not None:
+                                invalid_block_ids.append(block_id)
+                            logger.warning(
+                                "load_gvas: req=%s group=%d lease failed result=%d, block_id=%s load failed",
+                                request.req_id,
+                                group_id,
+                                lease_res,
+                                block_id,
+                            )
+                else:
+                    lease_results = []
+                    leased_keys = []
+
+                # Report invalid blocks to scheduler for recompute.
+                # Single-group models can safely report individual block IDs.
+                # Multi-group (hybrid) models must not report partial group
+                # failures, as the scheduler cannot handle inconsistent KV
+                # cache state across groups (see PR #9701 for rationale).
+                if invalid_block_ids:
+                    if self.num_kv_cache_groups == 1:
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(invalid_block_ids)
+                    else:
+                        leased_keys_to_release = list(
+                            dict.fromkeys(
+                                [
+                                    *all_group_load_keys,
+                                    *leased_keys,
+                                ]
+                            )
+                        )
+                        if leased_keys_to_release:
+                            self.m_store.batch_remove_lease(leased_keys_to_release)
+                        raise RuntimeError(
+                            "Layerwise multi-group KV load failed and cannot "
+                            "safely fall back to per-block recomputation: "
+                            f"request={request.req_id}, "
+                            f"failed_blocks={invalid_block_ids}"
+                        )
+                all_group_load_keys.extend(leased_keys)
+
+                logger.debug(
                     "load_gvas: req=%s group=%d eff_bs=%d load_blocks=[%d,%d) keys=%d valid_gvas=%d lease_fail=%d",
                     request.req_id,
                     group_id,
@@ -1248,10 +1548,13 @@ class KVPoolWorker:
 
                 # Pad to match block_ids_by_group length, with 0s before load_start_block
                 full_gvas = [0] * full_len
-                for i, gva in enumerate(gvas):
+                normal_gva_count = full_blocks - load_start_block
+                for i, gva in enumerate(gvas[:normal_gva_count]):
                     if load_start_block + i < len(full_gvas):
                         full_gvas[load_start_block + i] = gva
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
+                if partial_block_index is not None and len(gvas) > normal_gva_count:
+                    request.partial_load_gva_per_group[group_id] = gvas[normal_gva_count]
 
             if all_group_load_gvas:
                 request.load_keys = all_group_load_keys
@@ -1272,6 +1575,7 @@ class KVPoolWorker:
         group has different block_ranges (different effective_block_size).
         """
         if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
+            all_save_keys: list[str] = []
             for group_id in range(self.num_kv_cache_groups):
                 first_task = None
                 for layer_id in range(self.num_layers):
@@ -1285,10 +1589,19 @@ class KVPoolWorker:
                     continue
                 shared = self.kv_send_thread.build_shared_data(first_task)
                 if shared is not None:
+                    all_save_keys.extend(shared.save_keys)
                     for layer_id in range(self.num_layers):
                         for task in self.layer_save_tasks[layer_id]:
                             if task.group_id == group_id:
                                 task.shared_block_data = shared
+            last_task = None
+            for tasks in self.layer_save_tasks:
+                for task in tasks:
+                    task.write_finish_keys.clear()
+                    if task.shared_block_data is not None:
+                        last_task = task
+            if last_task is not None:
+                last_task.write_finish_keys.extend(dict.fromkeys(all_save_keys))
         elif isinstance(self.kv_send_thread, KVCacheStoreKeyLayerSendingThread):
             first_task = None
             for layer_id in range(self.num_layers):
@@ -1336,9 +1649,10 @@ class KVPoolWorker:
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+        # Protect the previous partial before allocating the next snapshot.
+        self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
-        self._prepare_load_gvas(requests)
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
@@ -1350,15 +1664,15 @@ class KVPoolWorker:
         recv_thread = self.kv_recv_thread
 
         def submit_layer_load(layer_id: int) -> bool:
-            if not self.layer_load_tasks[layer_id]:
+            reuse_source = self.prefetch_layer_map.get(layer_id)
+            if not self.layer_load_tasks[layer_id] and reuse_source is None:
                 return False
-            wait_for_save_layer = None
             attention_start_gate = None
-            if layer_id != self.current_layer:
+            if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
-                    wait_for_save_layer=wait_for_save_layer,
+                    wait_for_save_layer=reuse_source,
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
                     attention_start_gate=attention_start_gate,
@@ -1378,15 +1692,17 @@ class KVPoolWorker:
         if self.current_layer >= self.num_layers:
             return
         assert self.layer_load_finished_events is not None
+        assert self.kv_recv_thread is not None
+        self.kv_recv_thread.raise_if_failed()
         reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
-        should_wait = bool(self.layer_load_tasks[self.current_layer])
+        should_wait = bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
         if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
             return
-        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
-        if not is_finish:
-            logger.info("Layerwise %d load wait timed out", self.current_layer)
+        while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
+            self.kv_recv_thread.raise_if_failed()
+            logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
         logger.debug(">>>>>>>>>>>>>>>>>>>> clear load layer %d", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
 
@@ -1403,6 +1719,7 @@ class KVPoolWorker:
         assert self.layer_save_finished_events is not None
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
+        send_thread.raise_if_failed()
         self.sync_save_events[self.current_layer].record()
         if self.layer_save_tasks[self.current_layer]:
             for task in self.layer_save_tasks[self.current_layer]:
@@ -1412,10 +1729,13 @@ class KVPoolWorker:
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
-            is_finish = self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10)
-            if not is_finish:
-                logger.info("Layerwise %d save wait timed out", self.current_layer)
+            while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
+                send_thread.raise_if_failed()
+                logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
+            reuse_source_layers = set(self.prefetch_layer_map.values())
             for layer_id in range(self.num_layers):
+                if layer_id in reuse_source_layers:
+                    continue
                 if self.layer_save_finished_events[layer_id].is_set():
                     self.layer_save_finished_events[layer_id].clear()
 
@@ -1423,35 +1743,23 @@ class KVPoolWorker:
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
         current_event = None
-        has_save_request = False
-        for request in connector_metadata.requests:
-            can_save = request.can_save
-            if can_save is None or not can_save:
-                continue
-            current_event = torch.npu.Event()
-            current_event.record()
-            break
+        assert self.kv_send_thread is not None
+        send_thread = self.kv_send_thread
 
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
                 continue
-
+            if current_event is None:
+                current_event = torch.npu.Event()
+                current_event.record()
             request.skip_null_blocks_by_group = self.group_uses_align_state
             request.current_event = current_event
-            self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
-                request.req_id
-            )
-            self.kv_send_thread.add_request(  # type: ignore[union-attr]
-                request,
-            )
-            has_save_request = True
+            send_thread.add_stored_request(request.req_id)
+            send_thread.add_request(request)
 
-        if has_save_request:
-            # vLLM expects wait_for_save() to make stores visible before the
-            # request is reported as finished. Without this barrier a following
-            # identical prompt can lookup before Mooncake put() has completed.
-            self.kv_send_thread.request_queue.join()  # type: ignore[union-attr]
+        if current_event is not None:
+            send_thread.request_queue.join()
 
     def retrieve_layer(
         self,
@@ -1591,13 +1899,13 @@ class KVPoolWorker:
             for layer_id in range(self.num_layers):
                 yield
 
-    def _make_sub_key_str(self, base_key, effective_rank: int) -> str:
-        """Rewrite ``@head_or_tp_rank:<local>`` in base_key.to_string() to ``<effective_rank>``.
+    def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
+        """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.
 
         Under TP mismatch, both sides address the pool at the effective_tp_size
         namespace rather than the local TP rank.
         """
-        return self._replace_key_field(base_key.to_string(), "head_or_tp_rank", effective_rank)
+        return self._replace_key_field(base_key, "head_or_tp_rank", effective_rank)
 
     def _build_strided_addrs(self, block_id: int, token_count: int, sub_idx: int) -> tuple[list[int], list[int]]:
         """Build per-token (addr, size) pairs into local KV cache memory for one
@@ -1642,11 +1950,11 @@ class KVPoolWorker:
         all_addrs: list[list[int]] = []
         all_sizes: list[list[int]] = []
         all_block_ids: list[int] = []
-        for start, end, base_key, block_id in self.token_database.process_tokens_with_block_ids(
+        for start, end, base_key, _block_hash, block_id in self.token_database.process_token_key_strings_with_block_ids(
             token_len,
             block_hashes,
             block_ids,
-            mask_num,
+            mask_num=mask_num,
         ):
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
@@ -1794,6 +2102,32 @@ class KVPoolWorker:
         if ensure_initialized is not None:
             ensure_initialized()
 
+    def _build_lookup_keys(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        group_id: int,
+        use_layerwise: bool,
+    ) -> tuple[list[str], list[int], list[int]]:
+        keys: list[str] = []
+        starts: list[int] = []
+        ends: list[int] = []
+        if use_layerwise:
+            for start, end, pool_key in self.token_database.process_tokens(
+                token_len, block_hashes, kv_cache_group_id=group_id
+            ):
+                keys.extend(item.to_string() for item in pool_key.split_layers(self.num_layers))
+                starts.append(start)
+                ends.append(end)
+        else:
+            for start, end, key_string, _ in self.token_database.process_token_key_strings(
+                token_len, block_hashes, kv_cache_group_id=group_id
+            ):
+                keys.append(key_string)
+                starts.append(start)
+                ends.append(end)
+        return keys, starts, ends
+
     def lookup(
         self,
         token_len: int,
@@ -1819,23 +2153,7 @@ class KVPoolWorker:
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                end = 0
-                keys: list[str] = []
-                starts = []
-                ends = []
-                for start, end, key in self.token_database.process_tokens(
-                    token_len,
-                    block_hashes,
-                    kv_cache_group_id=group_id,
-                ):
-                    if use_layerwise:
-                        keys_multi_layer = key.split_layers(self.num_layers)
-                        for layer_key in keys_multi_layer:
-                            keys.append(layer_key.to_string())
-                    else:
-                        keys.append(key.to_string())
-                    starts.append(start)
-                    ends.append(end)
+                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
 
                 if not keys:
                     hits.append(0)
@@ -1855,7 +2173,7 @@ class KVPoolWorker:
                             hit_end = ends[index]
                             break
                 else:
-                    hit_end = end
+                    hit_end = ends[-1]
                     for index, value in enumerate(res):  # type: ignore[arg-type]
                         if value != 1:
                             hit_end = 0
@@ -1910,15 +2228,6 @@ class KVPoolWorker:
                     expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
         return expanded
 
-    @staticmethod
-    def _chunk_hash_to_bytes(chunk_hash: str) -> bytes:
-        if len(chunk_hash) == 64:
-            try:
-                return bytes.fromhex(chunk_hash)
-            except ValueError:
-                pass
-        return chunk_hash.encode("utf-8")
-
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
         if not include_all_ranks:
             return [key]
@@ -1931,6 +2240,7 @@ class KVPoolWorker:
         kv_cache_group_ids: list[int],
         use_layerwise: bool,
         include_all_ranks: bool,
+        hbm_hit_tokens: int = 0,
     ) -> int | None:
         if self.cache_coordinator is None or use_layerwise:
             return None
@@ -1938,18 +2248,49 @@ class KVPoolWorker:
             return None
 
         exists: set[tuple[int, bytes]] = set()
+        aligned_len = (
+            (token_len + self.cache_coordinator.lcm_block_size - 1)
+            // self.cache_coordinator.lcm_block_size
+            * self.cache_coordinator.lcm_block_size
+        )
+        lookup_masks = self.cache_coordinator.lookup_mask(aligned_len)
+
         for group_id in kv_cache_group_ids:
             keys: list[str] = []
-            chunk_hashes: list[str] = []
+            chunk_hashes: list[BlockHash | str] = []
             variant_counts: list[int] = []
-            for _, _, key in self.token_database.process_tokens(
+            base_block_size = self.token_database.get_block_size(group_id)
+            cache_family = self.token_database.group_cache_families.get("kv", {}).get(group_id, "default")
+            effective_block_size = get_cache_family_granularity(base_block_size, cache_family)
+            if hbm_hit_tokens:
+                grouped_hashes = get_block_hashes(
+                    block_hashes, effective_block_size, self.token_database.hash_block_size
+                )
+                exists.update(
+                    (group_id, block_hash_to_bytes(chunk_hash))
+                    for chunk_hash in grouped_hashes[: hbm_hit_tokens // effective_block_size]
+                )
+            lookup_start = hbm_hit_tokens // effective_block_size * effective_block_size
+            lookup_mask = lookup_masks[group_id] if lookup_masks is not None and group_id < len(lookup_masks) else None
+
+            def chunk_filter(
+                start: int,
+                base_block_size=base_block_size,
+                lookup_mask=lookup_mask,
+            ) -> bool:
+                chunk_idx = start // base_block_size
+                return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
+
+            for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
                 token_len,
                 block_hashes,
+                mask_num=lookup_start,
                 kv_cache_group_id=group_id,
+                chunk_filter=chunk_filter,
             ):
-                variants = self._expand_lookup_key_variants(key.to_string(), group_id, include_all_ranks)
+                variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
                 keys.extend(variants)
-                chunk_hashes.append(key.chunk_hash)
+                chunk_hashes.append(chunk_hash)
                 variant_counts.append(len(variants))
 
             if not keys:
@@ -1959,7 +2300,7 @@ class KVPoolWorker:
             for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                 values = res[offset : offset + count]  # type: ignore[index]
                 if values and all(value == 1 for value in values):
-                    exists.add((group_id, self._chunk_hash_to_bytes(chunk_hash)))
+                    exists.add((group_id, block_hash_to_bytes(chunk_hash)))
                 offset += count
 
             logger.debug(
@@ -1975,7 +2316,7 @@ class KVPoolWorker:
         _, hit_length = self.cache_coordinator.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(exists),
+            ExternalCachedBlockPool(self.hash_block_size, exists),
             apply_eagle=False,
         )
         logger.debug(
@@ -1992,6 +2333,7 @@ class KVPoolWorker:
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
         use_layerwise: bool = False,
+        hbm_hit_tokens: int = 0,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -2008,26 +2350,12 @@ class KVPoolWorker:
                 kv_cache_group_ids,
                 use_layerwise,
                 include_all_ranks=True,
+                hbm_hit_tokens=hbm_hit_tokens,
             )
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys: list[str] = []
-                starts = []
-                ends = []
-                for start, end, key in self.token_database.process_tokens(
-                    token_len,
-                    block_hashes,
-                    kv_cache_group_id=group_id,
-                ):
-                    if use_layerwise:
-                        keys_multi_layer = key.split_layers(self.num_layers)
-                        for layer_key in keys_multi_layer:
-                            keys.append(layer_key.to_string())
-                    else:
-                        keys.append(key.to_string())
-                    starts.append(start)
-                    ends.append(end)
+                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
 
                 if not keys:
                     return 0

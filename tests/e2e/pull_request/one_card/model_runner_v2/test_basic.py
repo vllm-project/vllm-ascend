@@ -22,7 +22,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
@@ -33,6 +33,7 @@ DFLASH_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
+MTP_MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -203,6 +204,7 @@ def test_dflash_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
     model: str,
     dspark_model: str,
@@ -246,6 +248,55 @@ def test_dspark_spec_decoding(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.parametrize("model", MTP_MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_mtp_spec_decoding(
+    model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+    compilation_config: dict,
+) -> None:
+    # The MTP draft head has random weights, so acceptance is ~0 and there is
+    # no trained golden to compare against -- this is a smoke test (assert only
+    # that the MTP MLA propose->verify loop produces output).
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    num_speculative_tokens = 3
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        async_scheduling=True,
+        enable_expert_parallel=True,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        compilation_config=compilation_config,
+    ) as runner:
+        outputs = runner.model.generate(prompts, sampling_params)
+
+    assert len(outputs) == len(prompts)
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
@@ -257,6 +308,7 @@ def test_dspark_spec_decoding(
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_dense_graph_mode(
     model: str,
     max_tokens: int,

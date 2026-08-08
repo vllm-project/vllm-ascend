@@ -78,6 +78,7 @@ class NpuType(str, Enum):
     A2 = "a2"
     A3 = "a3"
     _310P = "310p"
+    A5 = "a5"
     CPU = "cpu"
 
 
@@ -87,6 +88,7 @@ class RunnerInfo:
     npu_type: NpuType
     label: str
     image_tag: str = ""
+    csrc_cache_target: str = ""
 
 
 RunnerKey = tuple[int, NpuType]
@@ -190,6 +192,7 @@ def _load_runners() -> list[RunnerInfo]:
             npu_type=NpuType(info["chip"]),
             label=label,
             image_tag=info.get("image_tag", ""),
+            csrc_cache_target=info.get("csrc_cache_target", ""),
         )
         for label, info in raw.items()
     ]
@@ -592,6 +595,8 @@ def _build_test_group(
     }
     if runner.image_tag:
         group["image_tag"] = runner.image_tag
+    if runner.csrc_cache_target:
+        group["csrc_cache_target"] = runner.csrc_cache_target
     return group
 
 
@@ -654,10 +659,12 @@ def _write_output(
 ) -> None:
     has_tests = len(test_groups) > 0
     groups_json = json.dumps(test_groups, separators=(",", ":"))
+    cache_target_ids = sorted({group["csrc_cache_target"] for group in test_groups if group.get("csrc_cache_target")})
 
     outputs = {
         "test_groups": groups_json,
         "has_tests": str(has_tests).lower(),
+        "csrc_cache_target_ids": json.dumps(cache_target_ids, separators=(",", ":")),
         "matched_modules": ",".join(matched_modules),
     }
 
@@ -737,7 +744,18 @@ def main():
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
     )
-
+    parser.add_argument(
+        "--modules",
+        type=str,
+        default=None,
+        help="Force-select specific modules (comma-separated), bypassing file-change matching",
+    )
+    parser.add_argument(
+        "--runner-override",
+        type=str,
+        default=None,
+        help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
+    )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
@@ -777,6 +795,18 @@ def main():
             )
         if args.run_all_modules:
             matched_modules = [module["name"] for module in config]
+        elif args.modules:
+            requested = set(args.modules.split(","))
+            available = {m["name"] for m in config}
+            missing = requested - available
+            if missing:
+                print(
+                    f"ERROR: unknown module(s): {', '.join(sorted(missing))}. "
+                    f"Available: {', '.join(sorted(available))}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            matched_modules = sorted(requested)
         elif bisect_tool_scoped_change:
             matched_modules = _match_modules(changed_files, config, include_always=False)
         elif test_only_change:
@@ -835,6 +865,16 @@ def main():
                         all_groups[key].append(f)
 
         _dedup_groups(all_groups)
+
+    if args.runner_override:
+        override_key = _parse_runner_key(args.runner_override)
+        overridden: dict[RunnerKey, list[str]] = {}
+        for (num_npus, npu_type), tests in all_groups.items():
+            if npu_type == NpuType.CPU:
+                overridden[(num_npus, npu_type)] = tests
+            else:
+                overridden.setdefault(override_key, []).extend(tests)
+        all_groups = overridden
 
     if skip_tests:
         for key in list(all_groups.keys()):

@@ -112,7 +112,11 @@ markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
   - pymdownx.betterem:
-      smart_enable: all
+      # Chinese text does not use spaces between words, so smart emphasis
+      # treats valid constructs such as ``中文**加粗**文本`` as intraword
+      # markup. The Chinese build enables smart handling only for
+      # underscores, preserving identifiers such as ``foo_bar_baz``.
+      smart_enable: !ENV [DOCS_BETTEREM_SMART_ENABLE, all]
   - pymdownx.caret
   - pymdownx.details
   - pymdownx.emoji:
@@ -186,9 +190,9 @@ nav:
         - tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
         - tutorials/models/Qwen3-VL-235B-A22B-Instruct.md
         - tutorials/models/Qwen3-Coder-30B-A3B.md
-        - tutorials/models/Qwen3_embedding.md
+        - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
-        - tutorials/models/Qwen3_reranker.md
+        - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
         - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
@@ -210,6 +214,7 @@ nav:
         - tutorials/models/Kimi-K2.6.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
+        - tutorials/models/MiniMax-M3.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Minitron-8B-Base.md
@@ -224,8 +229,6 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/long_sequence_context_parallel_single_node.md
-        - tutorials/features/long_sequence_context_parallel_multi_node.md
         - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
@@ -267,6 +270,7 @@ nav:
         - user_guide/feature_guide/lmcache_ascend_deployment.md
         - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
         - user_guide/feature_guide/flash_attention.md
+        - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
@@ -289,6 +293,7 @@ nav:
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
         - developer_guide/Design_Documents/eplb_swift_balancer.md
+        - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
         - developer_guide/Design_Documents/add_custom_aclnn_op.md

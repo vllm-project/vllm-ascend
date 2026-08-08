@@ -35,25 +35,25 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
 1. For models using the MLA structure, Allgather is postponed until after QKV projection, further reducing communication volume.
 2. For MoE models, Allgather is postponed until after Gating+DynamicQuant, also aiming to reduce communication volume.
 
-FC1 is a unique optimization in vllm-ascend, currently implemented based on Custom OP, but it is difficult to support VL-class models (reasons detailed in [[RFC]: support sequence parallelism by pass](https://github.com/vllm-project/vllm-ascend/issues/5712) ). Therefore, currently FC1 and SP are complementary.
+FC1 is a unique optimization in vllm-ascend, currently implemented based on Custom OP, but it is difficult to support VL-class models (reasons detailed in [[RFC]: support sequence parallelism by pass](https://github.com/vllm-project/vllm-ascend/issues/5712)). Therefore, currently FC1 and SP are complementary.
 
 ## Support Matrix
 
 ### Without Quantization
 
-|                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
-| -------------------- | ---------- | -------- | -------------- | ------------ |
-| Sequence Parallelism | graph      | graph    | x              | x            |
-| Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
+|                      |  VL + Dense | VL + MoE    | non-VL + Dense | non-VL + MoE |
+| -------------------- | ----------- | ----------- | -------------- | ------------ |
+| Sequence Parallelism | x           | x           | x              | x            |
+| Flash Comm V1        | eager/graph | eager/graph | eager/graph    | eager/graph  |
 
 ### With Quantization
 
 SP currently does not support quantization and is under adaptation.
 
-|                      | VL + Dense | VL + MoE | non-VL + Dense | non-VL + MoE |
-| -------------------- | ---------- | -------- | -------------- | ------------ |
-| Sequence Parallelism | x          | x        | x              | x            |
-| Flash Comm V1        | x          | x        | eager/graph    | eager/graph  |
+|                      |  VL + Dense |   VL + MoE  | non-VL + Dense | non-VL + MoE |
+| -------------------- | ----------- | ----------- | -------------- | ------------ |
+| Sequence Parallelism | x           | x           | x              | x            |
+| Flash Comm V1        | eager/graph | eager/graph | eager/graph    | eager/graph  |
 
 ## Pass Design
 

@@ -126,11 +126,7 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
         vllm_config = get_current_vllm_config()
 
     parallel_config = vllm_config.parallel_config
-    return (
-        model_uses_sfa_sparse(vllm_config.model_config)
-        and parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size == 1
-    )
+    return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
 def clear_enable_sp():
@@ -679,6 +675,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -733,6 +731,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
+        "MoERunner": AscendMoERunner,
+        "RoutedExperts": AscendRoutedExperts,
     }
     if vllm_config is None:
         try:
@@ -748,6 +748,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -776,6 +777,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
+                "MoERunner": AscendMoERunner310,
+                "RoutedExperts": AscendRoutedExperts310,
             }
         )
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -1404,10 +1407,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
 
-    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # Keep the original TP o_proj weight when:
     # 1) KV pooling is disabled, or
-    # 2) KV pooling is enabled with kv_role == "kv_both".
-    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
+    # 2) KV pooling is enabled on a prefill producer (including kv_both).
+    # DSA-CP prefill produces a full-head attention output, so the runtime
+    # asynchronously gathers a temporary full o_proj weight for the forward.
+    return kv_transfer_config is None or kv_transfer_config.is_kv_producer
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1559,10 +1564,12 @@ def get_compressed_pos_and_indices(
     return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
 
 
-def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
+        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
+    )
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

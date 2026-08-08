@@ -15,7 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
+ARG CANN_QUAY_URL="quay.io/ascend/cann"
+ARG CANN_VERSION="9.1.0-beta.1"
+ARG BASE_OS="openeuler24.03"
+FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-${BASE_OS}-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
@@ -32,7 +35,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.25.1
+ARG VLLM_TAG=v0.26.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
@@ -42,7 +45,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -57,7 +60,7 @@ COPY . /vllm-workspace/vllm-ascend/
 RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton-ascend triton && \
     python3 -m pip cache purge
 
@@ -101,6 +104,20 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
+# ===== Conditional installation based on BUILD_TYPE =====
+# All ARG definitions are in the same stage for better maintainability
+ARG BUILD_TYPE="release"
+ARG TORCH_NPU_VERSION
+ARG TORCH_NPU_DATE
+ARG DAILY_DEPS_MODE="torch_npu_only"
+
+# Install daily packages via shared script
+COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
+RUN if [ "$BUILD_TYPE" = "daily" ]; then \
+        bash /tmp/install_daily_deps.sh; \
+    else \
+        echo "Building release version without daily packages"; \
+    fi && rm -f /tmp/install_daily_deps.sh
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
