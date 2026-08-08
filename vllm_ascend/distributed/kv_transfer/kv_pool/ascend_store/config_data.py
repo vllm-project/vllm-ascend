@@ -309,10 +309,11 @@ class ChunkedTokenDatabase:
         self,
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int = 0,
     ) -> tuple[list[bool], ...] | None:
         if self.cache_coordinator is None:
             return None
-        return self.cache_coordinator.store_mask(aligned_token_len, num_prompt_tokens)
+        return self.cache_coordinator.store_mask(aligned_token_len, num_prompt_tokens, shared_prefix_boundary)
 
     def load_mask(
         self,
@@ -721,6 +722,8 @@ class RequestTracker:
 
     # Full prompt length before chunk truncation, used by sparse retention masks.
     num_prompt_tokens: int | None = None
+    # Earliest uncached boundary from a shared local prefix-cache hit.
+    shared_prefix_boundary: int = 0
     block_gvas: list[int] = field(default_factory=list)
     block_gvas_by_group: list[list[int]] = field(default_factory=list)
     gva_block_offset: int = 0
@@ -751,6 +754,7 @@ class RequestTracker:
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int = 0,
         block_gvas: list[int] | None = None,
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
@@ -775,6 +779,7 @@ class RequestTracker:
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
         self.num_prompt_tokens = num_prompt_tokens
+        self.shared_prefix_boundary = shared_prefix_boundary
         self.block_gvas = [] if block_gvas is None else block_gvas
         self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
         self.gva_block_offset = gva_block_offset
@@ -807,6 +812,7 @@ class RequestTracker:
             allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
             num_saved_tokens=0,
             num_prompt_tokens=len(new_request.prompt_token_ids),
+            shared_prefix_boundary=getattr(new_request, "shared_prefix_boundary", 0),
         )
 
     def update(
@@ -880,6 +886,7 @@ class ReqMeta:
     kv_cache_families_by_group: list[str] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
     num_prompt_tokens: int | None = None
+    shared_prefix_boundary: int = 0
 
     # The following parameters are only used for kv event generation
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
@@ -902,6 +909,7 @@ class ReqMeta:
         kv_cache_families_by_group: list[str] | None = None,
         skip_null_blocks_by_group: list[bool] | None = None,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int = 0,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
@@ -944,6 +952,7 @@ class ReqMeta:
         self.kv_cache_families_by_group = kv_cache_families_by_group
         self.skip_null_blocks_by_group = skip_null_blocks_by_group
         self.num_prompt_tokens = num_prompt_tokens
+        self.shared_prefix_boundary = shared_prefix_boundary
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
@@ -1087,6 +1096,7 @@ class ReqMeta:
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             num_prompt_tokens=tracker.num_prompt_tokens or target_token_len,
+            shared_prefix_boundary=tracker.shared_prefix_boundary,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,
