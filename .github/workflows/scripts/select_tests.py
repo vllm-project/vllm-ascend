@@ -719,7 +719,6 @@ def main():
         default=None,
         help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
     )
-  
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
