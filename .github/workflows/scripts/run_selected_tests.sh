@@ -46,6 +46,11 @@ failed_logs=()
 timing_entries=()
 test_index=0
 overall_status=0
+total_collected=0
+total_passed=0
+total_failed=0
+total_errors=0
+total_skipped=0
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -69,6 +74,51 @@ setup_vllm_cache_root() {
   export VLLM_CACHE_ROOT
   VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
   echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
+}
+
+record_junit_results() {
+  local target="$1"
+  local junit_file="$2"
+  if [ ! -s "${junit_file}" ]; then
+    echo "::warning::JUnit report not found for ${target}; case count is unavailable."
+    return
+  fi
+
+  local stats
+  if ! stats="$(
+    python - "${junit_file}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+if root.tag == "testsuite":
+    suites = [root]
+else:
+    suites = list(root.findall("testsuite"))
+
+def total(attribute):
+    return sum(int(suite.attrib.get(attribute, 0)) for suite in suites)
+
+tests = total("tests")
+failures = total("failures")
+errors = total("errors")
+skipped = total("skipped")
+passed = max(tests - failures - errors - skipped, 0)
+print(f"{tests}\t{passed}\t{failures}\t{errors}\t{skipped}")
+PY
+  )"; then
+    echo "::warning::Could not parse JUnit report for ${target}; case count is unavailable."
+    return
+  fi
+
+  local collected passed failed errors skipped
+  IFS=$'\t' read -r collected passed failed errors skipped <<< "${stats}"
+  total_collected=$((total_collected + collected))
+  total_passed=$((total_passed + passed))
+  total_failed=$((total_failed + failed))
+  total_errors=$((total_errors + errors))
+  total_skipped=$((total_skipped + skipped))
+  echo "Case count: collected=${collected}, passed=${passed}, failed=${failed}, errors=${errors}, skipped=${skipped}"
 }
 
 print_test_info() {
@@ -101,6 +151,12 @@ print_summary() {
       echo "::endgroup::"
     done
   fi
+  echo -e "\033[1;34m=== PYTEST CASE COUNT ===\033[0m"
+  echo "  collected: ${total_collected}"
+  echo "  passed: ${total_passed}"
+  echo "  failed: ${total_failed}"
+  echo "  errors: ${total_errors}"
+  echo "  skipped: ${total_skipped}"
 }
 
 run_pytest_target() {
@@ -111,6 +167,8 @@ run_pytest_target() {
   log_name="${log_name%.py}"
   log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
+  local junit_file="${pytest_log_dir}/${test_index}-${log_name}.xml"
+  rm -f "${junit_file}"
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
@@ -120,13 +178,15 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest \
+      -sv --color=yes --junitxml="${junit_file}" "${target}" 2>&1 | tee "${log_file}"
   else
     set +e
-    pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+    pytest -sv --color=yes --junitxml="${junit_file}" "${target}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  record_junit_results "${target}" "${junit_file}"
   # When a target fails, mark its covdata dir so the downstream coverage
   # assembler treats it as unusable and backfills from the OBS history
   # instead of shipping the failed run's partial coverage.
@@ -157,6 +217,8 @@ run_pytest_batch() {
   local batch_targets=("$@")
   test_index=$((test_index + 1))
   local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+  local junit_file="${pytest_log_dir}/${test_index}-cpu-ut.xml"
+  rm -f "${junit_file}"
 
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
@@ -168,13 +230,15 @@ run_pytest_batch() {
     echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
     set +e
-    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest \
+      -sv --color=yes --junitxml="${junit_file}" "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   else
     set +e
-    pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+    pytest -sv --color=yes --junitxml="${junit_file}" "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  record_junit_results "${target}" "${junit_file}"
   if [ "${status}" -ne 0 ] && [ "${enable_coverage}" = "true" ]; then
     echo "1" > "$(dirname "${COVERAGE_FILE}")/FAILED"
   fi

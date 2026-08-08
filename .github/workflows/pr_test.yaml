@@ -190,7 +190,6 @@ jobs:
           done
 
   select-tests:
-    needs: pre-commit
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -345,18 +344,7 @@ jobs:
 
   run-selected-tests:
     needs:
-      - pre-commit
       - select-tests
-      - ensure-csrc-cache
-    if: >-
-      ${{
-        always() &&
-        needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        needs.select-tests.outputs.has_tests == 'true' &&
-        contains(github.event.pull_request.labels.*.name, 'ready') &&
-        needs.ensure-csrc-cache.result == 'success'
-      }}
     strategy:
       matrix:
         vllm_version:
