@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm_ascend.spec_decode.utils import (
+    build_parallel_draft_seq_lens_cpu,
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
 )
@@ -184,3 +185,44 @@ def test_cpu_and_gpu_corrections_agree():
     gpu_seq_lens = num_computed_gpu.numpy() + num_scheduled_step_n
 
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)
+
+
+def test_build_parallel_draft_seq_lens_cpu_mixed_acceptance():
+    optimistic = torch.tensor([100, 200, 300], dtype=torch.int32)
+    actual = build_parallel_draft_seq_lens_cpu(
+        optimistic,
+        num_draft_tokens=[3, 3, 0],
+        valid_sampled_token_count_cpu=torch.tensor([4, 2, 1], dtype=torch.int64),
+        num_reqs=3,
+        query_len=4,
+    )
+
+    # req0 accepts all drafts; req1 rejects two; req2 did not speculate.
+    torch.testing.assert_close(actual, torch.tensor([104, 202, 304], dtype=torch.int32))
+    torch.testing.assert_close(optimistic, torch.tensor([100, 200, 300], dtype=torch.int32))
+
+
+def test_build_parallel_draft_seq_lens_cpu_first_pass():
+    optimistic = torch.tensor([64, 128], dtype=torch.int32)
+    actual = build_parallel_draft_seq_lens_cpu(
+        optimistic,
+        num_draft_tokens=None,
+        valid_sampled_token_count_cpu=None,
+        num_reqs=2,
+        query_len=8,
+    )
+
+    torch.testing.assert_close(actual, torch.tensor([72, 136], dtype=torch.int32))
+
+
+def test_build_parallel_draft_seq_lens_cpu_preserves_unused_tail():
+    optimistic = torch.tensor([10, 20, 999, 999], dtype=torch.int32)
+    actual = build_parallel_draft_seq_lens_cpu(
+        optimistic,
+        num_draft_tokens=[2, 2],
+        valid_sampled_token_count_cpu=torch.tensor([1, 3], dtype=torch.int64),
+        num_reqs=2,
+        query_len=3,
+    )
+
+    torch.testing.assert_close(actual, torch.tensor([11, 23, 999, 999], dtype=torch.int32))

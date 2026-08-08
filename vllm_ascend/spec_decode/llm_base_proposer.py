@@ -57,6 +57,7 @@ from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _disable_flash_comm_v1_context,
     _maybe_eager_context,
+    build_parallel_draft_seq_lens_cpu,
     patch_tensor_parallel_group,
 )
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
@@ -905,6 +906,49 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _prepare_parallel_draft_seq_lens_cpu(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_size: int,
+        num_draft_tokens_cpu: list[int] | None,
+    ) -> None:
+        """Publish exact host KV lengths for Ascend parallel-draft FIA.
+
+        Async scheduling intentionally leaves the normal CPU sequence-length
+        mirrors optimistic. The accepted-token counts are already copied to a
+        pinned host buffer on a side stream. Wait only for that copy, then
+        reconstruct the current draft lengths on CPU; this avoids
+        ``seq_lens.tolist()`` synchronizing the whole NPU default stream.
+        """
+        if not self.parallel_drafting or not hasattr(self, "num_query_per_req"):
+            return
+
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        if seq_lens_cpu is None:
+            return
+
+        valid_counts_cpu = None
+        if num_draft_tokens_cpu is not None:
+            event = self.runner.valid_sampled_token_count_event
+            valid_counts_cpu = self.runner.valid_sampled_token_count_cpu
+            # Non-async callers do not maintain the side-stream host mirror;
+            # keep their existing device seq_lens fallback.
+            if event is None or valid_counts_cpu is None:
+                return
+            event.synchronize()
+
+        common_attn_metadata.parallel_draft_seq_lens_cpu = build_parallel_draft_seq_lens_cpu(
+            seq_lens_cpu,
+            num_draft_tokens_cpu,
+            valid_counts_cpu,
+            batch_size,
+            self.num_query_per_req,
+        )
+
     def _propose(
         self,
         # [num_tokens]
@@ -927,6 +971,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        num_draft_tokens_cpu: list[int] | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -1046,6 +1091,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
+
+        self._prepare_parallel_draft_seq_lens_cpu(
+            common_attn_metadata,
+            batch_size,
+            num_draft_tokens_cpu,
+        )
 
         if self.draft_window_size is not None:
             self.sliding_window.apply(common_attn_metadata)

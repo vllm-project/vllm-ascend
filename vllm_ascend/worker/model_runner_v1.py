@@ -1624,6 +1624,11 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output=scheduler_output,
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                num_draft_tokens_cpu=(
+                    spec_decode_metadata.num_draft_tokens
+                    if num_rejected_tokens_gpu is not None
+                    else None
+                ),
             )
             if get_pp_group().world_size > 1 and hasattr(
                 self.drafter, "take_last_draft_probs"

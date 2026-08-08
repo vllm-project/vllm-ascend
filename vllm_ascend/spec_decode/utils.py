@@ -79,6 +79,40 @@ def correct_optimistic_seq_lens_cpu(
     optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(optimistic_seq_lens_cpu_np.dtype, copy=False)
 
 
+def build_parallel_draft_seq_lens_cpu(
+    seq_lens_cpu: torch.Tensor,
+    num_draft_tokens: list[int] | None,
+    valid_sampled_token_count_cpu: torch.Tensor | None,
+    num_reqs: int,
+    query_len: int,
+) -> torch.Tensor:
+    """Build exact FIA KV lengths for one parallel-draft pass on the CPU.
+
+    ``seq_lens_cpu`` contains the target pass's optimistic lengths. For a
+    padded speculative batch, subtract tokens rejected by target verification,
+    then include the parallel draft query block that will be written to cache.
+    The source tensor is never modified.
+    """
+    exact_seq_lens_cpu = seq_lens_cpu.clone()
+    if num_draft_tokens is not None:
+        assert valid_sampled_token_count_cpu is not None
+        drafts = torch.as_tensor(
+            num_draft_tokens[:num_reqs],
+            dtype=exact_seq_lens_cpu.dtype,
+        )
+        valid_counts = valid_sampled_token_count_cpu[:num_reqs].to(
+            dtype=exact_seq_lens_cpu.dtype,
+        )
+        rejected = torch.where(
+            drafts > 0,
+            drafts + 1 - valid_counts,
+            torch.zeros_like(drafts),
+        )
+        exact_seq_lens_cpu[:num_reqs].sub_(rejected)
+    exact_seq_lens_cpu[:num_reqs].add_(query_len)
+    return exact_seq_lens_cpu
+
+
 class SlidingWindowAdapter:
     """
     Sliding-window draft attention for the draft model (EAGLE3 and DFlash).
@@ -164,7 +198,12 @@ class SlidingWindowAdapter:
 
         # update CPU mirrors: recompute from each one's own CPU tensor -> stays on CPU,
         # no D2H sync. numerically identical to the NPU
-        for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
+        for name in (
+            "seq_lens_cpu",
+            "_seq_lens_cpu",
+            "seq_lens_cpu_upper_bound",
+            "parallel_draft_seq_lens_cpu",
+        ):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
                 _windowed_cpu = src - ((src + k_future - w).clamp(min=0) // b) * b

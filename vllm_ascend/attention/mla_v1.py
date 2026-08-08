@@ -598,9 +598,15 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
+        # Parallel drafting needs the exact post-rejection length. In async
+        # mode the regular CPU mirrors are optimistic; the proposer supplies
+        # an exact host copy reconstructed from accepted-token counts. Other
+        # paths retain the existing CPU-mirror contract.
+        if common_attn_metadata.parallel_draft_seq_lens_cpu is not None:
+            self.seq_lens = common_attn_metadata.parallel_draft_seq_lens_cpu[:num_reqs]
+        # Prefer _seq_lens_cpu (always available, updated during non-parallel
+        # draft iterations) over seq_lens_cpu (None in async spec mode).
+        elif common_attn_metadata._seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
