@@ -18,7 +18,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
@@ -102,6 +102,10 @@ class EplbConfig:
     num_redundant_experts: int = 0
     eplb_policy_type: int = 2
     eplb_heat_collection_stage: str = "all"
+    # Model Runner V2 only. Restricts which batch phase contributes to the
+    # upstream EPLB expert-load window; any prefill request marks the batch
+    # as prefill.
+    load_collection_phase: str = "all"
 
     @model_validator(mode="after")
     def _validate_config(self):
@@ -132,6 +136,8 @@ class EplbConfig:
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
+        if self.load_collection_phase not in ["all", "prefill", "decode"]:
+            raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
 
         logger.info("Dynamic EPLB is %s", self.dynamic_eplb)
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
@@ -227,6 +233,7 @@ class AscendConfig:
     xlite_graph_config: XliteGraphConfig = dataclasses.field(default_factory=lambda: XliteGraphConfig())
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
     scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
+    dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
 
@@ -431,6 +438,24 @@ class AscendConfig:
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
+        # Enable optimized reduce sampling scheme. Preserve the safeguards
+        # added on main while consuming the already-validated typed field.
+        if self.enable_reduce_sample:
+            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+                raise ValueError(
+                    "enable_reduce_sample is incompatible with "
+                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            kv_transfer_config = getattr(vc, "kv_transfer_config", None)
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_role == "kv_producer":
+                raise ValueError(
+                    "enable_reduce_sample is not supported on PD-disaggregated "
+                    "scenarios. Please disable enable_reduce_sample."
+                )
+
         # mix_placement mutex
         self._check_mix_placement()
 
@@ -568,6 +593,34 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+@config
+class DynamicSpecConfig:
+    """
+    Configuration Object for dynamic_spec_config from additional_config
+    """
+
+    # Dynamic speculative-length methods. "dspark" relies on the DSpark
+    # confidence head; models without such a head need another method.
+    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark",)
+
+    # None disables the dynamic speculative-length path.
+    method: str | None = None
+    # Custom parameters of the selected dynamic method; the expected keys
+    # depend on `method` (e.g. dspark accepts
+    # initial_verify_budget_per_req, budget_update_interval and
+    # budget_threshold). Empty by default, in which case each method
+    # falls back to its own built-in defaults.
+    method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
+            raise ValueError(
+                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
+            )
+        return self
 
 
 @config
