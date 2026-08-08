@@ -24,7 +24,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 |DeepSeek V4-Flash|||||||||||||||||||||
 |DeepSeek V4-Pro|||||||||||||||||||||
 |DeepSeek-V3.1|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-|GLM-5.1|||||||||||||||||||||
+|GLM-5.1|✅| |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅||✅|200k||[GLM-5.1](../../tutorials/models/GLM5.md) |
 
 ::::
 
