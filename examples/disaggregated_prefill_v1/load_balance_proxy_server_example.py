@@ -946,7 +946,7 @@ async def assign_instances(
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except Exception:
+    except BaseException:
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
         raise
 
@@ -956,20 +956,24 @@ async def assign_instances(
         req_data["kv_transfer_params"] = kv_transfer_params
     prefiller_cached_tokens = extract_cached_tokens(response_json)
 
+    decoder_key = None
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
-    except Exception:
+        decoder_key = decoder["key"]
+        prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
+        decoder_client = await runtime.get_client(ServerRole.DECODE, decoder_key)
+    except BaseException:
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
+        if decoder_key is not None:
+            await runtime.schedule("release_decoder", decoder_key, decoder_score)
         raise
 
-    prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
-    decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
     logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
     return InstanceInfo(
         request_id=request_id,
         prefiller_key=prefiller_key,
         prefiller_score=prefiller_score,
-        decoder_key=decoder["key"],
+        decoder_key=decoder_key,
         decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
