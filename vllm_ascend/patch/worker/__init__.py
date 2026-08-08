@@ -22,6 +22,9 @@ from vllm_ascend.utils import is_310p
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+    # After patch_v2.patch_triton imports sample.states; rebind its
+    # import-time apply_top_k_top_p for V2 nightly.
+    import vllm_ascend.patch.worker.patch_v2.patch_topk_topp_sampler  # noqa
 
 
 import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
