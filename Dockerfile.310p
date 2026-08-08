@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
+FROM quay.io/ascend/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12 AS base
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
@@ -42,8 +42,34 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     else \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
-# In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
+
+# Build the vLLM Rust frontend in a dedicated stage. The final stage receives
+# compiled artifacts without inheriting rustup or protoc from this stage.
+FROM base AS rust-build
+ARG RUSTUP_DIST_SERVER=https://static.rust-lang.org
+ARG RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup
+ENV RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER} \
+    RUSTUP_UPDATE_ROOT=${RUSTUP_UPDATE_ROOT} \
+    RUSTUP_TERM_PROGRESS_WHEN=always
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends curl make unzip && \
+    rm -rf /var/lib/apt/lists/*
+RUN cd /vllm-workspace/vllm && \
+    tools/install_protoc.sh && \
+    python3 -m pip install -r requirements/build/rust.txt && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain none && \
+    . /root/.cargo/env && \
+    rustup set profile minimal && \
+    CARGO_BUILD_JOBS=4 bash build_rust.sh
+
+FROM base AS final
+COPY --from=rust-build /vllm-workspace/vllm/vllm/vllm-rs /vllm-workspace/vllm/vllm/vllm-rs
+COPY --from=rust-build /vllm-workspace/vllm/vllm/_rust_*.so /vllm-workspace/vllm/vllm/
+
+# Install vLLM in editable mode and require the prebuilt Rust frontend.
+# Remove Triton because it does not work correctly on Ascend.
+RUN VLLM_REQUIRE_RUST_FRONTEND=1 VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
