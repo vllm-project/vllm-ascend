@@ -27,6 +27,7 @@ if not is_310p():
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
+    import vllm_ascend.patch.platform.patch_mm_merge_310p  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
