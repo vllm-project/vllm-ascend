@@ -242,7 +242,7 @@ def _probabilistic_rejection_kernel(
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
-    seed = tl.load(seed_ptr + req_state_idx)  # noqa: F841
+    seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
     rejected_step = 0
@@ -284,8 +284,16 @@ def _probabilistic_rejection_kernel(
                     PADDED_VOCAB_NUM_BLOCKS,
                 )
                 target_log_prob = target_logit - target_lse
-                # NPU does not support tl_rand64; always accept the draft token.
-                u = tl.full([], 0.0, dtype=tl.float32)
+                # NPU does not support tl_rand64; emulate u ~ Uniform(0, 1]
+                # via tl.randint + tl.rand (the same pattern proven in
+                # _npu_gumbel_block_argmax above). The scalar `pos` offset
+                # yields one independent u per draft token.
+                # `includes_zero=False` semantics: clamp 0 -> 1 so that
+                # log(u) never collapses to -inf (which would make the
+                # ratio test trivially True and accept every draft).
+                pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                u = tl.rand(tl.randint(seed, pos), pos).to(tl.float32)
+                u = tl.where(u == 0.0, 1.0, u)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
