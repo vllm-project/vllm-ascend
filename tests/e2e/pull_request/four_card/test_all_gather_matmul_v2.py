@@ -25,7 +25,7 @@ import torch.multiprocessing as mp
 
 torch_npu = pytest.importorskip("torch_npu")
 
-WORLD_SIZE = 8
+WORLD_SIZE = 4
 LOCAL_M = 32
 K_SIZE = 6144
 N_SIZE = 1024
@@ -198,7 +198,7 @@ def _run_all_gather_matmul_v2_unquantized(rank: int, master_port: int) -> None:
 )
 @pytest.mark.skipif(
     hasattr(torch, "npu") and torch.npu.device_count() < WORLD_SIZE,
-    reason="AllGatherMatmulV2 e2e test requires 8 visible NPUs.",
+    reason="AllGatherMatmulV2 e2e test requires 4 visible NPUs.",
 )
 def test_all_gather_matmul_v2_dynamic_quant() -> None:
     os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
@@ -212,7 +212,7 @@ def test_all_gather_matmul_v2_dynamic_quant() -> None:
 )
 @pytest.mark.skipif(
     hasattr(torch, "npu") and torch.npu.device_count() < WORLD_SIZE,
-    reason="AllGatherMatmulV2 e2e test requires 8 visible NPUs.",
+    reason="AllGatherMatmulV2 e2e test requires 4 visible NPUs.",
 )
 def test_all_gather_matmul_v2_unquantized() -> None:
     os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
