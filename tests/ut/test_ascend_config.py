@@ -108,6 +108,13 @@ class TestAscendConfig(TestBase):
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.1.self_attn.indexer.k_cache"))
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
 
+    def test_vllm_independent_subconfigs_are_not_required(self):
+        config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+
+        self.assertFalse(config.xlite_graph_config.enabled)
+        self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
+        self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
@@ -138,6 +145,8 @@ class TestAscendConfig(TestBase):
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
+            "xlite_graph_config": {"enabled": False, "full_mode": True},
+            "finegrained_tp_config": {"lmhead_tensor_parallel_size": "0"},
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
@@ -151,6 +160,8 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+        self.assertTrue(ascend_config.xlite_graph_config.full_mode)
+        self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

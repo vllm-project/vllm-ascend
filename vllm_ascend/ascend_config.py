@@ -219,10 +219,12 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
 
-    # ---- sub-configs (need vllm_config / special): factory pre-constructs, kw_only ----
-    xlite_graph_config: XliteGraphConfig = dataclasses.field(kw_only=True)
-    finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(kw_only=True)
-    scheduler_config: SchedulerConfig = dataclasses.field(kw_only=True)
+    # ---- sub-configs declared later in this module ----
+    # Lambdas defer class lookup until construction, after module initialization.
+    xlite_graph_config: XliteGraphConfig = dataclasses.field(default_factory=lambda: XliteGraphConfig())
+    finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
+    scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
+    # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
@@ -910,9 +912,7 @@ def init_ascend_config(vllm_config):
     ):
         return _ASCEND_CONFIG
 
-    # Pre-construct sub-configs that need special injection.
-    xlite = XliteGraphConfig(**additional_config.get("xlite_graph_config", {}))  # type: ignore[call-arg]
-    finegrained = FinegrainedTPConfig(**additional_config.get("finegrained_tp_config", {}))  # type: ignore[call-arg]
+    # Pre-construct sub-configs that need precedence resolution or vllm_config.
     sched = SchedulerConfig.from_additional_config(additional_config)
     sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
@@ -926,8 +926,6 @@ def init_ascend_config(vllm_config):
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
-        "xlite_graph_config",
-        "finegrained_tp_config",
         "scheduler_config",
         "sparse_kv_offload_config",
         "dump_config_path",
@@ -950,8 +948,6 @@ def init_ascend_config(vllm_config):
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
 
     new_config = AscendConfig(  # type: ignore[call-arg]
-        xlite_graph_config=xlite,
-        finegrained_tp_config=finegrained,
         scheduler_config=sched,
         sparse_kv_offload_config=sparse_kv,
         dump_config_path=dump_config_path,
@@ -963,8 +959,8 @@ def init_ascend_config(vllm_config):
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
-    finegrained._validate_preconditions(vllm_config)
-    xlite._validate_preconditions(vllm_config)
+    new_config.finegrained_tp_config._validate_preconditions(vllm_config)
+    new_config.xlite_graph_config._validate_preconditions(vllm_config)
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
