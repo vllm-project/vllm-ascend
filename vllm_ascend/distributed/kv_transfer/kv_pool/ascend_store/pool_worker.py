@@ -39,8 +39,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
-    block_hash_to_bytes,
     block_hash_to_str,
+    block_hash_to_bytes,
+    extract_physical_layer_index,
     get_block_hashes,
     get_cache_family_granularity,
     infer_cache_family_ratio,
@@ -562,20 +563,8 @@ class KVPoolWorker:
             return cache.storage().data_ptr()
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        import regex as re
-
-        m = re.search(r"layers\.(\d+)", layer_name)
-        if m:
-            return int(m.group(1))
-        # MTP layers have names like "mtp.0.self_attn.xxx" without "layers."
-        # prefix. Map them after the main model layers.
-        if ".mtp." in f".{layer_name}.":
-            m = re.search(r"mtp\.(\d+)", layer_name)
-            if m:
-                num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
-                return num_hidden_layers + int(m.group(1))
-        m = re.search(r"(\d+)", layer_name)
-        return int(m.group(1)) if m else 0
+        num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
+        return extract_physical_layer_index(layer_name, num_hidden_layers, self.num_layers)
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []

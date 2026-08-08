@@ -23,6 +23,7 @@ import pytest
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     LoadSpec,
+    extract_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
@@ -96,6 +97,77 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.model_config.get_num_layers.return_value = 2
         return config
+
+    def _make_kv_cache_config(self, layer_names):
+        """Build a single-group KVCacheConfig mock with the given layer names.
+
+        ``kv_cache_spec`` is shaped so the scheduler's family/SWA inference
+        (which only inspects spec attributes for non-uniform/hybrid specs)
+        treats it as a plain full-attention group.
+        """
+        group = MagicMock(
+            layer_names=list(layer_names),
+            kv_cache_spec=MagicMock(kv_cache_specs=None, compress_ratio=None),
+        )
+        return MagicMock(kv_cache_groups=[group])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_num_layers_includes_deepseek_mtp_layer(self, mock_client_cls):
+        # num_hidden_layers == 2, so model.layers.2.* is the MTP draft layer.
+        config = self._make_config()
+        config.model_config.hf_text_config = MagicMock(num_hidden_layers=2)
+        kv_cache_config = self._make_kv_cache_config(
+            [
+                "model.layers.0.self_attn.attn",
+                "model.layers.1.self_attn.attn",
+                "model.layers.2.self_attn.attn",  # MTP: index >= num_hidden_layers
+            ]
+        )
+        scheduler = KVPoolScheduler(
+            config, use_layerwise=True, kv_cache_config=kv_cache_config, page_size_bytes=16
+        )
+        self.assertEqual(scheduler.num_layers, 3)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_num_layers_includes_mtp_prefix_layer(self, mock_client_cls):
+        config = self._make_config()
+        config.model_config.hf_text_config = MagicMock(num_hidden_layers=2)
+        kv_cache_config = self._make_kv_cache_config(
+            [
+                "model.layers.0.self_attn",
+                "model.layers.1.self_attn",
+                "model.mtp.0.self_attn",  # MTP via prefix -> num_hidden_layers + 0
+            ]
+        )
+        scheduler = KVPoolScheduler(
+            config, use_layerwise=True, kv_cache_config=kv_cache_config, page_size_bytes=16
+        )
+        self.assertEqual(scheduler.num_layers, 3)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_num_layers_without_kv_cache_config_falls_back(self, mock_client_cls):
+        # get_num_layers.return_value == 2 in _make_config.
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=True)
+        self.assertEqual(scheduler.num_layers, 2)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_keys_per_block_hash_includes_mtp_for_gva(self, mock_client_cls):
+        config = self._make_config(extra_config={"backend": "memcache"})
+        config.model_config.hf_text_config = MagicMock(num_hidden_layers=2)
+        kv_cache_config = self._make_kv_cache_config(
+            [
+                "model.layers.0.self_attn.attn",
+                "model.layers.1.self_attn.attn",
+                "model.layers.2.self_attn.attn",  # MTP
+            ]
+        )
+        scheduler = KVPoolScheduler(
+            config, use_layerwise=True, kv_cache_config=kv_cache_config, page_size_bytes=16
+        )
+        self.assertTrue(scheduler.use_gva_layerwise)
+        self.assertEqual(scheduler.num_layers, 3)
+        # pcp=1, dcp=1, tp_size//put_step=1, num_layer_keys=num_layers under gva.
+        self.assertEqual(scheduler.keys_per_block_hash, 1 * 1 * 1 * 3)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_consumer_no_load(self, mock_client_cls):
@@ -1261,6 +1333,32 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         scheduler.update_state_after_alloc(request, blocks, 0)
         # layerwise + kvpool_cached > 0 => can_load = True
         self.assertTrue(scheduler.load_specs["r1"].can_load)
+
+
+class TestExtractPhysicalLayerIndex(unittest.TestCase):
+    def test_deepseek_style_main_and_mtp(self):
+        # MTP reuses layers.{N} with N >= num_hidden_layers.
+        self.assertEqual(
+            extract_physical_layer_index("model.layers.0.self_attn.attn", 2, 2), 0
+        )
+        self.assertEqual(
+            extract_physical_layer_index("model.layers.60.self_attn.attn", 61, 61), 60
+        )
+        # First MTP layer for a 61-layer model (index == num_hidden_layers).
+        self.assertEqual(
+            extract_physical_layer_index("model.layers.61.self_attn.attn", 61, 61), 61
+        )
+
+    def test_mtp_prefix_maps_after_main_layers(self):
+        self.assertEqual(
+            extract_physical_layer_index("model.mtp.0.self_attn", 2, 2), 2
+        )
+        self.assertEqual(
+            extract_physical_layer_index("model.mtp.1.self_attn", 2, 2), 3
+        )
+
+    def test_fallback_when_no_numeric_token(self):
+        self.assertEqual(extract_physical_layer_index("no_index", 2, 2), 0)
 
 
 if __name__ == "__main__":
