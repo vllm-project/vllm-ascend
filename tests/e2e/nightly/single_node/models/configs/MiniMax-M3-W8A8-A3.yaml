@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "MiniMax-M3-w8a8"
-    model: "Eco-Tech/MiniMax-M3-w8a8"
+    model: "Eco-Tech/MiniMax-M3-w8a8-0626"
     envs:
       HCCL_BUFFSIZE: "512"
       HCCL_OP_EXPANSION_MODE: "AIV"
