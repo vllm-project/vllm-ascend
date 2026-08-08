@@ -10,15 +10,18 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 //
 
+#ifndef BATCH_MATMUL_TRANSPOSE_H
+#define BATCH_MATMUL_TRANSPOSE_H
+
 #define __aicore__ [aicore]
 #include "kernel_operator.h"
-#include "../op_host/tiling/tiling_data.h"
-#include "../../mla_preprocess/op_kernel/kernel/common.h"
-#include "../../mla_preprocess/op_kernel/kernel/hardware.h"
-#include "../../mla_preprocess/op_kernel/kernel/mma.h"
-#include "../../mla_preprocess/op_kernel/kernel/utils.h"
-#include "../../mla_preprocess/op_kernel/kernel/iterator.h"
-#include "../../kernels/math_utils.h"
+#include "batch_matmul_transpose_tiling_data.h"
+#include "../../../mla_preprocess/op_kernel/kernel/common.h"
+#include "../../../mla_preprocess/op_kernel/kernel/hardware.h"
+#include "../../../mla_preprocess/op_kernel/kernel/mma.h"
+#include "../../../mla_preprocess/op_kernel/kernel/utils.h"
+#include "../../../mla_preprocess/op_kernel/kernel/iterator.h"
+#include "../../../kernels/math_utils.h"
 
 constexpr uint32_t L0_PINGPONG_BUFFER_LEN = 16384;
 constexpr uint32_t L1_PINGPONG_BUFFER_LEN = 131072;
@@ -53,26 +56,26 @@ public:
     __aicore__ explicit PpMatmulEinSum(){};
 
     __aicore__ __force_inline__ void Init(__gm__ uint8_t *__restrict__ a, __gm__ uint8_t *__restrict__ b,
-                                          __gm__ uint8_t *__restrict__ c, __gm__ uint8_t *__restrict__ tiling_data)
+                                          __gm__ uint8_t *__restrict__ c,
+                                          const BatchMatmulTransposeTilingData *tiling_data)
     {
         gm_a.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(a));
         gm_b.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(b));
         gm_c.SetGlobalBuffer(reinterpret_cast<__gm__ OutDtype *>(c));
-        auto gm_tiling_data = reinterpret_cast<__gm__ pp_matmul::PpMatmulTilingData *>(tiling_data);
 
-        batch_size = gm_tiling_data->opShape.batchSize;
-        m = gm_tiling_data->opShape.m;
-        k = gm_tiling_data->opShape.k;
-        n = gm_tiling_data->opShape.n;
-        m0 = gm_tiling_data->opShape.m0;
-        k0 = gm_tiling_data->opShape.k0;
-        n0 = gm_tiling_data->opShape.n0;
-        tdim.m = gm_tiling_data->mLoop;
-        tdim.k = gm_tiling_data->kLoop;
-        tdim.n = gm_tiling_data->nLoop;
-        core_loop = gm_tiling_data->coreLoop;
-        swizzle_cnt = gm_tiling_data->swizzlCount;
-        en_shuffle_k = gm_tiling_data->enShuffleK;
+        batch_size = tiling_data->batchSize;
+        m = tiling_data->m;
+        k = tiling_data->k;
+        n = tiling_data->n;
+        m0 = tiling_data->m0;
+        k0 = tiling_data->k0;
+        n0 = tiling_data->n0;
+        tdim.m = tiling_data->mLoop;
+        tdim.k = tiling_data->kLoop;
+        tdim.n = tiling_data->nLoop;
+        core_loop = tiling_data->coreLoop;
+        swizzle_cnt = tiling_data->swizzlCount;
+        en_shuffle_k = tiling_data->enShuffleK;
 
         AsdopsBuffer<ArchType::ASCEND_V220> buf;
         l1_base_a = buf.template GetBuffer<BufferType::ASCEND_CB, InDtype>(0);
@@ -655,171 +658,4 @@ private:
     uint32_t ping_flag{0};
 };
 
-extern "C" __global__ __aicore__ void batch_matmul_transpose(GM_ADDR gm_a, GM_ADDR gm_b, GM_ADDR gm_c,
-                                                             GM_ADDR gm_tiling_data)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
-    PpMatmulEinSum<0, false, false, half, half, DataFormat::ND>
-        einsum_0_n_fp16_nd;  // swizzleDir[0] transA[0] transB[0] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<1, false, false, half, half, DataFormat::ND>
-        einsum_1_n_fp16_nd;  // swizzleDir[1] transA[0] transB[0] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<0, false, true, half, half, DataFormat::ND>
-        einsum_0_t_fp16_nd;  // swizzleDir[0] transA[0] transB[1] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<1, false, true, half, half, DataFormat::ND>
-        einsum_1_t_fp16_nd;  // swizzleDir[1] transA[0] transB[1] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<0, false, false, __bf16, __bf16, DataFormat::ND>
-        einsum_0_n_bf16_nd;  // swizzleDir[0] transA[0] transB[0] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<1, false, false, __bf16, __bf16, DataFormat::ND>
-        einsum_1_n_bf16_nd;  // swizzleDir[1] transA[0] transB[0] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<0, false, true, __bf16, __bf16, DataFormat::ND>
-        einsum_0_t_bf16_nd;  // swizzleDir[0] transA[0] transB[1] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[0]
-    PpMatmulEinSum<1, false, true, __bf16, __bf16, DataFormat::ND>
-        einsum_1_t_bf16_nd;  // swizzleDir[1] transA[0] transB[1] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[0]
-
-    PpMatmulEinSum<0, false, false, half, half, DataFormat::NZ>
-        einsum_0_n_fp16_nz;  // swizzleDir[0] transA[0] transB[0] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<1, false, false, half, half, DataFormat::NZ>
-        einsum_1_n_fp16_nz;  // swizzleDir[1] transA[0] transB[0] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<0, false, true, half, half, DataFormat::NZ>
-        einsum_0_t_fp16_nz;  // swizzleDir[0] transA[0] transB[1] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<1, false, true, half, half, DataFormat::NZ>
-        einsum_1_t_fp16_nz;  // swizzleDir[1] transA[0] transB[1] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<0, false, false, __bf16, __bf16, DataFormat::NZ>
-        einsum_0_n_bf16_nz;  // swizzleDir[0] transA[0] transB[0] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<1, false, false, __bf16, __bf16, DataFormat::NZ>
-        einsum_1_n_bf16_nz;  // swizzleDir[1] transA[0] transB[0] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<0, false, true, __bf16, __bf16, DataFormat::NZ>
-        einsum_0_t_bf16_nz;  // swizzleDir[0] transA[0] transB[1] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[1]
-    PpMatmulEinSum<1, false, true, __bf16, __bf16, DataFormat::NZ>
-        einsum_1_t_bf16_nz;  // swizzleDir[1] transA[0] transB[1] DtypeA[010] DtypeB[010] DtypeC[010] DataFormatA[0]
-                             // DataFormatB[1]
-
-    SetPadding<uint64_t>((uint64_t)0);
-    SetNdpara(1, 0, 0);
-    SetAtomicnone();
-
-    // get tiling args
-    auto tiling_data = reinterpret_cast<__gm__ pp_matmul::PpMatmulTilingData *>(gm_tiling_data);
-    uint32_t masked_key = tiling_data->tilingKey >> 2;
-
-    switch (masked_key) {
-        case 0b00000100100100:
-        case 0b01000100100100:
-            einsum_0_n_fp16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_n_fp16_nd.Process();
-            break;
-        case 0b00100100100100:
-        case 0b01100100100100:
-            einsum_0_t_fp16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_t_fp16_nd.Process();
-            break;
-        case 0b10000100100100:
-        case 0b11000100100100:
-            einsum_1_n_fp16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_n_fp16_nd.Process();
-            break;
-        case 0b10100100100100:
-        case 0b11100100100100:
-            einsum_1_t_fp16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_t_fp16_nd.Process();
-            break;
-        case 0b00001001001000:
-        case 0b01001001001000:
-            einsum_0_n_bf16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_n_bf16_nd.Process();
-            break;
-        case 0b00101001001000:
-        case 0b01101001001000:
-            einsum_0_t_bf16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_t_bf16_nd.Process();
-            break;
-        case 0b10001001001000:
-        case 0b11001001001000:
-            einsum_1_n_bf16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_n_bf16_nd.Process();
-            break;
-        case 0b10101001001000:
-        case 0b11101001001000:
-            einsum_1_t_bf16_nd.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_t_bf16_nd.Process();
-            break;
-
-        case 0b00000100100101:
-        case 0b01000100100101:
-            einsum_0_n_fp16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_n_fp16_nz.Process();
-            break;
-        case 0b00100100100101:
-        case 0b01100100100101:
-            einsum_0_t_fp16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_t_fp16_nz.Process();
-            break;
-        case 0b10000100100101:
-        case 0b11000100100101:
-            einsum_1_n_fp16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_n_fp16_nz.Process();
-            break;
-        case 0b10100100100101:
-        case 0b11100100100101:
-            einsum_1_t_fp16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_t_fp16_nz.Process();
-            break;
-        case 0b00001001001001:
-        case 0b01001001001001:
-            einsum_0_n_bf16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_n_bf16_nz.Process();
-            break;
-        case 0b00101001001001:
-        case 0b01101001001001:
-            einsum_0_t_bf16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_0_t_bf16_nz.Process();
-            break;
-        case 0b10001001001001:
-        case 0b11001001001001:
-            einsum_1_n_bf16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_n_bf16_nz.Process();
-            break;
-        case 0b10101001001001:
-        case 0b11101001001001:
-            einsum_1_t_bf16_nz.Init(gm_a, gm_b, gm_c, gm_tiling_data);
-            einsum_1_t_bf16_nz.Process();
-            break;
-        default:
-            break;
-    }
-}
-
-
-namespace vllm_ascend {
-
-extern void batch_matmul_transpose_impl(
-    void* stream,
-    void* gm_a,
-    void* gm_b,
-    void* gm_c,
-    void* gm_tiling_data,
-    const uint32_t block_dim)
-{
-    batch_matmul_transpose<<<block_dim, nullptr, stream>>>(
-        gm_a,
-        gm_b,
-        gm_c,
-        gm_tiling_data);
-}
-
-}
+#endif  // BATCH_MATMUL_TRANSPOSE_H

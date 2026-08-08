@@ -137,12 +137,4 @@ namespace vllm_ascend {
         const uint32_t block_dim
     );
 
-    extern void batch_matmul_transpose_impl(
-        void* stream,
-        void* gm_a,
-        void* gm_b,
-        void* gm_c,
-        void* gm_tiling_data,
-        const uint32_t block_dim
-    );
 }
