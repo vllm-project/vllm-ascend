@@ -1,0 +1,189 @@
+#长序列只验功能，不做性能要求
+test_name: "Qwen3.5-397B-w4a8_986k-function"
+model: "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp"
+num_nodes: 2
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 13321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
+    dp_address: "${NODE_0_IP}"
+
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 13321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
+    dp_address: "${NODE_1_IP}"
+
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_BUFFSIZE: "1024"
+  VLLM_USE_V1: "1"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+      ASCEND_BUFFER_POOL: "4:8"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-num-seqs
+      - "24"
+      - --max-model-len
+      - "1010000"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --seed
+      - "1024"
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --enforce-eager
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 1, "enforce_eager": true}'
+      - --additional-config
+      - '{"enable_cpu_binding": true}'
+      - --profiler-config
+      - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-disable-hybrid-kv-cache-manager
+      - --hf-overrides
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - --kv-transfer-config
+      - '{
+          "kv_connector": "MooncakeConnectorV1",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_producer",
+          "kv_port": "55010",
+          "engine_id": "0",
+          "kv_connector_extra_config": {
+            "prefill": {
+              "dp_size": 8,
+              "tp_size": 2
+            },
+            "decode": {
+              "dp_size": 8,
+              "tp_size": 2
+            }
+          }
+        }'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --max-num-seqs
+      - "24"
+      - --max-model-len
+      - "1010000"
+      - --max-num-batched-tokens
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --seed
+      - "1024"
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --compilation-config
+      - '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}'
+      - --profiler-config
+      - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-disable-hybrid-kv-cache-manager
+      - --hf-overrides
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - --kv-transfer-config
+      - '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_port": "55011",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 8,
+            "tp_size": 2
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 2
+          }
+        }
+      }'
+benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 1500
+        batch_size: 2
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97

@@ -80,6 +80,7 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
+            proposer.model = SimpleNamespace(get_draft_attn_causal=lambda: [False])
 
         with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
             proposer = AscendDSparkProposer(vllm_config, device)
@@ -328,7 +329,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
             pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(SimpleNamespace(dspark_bonus_anchor=True), False, 1 + _NUM_SPECULATIVE_TOKENS),
+            pytest.param(SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS),
         ],
     )
     def test_configures_anchor_sampling(

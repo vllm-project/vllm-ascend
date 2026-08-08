@@ -26,18 +26,12 @@ def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch
         return residual
 
     if x.size(0) != residual.size(0):
-        if residual.size(0) < x.size(0):
-            # A preceding SP RMSNorm leaves a local residual, while a MoE
-            # communication path can restore the full sequence before the
-            # next residual add.
-            residual = tensor_model_parallel_all_gather(residual, 0)
-        else:
-            pad_size = _EXTRA_CTX.pad_size
-            if pad_size > 0:
-                residual = F.pad(residual, (0, 0, 0, pad_size))
-            tp_size = get_tensor_model_parallel_world_size()
-            tp_rank = get_tensor_model_parallel_rank()
-            residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
+        pad_size = _EXTRA_CTX.pad_size
+        if pad_size > 0:
+            residual = F.pad(residual, (0, 0, 0, pad_size))
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
 
     return residual
 

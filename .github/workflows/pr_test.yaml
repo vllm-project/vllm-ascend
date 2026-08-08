@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   pre-commit:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -200,6 +200,8 @@ jobs:
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
+      has_tests_a5: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
+      test_groups_a5: ${{ steps.scope-a5.outputs.test_groups || steps.noop-a5.outputs.test_groups }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -291,6 +293,27 @@ jobs:
             echo "csrc_cache_target_ids=[]"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select A5 tests
+        id: scope-a5
+        if: steps.filter.outputs.src == 'true'
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git fetch origin ${{ github.base_ref }}
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --diff-base origin/${{ github.base_ref }} \
+            --modules a5 \
+            --runner-override a5_x4
+
+      - name: Set no-tests output for A5 when source paths unchanged
+        id: noop-a5
+        if: steps.filter.outputs.src != 'true'
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+          } >> "$GITHUB_OUTPUT"
+          
       - name: Add upstream test cache target
         id: cache-targets
         env:
@@ -311,7 +334,7 @@ jobs:
     if: >-
       ${{
         needs.select-tests.result == 'success' &&
-        contains(github.event.pull_request.labels.*.name, 'ready')
+        (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5'))
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
@@ -463,26 +486,46 @@ jobs:
             echo "coverage_paths=" >> "$GITHUB_OUTPUT"
             echo "::notice::recommended_pytest_paths.txt not found"
           fi 
-
+          
+  run-selected-tests-a5:
+    needs: [pre-commit, select-tests]
+    if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
+        
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, select-tests, run-selected-tests]
-    if: ${{ always() && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
+    if: ${{ always() && (contains(github.event.pull_request.labels.*.name, 'ready') || contains(github.event.pull_request.labels.*.name, 'ready-a5')) }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Check all required jobs
+        env:
+          HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready') }}
+          HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests }}"
+          HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
+          echo "has_tests_a5: ${HAS_TESTS_A5}"
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ] && [ "${PRE_COMMIT_RESULT}" != "skipped" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
@@ -497,12 +540,34 @@ jobs:
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${TESTS_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
-              exit 1
+            if [ "${HAS_READY_LABEL}" = "true" ]; then
+              if [ "${TESTS_RESULT}" != "success" ]; then
+                echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+                exit 1
+              fi
+            else
+              if [ "${TESTS_RESULT}" != "success" ] && [ "${TESTS_RESULT}" != "skipped" ]; then
+                echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+                exit 1
+              fi
             fi
           fi
 
+          if [ "${HAS_TESTS_A5}" = "true" ]; then
+            TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
+            echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
+            if [ "${HAS_READY_A5_LABEL}" = "true" ]; then
+              if [ "${TESTS_A5_RESULT}" != "success" ]; then
+                echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
+                exit 1
+              fi
+            else
+              if [ "${TESTS_A5_RESULT}" != "success" ] && [ "${TESTS_A5_RESULT}" != "skipped" ]; then
+                echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
+                exit 1
+              fi
+            fi
+          fi
           echo "=== CI Gate: PASSED ==="
 
   # this job collects failure from uploaded logs
