@@ -1,0 +1,75 @@
+name: "Issue Review Bot"
+on:
+  issues:
+    types: [opened, edited]
+
+concurrency:
+  group: issue-review-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  review:
+    runs-on: linux-amd64-cpu-2-hk
+    if: |
+      github.event.issue.state == 'open' &&
+      (
+        github.event.action == 'opened' ||
+        github.event.changes.title ||
+        github.event.changes.body
+      ) &&
+      (
+        startsWith(github.event.issue.title, '[Bug]:') ||
+        startsWith(github.event.issue.title, '[Installation]:') ||
+        startsWith(github.event.issue.title, '[Usage]:') ||
+        startsWith(github.event.issue.title, '[Doc]:') ||
+        startsWith(github.event.issue.title, '[Misc]:') ||
+        startsWith(github.event.issue.title, '[Feature]:') ||
+        startsWith(github.event.issue.title, '[Perf]:')
+      )
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests pyyaml regex
+
+      # Step 1: Review the issue description with the LLM → review_result.json
+      - name: Call LLM
+        id: llm
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          python .github/workflows/scripts/robot/call_llm.py \
+            --kind issue \
+            --output review_result.json
+
+      # Step 2: Post comment if description incomplete → label_actions.json
+      - name: Post handler
+        id: post
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          NEED_DETAIL_LABEL: ${{ vars.ISSUE_DESCRIPTION_CHECK_NEED_DETAIL_LABEL || 'need-detail-desc' }}
+        run: |
+          python .github/workflows/scripts/robot/handle_review.py \
+            --input review_result.json \
+            --label-output label_actions.json
+
+      # Step 3: Add or remove the need-detail-desc label
+      - name: Manage label
+        id: label
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: python .github/workflows/scripts/robot/manage_labels.py
