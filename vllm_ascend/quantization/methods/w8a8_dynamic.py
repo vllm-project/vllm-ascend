@@ -304,12 +304,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         fused_mc2_selected = _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
         ascend_config = get_ascend_config() if fused_mc2_selected else None
         enable_fused_mc2 = ascend_config.enable_fused_mc2 if ascend_config else 0
-        cann_megamoe_flag = fused_mc2_selected and _MEGA_MOE_SUPPORTED and (
-            enable_fused_mc2 == 1 or _is_a2_megamoe_enabled(ascend_config)
+        cann_megamoe_flag = (
+            fused_mc2_selected
+            and _MEGA_MOE_SUPPORTED
+            and (enable_fused_mc2 == 1 or _is_a2_megamoe_enabled(ascend_config))
         )
-        fused_scale_flag = (
-            fused_mc2_selected and enable_fused_mc2 in (1, 2) and act_name != "swigluoai_uninterleave"
-        )
+        fused_scale_flag = fused_mc2_selected and enable_fused_mc2 in (1, 2) and act_name != "swigluoai_uninterleave"
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
