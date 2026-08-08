@@ -42,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import (
     record_attention_compute_start,
@@ -65,7 +66,9 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     get_ascend_device_type,
+    get_potential_max_tokens,
     maybe_trans_nz,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -1035,6 +1038,52 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             return attn_output, True
 
+    def _forward_o_proj_tp(self, attn_output: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        # o_proj with oproj_tp: cross-DP sharded attention output projection.
+        num_tokens = attn_output.shape[0]
+        oproj_group = get_otp_group()
+        oproj_tp_size = oproj_group.world_size
+        chunk_size = self.o_proj.input_size_per_partition
+        assert attn_output.numel() == num_tokens * oproj_tp_size * chunk_size, (
+            "o_proj TP shard mismatch: got "
+            f"{tuple(attn_output.shape)} for oproj_tp_size * chunk_size = {oproj_tp_size * chunk_size}."
+        )
+        exchange_num_tokens = get_potential_max_tokens()
+        if exchange_num_tokens < num_tokens:
+            raise ValueError(
+                f"oproj static exchange capacity must cover local tokens, got {exchange_num_tokens} and {num_tokens}."
+            )
+        # Lazy init on first call (profiling run, which precedes ACL graph
+        # capture). Static buffers keep a stable device address across all
+        # later capture/replay cycles — graph replay requires the same
+        # address that was recorded at capture.
+        if not hasattr(self, "_o_proj_tp_send_buf"):
+            buf_shape = (oproj_tp_size, exchange_num_tokens, chunk_size)
+            self._o_proj_tp_send_buf = torch.zeros(buf_shape, dtype=attn_output.dtype, device=attn_output.device)
+            self._o_proj_tp_recv_buf = torch.empty_like(self._o_proj_tp_send_buf)
+        send = self._o_proj_tp_send_buf
+        recv = self._o_proj_tp_recv_buf
+        # In-place fill into the address-stable buffer: zero the padding
+        # tail, then copy the real tokens.
+        send.zero_()
+        send[:, :num_tokens].copy_(attn_output.view(num_tokens, oproj_tp_size, chunk_size).transpose(1, 0))
+        torch.distributed.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
+        o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, chunk_size)
+        # w8a8-mxfp8: local dynamic MX quant + quantized matmul against the
+        # OTP-sharded weight; the SFA o_proj has no bias.
+        o_proj_output = self.o_proj.quant_method.apply(self.o_proj, o_proj_input, bias=None)
+        if not hasattr(self, "_o_proj_tp_rs_out_buf"):
+            self._o_proj_tp_rs_out_buf = torch.empty(
+                (exchange_num_tokens, o_proj_output.shape[-1]),
+                dtype=o_proj_output.dtype,
+                device=o_proj_output.device,
+            )
+        torch.distributed.reduce_scatter_tensor(
+            self._o_proj_tp_rs_out_buf, o_proj_output, group=oproj_group.device_group
+        )
+        output[...] = self._o_proj_tp_rs_out_buf[:num_tokens]
+        return output
+
     def _get_full_kv(self, k, attn_metadata):
         return k
 
@@ -1747,8 +1796,21 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
+            # Profiling / dummy run: run o_proj on zero input so the OTP HCCL
+            # collectives are executed on every DP rank (including dummy
+            # accompanying ranks that would otherwise skip attention and
+            # deadlock the group) and captured by the ACL graph. Non-OTP just
+            # zeros the output. Mirrors dsa_v1.forward().
+            if oproj_tp_enable():
+                o_proj_input = torch.zeros(
+                    (output.shape[0], self.o_proj.input_size),
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                )
+                self._forward_o_proj_tp(o_proj_input, output)
+            else:
+                output.fill_(0)
+            return output
 
         composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
         assert composed_kv_cache is not None
@@ -2000,7 +2062,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
-        output[...] = self.o_proj(attn_output)[0]
+        if oproj_tp_enable():
+            # oproj_tp: cross-DP sharded o_proj via static-buffer
+            # all_to_all / reduce_scatter (see _forward_o_proj_tp). CP is
+            # mutually exclusive with oproj_tp (oproj requires TP == 1), so
+            # this is the non-CP path.
+            self._forward_o_proj_tp(attn_output, output)
+        else:
+            output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
