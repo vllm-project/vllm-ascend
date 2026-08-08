@@ -21,6 +21,7 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     filter_environment,
     write_results_json,
 )
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,11 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
 
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
     write_results_json(output, job_name=job_name)
+
+    postprocess_benchmark_results(
+        [(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)],
+        job_name=job_name or config.test_name,
+    )
 
 
 @pytest.mark.asyncio
