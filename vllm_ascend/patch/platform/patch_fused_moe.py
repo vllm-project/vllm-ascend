@@ -40,7 +40,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMo
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
@@ -50,21 +50,6 @@ if vllm_version_is("0.26.0"):
     _original_FusedMoE = _fused_moe_layer.FusedMoE
 else:
     _original_FusedMoE = _fused_moe_layer.FusedMoEFactory
-_DefaultAscendMoERunner: Any
-_DefaultAscendRoutedExperts: type[RoutedExperts]
-_IS_310P = is_310p()
-
-if _IS_310P:
-    from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
-
-    _DefaultAscendMoERunner = AscendMoERunner310
-    _DefaultAscendRoutedExperts = AscendRoutedExperts310
-else:
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-
-    _DefaultAscendMoERunner = AscendMoERunner
-    _DefaultAscendRoutedExperts = AscendRoutedExperts
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
