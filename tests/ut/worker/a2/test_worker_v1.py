@@ -55,7 +55,7 @@ class TestNPUWorker(TestBase):
         self.distributed_init_method = "tcp://localhost:12345"
         self.is_driver_worker = False
 
-    def test_layer_reuse_memory_factor_counts_complete_slot_signatures(self):
+    def test_layer_reuse_memory_factor_merges_main_components(self):
         from vllm_ascend.core.kv_cache_interface import (
             AscendMLAAttentionSpec,
             AscendSFAIndexerCacheSpec,
@@ -93,8 +93,57 @@ class TestNPUWorker(TestBase):
         )
 
         expected_logical_bytes = 6 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        expected_physical_bytes = 5 * main_spec.page_size_bytes + 2 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (6, 5))
+        # Both reused slots contain indexer layers; the independent slot does not.
+        expected_physical_bytes = 3 * main_spec.page_size_bytes + 2 * indexer_spec.page_size_bytes
+        self.assertEqual((num_layers, num_slots), (6, 3))
+        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+
+    def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
+        from vllm_ascend.core.kv_cache_interface import (
+            AscendMLAAttentionSpec,
+            AscendSFAIndexerCacheSpec,
+        )
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 6
+        main_spec = AscendMLAAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.int8,
+            cache_sparse_sfa_c8=True,
+        )
+        indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        # A/B-mixed with MTP: layers 0,1,4 have main + indexer; layers 2,3,5 and MTP are
+        # main-only. Main is shared by all reused layers; indexer only by A-class layers.
+        specs = {
+            **{f"model.layers.{layer}.self_attn.attn": main_spec for layer in range(6)},
+            **{f"model.layers.{layer}.self_attn.indexer.k_cache": indexer_spec for layer in (0, 1, 4)},
+            "model.mtp.0.self_attn.attn": main_spec,
+        }
+
+        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {"layerwise_num_shared_buffers": 2},
+        )
+
+        # Layer 0 independent; reused layers split into buffers [1,3,5] and [2,4,6] -> 3
+        # main tensors. Each reused buffer holds an A-class layer (1 and 4), so indexer is
+        # counted once per buffer: independent + both reused == 3 indexer slots.
+        expected_logical_bytes = 7 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
+        expected_physical_bytes = 3 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
+        self.assertEqual((num_layers, num_slots), (7, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
 
     def test_incomplete_layer_layout_does_not_scale_memory_budget(self):

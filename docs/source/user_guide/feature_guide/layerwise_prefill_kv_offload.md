@@ -103,18 +103,25 @@ Layer 4 reuses layer 1's physical buffer, layer 7 reuses layer 4's buffer, and
 so on. Before loading layer 4, the transfer thread waits until layer 1 has
 finished saving.
 
-When cache-bearing layers have different KV cache layouts, the planner first
-groups them by their complete cache signature. Each signature gets its own
-reusable buffer pool, so incompatible layouts never share storage. The number
-of physical KV buffers is then:
+When cache-bearing layers have different KV cache layouts, the planner groups
+them by their **main** attention cache spec (not the whole-layer signature).
+Layers whose main specs match share one reusable buffer pool: within each
+physical buffer the main KV tensor is shared by every layer in the buffer,
+while an auxiliary component (for example the SFA indexer cache) is shared only
+by the subset of layers that actually own it. A buffer that holds only main-only
+layers gets **no** auxiliary allocation at all — the auxiliary component is
+provisioned on demand, per buffer, instead of unconditionally for every buffer.
+The number of main buffer assignments is then:
 
 ```text
-I + sum(min(B, reusable layers with signature S) for each signature S)
+I + sum(min(B, reusable layers with main spec S) for each main spec S)
 ```
 
 For a uniform layout, the approximate logical-to-physical memory factor remains
 `N / (I + min(B, R))`. For heterogeneous layouts, the implementation calculates
-the factor from the actual cache page bytes assigned to every physical buffer.
+the factor from the actual cache page bytes assigned to every physical buffer
+(main counted once per buffer, and the optional indexer counted once per buffer
+that owns it).
 
 ## Request Flow
 
@@ -123,8 +130,7 @@ the factor from the actual cache page bytes assigned to every physical buffer.
 1. The KV cache planner maps logical layer names to cache-bearing layer indices.
 2. Base transformer layers keep their normal indices. MTP layers are appended
    after the base layers.
-3. The planner builds the complete KV cache signature of each cache-bearing
-   layer.
+3. The planner groups cache-bearing layers by their main KV cache spec.
 4. Compatible layers are assigned to dedicated or shared physical KV buffers.
 5. Corresponding KV cache tensor descriptors assigned to the same buffer are
    merged.
@@ -166,18 +172,20 @@ transformer layer.
 An SFA layer can contain separate cache entries:
 
 - the main MLA/SFA KV cache;
-- the sparse indexer cache;
-- their corresponding C8 scale data when enabled.
+- the optional sparse indexer cache, whose name ends with
+  `.indexer.k_cache`.
 
-The planner does not identify these entries by model-specific names. It builds
-the physical layer's signature from their actual KV cache specifications and
-only reuses a buffer when the complete signature matches. Transfer addresses and
-allocation sizes are derived from each group's real per-layer offsets and page
-bytes. This allows MTP and sparse C8 layouts to use the same layerwise offload
-pipeline without assuming that every layer has one tensor.
+The planner groups reusable layers by their main cache spec. The optional
+indexer follows the main buffer assignment and is allocated only for buffers
+that contain an indexer-bearing layer. C8 scale storage, when enabled, is part
+of the corresponding cache spec and physical allocation.
 
-An incompatible layout receives a separate buffer pool instead of being
-transferred through an incorrectly sized buffer.
+Before tensor descriptors are merged, the implementation verifies that every
+main cache sharing a buffer has the same spec and size, and performs the same
+check for indexer caches. Unsupported multi-entry layouts or incompatible
+descriptors raise an error instead of sharing an incorrectly sized buffer.
+Transfer addresses and allocation sizes are derived from each group's actual
+per-layer offsets and page bytes.
 
 ## Verification
 

@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
+    LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
     LayerBatchReqMeta,
@@ -291,6 +292,83 @@ class TestGVALayerTransferFailures(unittest.TestCase):
         thread._handle_request([task])
 
         store.batch_write_finish.assert_called_once_with(["k0"], [0])
+
+
+class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
+    def _make_thread(self):
+        store = MagicMock()
+        store.store.batch_copy.return_value = 0
+        load_finished = [threading.Event(), threading.Event()]
+        save_finished = [threading.Event(), threading.Event()]
+        sync_events = [MagicMock(), MagicMock()]
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerBatchReqMeta(
+            req_ids=["r1"],
+            layer_id=1,
+            is_last_chunks=[False],
+            addr_array=np.asarray([10]),
+            size_array=np.asarray([16]),
+            gvas_array=np.asarray([100]),
+        )
+        thread = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=16,
+            ready_event=threading.Event(),
+            get_event=threading.Event(),
+            layer_load_finished_events=load_finished,
+            layer_save_finished_events=save_finished,
+            sync_save_events=sync_events,
+            num_layers=2,
+            group_builders=[builder],
+        )
+        return thread, load_finished, save_finished, sync_events
+
+    def test_handle_request_does_not_clear_worker_owned_tasks(self):
+        thread, _, _, _ = self._make_thread()
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([0]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        transfer_tasks = [task]
+        load_task = LayerLoadTask(
+            wait_for_save_layer=None,
+            transfer_tasks=transfer_tasks,
+            layer_id=1,
+        )
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(transfer_tasks, [task])
+
+    def test_empty_reuse_gate_waits_for_non_saving_rank_compute(self):
+        thread, load_finished, save_finished, sync_events = self._make_thread()
+        save_finished[0].set()
+        load_task = LayerLoadTask(
+            wait_for_save_layer=0,
+            transfer_tasks=[],
+            layer_id=1,
+        )
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        sync_events[0].synchronize.assert_called_once_with()
+        self.assertFalse(save_finished[0].is_set())
+        self.assertTrue(load_finished[1].is_set())
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
