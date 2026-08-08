@@ -1050,9 +1050,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
-        # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
-        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory.
+        # On KV consumers (decode-only) the MLAPO decode fast path uses only the
+        # transformed weights built above; the original fused_qkv_a_proj/q_proj
+        # weights and quant params are not referenced by that fast path, so drop
+        # them to save NPU memory. _mla_preprocess (reached when D must local-prefill)
+        # raises a clear error instead of crashing with UndefinedTensorImpl.
         if (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
@@ -1064,6 +1066,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.q_proj.weight = None
             self.q_proj.deq_scale = None
             self.q_proj.quant_bias = None
+            self._prefill_weights_offloaded = True
             torch.npu.empty_cache()
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
@@ -1627,14 +1630,28 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv):
         # MLA Preprocess:
-        # 1. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
+        # 1. Guard: on a kv_consumer with MLAPO the prefill weights were freed to
+        #    save NPU memory. _mla_preprocess is only reached when D must
+        #    local-prefill (recompute) or when the MLAPO decode fast path does not
+        #    apply (e.g. num_prefills > 0), which means D received a request it
+        #    cannot serve (e.g. miss-parametrized kv_transfer_params without valid
+        #    remote KV, see #11882). Fail this request explicitly instead of
+        #    crashing the worker with UndefinedTensorImpl.
+        # 2. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
         # or
         #    Perform kv_a_proj_with_mqa to obtain kv_no_split
-        # 2. If need_gather_q_kv, perform all_gather.
-        # 3. Preprocess decode tokens, write kv cache and get:
+        # 3. If need_gather_q_kv, perform all_gather.
+        # 4. Preprocess decode tokens, write kv cache and get:
         # decode_ql_nope, decode_q_pe, decode_k_pe, decode_k_nope
-        # 4. Preprocess prefill tokens, write kv cache and get:
+        # 5. Preprocess prefill tokens, write kv cache and get:
         # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
+        if getattr(self, "_prefill_weights_offloaded", False):
+            raise ValueError(
+                "Decode (kv_consumer) worker cannot perform local prefill: MLAPO "
+                "prefill weights have been freed to save NPU memory. This usually "
+                "means the request arrived without valid remote KV (miss-parametrized "
+                "kv_transfer_params, see issue #11882)."
+            )
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
