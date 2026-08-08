@@ -414,6 +414,8 @@ private:
     ge::graphStatus CheckSingleParaSparseMode() const;
     ge::graphStatus CheckSingleParaSparseBlockSize() const;
     ge::graphStatus CheckSingleParaSparseIndices() const;
+    ge::graphStatus CheckSoftmaxMax() const;
+    ge::graphStatus CheckSoftmaxSum() const;
     ge::graphStatus CheckSinglePara() const;
     ge::graphStatus CheckMultiParaConsistency() const;
     ge::graphStatus CheckDequantScaleNotExistence();
@@ -508,6 +510,8 @@ private:
     gert::Shape valueShapeCmp_{};
     gert::Shape topkShapeCmp_{};
     gert::Shape attenOutShapeCmp_{};
+    gert::Shape softmaxMaxShapeCmp_{};
+    gert::Shape softmaxSumShapeCmp_{};
 };
 
 class QSFAInfoParser {

@@ -21,7 +21,6 @@ from vllm_ascend.attention.sfa_v1 import (
     DSACPContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -761,8 +760,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # its local Q heads/tokens directly. In particular, DSA-CP keeps
             # its token shard local; no Q all-gather, sparse-index remap, LSE,
             # or output all-to-all merge is required.
-            attn_output = DeviceOperator.execute_sparse_flash_attention_process(
-                self,
+            attn_output = super()._execute_sparse_flash_attention_process(
                 ql_nope,
                 q_pe,
                 gathered_kv_cache,
@@ -790,8 +788,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
         ql_nope, q_pe = self._finish_dcp_gather(gather_context)
-        sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
-            self,
+        sfa_output, softmax_max, softmax_sum = super()._execute_sparse_flash_attention_process(
             ql_nope,
             q_pe,
             kv_cache,
