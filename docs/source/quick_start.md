@@ -32,14 +32,14 @@ This section guides you through container-based environment setup and large mode
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |  
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and TorchNPU   |
-    | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+    | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
+    | TorchNPU      | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+    | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
-Atlas 300I DUO uses CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
+Atlas 300I DUO uses CANN 9.1.0 and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
 
 Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
@@ -52,10 +52,10 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
 
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
- | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
+ | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
  | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
- | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
- | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
+ | TorchNPU      | == 2.10.0.post4         | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | torch         | == 2.10.0               | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 

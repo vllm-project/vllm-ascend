@@ -15,14 +15,14 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and TorchNPU    |
-    | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+    | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
+    | TorchNPU      | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+    | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
-Atlas 300I DUO require CANN 9.1.0 . The Atlas A2/A3 requirements in the table above remain unchanged.
+Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
 ```
 
 ::::
@@ -30,10 +30,10 @@ Atlas 300I DUO require CANN 9.1.0 . The Atlas A2/A3 requirements in the table ab
 
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
- | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
+ | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
  | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
- | TorchNPU     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
- | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
+ | TorchNPU      | == 2.10.0.post4         | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | torch         | == 2.10.0               | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
@@ -114,17 +114,17 @@ python -m pip install --upgrade pip
 pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_9.0.1_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0/Ascend-cann-toolkit_9.1.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_9.1.0_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_9.1.0_linux-"$(uname -i)".run --full
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run
-./Ascend-cann-910b-ops_9.0.1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0/Ascend-cann-910b-ops_9.1.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_9.1.0_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_9.1.0_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.1/Ascend-cann-nnal_9.0.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_9.0.1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_9.0.1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0/Ascend-cann-nnal_9.1.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_9.1.0_linux-"$(uname -i)".run
+./Ascend-cann-nnal_9.1.0_linux-"$(uname -i)".run --install
 ```
 
 :::
