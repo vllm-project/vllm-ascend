@@ -108,14 +108,15 @@
 #
 # ** 6. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       vllm's FusedMoE is a factory function (not a class). deepseek_v2 and
-#       other models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
+#       vllm's MoE factory function (formerly FusedMoE, now FusedMoEFactory on main).
+#       deepseek_v2 and other models do
+#       `from vllm.model_executor.layers.fused_moe import FusedMoEFactory`
 #       and call it directly, so on Ascend we must redirect it to AscendMoERunner
 #       before any model is imported.
 #    How：
-#       Patch the FusedMoE binding in both the package `__init__` and the layer
+#       Patch the FusedMoEFactory binding in both the package `__init__` and the layer
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
@@ -741,9 +742,9 @@
 #
 # ** 8. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       The worker process re-imports the FusedMoE factory after the platform
+#       The worker process re-imports the MoE factory after the platform
 #       patch has already redirected it to AscendMoERunner. Re-applying the
 #       monkey-patch directly would wrap an already-patched factory.
 #    How：
@@ -1253,4 +1254,21 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 34. File: platform/patch_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
+#    Why:
+#       Upstream vllm-project/vllm#50411 added FusedInputNorm with F.batch_norm
+#       eps=0.0. CUDA PyTorch >= 2.7 accepts eps=0.0, but Ascend torch_npu still
+#       validates eps > 0 and raises "batch_norm eps must be positive".
+#    How：
+#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
+#       The patch is guarded with contextlib.suppress(ImportError) so it does
+#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/50411
+#    Future Plan:
+#       Remove this patch once Ascend torch_npu accepts eps=0.0 in eval-mode
+#       F.batch_norm (matching CUDA PyTorch >= 2.7 behavior).
 #
