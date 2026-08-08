@@ -93,6 +93,7 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 | 2026.06.03 | Release candidates, v0.20.2rc1            |
 | 2026.04.30 | Release candidates, v0.19.1rc1            |
 | 2026.04.24 | Release candidates, v0.13.0rc3            |
+| 2026.04.22 | v0.18.0 Final release, v0.18.0            |
 | 2026.04.01 | Release candidates, v0.18.0rc1            |
 | 2026.03.15 | Release candidates, v0.17.0rc1            |
 | 2026.03.10 | Release candidates, v0.16.0rc1            |
