@@ -51,7 +51,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -120,6 +120,9 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        # FusedMoE can be constructed by the parent initializer and reads this
+        # capacity while setting up MC2 communication.
+        set_potential_max_tokens(vllm_config)
         # The following features are not yet supported in Ascend NPU model runner v2:
         # - Context parallelism (prefill or decode)
         parallel_config = vllm_config.parallel_config

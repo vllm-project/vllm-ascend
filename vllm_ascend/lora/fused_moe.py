@@ -49,7 +49,7 @@ from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
+from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",

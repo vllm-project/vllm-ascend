@@ -982,7 +982,7 @@
 #       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
 #       special-token schema required by Transformers 5.13.
 #
-# ** 19. File: worker/patch_qwen3_next_mtp.py**
+# ** 19. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:

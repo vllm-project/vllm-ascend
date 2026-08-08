@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -19,7 +18,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -131,66 +130,6 @@ def _is_w8a8_dynamic(linear) -> bool:
     return isinstance(inner, AscendW8A8DynamicLinearMethod)
 
 
-def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
-    """
-    Pads a ragged/packed tensor into fixed-size blocks.
-
-    Args:
-        x: Input tensor of shape [t, n, d] where t = sum(length_list).
-        length_list: Tensor of shape [bs] containing valid sequence lengths.
-        block_size: The size of each block (default 128).
-
-    Returns:
-        padded_blocks: Tensor of shape [total_blocks, block_size, n, d].
-    """
-    # 1. Validation
-    if x.shape[0] != length_list.sum():
-        raise ValueError(f"Input dimension 0 ({x.shape[0]}) does not match sum of length_list ({length_list.sum()})")
-
-    bs = length_list.shape[0]
-    n, d = x.shape[1], x.shape[2]
-
-    # 2. Calculate how many blocks are needed for each request
-    # Formula: ceil(length / block_size) -> (length + block_size - 1) // block_size
-    blocks_per_req = (length_list + block_size - 1) // block_size
-    total_blocks = blocks_per_req.sum() + 1
-
-    # 3. Allocate output tensor with zeros (this handles the padding automatically)
-    # Shape: [total_blocks, block_size, n, d]
-    out = torch.zeros((total_blocks, block_size, n, d), dtype=x.dtype, device=x.device)
-
-    # 4. Fill data
-    input_offset = 0
-    block_offset = 1
-
-    for i in range(bs):
-        length = length_list[i]
-        num_blocks = blocks_per_req[i]
-
-        if length > 0:
-            # Slice the valid data for this request from the packed input
-            # Shape: [length, n, d]
-            req_data = x[input_offset : input_offset + length]
-
-            # Select the assigned blocks in the output
-            # Shape: [num_blocks, block_size, n, d]
-            target_blocks = out[block_offset : block_offset + num_blocks]
-
-            # View as a flat sequence to easily copy the data
-            # Shape: [num_blocks * block_size, n, d]
-            target_flat = target_blocks.view(-1, n, d)
-
-            # Copy valid data into the beginning of the allocated blocks
-            # The rest remains zeros
-            target_flat[:length] = req_data
-
-        # Update pointers
-        input_offset += length
-        block_offset += num_blocks
-
-    return out
-
-
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -209,7 +148,13 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int) -> tuple[int, ...]:
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
@@ -335,22 +280,8 @@ class AscendDSAMetadata:
 
     start_pos: torch.Tensor | None = None
 
-    def __post_init__(self):
-        pass
-
 
 DSAMetadataList: TypeAlias = list[AscendDSAMetadata]
-DSAPrepareResult: TypeAlias = tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    AscendDSAMetadata,
-    bool,
-]
 
 
 def _require_prefill_metadata(metadata: AscendDSAMetadata) -> AscendDSAPrefillMetadata:
@@ -457,9 +388,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.model_config = vllm_config.model_config
         self.device = device
         scheduler_config = vllm_config.scheduler_config
-        # self.block_size = vllm_config.cache_config.block_size
-        self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
-
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
@@ -484,24 +412,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
 
         self.reorder_batch_threshold = self.decode_threshold
-        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
-
-        self.cu_seq_lens_cpu: torch.Tensor = None
         self.num_decodes = 0
         self.num_prefills = 0
         self.num_decode_tokens = 0
         self.num_prefill_tokens = 0
-        self.context_lens_cpu: torch.Tensor = None
         self.num_actual_tokens: int | None = None
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
         self.graph_pad_size = 0
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
-
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
 
@@ -632,7 +552,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata")
         assert self.prefill_ratio_to_sas_metadata is not None
         assert self.decode_ratio_to_sas_metadata is not None
-        self.block_size = kwargs.get("block_size", 128)
+        self.block_size = kwargs.get("block_size", self.kv_cache_spec.block_size)
 
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None
@@ -1526,8 +1446,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             self.weights_proj = self.indexer.weights_proj
             self.indexer_softmax_scale = self.inderxer_dim**-0.5
 
-            self.indexer_compress = self.indexer.compressor
-
             # indexer_compressor
             self.indexcom_ape = self.indexer.compressor.ape
             self.indexcom_wkv = self.indexer.compressor.wkv
@@ -1540,9 +1458,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         # compress param
         if self.compressor is not None:
-            self.compressor_head_dim = self.compressor.head_dim
             self.compressor_overlap = self.compressor.overlap
-            self.compressor_rotate = self.compressor.rotate
 
             self.compressor_ape = self.compressor.ape
             self.compressor_wkv = self.compressor.wkv
@@ -1769,8 +1685,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         output_padded = output
-        forward_context = get_forward_context()
-        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
+        o_proj_input_shape = (
+            _EXTRA_CTX.num_tokens,
+            self.n_local_heads,
+            self.head_dim,
+        )
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
@@ -1805,16 +1724,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 attn_metadata,
             )  # type: ignore[arg-type]
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
-            cos = attn_metadata[0].prefill.cos[layer_name]
-            sin = attn_metadata[0].prefill.sin[layer_name]
-
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
             o_proj_input[:decode_tokens] = output_decode
-            cos = attn_metadata[0].decode.cos[layer_name]
-            sin = attn_metadata[0].decode.sin[layer_name]
-
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
 
@@ -2103,7 +2016,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                             cos=cos,
                             sin=sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
-                            actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
@@ -2401,7 +2313,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                             cos=cos,
                             sin=sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
-                            actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
@@ -2656,7 +2567,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             indexer_k_cache,
             indexer_scale_cache,
             indexer_full_cache,
-            indexer_kv_state_metadata,
             indexer_kv_scale_metadata,
             indexer_slot_mapping,
             with_prefill,
@@ -2670,12 +2580,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         indexer_k_cache: torch.Tensor,
         indexer_scale_cache: torch.Tensor,
         indexer_full_cache: torch.Tensor | None,
-        indexer_kv_state_metadata,
         indexer_kv_scale_metadata,
         indexer_slot_mapping: torch.Tensor,
         with_prefill: bool,
     ):
-        q, q_scale, kv, kv_scale = self._indexer_quant_scatter(
+        q, q_scale, _, _ = self._indexer_quant_scatter(
             q,
             kv,
             indexer_k_cache,
@@ -2761,11 +2670,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         cos: torch.Tensor,
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        q, kv, ik, isc, ifc, indexer_kv_state_meta, isc_meta, indexer_slot_mapping, wp = self._indexer_qkv_prepare(
+        q, kv, ik, isc, ifc, isc_meta, indexer_slot_mapping, wp = self._indexer_qkv_prepare(
             x,
             qr,
             kv_cache,
@@ -2786,7 +2694,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             ik,
             isc,
             ifc,
-            indexer_kv_state_meta,
             isc_meta,
             indexer_slot_mapping,
             wp,

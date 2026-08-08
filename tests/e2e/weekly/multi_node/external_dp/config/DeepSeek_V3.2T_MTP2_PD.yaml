@@ -64,7 +64,7 @@ env_common: &env_common
   ASCEND_TRANSPORT_PRINT: "1"
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
-  ASCEND_BUFFER_POOL: "4:8"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"

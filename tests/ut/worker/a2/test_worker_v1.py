@@ -341,6 +341,10 @@ class TestNPUWorker(TestBase):
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
+            mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+
+            worker.wake_up(tags=["kv_cache"])
+            mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
 
     @staticmethod
     def _make_unquantized_moe_model():
@@ -357,18 +361,12 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_prepares_target_and_mtp_drafter_weights(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_does_not_transpose_moe_weights(self, mock_get_config, mock_allocator_class):
+        """Level-2 reload uses reload_weights; wake_up must not transpose MoE layout."""
         from vllm_ascend.worker.worker import NPUWorker
 
         target_model = self._make_unquantized_moe_model()
         draft_model = self._make_unquantized_moe_model()
-        storage_ptrs = [
-            (
-                model.mlp.experts.routed_experts.w13_weight.untyped_storage().data_ptr(),
-                model.mlp.experts.routed_experts.w2_weight.untyped_storage().data_ptr(),
-            )
-            for model in (target_model, draft_model)
-        ]
         weight_loaders = [
             (
                 model.mlp.experts.routed_experts.w13_weight.weight_loader,
@@ -394,49 +392,14 @@ class TestNPUWorker(TestBase):
 
         worker.wake_up(tags=["weights"])
 
-        for model, (w13_storage_ptr, w2_storage_ptr), (w13_loader, w2_loader) in zip(
-            (target_model, draft_model), storage_ptrs, weight_loaders
-        ):
+        for model, (w13_loader, w2_loader) in zip((target_model, draft_model), weight_loaders):
             routed_experts = model.mlp.experts.routed_experts
-            self.assertEqual(routed_experts.w13_weight.shape, (2, 6, 4))
-            self.assertEqual(routed_experts.w2_weight.shape, (2, 4, 3))
-            self.assertEqual(routed_experts.w13_weight.untyped_storage().data_ptr(), w13_storage_ptr)
-            self.assertEqual(routed_experts.w2_weight.untyped_storage().data_ptr(), w2_storage_ptr)
+            # Keep execution layout; do not transpose back to loadable layout.
+            self.assertEqual(routed_experts.w13_weight.shape, (2, 4, 6))
+            self.assertEqual(routed_experts.w2_weight.shape, (2, 3, 4))
             self.assertIs(routed_experts.w13_weight.weight_loader, w13_loader)
             self.assertIs(routed_experts.w2_weight.weight_loader, w2_loader)
         mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
-
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_does_not_prepare_non_mtp_drafter(self, mock_get_config, mock_allocator_class):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        target_model = self._make_unquantized_moe_model()
-        draft_model = self._make_unquantized_moe_model()
-        mock_get_config.return_value = SimpleNamespace(weight_nz_mode=0, enable_sleep_mode_extra_cleanup=False)
-
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-        worker.model_runner = SimpleNamespace(
-            model=target_model,
-            drafter=SimpleNamespace(model=draft_model),
-            post_kv_cache_wake_up=MagicMock(),
-        )
-        worker.vllm_config = SimpleNamespace(
-            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4)),
-            quant_config=None,
-            speculative_config=SimpleNamespace(method="eagle3"),
-        )
-        worker._sleep_saved_buffers = {}
-
-        worker.wake_up(tags=["weights"])
-
-        target_experts = target_model.mlp.experts.routed_experts
-        draft_experts = draft_model.mlp.experts.routed_experts
-        self.assertEqual(target_experts.w13_weight.shape, (2, 6, 4))
-        self.assertEqual(target_experts.w2_weight.shape, (2, 4, 3))
-        self.assertEqual(draft_experts.w13_weight.shape, (2, 4, 6))
-        self.assertEqual(draft_experts.w2_weight.shape, (2, 3, 4))
 
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
