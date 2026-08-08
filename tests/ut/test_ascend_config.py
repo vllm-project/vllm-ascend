@@ -31,6 +31,7 @@ from vllm_ascend.ascend_config import (
     RejectionSamplerConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
+    SparseKVOffloadConfig,
     clear_ascend_config,
     get_ascend_config,
     init_ascend_config,
@@ -555,6 +556,48 @@ class TestShortRequestFirstConfig(TestBase):
         self.assertEqual(cfg.long_max_wait_ms, 0.0)
 
 
+class TestSparseKVOffloadConfig(TestBase):
+    def test_disabled_string_false_does_not_enter_enabled_path(self):
+        config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"enabled": "false"})
+
+        self.assertFalse(config.enabled)
+
+    def test_enabled_fields_are_typed_before_consumption(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=False,
+        )
+
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {
+                "enabled": "true",
+                "topk_buffer_size": "256",
+                "dram_size_per_dp_GB": "64",
+                "keep_device_kv_cache": "false",
+            },
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.topk_buffer_size, 256)
+        self.assertEqual(config.dram_size_per_dp_GB, 64)
+        self.assertFalse(config.keep_device_kv_cache)
+
+    def test_unknown_key_is_rejected_even_when_disabled(self):
+        with self.assertRaises(ValueError):
+            SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"enabeld": False})
+
+    def test_non_dict_config_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "sparse_kv_offload_config must be a dict"):
+            SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), [])
+
+
 class TestSchedulerConfig(TestBase):
     def test_defaults(self):
         config = SchedulerConfig.from_additional_config({})
@@ -910,6 +953,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         with self.assertRaises(ValueError):
             init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sparse_kv_offload_string_false_survives_factory(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"sparse_kv_offload_config": {"enabled": "false"}}
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.sparse_kv_offload_config.enabled)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

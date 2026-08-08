@@ -836,19 +836,39 @@ class SchedulerConfig:
         return cls(**resolved)  # type: ignore[arg-type]
 
 
+@config
 class SparseKVOffloadConfig:
     """
     Configuration for the Sparse KV cache offloading.
     """
 
-    def __init__(self, vllm_config: VllmConfig, user_config: dict[str, Any]):
-        self.enabled = bool(user_config.get("enabled", False))
+    enabled: bool = False
+    topk_buffer_size: int = 4096
+    dram_size_per_dp_GB: int = 128
+    keep_device_kv_cache: bool = False
+    topk: int = dataclasses.field(default=0, init=False)
+
+    @model_validator(mode="after")
+    def _validate_values(self):
+        if self.topk_buffer_size <= 0:
+            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
+        if self.dram_size_per_dp_GB <= 0:
+            raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        return self
+
+    @classmethod
+    def from_additional_config(cls, vllm_config: VllmConfig, user_config: Any) -> SparseKVOffloadConfig:
+        if not isinstance(user_config, dict):
+            raise ValueError(
+                f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
+            )
+        config = cls(**user_config)  # type: ignore[call-arg]
+        config._validate_preconditions(vllm_config)
+        return config
+
+    def _validate_preconditions(self, vllm_config: VllmConfig) -> None:
         if not self.enabled:
             return
-
-        self.topk_buffer_size = int(user_config.get("topk_buffer_size", 4096))
-        self.dram_size_per_dp_GB = int(user_config.get("dram_size_per_dp_GB", 128))
-        self.keep_device_kv_cache = bool(user_config.get("keep_device_kv_cache", False))
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")
@@ -877,8 +897,6 @@ class SparseKVOffloadConfig:
             raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        if self.topk_buffer_size <= 0:
-            raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "
@@ -921,7 +939,9 @@ def init_ascend_config(vllm_config):
 
     # Pre-construct sub-configs that need precedence resolution or vllm_config.
     sched = SchedulerConfig.from_additional_config(additional_config)
-    sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
+    sparse_kv = SparseKVOffloadConfig.from_additional_config(
+        vllm_config, additional_config.get("sparse_kv_offload_config", {})
+    )
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
