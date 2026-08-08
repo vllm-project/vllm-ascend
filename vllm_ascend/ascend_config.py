@@ -928,6 +928,9 @@ def init_ascend_config(vllm_config):
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        # Factory-only input: materialized by _resolve_dump_config_path and
+        # replaced with the validated dump_config_path field below.
+        "dump_config",
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
         # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
