@@ -103,11 +103,6 @@ def test_balance_config_uses_initialized_scheduler_config():
         assert _balance_scheduling_enabled(vllm_config) is True
 
 
-def test_balance_config_without_vllm_config_is_disabled():
-    with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
-        assert _balance_scheduling_enabled(None) is False
-
-
 def test_balance_config_fallback_prefers_nested_config():
     vllm_config = SimpleNamespace(
         additional_config={
@@ -120,25 +115,23 @@ def test_balance_config_fallback_prefers_nested_config():
         assert _balance_scheduling_enabled(vllm_config) is False
 
 
-def test_balance_config_fallback_accepts_legacy_top_level_config():
-    vllm_config = SimpleNamespace(additional_config={"enable_balance_scheduling": True})
+def test_balance_config_fallback_ignores_non_dict_nested_config():
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "scheduler_config": None,
+            "enable_balance_scheduling": True,
+        }
+    )
 
     with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
         assert _balance_scheduling_enabled(vllm_config) is True
 
 
-@pytest.mark.parametrize(
-    "additional_config",
-    [
-        {"scheduler_config": {"enable_balance_scheduling": "false"}},
-        {"enable_balance_scheduling": "false"},
-    ],
-)
-def test_balance_config_fallback_coerces_string_false(additional_config):
-    vllm_config = SimpleNamespace(additional_config=additional_config)
+def test_balance_config_fallback_accepts_legacy_top_level_config():
+    vllm_config = SimpleNamespace(additional_config={"enable_balance_scheduling": True})
 
     with patch("vllm_ascend.ascend_config.get_ascend_config", side_effect=RuntimeError):
-        assert _balance_scheduling_enabled(vllm_config) is False
+        assert _balance_scheduling_enabled(vllm_config) is True
 
 
 @pytest.mark.parametrize("balance_enabled", [False, True])

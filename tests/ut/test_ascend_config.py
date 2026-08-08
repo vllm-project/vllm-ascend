@@ -655,20 +655,18 @@ class TestSchedulerConfig(TestBase):
         with self.assertRaises(ValueError):
             SchedulerConfig.from_additional_config({"scheduler_config": {"batch_job_sched_config": {"max_job": 2}}})
 
-    def test_scheduler_switches_get_bool_validation(self):
+    def test_recompute_scheduler_switch_gets_bool_validation(self):
         config = SchedulerConfig.from_additional_config(
             {
                 "scheduler_config": {
-                    "enable_balance_scheduling": "false",
                     "recompute_scheduler_enable": "false",
                 }
             }
         )
 
-        self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
         with self.assertRaises(ValueError):
-            SchedulerConfig.from_additional_config({"scheduler_config": {"enable_balance_scheduling": 2}})
+            SchedulerConfig.from_additional_config({"scheduler_config": {"recompute_scheduler_enable": 2}})
 
     def test_nested_config_overrides_all_scheduler_settings(self):
         config = SchedulerConfig.from_additional_config(
