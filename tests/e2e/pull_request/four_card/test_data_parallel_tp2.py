@@ -37,7 +37,7 @@ def test_qwen3_inference_dp2_tp2(model, max_tokens):
         "--trust-remote-code",
     ]
 
-    print(f"Running subprocess: {' '.join(cmd)}")
+    print(f"Running a subprocess: {' '.join(cmd)}")
     proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
     output = proc.stdout.decode(errors="ignore")
 
