@@ -102,6 +102,7 @@ def _append_cann_megamoe_dummy_tokens(
     x_active_mask = torch.cat((x_active_mask, dummy_mask), dim=0)
     return hidden_states, topk_ids, topk_weights, x_active_mask, original_num_tokens
 
+
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
 

@@ -281,10 +281,7 @@ class AscendConfig:
 
         self.mega_moe_min_tokens = additional_config.get("mega_moe_min_tokens", 512)
         if not isinstance(self.mega_moe_min_tokens, int) or not 1 <= self.mega_moe_min_tokens <= 4096:
-            raise ValueError(
-                "mega_moe_min_tokens must be an integer in [1, 4096], got "
-                f"{self.mega_moe_min_tokens!r}"
-            )
+            raise ValueError(f"mega_moe_min_tokens must be an integer in [1, 4096], got {self.mega_moe_min_tokens!r}")
 
         # Optionally synchronize DP metadata through the NPU group.
         self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)

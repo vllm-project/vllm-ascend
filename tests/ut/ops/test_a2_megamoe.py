@@ -16,16 +16,14 @@ def test_dummy_routes_cover_all_experts_across_ep_ranks():
         topk_weights = torch.full((2, 2), 0.5, dtype=torch.float32)
         active_mask = torch.tensor([1, 0], dtype=torch.int8)
 
-        hidden_states, topk_ids, topk_weights, active_mask, original_num_tokens = (
-            _append_cann_megamoe_dummy_tokens(
-                hidden_states,
-                topk_ids,
-                topk_weights,
-                active_mask,
-                num_experts=8,
-                ep_rank_id=ep_rank_id,
-                ep_world_size=4,
-            )
+        hidden_states, topk_ids, topk_weights, active_mask, original_num_tokens = _append_cann_megamoe_dummy_tokens(
+            hidden_states,
+            topk_ids,
+            topk_weights,
+            active_mask,
+            num_experts=8,
+            ep_rank_id=ep_rank_id,
+            ep_world_size=4,
         )
 
         assert original_num_tokens == 2
