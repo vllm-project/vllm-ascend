@@ -359,6 +359,16 @@ msgstr "`export HCCL_INTRA_ROCE_ENABLE=1`"
 msgid "Required by direct transmission scheme on 800 I/T A2 series"
 msgstr "800 I/T A2系列直接传输方案所需"
 
+#: ../../source/user_guide/feature_guide/kv_pool.md
+msgid ""
+"> **Note:** `ASCEND_BUFFER_POOL` has been removed. Use "
+"`ASCEND_ENABLE_USE_FABRIC_MEM=1` for A3 HCCS scenarios or "
+"`HCCL_INTRA_ROCE_ENABLE=1` for A2/A3 RoCE scenarios instead."
+msgstr ""
+"> **注意：** `ASCEND_BUFFER_POOL` 已移除。请根据硬件场景使用 "
+"`ASCEND_ENABLE_USE_FABRIC_MEM=1`（A3 HCCS场景）或 "
+"`HCCL_INTRA_ROCE_ENABLE=1`（A2/A3 RoCE场景）替代。"
+
 #: ../../source/user_guide/feature_guide/kv_pool.md:93
 msgid "Run Mooncake Master"
 msgstr "运行Mooncake Master"
