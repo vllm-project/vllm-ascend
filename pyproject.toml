@@ -1,3 +1,7 @@
+[project]
+name = "vllm-ascend"
+requires-python = ">=3.10"
+
 [build-system]
 # Should be mirrored in requirements.txt
 requires = [
