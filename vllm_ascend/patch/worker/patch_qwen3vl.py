@@ -1,15 +1,23 @@
+import importlib
+from functools import lru_cache, wraps
+from typing import NamedTuple
+
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.model_executor.models.qwen3 import Qwen3Attention
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLForConditionalGeneration,
     pos_embed_interpolate_native,
+    run_dp_sharded_mrope_vision_model,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.patch.platform.patch_qwen3vl_processor import ORIG_PREPROCESS_FLAGS_ATTR
 
 
 def tensor_parallel_wrap(func):
@@ -108,3 +116,217 @@ def patch_qwen3_vl_moe_pp_layer_range():
 
 
 patch_qwen3_vl_moe_pp_layer_range()
+
+
+# ---------------------------------------------------------------------------
+# Move image/video rescale+normalize from HF processor (CPU) onto device (NPU).
+# HF processor disable lives in platform/patch_qwen3vl_processor.py so the
+# APIServer also skips CPU normalize; otherwise values are normalized twice.
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=10)
+def _fuse_mean_std_and_rescale_factor(
+    do_normalize: bool,
+    image_mean: tuple[float, ...] | None,
+    image_std: tuple[float, ...] | None,
+    do_rescale: bool,
+    rescale_factor: float | None,
+    device: torch.device | None = None,
+) -> tuple:
+    """Build device-side mean/std, folding the rescale factor into them.
+
+    ``(x * s - mean) / std`` equals ``(x - mean / s) / (std / s)``, so when both
+    steps are enabled the rescale collapses into the normalize and only one pass
+    over the tensor is needed. Cached so the mean/std tensors are built once
+    instead of being copied from host on every forward.
+    """
+    if not do_normalize:
+        return None, None, do_rescale
+    mean = torch.tensor(image_mean, device=device, dtype=torch.float32)
+    std = torch.tensor(image_std, device=device, dtype=torch.float32)
+    if do_rescale:
+        assert rescale_factor is not None
+        mean = mean / rescale_factor
+        std = std / rescale_factor
+        do_rescale = False
+    return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1), do_rescale
+
+
+def rescale_and_normalize(
+    images: torch.Tensor,
+    do_rescale: bool,
+    rescale_factor: float,
+    do_normalize: bool,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Rescale and normalize NCHW images on device (fused when both are on)."""
+    mean, std, do_rescale = _fuse_mean_std_and_rescale_factor(
+        do_normalize=do_normalize,
+        image_mean=image_mean,
+        image_std=image_std,
+        do_rescale=do_rescale,
+        rescale_factor=rescale_factor,
+        device=images.device,
+    )
+    if do_normalize:
+        images = (images.to(dtype=torch.float32) - mean) / std
+    elif do_rescale:
+        images = images.to(dtype=torch.float32) * rescale_factor
+    return images.to(dtype)
+
+
+class _VLPreprocessConfig(NamedTuple):
+    channel: int
+    patch_size: int
+    temporal_patch_size: int
+    do_rescale: bool
+    rescale_factor: float | None
+    do_normalize: bool
+    image_mean: tuple[float, ...]
+    image_std: tuple[float, ...]
+
+
+_PREPROCESS_ATTR = "_ascend_vl_preprocess"
+
+
+def _image_post_process_config(self, vision_config, model_config) -> None:
+    image_processor = MULTIMODAL_REGISTRY.create_processor(model_config).info.get_hf_processor().image_processor
+    flags = getattr(image_processor, ORIG_PREPROCESS_FLAGS_ATTR, None)
+    if flags is None:
+        # The platform patch never ran, so HF is still rescaling/normalizing on
+        # the host. Doing nothing here is what keeps values from being
+        # normalized twice; the request stays correct, just without the speedup.
+        logger.warning(
+            "Qwen3-VL HF processor still applies rescale/normalize on host, "
+            "skipping device-side preprocess to avoid normalizing twice."
+        )
+        flags = {"do_rescale": False, "do_normalize": False}
+    setattr(
+        self,
+        _PREPROCESS_ATTR,
+        _VLPreprocessConfig(
+            channel=vision_config.in_channels,
+            patch_size=vision_config.patch_size,
+            temporal_patch_size=vision_config.temporal_patch_size,
+            do_rescale=flags["do_rescale"],
+            rescale_factor=getattr(image_processor, "rescale_factor", None),
+            do_normalize=flags["do_normalize"],
+            image_mean=tuple(image_processor.image_mean),
+            image_std=tuple(image_processor.image_std),
+        ),
+    )
+
+
+def _apply_rescale_normalize(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    cfg = getattr(self, _PREPROCESS_ATTR, None)
+    if cfg is None:
+        _image_post_process_config(self, self.config.vision_config, self.model_config)
+        cfg = getattr(self, _PREPROCESS_ATTR)
+    if not (cfg.do_rescale or cfg.do_normalize):
+        return pixel_values.to(self.visual.dtype)
+
+    # Each row packs one patch as [channel][temporal][ph][pw] (see the flatten
+    # step in the HF image/video processors), so folding temporal into the
+    # height axis exposes the channel axis to mean/std without moving any data.
+    # Reshaping straight to (-1, channel, ph, pw) would instead line temporal
+    # slices up under the channel axis and normalize the wrong channels.
+    pixel_values = pixel_values.reshape(
+        -1,
+        cfg.channel,
+        cfg.temporal_patch_size * cfg.patch_size,
+        cfg.patch_size,
+    )
+    # Keep the raw integer/float range until after the fp32 normalize; casting
+    # uint8 -> bf16 first would lose precision before the scale is applied.
+    pixel_values = rescale_and_normalize(
+        pixel_values,
+        cfg.do_rescale,
+        cfg.rescale_factor,
+        cfg.do_normalize,
+        cfg.image_mean,
+        cfg.image_std,
+        dtype=self.visual.dtype,
+    )
+    return pixel_values.reshape(
+        -1,
+        cfg.channel * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size,
+    )
+
+
+def _hook_preprocess_config(cls) -> None:
+    orig_init = cls.__init__
+
+    # vLLM decides how to construct a model by looking for `vllm_config` and
+    # `prefix` in the __init__ signature, so the wrapper has to keep reporting
+    # the wrapped signature -- `functools.wraps` is what makes that work.
+    @wraps(orig_init)
+    def patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        _image_post_process_config(self, self.config.vision_config, self.model_config)
+
+    cls.__init__ = patched_init
+
+
+# Qwen3-VL-MoE, Qwen3.5 and Qwen3.5-MoE each define their own __init__ that
+# bypasses Qwen3VLForConditionalGeneration.__init__, so hooking the base class
+# alone would leave them falling back to the lazy path on the first request.
+_hook_preprocess_config(Qwen3VLForConditionalGeneration)
+for _module_name, _class_names in (
+    ("vllm.model_executor.models.qwen3_vl_moe", ("Qwen3VLMoeForConditionalGeneration",)),
+    ("vllm.model_executor.models.qwen3_5", ("Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration")),
+):
+    try:
+        _module = importlib.import_module(_module_name)
+    except ImportError:
+        continue
+    for _class_name in _class_names:
+        _cls = getattr(_module, _class_name, None)
+        if _cls is not None and "__init__" in _cls.__dict__:
+            _hook_preprocess_config(_cls)
+
+
+def _patched_process_image_input(self, image_input):
+    grid_thw = image_input["image_grid_thw"]
+    assert grid_thw.ndim == 2
+
+    if image_input["type"] == "image_embeds":
+        image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+    else:
+        # Do not cast to visual.dtype before normalize (raw uint8/[0,255]).
+        pixel_values = _apply_rescale_normalize(self, image_input["pixel_values"])
+        if self.use_data_parallel:
+            return run_dp_sharded_mrope_vision_model(self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d")
+        image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+
+    merge_size = self.visual.spatial_merge_size
+    sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+    return image_embeds.split(sizes)
+
+
+def _patched_process_video_input(self, video_input):
+    grid_thw = video_input["video_grid_thw"]
+    assert grid_thw.ndim == 2
+
+    if video_input["type"] == "video_embeds":
+        video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+    else:
+        pixel_values_videos = _apply_rescale_normalize(self, video_input["pixel_values_videos"])
+        if self.use_data_parallel:
+            return run_dp_sharded_mrope_vision_model(
+                self.visual,
+                pixel_values_videos,
+                grid_thw.tolist(),
+                rope_type="rope_3d",
+            )
+        video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+
+    merge_size = self.visual.spatial_merge_size
+    sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+    return video_embeds.split(sizes)
+
+
+Qwen3VLForConditionalGeneration._process_image_input = _patched_process_image_input
+Qwen3VLForConditionalGeneration._process_video_input = _patched_process_video_input
