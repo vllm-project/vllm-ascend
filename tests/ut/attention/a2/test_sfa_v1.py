@@ -15,6 +15,10 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
+from vllm_ascend.attention.sfa_kv_offload import (
+    AscendSFAKVOffloadImpl,
+    AscendSFAKVOffloadMetadataBuilder,
+)
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFABackend,
     AscendSFAImpl,
@@ -54,28 +58,48 @@ class TestAscendSFABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
-    def test_get_builder_cls(self):
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_builder_cls(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         self.assertEqual(AscendSFABackend.get_builder_cls(), AscendSFAMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendSFABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    def test_get_impl_cls(self):
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_impl_cls(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
     @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
-    def test_get_builder_cls_with_dcp(self, mock_enable_dcp):
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
     @patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer")
-    def test_get_impl_cls_with_dcp(self, mock_enable_dcp):
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         impl_cls = AscendSFABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_builder_cls_with_sparse_kv_offload(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = True
+        result = AscendSFABackend.get_builder_cls()
+        self.assertEqual(result, AscendSFAKVOffloadMetadataBuilder)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_get_impl_cls_with_sparse_kv_offload(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = True
+        result = AscendSFABackend.get_impl_cls()
+        self.assertEqual(result, AscendSFAKVOffloadImpl)
 
 
 class TestAscendSFADeviceOperator(TestBase):

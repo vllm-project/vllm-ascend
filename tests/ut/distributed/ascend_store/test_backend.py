@@ -613,6 +613,19 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 
+    def test_batch_write_finish(self):
+        b = self._make_backend()
+        b.store.batch_write_finish.return_value = [0]
+
+        self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
+        b.store.batch_write_finish.assert_called_once_with(["k1"], [0])
+
+    def test_batch_write_finish_supports_legacy_store(self):
+        b = self._make_backend()
+        b.store = object()
+
+        self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
+
     def test_get(self):
         b = self._make_backend()
         b.store.batch_get_into_layers.return_value = [0]
