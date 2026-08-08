@@ -42,6 +42,28 @@ test_cases:
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--mm-processor-cache-gb"
       - "0"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+    test_content:
+      - "messages"
+    prompts:
+      - "Hello!"
+      - "What is the weather in Shanghai?"
+      - "Count to 5."
+    api_keyword_args:
+      - max_tokens: 100
+      - max_tokens: 100
+        tools:
+          - name: "get_weather"
+            description: "Get weather info"
+            input_schema:
+              type: "object"
+              properties:
+                location:
+                  type: "string"
+      - max_tokens: 50
+        stream: true
     benchmarks:
       acc_aime2025:
         case_type: accuracy
