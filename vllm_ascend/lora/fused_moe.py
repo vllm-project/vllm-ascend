@@ -13,30 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend MoE-LoRA wrapper (v1).
-
-Design (see plan in conversation history):
-
-  - Inherits weight allocation / set_lora / slice helpers from upstream
-    FusedMoEWithLoRA. Only the injection mechanism differs: upstream wraps
-    Triton modular kernel internals (`TritonExperts.activation` / `moe_sum`),
-    which do not exist on Ascend. We instead wrap the per-layer
-    `quant_method.apply` and, inside it, temporarily swap the active
-    `MoECommMethod._apply_mlp` so the LoRA delta is added on permuted
-    activations between the grouped GMMs.
-
-  - Per-layer ownership is critical: `_MoECommMethods` is a module-level
-    singleton shared by all 48 MoE layers. If we wrapped `_apply_mlp` at
-    init time, layer N+1 would compose on top of layer N's wrapper and
-    every forward would stack all layers' LoRA deltas. We bracket the swap
-    inside `apply_wrapper` so only the active layer is in effect.
-
-  - v1 deliberately limits scope to: unquant + AllGather + TP-only +
-    no shared experts + no FusedMC2 + no dynamic EPLB. These are the exact
-    conditions under which `Qwen3-30B-A3B-Thinking-2507` runs cleanly with
-    TP=4 EP=1 on 4×64GB. Other paths assert early so users get a clear
-    error rather than silently wrong outputs.
-"""
+"""Ascend integration for vLLM's fused MoE LoRA layers."""
 
 from __future__ import annotations
 
@@ -58,6 +35,21 @@ _MOE_LORA_INDEX_FIELDS = (
 )
 
 
+def _moe_lora_projection_enabled(lora_b: list[torch.Tensor], w13_num_slices: int) -> tuple[bool, bool]:
+    if len(lora_b) == 2:
+        w13_lora_b, w2_lora_b = lora_b
+        return bool(torch.count_nonzero(w13_lora_b).item()), bool(torch.count_nonzero(w2_lora_b).item())
+
+    if len(lora_b) != 3:
+        raise ValueError(f"Expected 2 or 3 routed-expert LoRA B tensors, got {len(lora_b)}")
+
+    w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+    w13_enabled = bool(torch.count_nonzero(w1_lora_b).item())
+    if w13_num_slices == 2:
+        w13_enabled = w13_enabled or bool(torch.count_nonzero(w3_lora_b).item())
+    return w13_enabled, bool(torch.count_nonzero(w2_lora_b).item())
+
+
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         if hasattr(lora_context, field):
@@ -72,11 +64,7 @@ def prepare_lora_indices(
     tp_size: int,
     tp_rank: int,
 ) -> None:
-    """Truncate, pad, and TP-split the per-token LoRA index tensor,
-    storing the result in ``lora_context.split_lora_indices``.
-
-    Caller must ensure ``lora_context`` is not ``None``.
-    """
+    """Build the local per-token LoRA indices for MoE dispatch."""
     token_indices = lora_context.punica_wrapper.token_lora_indices
     token_indices = token_indices[:num_tokens]
     if pad_size > 0:
@@ -84,7 +72,6 @@ def prepare_lora_indices(
     if tp_size > 1:
         lora_context.split_lora_indices = torch.tensor_split(token_indices, tp_size, dim=0)[tp_rank]
     else:
-        # use ep for dp without tp.
         lora_context.split_lora_indices = token_indices
 
 
@@ -94,16 +81,7 @@ def preprocess_lora_indices(
     topk_ids: torch.Tensor,
     reversed_permutation_mapping: torch.Tensor,
 ) -> None:
-    """Expand and permute LoRA token indices for the AlltoAll dispatch path.
-
-    Reads ``lora_context.split_lora_indices``, repeats each entry by
-    ``topk``, applies the token permutation to align with the dispatched
-    hidden states, and stores the result in
-    ``lora_context.permuted_lora_indices``.
-
-    Caller must ensure ``lora_context`` is not ``None`` and
-    ``split_lora_indices`` has been populated.
-    """
+    """Align LoRA indices with AlltoAll-dispatched token rows."""
     split_indices = getattr(lora_context, "split_lora_indices", None)
     if split_indices is None:
         return
@@ -117,16 +95,7 @@ def postprocess_lora_indices(
     *,
     reversed_permutation_mapping: torch.Tensor,
 ) -> None:
-    """Re-permute exchanged LoRA indices to align with the global token
-    ordering after ``npu_moe_token_permute`` in the AlltoAll dispatch
-    postprocess.
-
-    Reads ``lora_context.exchanged_lora_indices``, applies the
-    global permutation, and writes the result back.
-
-    Caller must ensure ``lora_context`` is not ``None`` and
-    ``exchanged_lora_indices`` has been populated.
-    """
+    """Align exchanged LoRA indices with post-dispatch token rows."""
     exchanged = getattr(lora_context, "exchanged_lora_indices", None)
     if exchanged is None:
         return
@@ -141,15 +110,7 @@ def all2all_lora_indices(
     input_splits,
     ep_group,
 ) -> None:
-    """Exchange permuted LoRA indices across EP ranks via all_to_all.
-
-    Reads ``lora_context.permuted_lora_indices``, performs the all_to_all
-    exchange with the given splits and group, and stores the result in
-    ``lora_context.exchanged_lora_indices``.
-
-    Caller must ensure ``lora_context`` is not ``None`` and
-    ``permuted_lora_indices`` has been populated.
-    """
+    """Exchange LoRA indices with the activation AlltoAll split sizes."""
     permuted = getattr(lora_context, "permuted_lora_indices", None)
     if permuted is None:
         return
@@ -160,12 +121,7 @@ def all2all_lora_indices(
 
 
 def sync_lora_context(quant_method, lora_context):
-    """Push ``lora_context`` onto MoE communication singletons, or clear
-    them when ``lora_context`` is ``None``.
-
-    Encapsulates the ``hasattr``/``set_lora_context`` pattern shared by
-    setup and teardown so callers just pass the target value.
-    """
+    """Update the active LoRA context on initialized MoE communicators."""
     if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
         _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
     if hasattr(quant_method, "set_lora_context"):
@@ -183,13 +139,6 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Ascend MoE LoRA cannot patch FusedMC2 path "
             "(dispatch_ffn_combine/mega_moe is a single fused C++ op). "
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
-        )
-    if getattr(base_layer, "_shared_experts", None) is not None:
-        raise AssertionError(
-            "Ascend MoE LoRA does not wrap the shared_experts path "
-            "(it runs outside quant_method.apply). The target model "
-            "Qwen3-30B-A3B-Thinking-2507 has no shared experts; models "
-            "like DeepSeek-V3 are not yet supported."
         )
 
 
@@ -223,23 +172,12 @@ def _recover_moe_lora_routing_all2all(
     lora_context,
     group_list: torch.Tensor,
 ):
-    """Recover per-row (expert_id, lora_id) for the AlltoAll dispatched tokens.
-
-    In the AlltoAll + EP path, tokens have already been exchanged via
-    all_to_all and sorted by local expert.  ``group_list`` tells us how
-    many tokens belong to each local expert. The LoRA indices for those
-    dispatched rows are stored on ``lora_context.exchanged_lora_indices``.
-
-    Returns:
-        expert_per_row: [num_dispatched_tokens] local expert id (0..E-1)
-        lora_per_row:   [num_dispatched_tokens] lora adapter id (-1 = none)
-    """
+    """Recover expert and LoRA slots for AlltoAll-dispatched rows."""
     num_local_experts = lora_context.local_num_experts
     exchanged_lora_indices = getattr(lora_context, "exchanged_lora_indices", None)
     if exchanged_lora_indices is None:
         raise AssertionError("AlltoAll MoE LoRA requires exchanged_lora_indices in lora_context.")
 
-    # Build per-token expert IDs
     expert_per_row = torch.repeat_interleave(
         torch.arange(num_local_experts, device=group_list.device),
         group_list,
@@ -257,15 +195,7 @@ def _recover_moe_lora_routing_all2all(
 
 
 def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing):
-    """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
-
-    Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
-
-    Args:
-        lora_routing: (expert_per_row, lora_per_row) pre-computed by the
-            caller via _recover_moe_lora_routing (AllGather) or
-            _recover_moe_lora_routing_all2all (AlltoAll).
-    """
+    """Add the routed-expert gate/up LoRA delta before activation."""
     expert_per_row, lora_per_row = lora_routing
     # EP rank may receive 0 dispatched tokens when all tokens route to
     # experts on other ranks. Skip LoRA to avoid passing empty tensors
@@ -278,17 +208,13 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         lora_a_stacked=lora_context.w13_lora_a_stacked,
         lora_b_stacked=lora_context.w13_lora_b_stacked,
         expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
+        adapter_enabled=getattr(lora_context, "w13_adapter_enabled", lora_context.adapter_enabled),
         token_lora_mapping=lora_per_row,
     )
 
 
 def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
-    """Add the w2 LoRA delta into ``down_out`` (in place), after the down GMM.
-
-    Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
-    is the activation output that fed the base down GMM.
-    """
+    """Add the routed-expert down LoRA delta after the down GMM."""
     expert_per_row, lora_per_row = lora_routing
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
     # kernel crashes with empty tensors.
@@ -300,27 +226,14 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         lora_a_stacked=lora_context.w2_lora_a_stacked,
         lora_b_stacked=lora_context.w2_lora_b_stacked,
         expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
+        adapter_enabled=getattr(lora_context, "w2_adapter_enabled", lora_context.adapter_enabled),
         token_lora_mapping=lora_per_row,
     )
-    # Clear per-forward intermediate indices now that the LoRA delta
-    # for this layer has been fully applied — they are not needed for
-    # the remaining combine/finalize stages.
     reset_lora_indices(lora_context)
 
 
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
-    """Ascend-native MoE-LoRA wrapper.
-
-    Reuses upstream weight allocation, set_lora, reset_lora, and slicing.
-    Instead of the GPU modular-kernel injection, it publishes a per-layer
-    ``MoELoRAContext`` onto the base layer (``_ascend_moe_lora_context``).
-    The Ascend unquant MoE path threads that context through
-    ``MoEFusedExpertsInput`` -> ``MoEMlpComputeInput`` and applies the LoRA
-    delta natively inside ``unquant_apply_mlp`` (see
-    ``moe_lora_apply_w13`` / ``moe_lora_apply_w2`` below) -- no runtime
-    monkey-patch of ``comm._apply_mlp``.
-    """
+    """Fused MoE LoRA wrapper for the Ascend MoE runner."""
 
     def __init__(self, base_layer: nn.Module) -> None:
         # Skip FusedMoEWithLoRA.__init__: it immediately asserts Triton
@@ -329,6 +242,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.base_layer = base_layer
         _assert_ascend_moe_lora_supported(base_layer)
         self.moe_config = base_layer.moe_config
+        self._shared_experts = base_layer._shared_experts
         # Match upstream FusedMoEWithLoRA: EP collapses the MoE TP dimension
         # to one and shards experts across the original TP group.  Using the
         # global TP rank/size here would incorrectly TP-slice every local
@@ -338,26 +252,47 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        # State normally initialized by the skipped GPU-only constructor.
+        self._lora_stream = None
+        self._events = None
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        self.enable_moe_shared_loras = False
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
         self.n_slices = self.local_num_experts * (self._w13_slices + 1)
 
-    # ------------------------------------------------------------------
-    # Mapping
-    # ------------------------------------------------------------------
+    def create_lora_weights(self, max_loras, lora_config, model_config=None) -> None:
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        self.w13_adapter_enabled = torch.zeros_like(self.adapter_enabled)
+        self.w2_adapter_enabled = torch.zeros_like(self.adapter_enabled)
+
+    def reset_lora(self, index: int) -> None:
+        super().reset_lora(index)
+        self.w13_adapter_enabled[index] = 0
+        self.w2_adapter_enabled[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ) -> None:
+        assert isinstance(lora_b, list)
+        w13_enabled, w2_enabled = _moe_lora_projection_enabled(lora_b, self._w13_slices)
+        super().set_lora(index, lora_a, lora_b)
+        self.w13_adapter_enabled[index] = int(w13_enabled)
+        self.w2_adapter_enabled[index] = int(w2_enabled)
+
+    def _build_lora_context(self):
+        lora_context = super()._build_lora_context()
+        lora_context.w13_adapter_enabled = self.w13_adapter_enabled
+        lora_context.w2_adapter_enabled = self.w2_adapter_enabled
+        return lora_context
+
     def set_mapping(self, punica_wrapper):
-        # Upstream FusedMoEWithLoRA.set_mapping (vllm v0.22.0+) chains into
-        # ``self._moe_kernel.fused_experts.set_lora_context(...)``, but
-        # ``_moe_kernel`` is only set by the GPU modular-kernel path that we
-        # deliberately skip in __init__. We instead build the per-layer
-        # MoELoRAContext (now that punica_wrapper is available) and publish it
-        # on the module that ``AscendUnquantizedFusedMoEMethod.apply`` reads via
-        # ``getattr(layer, "_ascend_moe_lora_context", None)``
-        # Build the per-layer MoELoRAContext once punica_wrapper is available and
-        # publish it through the Ascend MoE runner. The runner stores it on
-        # routed_experts; batch-local LoRA indices are refreshed before each forward.
+        # The upstream implementation publishes this context through its
+        # Triton kernel. Ascend keeps it on the backend MoE layer instead.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
         self.base_layer.set_lora_context(self._build_lora_context())
 
@@ -369,19 +304,9 @@ class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
         AscendFusedMoEWithLoRA.__init__(self, base_layer)
         # Override: 3D MoE LoRA uses a single w13 slice.
         self._w13_slices = 1
+        self.n_slices = self.local_num_experts * (self._w13_slices + 1)
 
 
-# ----------------------------------------------------------------------
-# Upstream compatibility shim: vllm/lora/model_manager.py:create_dummy_lora
-# branches on `module.__class__.__name__ == "FusedMoEWithLoRA"` (and the
-# 3D variant). Without this override, our subclasses would skip the
-# pack_moe path and hit the generic pack() fallback, which produces a
-# flat list of N_experts * 3 sub-LoRAs -- `set_lora` then fails with
-# "too many values to unpack (expected 3)".
-#
-# Overriding only __name__ keeps the actual class object distinct (so
-# isinstance / type identity / debugging are unaffected) but lets the
-# upstream string compare hit our objects.
-# ----------------------------------------------------------------------
+# vLLM's dummy adapter packer selects fused MoE handling by class name.
 AscendFusedMoEWithLoRA.__name__ = "FusedMoEWithLoRA"
 AscendFusedMoE3DWithLoRA.__name__ = "FusedMoE3DWithLoRA"
