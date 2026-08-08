@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef ACLNN_SPARSE_FLASH_ATTENTION_H
-#define ACLNN_SPARSE_FLASH_ATTENTION_H
+#ifndef ACLNN_SPARSE_FLASH_ATTENTION_VLLM_H
+#define ACLNN_SPARSE_FLASH_ATTENTION_VLLM_H
 
 #include "aclnn/acl_meta.h"
 #include "aclnn/aclnn_base.h"
@@ -22,7 +22,7 @@ extern "C" {
  * @brief The first interface of aclnnMlaPrologV2WeightNz calculates the workspace size based on the specific calculation process.
  * @domain aclnn_ops_infer
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
+__attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttentionVllmGetWorkspaceSize(
     const aclTensor *query,
     const aclTensor *key,
     const aclTensor *value,
@@ -48,9 +48,9 @@ __attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttentionGetW
     aclOpExecutor **executor);
 
 /**
- * @brief The second interface of ACLNN_SPARSE_FLASH_ATTENTION_H is used to perform calculations.
+ * @brief The second interface of ACLNN_SPARSE_FLASH_ATTENTION_VLLM_H is used to perform calculations.
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttention(void *workspace,
+__attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttentionVllm(void *workspace,
                                                                             uint64_t workspaceSize,
                                                                             aclOpExecutor *executor,
                                                                             const aclrtStream stream);
@@ -60,4 +60,4 @@ __attribute__((visibility("default"))) aclnnStatus aclnnSparseFlashAttention(voi
 }
 #endif
 
-#endif // ACLNN_SPARSE_FLASH_ATTENTION_H
+#endif // ACLNN_SPARSE_FLASH_ATTENTION_VLLM_H

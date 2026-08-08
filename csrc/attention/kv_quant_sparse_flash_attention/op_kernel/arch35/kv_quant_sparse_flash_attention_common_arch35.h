@@ -17,10 +17,10 @@
 #include <type_traits>
 #include "kernel_tiling/kernel_tiling.h"
 
-#if __has_include("../../sparse_flash_attention/arch35/common/util_regbase.h")
-#include "../../sparse_flash_attention/arch35/common/util_regbase.h"
+#if __has_include("../../sparse_flash_attention_vllm/arch35/util_regbase.h")
+#include "../../sparse_flash_attention_vllm/arch35/util_regbase.h"
 #else
-#include "../../../sparse_flash_attention/op_kernel/arch35/common/util_regbase.h"
+#include "../../../sparse_flash_attention_vllm/op_kernel/arch35/util_regbase.h"
 #endif
 
 #if __has_include("../../common/op_kernel/buffer.h")

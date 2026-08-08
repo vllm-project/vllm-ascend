@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file sparse_flash_attention_tiling.cpp
+ * \file sparse_flash_attention_vllm_tiling.cpp
  * \brief
  */
 
@@ -21,7 +21,7 @@
 #include "err/ops_err.h"
 #include "register/op_def_registry.h"
 #include "../op_kernel/sparse_flash_attention_template_tiling_key.h"
-#include "sparse_flash_attention_tiling.h"
+#include "sparse_flash_attention_vllm_tiling.h"
 
 using std::map;
 using std::string;
@@ -144,7 +144,7 @@ static std::string SFADataTypeToSerialString(ge::DataType type)
     if (it != DATATYPE_TO_STRING_MAP.end()) {
         return it->second;
     } else {
-        OP_LOGE("SparseFlashAttention", "datatype %d not support", type);
+        OP_LOGE("SparseFlashAttentionVllm", "datatype %d not support", type);
         return "UNDEFINED";
     }
 }
@@ -1593,7 +1593,7 @@ ge::graphStatus SFAInfoParser::GetActualSeqLenQSize(uint32_t &size)
 ge::graphStatus SFAInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("SparseFlashAttention", "opName got from TilingContext is nullptr");
+        OP_LOGE("SparseFlashAttentionVllm", "opName got from TilingContext is nullptr");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -2022,7 +2022,7 @@ void SFAInfoParser::GenerateInfo(SFATilingInfo &sfaInfo)
 ge::graphStatus SFAInfoParser::Parse(SFATilingInfo &sfaInfo)
 {
     if (context_ == nullptr) {
-        OP_LOGE("SparseFlashAttention", "tiling context is nullptr!");
+        OP_LOGE("SparseFlashAttentionVllm", "tiling context is nullptr!");
         return ge::GRAPH_FAILED;
     }
 
@@ -2067,7 +2067,7 @@ ge::graphStatus SFAInfoParser::Parse(SFATilingInfo &sfaInfo)
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(SparseFlashAttention)
+IMPL_OP_OPTILING(SparseFlashAttentionVllm)
     .Tiling(TilingSparseFlashAttention)
     .TilingParse<SparseFlashAttentionCompileInfo>(TilingPrepareForSparseFlashAttention);
 } // namespace optiling
