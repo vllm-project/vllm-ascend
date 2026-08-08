@@ -86,6 +86,33 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     return test_files_found
 
 
+def _has_csrc_changes(diff_file: str) -> bool:
+    """
+    Check if diff file contains changes to csrc directory.
+    If csrc changes detected, full test suite should be run.
+
+    Args:
+        diff_file: Path to the PR diff file
+
+    Returns:
+        True if csrc directory changes detected, False otherwise
+    """
+    try:
+        with open(diff_file, encoding="utf-8") as f:
+            diff_content = f.read()
+    except Exception as e:
+        print(f"  Warning: Failed to read diff file for csrc detection: {e}")
+        return False
+
+    # Pattern to match csrc directory in diff paths (csrc as root directory)
+    # Match lines like: +++ b/csrc/xxx.cpp or --- a/csrc/xxx.cpp
+    csrc_pattern = re.compile(r"^\+{3} [ab]/csrc/|^\-{3} a/csrc/", re.MULTILINE)
+    if csrc_pattern.search(diff_content):
+        print("  CSRC directory changes detected in PR diff")
+        return True
+    return False
+
+
 def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract deleted test files from PR diff.
@@ -107,15 +134,17 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list
         print(f"  Warning: Failed to read diff file for deleted test detection: {e}")
         return deleted_test_files
 
-    # Pattern to match --- a/tests/... lines (deleted files start with --- a/)
-    # and verify the file is followed by +++ /dev/null (or +++ b/dev/null)
-    deleted_pattern = re.compile(r"^--- a/(tests/.+/\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null", re.MULTILINE)
+    # Pattern to match deleted test files: tests/e2e/pull_request/ or tests/ut/ directory
+    # Match --- a/tests/... followed by +++ /dev/null (deleted file marker)
+    deleted_pattern = re.compile(
+        r"^--- a/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null|"
+        r"^--- a/(tests/ut(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null",
+        re.MULTILINE,
+    )
 
     for match in deleted_pattern.finditer(diff_content):
-        test_file_path = match.group(1)
-        # Normalize: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
-        test_case_name = test_file_path.rsplit(".py", 1)[0]
-        deleted_test_files.append(test_case_name)
+        test_file_path = match.group(1) or match.group(2)
+        deleted_test_files.append(test_file_path)
 
     if deleted_test_files:
         print(f"  Found {len(deleted_test_files)} deleted test file(s): {deleted_test_files}")
@@ -1117,67 +1146,88 @@ def main():
                 time.sleep(1)
 
         print(f"  PR diff saved to: {diff_file}")
-        changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
-        print(f"Parsed {len(changed_files_with_lines)} changed files")
     else:
         # Get from file comparison (default)
         change_detector.scan_source_files()
         changed_files_with_lines = change_detector.detect_changes_by_comparison()
         print(f"Detected {len(changed_files_with_lines)} changed files")
 
-    if not changed_files_with_lines:
-        print("\n=== No product source code changes found in PR ===")
-        print("skipping test recommendation.")
-        # Write empty result file
-        with open("recommended_pytest_paths.txt", "w", encoding="utf-8") as f:
-            pass
-        print("\nResults saved to: recommended_pytest_paths.txt")
-        return
-
-    # 3. Select test cases
-    print("\n=== Selecting Affected Test Cases ===")
-    test_selector = TestSelector(selector.test_case_map)
-    selected, expand_reason = test_selector.select_tests(
-        changed_files_with_lines,
-        min_affected_lines=args.min_affected,
-        source_dir=args.source_dir,
-        enable_line_match=args.enable_line_match,
-        enable_function_match=args.enable_function_match,
-        enable_file_match=args.enable_file_match,
-        enable_skip_imports=args.skip_imports,
-        enable_dedup=args.dedup,
-    )
-    test_selector.print_selection(
-        selected, changed_files_with_lines, min_affected_lines=args.min_affected, expand_reason=expand_reason
-    )
-
-    # 4. Add new/modified test files from PR (vllm_ascend/tests/test_*.py)
-    test_file_tests = []
+    # ===== Action 1: Extract new/deleted test files =====
+    has_csrc_changes = False
+    new_test_files: list[str] = []
+    deleted_test_files: list[str] = []
     if args.github_pr and diff_file:
-        test_file_tests = _get_test_files_from_pr_diff(diff_file)
-        if test_file_tests:
-            print("\n=== New/Modified Test Files in PR ===")
-            print(f"Adding {len(test_file_tests)} test file(s): {test_file_tests}")
-            # Merge with existing selected tests (deduplicate)
-            existing_test_names = set(s[0] for s in selected)
-            for test_name in test_file_tests:
-                if test_name not in existing_test_names:
-                    # Add to selected (can be new test files not in test_case_map)
-                    selected.append((test_name, {}, 0))
+        new_test_files = _get_test_files_from_pr_diff(diff_file)
+        deleted_test_files = _get_deleted_test_files_from_pr(diff_file, selector.test_case_map)
+        # ===== Action 2: Check for csrc changes =====
+        has_csrc_changes = _has_csrc_changes(diff_file)
 
-    # 5. Remove deleted test files from PR
-    if args.github_pr and diff_file:
-        deleted_tests = _get_deleted_test_files_from_pr(diff_file, selector.test_case_map)
-        if deleted_tests:
-            print("\n=== Deleted Test Files in PR ===")
-            print(f"Removing {len(deleted_tests)} deleted test file(s): {deleted_tests}")
-            deleted_set = set(deleted_tests)
-            selected = [(name, detail, count) for name, detail, count in selected if name not in deleted_set]
+    # ===== Action 3: Detect Python product code changes -> Precision matching =====
+    selected: list[tuple[str, dict[str, set[int]], int]] = []
+    expand_reason = ""
+    changed_files_with_lines: dict[str, set[int]] = {}
 
-    # 6. Output executable pytest command
-    test_names = [s[0] for s in selected]
+    if has_csrc_changes:
+        print("\n=== CSRC Directory Changes Detected - Running Full Test Suite ===")
+    else:
+        if args.github_pr and diff_file:
+            changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
+            print(f"Parsed {len(changed_files_with_lines)} changed files")
+
+        if changed_files_with_lines:
+            # Select test cases by precision matching
+            print("\n=== Selecting Affected Test Cases ===")
+            test_selector = TestSelector(selector.test_case_map)
+            selected, expand_reason = test_selector.select_tests(
+                changed_files_with_lines,
+                min_affected_lines=args.min_affected,
+                source_dir=args.source_dir,
+                enable_line_match=args.enable_line_match,
+                enable_function_match=args.enable_function_match,
+                enable_file_match=args.enable_file_match,
+                enable_skip_imports=args.skip_imports,
+                enable_dedup=args.dedup,
+            )
+            test_selector.print_selection(
+                selected, changed_files_with_lines, min_affected_lines=args.min_affected, expand_reason=expand_reason
+            )
+        else:
+            print("\n=== No product source code changes found ===")
+
+    # ===== Merge results =====
+    # Base set: full suite for csrc changes, otherwise use precision results
+    if has_csrc_changes:
+        base_selected = [(test_name, {}, 0) for test_name in selector.test_case_map]
+        print(f"\n=== Full Test Suite: {len(base_selected)} tests ===")
+    else:
+        base_selected = selected
+
+    # Add new test files
+    existing_test_names = {s[0] for s in base_selected}
+    for test_name in new_test_files:
+        if test_name not in existing_test_names:
+            base_selected.append((test_name, {}, 0))
+            existing_test_names.add(test_name)
+
+    if new_test_files:
+        print(f"\n=== New Test Files Added: {len(new_test_files)} ===")
+        print(f"  {new_test_files}")
+
+    # Remove deleted test files
+    if deleted_test_files:
+        print(f"\n=== Deleted Test Files Removed: {len(deleted_test_files)} ===")
+        print(f"  {deleted_test_files}")
+        deleted_set = set(deleted_test_files)
+        base_selected = [
+            (name, detail, count)
+            for name, detail, count in base_selected
+            if name not in deleted_set and not any(name.startswith(d) for d in deleted_set)
+        ]
+
+    # ===== Output results =====
+    test_names = [s[0] for s in base_selected]
     if test_names:
-        print("\n=== Recommended Test Cases ===")
+        print(f"\n=== Recommended Test Cases ({len(test_names)} tests) ===")
         print(test_names)
     else:
         print("\n=== No Test Cases Recommended ===")
