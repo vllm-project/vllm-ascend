@@ -16,6 +16,8 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.spec_decode.dynamic_utils.dynamic_scheduler import DynamicSpecScheduler
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -61,40 +63,17 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=self.dtype,
             device=self.device,
         )
-        # Dynamic verify-length (confidence head) state and buffers. The
-        # hyperparameters can be overridden through
-        # additional_config.dynamic_spec_config.method_params when the dspark
-        # dynamic method is selected; otherwise the defaults below are used.
         dynamic_spec_config = get_ascend_config().dynamic_spec_config
-        dspark_params = dynamic_spec_config.method_params if dynamic_spec_config.method == "dspark" else {}
-        # Initial per-request verify budget before the first recompute.
-        self.initial_verify_budget_per_req = int(dspark_params.get("initial_verify_budget_per_req", 5))
-        # Recompute the budget once this many decoding steps have accumulated.
-        self.budget_update_interval = int(dspark_params.get("budget_update_interval", 50))
-        self.budget_threshold = float(dspark_params.get("budget_threshold", 0.7))
-        self.budget_k = self.initial_verify_budget_per_req
-        # Steps accumulated since the last budget update; cleared to zero on every recompute.
-        self._steps_since_budget_update = 0
-        # Guaranteed minimum verify length per request.
-        self._dspark_min_k = 1
-        # Per-request verify lengths of the latest proposal, consumed by
-        # NPUModelRunner.take_draft_token_ids. None means keep all tokens.
-        self._dspark_num_verify_tokens: torch.Tensor | None = None
-        self._dspark_confidence_logits_buffer = torch.zeros(
-            (self.max_batch_size, self.num_speculative_tokens),
-            dtype=torch.float32,
-            device=device,
-        )
-        self._dspark_num_verify_tokens_buffer = torch.zeros(
-            self.max_batch_size,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._keep_lens = torch.zeros(
-            (self.max_batch_size,),
-            dtype=torch.int32,
-            device=self.device,
-        )
+        self.dynamic_spec = None
+        
+        if dynamic_spec_config.method == "dspark":
+            self.dynamic_spec = DynamicSpecScheduler(
+                method="dspark",
+                method_params=dynamic_spec_config.method_params,
+                max_batch_size=self.max_batch_size,
+                num_speculative_tokens=self.num_speculative_tokens,
+                device=device,
+            )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.

@@ -10,6 +10,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.spec_decode.dynamic_utils.dynamic_scheduler import DynamicSpecScheduler
 
 
 class AscendDflashProposer(AscendEagleProposer):
@@ -59,6 +61,18 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self.parallel_drafting_hidden_state_tensor = None
+        
+        dynamic_spec_config = get_ascend_config().dynamic_spec_config
+        self.dynamic_spec = None
+        
+        if dynamic_spec_config.method == "dflash":
+            self.dynamic_spec = DynamicSpecScheduler(
+                method="dflash",
+                method_params=dynamic_spec_config.method_params,
+                max_batch_size=self.max_batch_size,
+                num_speculative_tokens=self.num_speculative_tokens,
+                device=device,
+            )
 
     def set_inputs_first_pass(
         self,
