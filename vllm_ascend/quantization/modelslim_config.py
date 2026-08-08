@@ -749,6 +749,10 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
+        elif isinstance(layer, AttentionLayerBase) and self.enable_mxfp_c8_quant:
+            from .methods.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
+
+            return AscendKVCacheMethod(AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix))
         elif _is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -840,6 +844,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         return False
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        if self.enable_mxfp_c8_quant:
+            return torch.float8_e4m3fn, torch.float8_e4m3fn
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
             quant_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
@@ -1039,6 +1045,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        self.enable_mxfp_c8_quant = kv_quant_type == "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"
+        if self.enable_mxfp_c8_quant:
+            logger.info_once("[quantization] Enable C8 MXFP8 quantization!")
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
         if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:

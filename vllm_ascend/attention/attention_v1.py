@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import re
 import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -61,6 +62,12 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.device.mxfp_kv_cache import (
+    MXFP_KV_SCALE_GROUP_SIZE,
+    scatter_mxfp_k_scale_cache,
+    scatter_mxfp_v_cache,
+    scatter_mxfp_v_scale_cache,
+)
 from vllm_ascend.utils import is_950, weak_ref_tensors
 
 # default max value of sliding window size
@@ -108,13 +115,11 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
         src_indices = src_to_dst[:, 0]
         dst_indices = src_to_dst[:, 1]
 
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        for src_cache, dst_cache in zip(src_kv_cache, dst_kv_cache):
+            dst_cache[dst_indices] = src_cache[src_indices].to(dst_cache.device)
 
     @staticmethod
     def copy_blocks(
@@ -125,14 +130,12 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
+            for cache in kv_cache:
+                cache[dst_indices] = cache[src_indices]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        return [128]
+        return [128, 512]
 
 
 class AscendAttentionState(Enum):
@@ -2113,3 +2116,297 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             notify_kv_cache_written()
         return query, key, value, output
+
+
+class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
+    """MXFP8 KV cache backend.
+
+    In forward(), Q and K/V are quantized to FP8 E4M3 (with E8M0 scales) before
+    cache write; reshape_and_cache only scatters quantized K/V and scales into
+    paged cache, and FIA consumes them from the transposed cache layout.
+    """
+
+    def _transpose_kv_cache(
+        self, kv_cache: tuple[torch.Tensor]
+    ) -> tuple[torch.Tensor]:
+        """Swap block_size (dim 1) and num_kv_heads (dim 2) on paged K/V for FIA.
+
+        [num_blocks, block_size, num_kv_heads, head_dim]
+        -> [num_blocks, num_kv_heads, block_size, head_dim]
+        """
+        key = kv_cache[0].transpose(1, 2).contiguous()
+        value = kv_cache[1].transpose(1, 2).contiguous()
+        return (key, value, kv_cache[2], kv_cache[3])
+
+    def _run_mxfp8_fia_v2(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_scale: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        *,
+        block_size: int,
+        block_table: torch.Tensor | None,
+        actual_seq_qlen: list[int] | torch.Tensor,
+        actual_seq_lengths_kv: list[int] | torch.Tensor,
+        num_tokens: int,
+        output: torch.Tensor,
+        token_offset: int = 0,
+        sparse_mode: int = 3,
+        use_attn_mask: bool = True,
+    ) -> torch.Tensor:
+        query_slice = quant_query[token_offset : token_offset + num_tokens]
+        query_scale_slice = query_scale[token_offset : token_offset + num_tokens]
+        fia_kwargs: dict = {
+            "block_table": block_table,
+            "input_layout": "TND",
+            "block_size": block_size,
+            "actual_seq_qlen": actual_seq_qlen,
+            "actual_seq_kvlen": actual_seq_lengths_kv,
+            "num_query_heads": self.num_heads,
+            "num_key_value_heads": self.num_kv_heads,
+            "softmax_scale": self.scale,
+            "sparse_mode": sparse_mode,
+            "dequant_scale_query": query_scale_slice,
+            "dequant_scale_key": key_scale,
+            "dequant_scale_value": value_scale,
+            "query_quant_mode": 6,
+            "key_quant_mode": 6,
+            "value_quant_mode": 8,
+            "query_dtype": torch.float8_e4m3fn,
+            "key_dtype": torch.float8_e4m3fn,
+            "value_dtype": torch.float8_e4m3fn,
+            "dequant_scale_query_dtype": torch_npu.float8_e8m0fnu,
+            "dequant_scale_key_dtype": torch_npu.float8_e8m0fnu,
+            "dequant_scale_value_dtype": torch_npu.float8_e8m0fnu,
+        }
+        if use_attn_mask:
+            fia_kwargs["atten_mask"] = attn_metadata.attn_mask
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+            query_slice,
+            key,
+            value,
+            **fia_kwargs,
+        )
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[token_offset : token_offset + num_tokens] = attn_output
+        return output
+
+    def _forward_mxfp8_decode(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        key, value, key_scale, value_scale = kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[3]
+        # kv_cache K/V are transposed to [num_blocks, num_kv_heads, block_size, head_dim].
+        block_size = key.shape[2]
+        num_decodes = attn_metadata.num_decodes
+
+        return self._run_mxfp8_fia_v2(
+            quant_query,
+            query_scale,
+            key,
+            value,
+            key_scale,
+            value_scale,
+            attn_metadata,
+            block_size=block_size,
+            block_table=attn_metadata.block_tables[:num_decodes],
+            actual_seq_qlen=attn_metadata.actual_seq_lengths_q[:num_decodes],
+            actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+            num_tokens=attn_metadata.num_decode_tokens,
+            output=output,
+            token_offset=0,
+            sparse_mode=0,
+            use_attn_mask=False,
+        )
+
+    def _forward_mxfp8_prefill(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        *,
+        token_offset: int,
+    ) -> torch.Tensor:
+        """Prefill path: paged FP8 KV + scale cache (K/V read from fia_kv_cache)."""
+        actual_seq_qlen_full = attn_metadata.actual_seq_lengths_q
+        num_tokens = int(actual_seq_qlen_full[-1])  # type: ignore[index]
+        num_prefill_tokens = num_tokens - token_offset
+
+        num_decodes = attn_metadata.num_decodes
+        prefill_seq_qlen = [
+            actual_seq_qlen_full[i] - token_offset for i in range(num_decodes, len(actual_seq_qlen_full))
+        ]
+
+        quant_key, quant_value, key_scale, value_scale = kv_cache
+        block_size = quant_key.shape[2]
+        block_table = attn_metadata.block_tables[num_decodes:]
+        prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
+        actual_seq_lengths_kv = torch.tensor(
+            prefill_sl, dtype=torch.int32, device=quant_query.device
+        ).cumsum(dim=0)
+
+        return self._run_mxfp8_fia_v2(
+            quant_query,
+            query_scale,
+            quant_key,
+            quant_value,
+            key_scale,
+            value_scale,
+            attn_metadata,
+            block_size=block_size,
+            block_table=block_table,
+            actual_seq_qlen=prefill_seq_qlen,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_tokens=num_prefill_tokens,
+            output=output,
+            token_offset=token_offset,
+        )
+
+    def _forward_mxfp8_chunked_prefill(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """ChunkedPrefill: decode requests first, then prefill (same batch ordering as MLA)."""
+        self._forward_mxfp8_decode(quant_query, query_scale, kv_cache, attn_metadata, output)
+        self._forward_mxfp8_prefill(
+            quant_query,
+            query_scale,
+            kv_cache,
+            attn_metadata,
+            output,
+            token_offset=attn_metadata.num_decode_tokens,
+        )
+        return output
+
+    def _forward_mxfp8_attention(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if not attn_metadata.causal:
+            raise NotImplementedError("C8_MXFP attention does not support non-causal attention yet.")
+        if self.sliding_window is not None:
+            raise NotImplementedError("C8_MXFP attention does not support sliding window attention yet.")
+
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            return self._forward_mxfp8_decode(quant_query, query_scale, kv_cache, attn_metadata, output)
+        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            return self._forward_mxfp8_chunked_prefill(
+                quant_query, query_scale, kv_cache, attn_metadata, output
+            )
+        return self._forward_mxfp8_prefill(
+            quant_query, query_scale, kv_cache, attn_metadata, output, token_offset=0
+        )
+
+    # KV cache writes for C8_MXFP happen in reshape_and_cache(), invoked from forward()
+    # when key/value are present. This hook is only reached when attention is split from
+    # cache update, e.g. Attention.forward with forward_includes_kv_cache_update=False
+    # (unified_kv_cache_update -> do_kv_cache_update), or explicit callers such as
+    # patch_qwen3_dflash.precompute_and_store_context_kv. AscendAttentionBackend keeps
+    # forward_includes_kv_cache_update=True, so normal inference never calls this.
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError(
+            "C8_MXFP KV cache update is only supported via reshape_and_cache in forward()."
+        )
+
+    def reshape_and_cache(
+        self,
+        quant_key: torch.Tensor,
+        quant_value: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        num_actual_tokens = quant_key.shape[0]
+        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+        DeviceOperator.reshape_and_cache(
+            key=quant_key,
+            value=quant_value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+        )
+
+        # reshape_and_cache mxfp8 scales
+        key_scale_cache, value_scale_cache = kv_cache[2], kv_cache[3]
+        scatter_mxfp_k_scale_cache(
+            key_scale,
+            key_scale_cache,
+            slot_mapping,
+            key_cache.shape[1],
+        )
+        if not self.save_v_scale_flag:
+            # (hidden_size) -> (num_kv_heads, head_size) -> broadcast -> (num_blocks, num_kv_heads, block_size // 64, head_size, 2)
+            value_scale_cache.copy_(value_scale.view(1, self.num_kv_heads, 1, self.head_size, 1))
+            self.save_v_scale_flag = True
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError("fused output quantization is not yet supported for AscendC8MXFPAttentionBackendImpl")
+        if attn_metadata is None:
+            return output.fill_(0)
+        if _EXTRA_CTX.capturing:
+            raise NotImplementedError("C8_MXFP attention does not support ACL graph capture yet.")
+        if self.enable_hamming_sparse:
+            raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
+
+        query_mxfp8, query_scale = torch_npu.npu_dynamic_mx_quant(
+            query[:attn_metadata.num_actual_tokens],
+            dst_type=torch.float8_e4m3fn,
+        )
+        key_mxfp8, key_scale = torch_npu.npu_dynamic_mx_quant(
+            key[:attn_metadata.num_actual_tokens],
+            dst_type=torch.float8_e4m3fn,
+        )
+
+        original_value_shape = value.shape
+        value = value.view(original_value_shape[0], -1)
+        value_mxfp8 = torch_npu.npu_quantize(value[:attn_metadata.num_actual_tokens], layer.v_cache_scale_float_reciprocal, None, torch.float8_e4m3fn, -1, False)
+        value_mxfp8 = value_mxfp8.view((attn_metadata.num_actual_tokens, *original_value_shape[1:]))
+
+        self.reshape_and_cache(
+            key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata
+        )
+
+        fia_kv_cache = self._transpose_kv_cache(kv_cache)
+        return self._forward_mxfp8_attention(
+            query_mxfp8, query_scale, fia_kv_cache, attn_metadata, output
+        )
