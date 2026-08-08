@@ -1,11 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.worker.v2.model_runner import (
+    NPUModelRunner,
     flashcomm_dispatch_wrapper,
 )
 from vllm_ascend.worker.v2.sp_utils import (
@@ -99,3 +101,41 @@ def test_flashcomm_dense_threshold_and_moe_behavior():
         ),
     ):
         assert _flashcomm_enabled(config, 1)
+
+
+def test_fia_padding_uses_dynamic_decode_query_len():
+    runner = SimpleNamespace(decode_query_len=4)
+    query_start_loc = np.array([0, 2, 4, 4], dtype=np.int32)
+
+    query_start_loc, num_reqs_padded = NPUModelRunner._pad_query_start_loc_for_fia(
+        runner,
+        num_tokens_padded=4,
+        num_reqs_padded=2,
+        num_reqs=2,
+        query_start_loc_np=query_start_loc,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=2,
+        uniform_decode_query_len=2,
+    )
+
+    assert num_reqs_padded == 2
+    np.testing.assert_array_equal(query_start_loc[:3], [0, 2, 4])
+
+
+def test_fia_padding_preserves_dynamic_full_graph_request_padding():
+    runner = SimpleNamespace(decode_query_len=4)
+    query_start_loc = np.array([0, 2, 4, 4, 4, 4], dtype=np.int32)
+
+    query_start_loc, num_reqs_padded = NPUModelRunner._pad_query_start_loc_for_fia(
+        runner,
+        num_tokens_padded=8,
+        num_reqs_padded=4,
+        num_reqs=2,
+        query_start_loc_np=query_start_loc,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=4,
+        uniform_decode_query_len=2,
+    )
+
+    assert num_reqs_padded == 3
+    np.testing.assert_array_equal(query_start_loc[:4], [0, 2, 4, 8])

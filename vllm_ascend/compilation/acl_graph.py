@@ -3,7 +3,7 @@
 
 import dataclasses
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -298,10 +298,52 @@ def update_full_graph_params(
 
 @dataclass
 class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
+    events: dict[Hashable, list[torch.npu.ExternalEvent]]
+    workspaces: dict[Hashable, torch.Tensor | None]
+    handles: dict[Hashable, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[Hashable, list[tuple]]
+
+
+def get_graph_param_key(
+    num_tokens: int,
+    speculative_config,
+    attn_metadata,
+    *,
+    is_draft_model: bool | None = None,
+) -> int | tuple[int, int]:
+    """Return a shape-complete key for target-model FULL graph parameters.
+
+    Dynamic speculative decoding can capture multiple FULL graphs with the
+    same total token count but different uniform query lengths. Token count
+    alone therefore cannot identify the attention graph task to update.
+    """
+    if speculative_config is None or speculative_config.uses_dynamic_speculative_decoding() is not True:
+        return num_tokens
+    if is_draft_model is None:
+        is_draft_model = bool(_EXTRA_CTX.is_draft_model)
+    if is_draft_model:
+        return num_tokens
+
+    metadata_values = attn_metadata.values() if isinstance(attn_metadata, dict) else (attn_metadata,)
+    for metadata in metadata_values:
+        decode_metadata = getattr(metadata, "decode", None)
+        actual_seq_lengths_q = getattr(decode_metadata, "actual_seq_lengths_q", None)
+        if actual_seq_lengths_q is None or len(actual_seq_lengths_q) == 0:
+            actual_seq_lengths_q = getattr(metadata, "actual_seq_lengths_q", None)
+        if actual_seq_lengths_q is not None and len(actual_seq_lengths_q) > 0:
+            uniform_query_len = int(actual_seq_lengths_q[0])
+            assert uniform_query_len > 0
+            return num_tokens, uniform_query_len
+
+    raise ValueError("Dynamic speculative decoding FULL graph metadata has no query lengths.")
+
+
+def ensure_graph_param_key(graph_params: GraphParams, graph_key: Hashable) -> None:
+    """Initialize storage for a graph shape discovered during capture."""
+    graph_params.events.setdefault(graph_key, [])
+    graph_params.workspaces.setdefault(graph_key, None)
+    graph_params.handles.setdefault(graph_key, [])
+    graph_params.attn_params.setdefault(graph_key, [])
 
 
 _graph_params: GraphParams | None = None
@@ -319,10 +361,10 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     )
 
 
-def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
+def update_graph_params_workspaces(graph_key: Hashable, workspace: torch.Tensor):
     global _graph_params
     if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+        _graph_params.workspaces[graph_key] = workspace
 
 
 def get_graph_params():
