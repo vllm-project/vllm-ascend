@@ -19,9 +19,8 @@ from collections.abc import Callable
 import torch
 from vllm.distributed import get_tp_group
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
@@ -104,16 +103,17 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         renorm = int(self.renormalize)
         if self.scoring_func == "sqrtsoftplus":
             if self.tid2eid is not None:
-                forward_context = get_forward_context()
-                input_ids = forward_context.input_ids.to(torch.int64)
+                if input_ids is None:
+                    raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+                input_ids = input_ids.to(torch.int64)
                 tid2eid_ones = self.tid2eid.to(torch.int32)
-                if forward_context.moe_comm_type == MoECommType.ALLGATHER:
-                    prepare_finalize = forward_context.moe_comm_method.prepare_finalize
+                if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
+                    prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
                     input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
                 else:
-                    input_ids = forward_context.moe_comm_method.pad_and_split_input_ids(input_ids)
+                    input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
 
-                if forward_context.flash_comm_v1_enabled and forward_context.moe_comm_type != MoECommType.ALLGATHER:
+                if _EXTRA_CTX.flash_comm_v1_enabled and _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER:
                     # Process for Flash Comm V1
                     tp_size = get_tp_group().world_size
                     tp_rank = get_tp_group().rank_in_group

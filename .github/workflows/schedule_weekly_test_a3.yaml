@@ -214,6 +214,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
+      test_frequency: weekly
       runner: linux-aarch64-a3-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
@@ -224,6 +225,7 @@ jobs:
       config_base_path: tests/e2e/weekly/multi_node/external_dp/config
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       testcase_timeout: 600
       should_run: >-
@@ -254,6 +256,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
+      test_frequency: weekly
       runner: linux-aarch64-a3-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
@@ -264,6 +267,7 @@ jobs:
       config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       testcase_timeout: 600
       should_run: >-
@@ -294,6 +298,8 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: a3
+      test_frequency: weekly
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}

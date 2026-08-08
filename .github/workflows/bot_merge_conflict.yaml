@@ -10,9 +10,10 @@ jobs:
     steps:
       - name: check if prs are dirty
         uses: eps1lon/actions-label-merge-conflict@v3
+        continue-on-error: true
         with:
           dirtyLabel: "merge-conflicts"
           repoToken: "${{ secrets.GITHUB_TOKEN }}"
-          retryAfter: 5
-          retryMax: 1
+          retryAfter: 10
+          retryMax: 3
           commentOnDirty: "This pull request has conflicts, please resolve those before we can evaluate the pull request."

@@ -453,6 +453,154 @@ Key configuration parameters:
 
 5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
 
+## Dynamic Speculative Decoding {: #dynamic-speculative-decoding }
+
+Dynamic Speculative Decoding adapts the number of draft tokens (K) at runtime, instead of always using a fixed `num_speculative_tokens`. This helps keep speculative decoding beneficial as concurrency and draft confidence change. vLLM Ascend currently provides two approaches:
+
+- **Confidence-head based (DSpark)**: adjust the per-request verify length using the DSpark confidence head.
+- **Batch-size based (Autoregressive)**: select a shared K from concurrency ranges via `num_speculative_tokens_per_batch_size`.
+
+### Confidence-head based (DSpark)
+
+This approach adapts how many drafted tokens are verified per request. It can reduce verify cost when the drafter is less confident about later tokens, while still allowing longer speculation when confidence is high.
+
+> [!NOTE]
+> This is an **exploratory** feature and currently targets **model runner v1** only. The supported dynamic method relies on the DSpark **confidence head**. For other proposers such as DFlash, non-neural-parameter-based dynamic schemes are under exploration. Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
+
+#### How it works
+
+When `dynamic_spec_config.method` is set to `"dspark"`, the DSpark proposer:
+
+1. Runs the draft model as usual to produce up to `num_speculative_tokens` draft tokens.
+2. Uses the DSpark confidence head to estimate per-position acceptance likelihood for each request.
+3. Periodically recomputes a shared per-request verify budget from those confidence scores.
+4. Allocates that budget across requests, so each request keeps only a prefix of draft tokens for verification.
+
+The resulting per-request verify lengths are consumed by the model runner when collecting draft tokens for the target-model verify step.
+
+#### Configuration
+
+Enable this approach through `additional_config.dynamic_spec_config`. See [Additional Configuration](../configuration/additional_config.md) for the full parameter reference.
+
+You still need a normal DSpark `speculative_config` (`method: "dspark"`, draft model path, and `num_speculative_tokens`). Dynamic decoding only decides how many of those drafted tokens are verified per request.
+
+#### Offline inference example
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.config import CompilationConfig
+
+prompts = [
+    "The future of AI is",
+]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+llm = LLM(
+    model="Qwen/Qwen3-8B",
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    max_model_len=4096,
+    max_num_seqs=8,
+    gpu_memory_utilization=0.8,
+    enable_prefix_caching=False,
+    speculative_config={
+        "method": "dspark",
+        "model": "deepseek-ai/dspark_qwen3_8b_block7",
+        "num_speculative_tokens": 7,
+    },
+    additional_config={
+        "dynamic_spec_config": {
+            "method": "dspark",
+            "method_params": {
+                "initial_verify_budget_per_req": 5,
+                "budget_update_interval": 50,
+                "budget_threshold": 0.7,
+            },
+        },
+    },
+    compilation_config=CompilationConfig(cudagraph_mode="FULL"),
+)
+outputs = llm.generate(prompts, sampling_params)
+
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+### Batch-size based (Autoregressive)
+
+This approach selects a shared speculative length K from the current concurrency (batch size). It is intended for autoregressive draft methods such as MTP, EAGLE / EAGLE-3, DFlash, and n-gram.
+
+#### Why is it needed?
+
+SD methods need to verify K tokens for each sequence during decoding. As batch size (BS) increases, the effective batch becomes `BS * K`, which increases the compute requirement during verification. When `BS * K` goes beyond a critical batch size, speculative decoding can hurt decode speed (TPOT). Batch-size based Dynamic SD tunes K to an optimal value so that speculative decoding remains beneficial.
+
+#### Use cases
+
+- Variable concurrency on the same deployment: K decreases as concurrency increases.
+- RL rollout workloads that start with high BS and later shrink to a few long-tail requests: K can increase again toward the end of the rollout.
+- Currently supports MTP, EAGLE-3, DFlash, n-gram, and similar methods. Suffix Decoding is already per-request dynamic, so an outer dynamic K is redundant or conflicting; this is an upstream constraint, not Ascend-specific. DSpark and `MTP + DCP + DSD` are currently not supported on this path.
+
+#### `--speculative-config` schema
+
+To use Batch-size based Dynamic SD, add `num_speculative_tokens_per_batch_size` to the speculative config of a supported method. It is a list of lists, where each entry is `[start_bs, end_bs, optimal_K]`: when concurrency is within `[start_bs, end_bs]`, `optimal_K` draft tokens are used. For example:
+
+```bash
+--speculative-config '{
+    "method": "eagle",
+    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 64, 3],
+      [65, 128, 1],
+      [129, 512, 0]
+    ]
+  }'
+```
+
+implies that:
+
+- K=3 will be used when the concurrency is in range [1, 64]
+- K=1 will be used when the concurrency is in range [65, 128]
+- K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
+
+#### Online examples
+
+##### Dynamic SD Eagle Drafter
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --speculative-config '{
+    "method": "eagle",
+    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 64, 3],
+      [65, 128, 1],
+      [129, 512, 0]
+    ]
+  }'
+```
+
+##### Dynamic SD Eagle3 Drafter
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --speculative-config '{
+    "method": "eagle3",
+    "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 16, 5],
+      [17, 32, 4],
+      [33, 64, 3],
+      [65, 128, 1],
+      [129, 512, 0]
+    ]
+  }'
+```
+
 ## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
@@ -504,77 +652,6 @@ This entropy-aware threshold is controlled by two parameters:
     ```
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
-
-## Dynamic Speculative Decoding
-
-### Why is Dynamic SD needed?
-
-SD methods need to verify K tokens for each sequence during decoding. As BS increases, the effective BS becomes BS\*K which increases the compute requirement during verification. When this BS\*K goes beyond a critical BS then SD negatively impacts the decode speed (TPOT). DSD helps by tuning the K to an optimal value such that we continue to reap the benefits from SD.
-
-### Use cases
-
-- Variable concurrency workload using same deployment. K would decrease as concurrency increases.
-- During RL rollout where we start off with high BS but then end up with small BS due to very few long tail request which end up generating a lot of tokens stalling the progress of the current rollout. Here K would go up during the end of rollout.
-- Currently supports MTP, eagle3, dflash, ngram, etc, Suffix itself is' per request dynamic ', and the outer dynamic K is redundant/conflicting for it.This is an upstream constraint, and vLLM itself will also collapse, not a unique problem of Ascend. dspark、MTP+DCP+DSD Currently not supported.
-
-### `--speculative-config` schema
-
-To use Dynamic SD, add `num_speculative_tokens_per_batch_size` to the config of an SD method which is a list of list. Here, an entry is `[start_bs, end_bs, optimal_K]` which means when the concurrency is within range `[start_bs, end_bs]` then `optimal_K` number of draft tokens are used. For e.g.,
-
-```bash
---speculative-config '{
-    "method": "eagle",
-    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
-    "num_speculative_tokens": 3,
-    "num_speculative_tokens_per_batch_size": [
-      [1, 64, 3],
-      [65, 128, 1],
-      [129, 512, 0]
-    ]
-  }'
-```
-
-implies that:
-
-- K=3 will be used when the concurrency is in range [1, 64]
-- K=1 will be used when the concurrency is in range [65, 128]
-- K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
-
-### Online Examples
-
-#### Dynamic SD Eagle Drafter
-
-```bash
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-  --speculative-config '{
-    "method": "eagle",
-    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
-    "num_speculative_tokens": 3,
-    "num_speculative_tokens_per_batch_size": [
-      [1, 64, 3],
-      [65, 128, 1],
-      [129, 512, 0]
-    ]
-  }'
-```
-
-#### Dynamic SD Eagle3 Drafter
-
-```bash
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-  --speculative-config '{
-    "method": "eagle3",
-    "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
-    "num_speculative_tokens": 3,
-    "num_speculative_tokens_per_batch_size": [
-      [1, 16, 5],
-      [17, 32, 4],
-      [33, 64, 3],
-      [65, 128, 1],
-      [129, 512, 0]
-    ]
-  }'
-```
 
 ## Synthetic Rejection Sampling
 

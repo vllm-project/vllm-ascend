@@ -46,6 +46,9 @@ class AscendConfig:
         finegrained_tp_config = additional_config.get("finegrained_tp_config", {})
         self.finegrained_tp_config = FinegrainedTPConfig(finegrained_tp_config, vllm_config)
 
+        dynamic_spec_config = additional_config.get("dynamic_spec_config", {})
+        self.dynamic_spec_config = DynamicSpecConfig(dynamic_spec_config)
+
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
@@ -460,6 +463,42 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+
+class DynamicSpecConfig:
+    """
+    Configuration Object for dynamic_spec_config from additional_config
+    """
+
+    # Dynamic speculative-length methods. "dspark" relies on the DSpark
+    # confidence head; models without such a head need another method.
+    SUPPORTED_METHODS = ("dspark",)
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+
+        # None disables the dynamic speculative-length path.
+        self.method: str | None = config.get("method")
+        # Custom parameters of the selected dynamic method; the expected keys
+        # depend on `method` (e.g. dspark accepts
+        # initial_verify_budget_per_req, budget_update_interval and
+        # budget_threshold). Empty by default, in which case each method
+        # falls back to its own built-in defaults.
+        self.method_params: dict = config.get("method_params", {})
+        self._validate()
+
+    def _validate(self) -> None:
+        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
+            raise ValueError(
+                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
+            )
+        if not isinstance(self.method_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.method_params must be a dict, "
+                f"got {type(self.method_params).__name__}: "
+                f"{self.method_params}"
+            )
 
 
 class FinegrainedTPConfig:

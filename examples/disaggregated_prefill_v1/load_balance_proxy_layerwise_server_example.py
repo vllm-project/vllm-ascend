@@ -256,6 +256,38 @@ class ProxyState:
 proxy_state = None
 
 
+def _validate_host(host: str, arg_name: str, index: int) -> None:
+    """Validate that a host argument is a well-formed IP address or hostname.
+
+    Catches shell-escaping typos where a missing space before a line-continuation
+    backslash concatenates adjacent values (e.g. ``192.0.0.3\\n192.0.0.3``).
+    """
+    # A valid IP (IPv4/IPv6) is accepted as-is.
+    try:
+        ipaddress.ip_address(host)
+        return
+    except ValueError:
+        pass
+    # A non-IP value whose labels are all digits is almost always a shell-escaping
+    # typo that concatenated two hosts (e.g. "192.0.0.3192.0.0.3"); anything else
+    # is treated as a hostname.
+    if host and not all(label.isdigit() for label in host.split(".")):
+        return
+    hint = (
+        "looks like a concatenated IP address; check for missing whitespace before line-continuation backslashes"
+        if host
+        else "must be a valid IP or hostname"
+    )
+    raise ValueError(f"Invalid host {host!r} in {arg_name}[{index}]: {hint}")
+
+
+def _validate_hosts(hosts: list, arg_name: str) -> None:
+    """Validate every host in *hosts*, raising ValueError on the first
+    malformed entry."""
+    for i, host in enumerate(hosts):
+        _validate_host(host, arg_name, i)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
@@ -281,6 +313,11 @@ def parse_args():
             f"Decoder hosts will access Proxy host:port/metaserver, to avoid configuration errors, "
             f"the Wildcard Address {args.host} is not allowed for proxy"
         )
+    # Validate host arguments so that shell-escaping typos
+    # (e.g. "192.0.0.3\\n192.0.0.3") are caught early with a clear
+    # message rather than producing a confusing runtime failure.
+    _validate_hosts(args.prefiller_hosts, "--prefiller-hosts")
+    _validate_hosts(args.decoder_hosts, "--decoder-hosts")
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
         raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
