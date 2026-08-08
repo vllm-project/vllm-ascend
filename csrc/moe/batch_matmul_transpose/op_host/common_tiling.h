@@ -11,6 +11,8 @@
 #ifndef COMMMON_TILING_H
 #define COMMMON_TILING_H
 
+#include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <cmath>
 #include "common.h"
@@ -39,10 +41,40 @@ enum class PlatformType { ASCEND_310P, ASCEND_910A, ASCEND_910B, ASCEND_910C, PL
 
 struct PlatformInfo {
 public:
-    static const PlatformInfo &Instance()
+    static PlatformInfo &Instance()
     {
         static PlatformInfo platformInfo;
         return platformInfo;
+    }
+
+    void Update(const platform_ascendc::PlatformAscendC &ascendcPlatform)
+    {
+        coreNum = ascendcPlatform.GetCoreNum();
+        coreNumAic = ascendcPlatform.GetCoreNumAic();
+        coreNumAiv = ascendcPlatform.GetCoreNumAiv();
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1Size);
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2Size);
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, l0aSize);
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_B, l0bSize);
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, l0cSize);
+        socType = GetPlatformType(ascendcPlatform.GetSocVersion());
+    }
+
+    void Update(uint32_t coreNumIn, uint32_t coreNumAicIn, uint32_t coreNumAivIn, uint64_t ubSizeIn,
+                uint64_t l1SizeIn, uint64_t l2SizeIn, uint64_t l0aSizeIn, uint64_t l0bSizeIn,
+                uint64_t l0cSizeIn, platform_ascendc::SocVersion socVersionIn)
+    {
+        coreNum = coreNumIn;
+        coreNumAic = coreNumAicIn;
+        coreNumAiv = coreNumAivIn;
+        ubSize = ubSizeIn;
+        l1Size = l1SizeIn;
+        l2Size = l2SizeIn;
+        l0aSize = l0aSizeIn;
+        l0bSize = l0bSizeIn;
+        l0cSize = l0cSizeIn;
+        socType = GetPlatformType(socVersionIn);
     }
 
     PlatformType socType;
@@ -57,22 +89,21 @@ public:
     uint64_t l0cSize;
 
 private:
-    PlatformInfo()
+    static PlatformType GetPlatformType(platform_ascendc::SocVersion socVersion)
     {
-        auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
-        // TODO Hard coding set to 910_93xx, parse using aclrtGetSocName is better
-        socType = PlatformType::ASCEND_910C;
-        coreNum = ascendcPlatform->GetCoreNum();
-        coreNumAic = ascendcPlatform->GetCoreNumAic();
-        coreNumAiv = ascendcPlatform->GetCoreNumAiv();
-        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
-        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1Size);
-        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2Size);
-        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, l0aSize);
-        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::L0_B, l0bSize);
-        ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, l0cSize);
+        switch (socVersion) {
+            case platform_ascendc::SocVersion::ASCEND310P:
+                return PlatformType::ASCEND_310P;
+            case platform_ascendc::SocVersion::ASCEND910:
+                return PlatformType::ASCEND_910A;
+            case platform_ascendc::SocVersion::ASCEND910_93:
+                return PlatformType::ASCEND_910C;
+            default:
+                return PlatformType::ASCEND_910B;
+        }
     }
 
+    PlatformInfo() = default;
     PlatformInfo(const PlatformInfo &) = delete;
     PlatformInfo &operator=(const PlatformInfo &) = delete;
     PlatformInfo(PlatformInfo &&) = delete;
@@ -225,15 +256,10 @@ uint32_t Swizzl(PpTilingDataType &tilingData)
 }
 
 template <typename PpTilingDataType>
-inline __attribute__((always_inline)) void PpMatmulTilingCheck(const PpTilingDataType &tilingData)
+inline __attribute__((always_inline)) bool PpMatmulTilingCheck(const PpTilingDataType &tilingData)
 {
-    TORCH_CHECK(tilingData.opShape.m0 > 0, "m0 is invalid");
-    TORCH_CHECK(tilingData.opShape.k0 > 0, "k0 is invalid");
-    TORCH_CHECK(tilingData.opShape.n0 > 0, "n0 is invalid");
-    TORCH_CHECK(tilingData.mLoop > 0, "mLoop is invalid");
-    TORCH_CHECK(tilingData.kLoop > 0, "kLoop is invalid");
-    TORCH_CHECK(tilingData.nLoop > 0, "nLoop is invalid");
-    TORCH_CHECK(tilingData.blockDim > 0, "nLoop is invalid");
+    return tilingData.opShape.m0 > 0 && tilingData.opShape.k0 > 0 && tilingData.opShape.n0 > 0 &&
+           tilingData.mLoop > 0 && tilingData.kLoop > 0 && tilingData.nLoop > 0 && tilingData.blockDim > 0;
 }
 }  // namespace host_utils
 #endif

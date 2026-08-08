@@ -114,6 +114,26 @@ class TestMatrixMultiplication(unittest.TestCase):
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
 
+    def test_fused_mla_badcase_shape(self):
+        """Reproduce fused MLA badcase shape with bf16"""
+        # (num_tokens, num_heads, kv_lora_rank) x (num_heads, kv_lora_rank, v_head_dim)
+        b, m, k, n = 33, 64, 512, 256
+        dtype = torch.bfloat16
+        torch.manual_seed(42)
+
+        a = torch.randn(b, m, k, dtype=dtype, device="npu")
+        b_tensor = torch.randn(m, k, n, dtype=dtype, device="npu")
+        res1 = torch.empty((b, m * n), dtype=dtype, device="npu")
+        res2 = torch.empty((b, m, n), dtype=dtype, device="npu")
+
+        self.compute_golden(a, b_tensor, res1, m, n)
+        torch.ops._C_ascend.batch_matmul_transpose(a, b_tensor, res2)
+
+        self.assert_tensors_almost_equal(res1.view(-1, m, n), res2, dtype)
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
+
     def test_zero_values(self):
         """Test zero input values"""
         dtypes = [torch.float16, torch.bfloat16]
