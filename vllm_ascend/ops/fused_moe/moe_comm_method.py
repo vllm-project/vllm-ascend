@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -23,7 +24,12 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    _MEGA_MOE_SUPPORTED,
+    MoECommType,
+    _is_a2_megamoe_enabled,
+)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
@@ -48,6 +54,54 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import get_cann_megamoe_buffer_params, get_cann_megamoe_dummy_token_capacity
+
+
+def _append_cann_megamoe_dummy_tokens(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    x_active_mask: torch.Tensor | None,
+    num_experts: int,
+    ep_rank_id: int,
+    ep_world_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Append equal-size local sentinels that cover all experts globally."""
+    if ep_world_size < 1 or not 0 <= ep_rank_id < ep_world_size:
+        raise ValueError(
+            "CANN MegaMoe dummy routing requires a valid EP rank: "
+            f"ep_rank_id={ep_rank_id}, ep_world_size={ep_world_size}."
+        )
+    num_topk = int(topk_ids.shape[-1])
+    global_dummy_capacity = get_cann_megamoe_dummy_token_capacity(num_experts, num_topk)
+    local_dummy_capacity = math.ceil(global_dummy_capacity / ep_world_size)
+    global_dummy_rows = ep_rank_id * local_dummy_capacity + torch.arange(
+        local_dummy_capacity, dtype=topk_ids.dtype, device=topk_ids.device
+    )
+    dummy_topk_ids = global_dummy_rows[:, None] * num_topk + torch.arange(
+        num_topk, dtype=topk_ids.dtype, device=topk_ids.device
+    )
+    dummy_topk_ids = dummy_topk_ids.remainder(num_experts)
+    dummy_hidden_states = torch.ones(
+        (local_dummy_capacity, hidden_states.shape[-1]), dtype=hidden_states.dtype, device=hidden_states.device
+    )
+    dummy_topk_weights = torch.full(
+        (local_dummy_capacity, num_topk),
+        1.0 / num_topk,
+        dtype=topk_weights.dtype,
+        device=topk_weights.device,
+    )
+
+    original_num_tokens = int(hidden_states.shape[0])
+    hidden_states = torch.cat((hidden_states, dummy_hidden_states), dim=0)
+    topk_ids = torch.cat((topk_ids, dummy_topk_ids), dim=0)
+    topk_weights = torch.cat((topk_weights, dummy_topk_weights), dim=0)
+    if x_active_mask is None:
+        x_active_mask = torch.ones(original_num_tokens, dtype=torch.int8, device=hidden_states.device)
+    dummy_mask = torch.ones(local_dummy_capacity, dtype=x_active_mask.dtype, device=x_active_mask.device)
+    x_active_mask = torch.cat((x_active_mask, dummy_mask), dim=0)
+    return hidden_states, topk_ids, topk_weights, x_active_mask, original_num_tokens
+
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -305,45 +359,38 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
-        # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
-        # setup_moe_comm_method), which is where global_bs / ep_world_size live.
-        # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         dispatch_quant_mode, dispatch_quant_out_dtype, self._mega_moe_weight_type = (
             comm_utils._get_cann_mega_moe_quant_settings(fused_experts_input.quant.quant_type)
         )
         group = get_mc2_group().device_group
-        # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
-        # collective handshake over the EP (mc2) group. Its shape params —
-        # especially num_max_tokens_per_rank — MUST be identical on every EP
-        # rank, otherwise ranks allocate mismatched buffers / at different
-        # times and HCCL aborts (SUSPECT REMOTE ERROR 507057). So this value
-        # must be derived ONLY from rank-invariant, compile-time config,
-        # NEVER from the current forward's per-rank token count.
+        # Symmetric buffer dimensions must be identical across the EP group.
         if self.token_dispatcher.global_bs > 0:
-            # global_bs = num_tokens_per_tp_rank * ep_world_size (compile-time).
-            num_max_tokens_per_rank = max(
+            base_num_max_tokens_per_rank = max(
                 1,
                 int(self.token_dispatcher.global_bs // self.token_dispatcher.ep_world_size),
             )
         else:
-            # num_tokens_per_tp_rank, set once in TokenDispatcherWithMC2.__init__
-            # from scheduler/graph config — rank-invariant.
             rank_invariant_cap = getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)
-            num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
-        num_topk = self.moe_config.experts_per_token
-        num_experts = self.moe_config.num_experts
-        expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
-            1,
-            num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
+            base_num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
+        num_topk = int(self.moe_config.experts_per_token)
+        num_experts = int(self.moe_config.num_experts)
+        num_max_tokens_per_rank, _, dummy_tokens, max_recv_token_num = get_cann_megamoe_buffer_params(
+            base_num_max_tokens_per_rank,
+            int(self.token_dispatcher.ep_world_size),
+            num_experts,
+            num_topk,
         )
 
         logger.info(
-            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
+            "CANN MegaMoe sym-buffer alloc: ep_rank=%s ep_world=%s global_bs=%s "
+            "max_tokens_per_rank=%s dummy_tokens=%s max_recv_tokens=%s",
             getattr(self.token_dispatcher, "ep_rank_id", "?"),
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
+            num_max_tokens_per_rank,
+            dummy_tokens,
+            max_recv_token_num,
         )
         self._mega_moe_symm_buffer = self.get_symm_buffer_for_mega_moe(
             group,
@@ -352,7 +399,7 @@ class FusedMC2CommImpl(MoECommMethod):
             num_topk,
             hidden=self.moe_config.hidden_dim,
             intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
-            max_recv_token_num=max_recv_token_num,
+            max_recv_token_num=0,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
         )
@@ -362,6 +409,11 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
     ):
+        if _is_a2_megamoe_enabled(get_ascend_config()) and fused_experts_input.quant.quant_type != QuantType.W8A8:
+            raise RuntimeError(
+                "CANN MegaMoe mode 2 currently supports only W8A8 routed experts, got "
+                f"{fused_experts_input.quant.quant_type}."
+            )
         assert fused_experts_input.weights.w1_scale is not None
         assert fused_experts_input.weights.w2_scale is not None
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
@@ -410,10 +462,26 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
+        hidden_states = fused_experts_input.hidden_states
+        topk_weights = fused_experts_input.topk_weights
+        original_num_tokens = int(hidden_states.shape[0])
+        if _is_a2_megamoe_enabled(get_ascend_config()):
+            hidden_states, topk_ids, topk_weights, x_active_mask, original_num_tokens = (
+                _append_cann_megamoe_dummy_tokens(
+                    hidden_states,
+                    topk_ids,
+                    topk_weights,
+                    x_active_mask,
+                    int(self.moe_config.num_experts),
+                    int(self.token_dispatcher.ep_rank_id),
+                    int(self.token_dispatcher.ep_world_size),
+                )
+            )
+
         out, expert_tokens = self.mega_moe(
-            fused_experts_input.hidden_states,
+            hidden_states,
             topk_ids.to(torch.int32),
-            fused_experts_input.topk_weights.to(torch.float32),
+            topk_weights.to(torch.float32),
             weight1,
             weight2,
             self._mega_moe_symm_buffer,
@@ -431,7 +499,7 @@ class FusedMC2CommImpl(MoECommMethod):
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh
         # expert_tokens tensor that is consumed by the caller via the
         # return value, so there is nothing to keep on the instance.
-        return out, expert_tokens
+        return out[:original_num_tokens], expert_tokens
 
     def fused_experts(
         self,
@@ -455,7 +523,8 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_ids = fused_experts_input.routing.log2phy[topk_ids]
 
         expert_tokens = None
-        if get_ascend_config().enable_fused_mc2 == 1:
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        if enable_fused_mc2 == 1:
             if _MEGA_MOE_SUPPORTED:
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
             else:
@@ -483,8 +552,12 @@ class FusedMC2CommImpl(MoECommMethod):
                     expert_token_nums=self.expert_token_nums,
                 )
                 expert_tokens = self.expert_token_nums
+        elif enable_fused_mc2 == 2 and _is_a2_megamoe_enabled(get_ascend_config()):
+            if not _MEGA_MOE_SUPPORTED:
+                raise RuntimeError("CANN MegaMoe mode 2 requires cann_ops_transformer.")
+            out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
         else:
-            raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
+            raise ValueError(f"Wrong value of enable_fused_mc2={enable_fused_mc2}")
         return FusedExpertsResult(
             routed_out=out,
             expert_tokens=expert_tokens,
