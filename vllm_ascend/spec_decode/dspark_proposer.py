@@ -53,6 +53,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "model runner; use greedy (the default) instead."
             )
         super().__init__(vllm_config, device, runner=runner)
+        self._draft_attn_causal = False
         self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
@@ -123,6 +124,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
     @staticmethod
+    def _resolve_draft_attn_causal(model: Any) -> bool:
+        get_draft_attn_causal = getattr(model, "get_draft_attn_causal", None)
+        # Legacy DSpark models such as DeepSeek V4 use non-causal attention
+        # without exposing this optional vLLM model API.
+        return get_draft_attn_causal()[0] if get_draft_attn_causal is not None else False
+
+    @staticmethod
     def _resolve_kernel_block_size(
         gid: int,
         kv_cache_spec,
@@ -139,6 +147,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
         # Find draft layers (attention layers added by draft model)
+        self._draft_attn_causal = self._resolve_draft_attn_causal(self.model)
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
@@ -339,7 +348,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
         # Currently, attention causality across draft layers are uniform.
-        cad.causal = self.model.get_draft_attn_causal()[0]
+        cad.causal = self._draft_attn_causal
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
