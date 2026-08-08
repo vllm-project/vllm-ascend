@@ -130,9 +130,6 @@ msgid ""
 "confirming a successful installation."
 msgstr "预期结果：显示 `vllm-ascend` 的版本信息，确认安装成功。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -393,3 +390,6 @@ msgstr ""
 "> **注意**：以下配置仅供参考。最佳配置取决于模型大小、最大输入/输出长度和实际设备内存。\n"
 ">\n"
 "> **Atlas 300I DUO / Atlas 200I Pro**：目前仅支持 TP 场景。在 Atlas 200I Pro 上建议使用 **TP=1**。在 Atlas 300I DUO 上，**TP=1** 和 **TP=2** 均受支持；请根据可用设备选择。请根据实际设备内存配置 `--max-model-len`、`--max-num-seqs` 和 `--gpu-memory-utilization`；设置过高可能导致 OOM。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

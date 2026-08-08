@@ -158,9 +158,6 @@ msgid ""
 "without errors."
 msgstr "预期结果：命令打印已安装的 vLLM Ascend 版本且无错误。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -507,3 +504,6 @@ msgid ""
 msgstr ""
 "**解决方案：** 从基线使用的相同张量并行配置开始。如果部署计划使用专家并行，请添加 `--enable-expert-"
 "parallel`，并在相同工作负载下比较吞吐量、延迟和内存使用情况。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

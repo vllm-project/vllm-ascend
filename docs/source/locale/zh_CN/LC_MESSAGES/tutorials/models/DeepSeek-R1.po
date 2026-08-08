@@ -135,9 +135,6 @@ msgid ""
 " on each node."
 msgstr "如需部署多节点环境，需要在每个节点上配置环境。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -345,3 +342,6 @@ msgstr ""
 "- `--max-model-len` 指定最大上下文长度，即单个请求的输入和输出token之和。对于输入长度为3.5k、输出长度为1.5k的性能测试，`16384` 的值是足够的，但对于精度测试，请将其设置为至少 `35000`。\n"
 "- `--no-enable-prefix-caching` 表示禁用前缀缓存。要启用它，请移除该选项。\n"
 "- 如果您使用w4a8权重，将为kvcache分配更多内存，您可以尝试增加系统吞吐量以获得更大的吞吐量。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

@@ -6,9 +6,6 @@
 #
 msgid ""
 msgstr ""
-
-msgid ""
-msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-07-02 07:02+0000\n"
@@ -21,6 +18,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid ""
+msgstr ""
 
 msgid ""
 "MiniMax-M2 is MiniMax's flagship large language model series, including "
@@ -311,9 +311,6 @@ msgstr "### 4.1 Docker 镜像安装"
 
 msgid "### 4.2 Source Code Installation"
 msgstr "### 4.2 源码安装"
-
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
@@ -706,3 +703,6 @@ msgstr ""
 "答：这是预期行为。`minimax_m2_append_think` 解析器会将 `<think>...</think>` 块直接保留在 "
 "`content` 字段中，而不是将其分离。如果您的下游应用依赖 `/v1/responses` 的标准推理语义（即思考过程和最终答案分离），则应使用 "
 "`--reasoning-parser minimax_m2` 以确保专用的 `reasoning` 字段被正确填充。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

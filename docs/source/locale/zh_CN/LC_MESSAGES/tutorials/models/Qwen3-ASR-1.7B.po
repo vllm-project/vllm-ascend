@@ -110,9 +110,6 @@ msgstr ""
 msgid "To verify the source installation:"
 msgstr "验证源码安装："
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -279,3 +276,6 @@ msgid ""
 msgstr ""
 "**原因：** 在Atlas 300I "
 "DUO上，自动检测到的大上下文长度可能会生成完整的因果注意力掩码，其内存消耗随`max_model_len`呈二次方增长。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
