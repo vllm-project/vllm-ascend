@@ -465,6 +465,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 request_id=req_id,
                 local_block_ids=block_ids,
                 local_full_block_ids=full_block_ids,
+                local_num_prompt_tokens=req.num_prompt_tokens,
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
             )
