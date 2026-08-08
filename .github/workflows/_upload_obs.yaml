@@ -1,0 +1,233 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: Upload Failure Report to OBS
+
+run-name: Upload failure report - ${{ github.event.workflow_run.display_title }}
+
+on:
+  workflow_run:
+    workflows: ["E2E"]
+    types:
+      - completed
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  upload-failure-report-to-obs:
+    name: Upload failure report to OBS
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+    steps:
+      - name: Download failure analysis report
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: failure-analysis-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ./failure-analysis-report
+
+      - name: Check failure analysis report
+        id: report-ready
+        if: always()
+        run: |
+          if [ -s ./failure-analysis-report/failure_report.md ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+            echo "Failure analysis report is ready for upload."
+          else
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::No failure analysis artifact was produced; ending OBS upload job."
+          fi
+
+      - name: Resolve pull request metadata
+        id: pr-metadata
+        if: steps.report-ready.outputs.available == 'true'
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const workflowRun = context.payload.workflow_run;
+            let pullNumber = workflowRun.pull_requests?.[0]?.number;
+
+            if (!pullNumber) {
+              const associatedPulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: workflowRun.head_sha,
+              });
+              pullNumber = associatedPulls.data.find(
+                pull => pull.head.sha === workflowRun.head_sha ||
+                  pull.merge_commit_sha === workflowRun.head_sha
+              )?.number || associatedPulls.data[0]?.number;
+            }
+
+            const resolvedNumber = pullNumber || "unknown";
+            core.setOutput("number", resolvedNumber);
+            core.info(`Resolved PR number: #${resolvedNumber}`);
+
+      - name: Install OBS SDK
+        if: steps.report-ready.outputs.available == 'true'
+        run: |
+          if ! pip install esdk-obs-python --quiet --default-timeout=30 --retries 1; then
+            echo "::warning::Failed to install OBS SDK; skipping OBS upload."
+          fi
+
+      - name: Upload failure analysis report to OBS
+        if: steps.report-ready.outputs.available == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr-metadata.outputs.number || github.event.workflow_run.pull_requests[0].number || 'unknown' }}
+        run: |
+          set +e
+          python3 - <<'PY'
+          import os
+          import re
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from urllib.parse import quote
+
+          OBS_BUCKET = "vllm-ascend"
+          OBS_PREFIX = "ci/precision-test"
+          OBS_SERVER = "https://obs.cn-north-4.myhuaweicloud.com"
+          OBS_REQUEST_TIMEOUT_SECONDS = 30
+          OBS_MAX_RETRY_COUNT = 2
+          REPORT_PATH = Path("failure-analysis-report/failure_report.md")
+          BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+
+
+          def warn(message):
+              print(f"::warning::{message}")
+
+
+          def resolve_pr_number():
+              report = REPORT_PATH.read_text(encoding="utf-8")
+              match = re.search(
+                  r"^\*\*Pull request\*\*:\s*#(\d+)\s*$",
+                  report,
+                  flags=re.MULTILINE,
+              )
+              if match:
+                  return match.group(1)
+
+              event_pr_number = os.environ.get("PR_NUMBER", "")
+              if event_pr_number.isdigit():
+                  return event_pr_number
+
+              return None
+
+
+          def main():
+              if not REPORT_PATH.is_file() or REPORT_PATH.stat().st_size == 0:
+                  print("::notice::No failure analysis report was produced; skipping OBS upload.")
+                  return
+
+              access_key = os.environ.get("OBS_ACCESS_KEY", "")
+              secret_key = os.environ.get("OBS_SECRET_KEY", "")
+              if not access_key or not secret_key:
+                  warn("OBS failure-analysis credentials are not configured; skipping upload.")
+                  return
+
+              try:
+                  from obs import ObsClient
+              except Exception as exc:
+                  warn(f"OBS SDK is unavailable; skipping OBS upload: {exc}")
+                  return
+
+              pr_number = resolve_pr_number()
+              if not pr_number:
+                  warn("Unable to resolve the pull request number; skipping OBS upload.")
+                  return
+
+              now = datetime.now(BEIJING_TIMEZONE)
+              report_date = now.strftime("%Y-%m-%d")
+              timestamp = now.strftime("%Y%m%dT%H%M%S%z")
+              report_name = f"PR-{pr_number}_{timestamp}.md"
+              obs_key = f"{OBS_PREFIX}/{report_date}/{report_name}"
+              download_url = (
+                  f"https://{OBS_BUCKET}.obs.cn-north-4.myhuaweicloud.com/"
+                  f"{quote(obs_key, safe='/')}"
+              )
+
+              client = ObsClient(
+                  access_key_id=access_key,
+                  secret_access_key=secret_key,
+                  server=OBS_SERVER,
+                  timeout=OBS_REQUEST_TIMEOUT_SECONDS,
+                  max_retry_count=OBS_MAX_RETRY_COUNT,
+              )
+              try:
+                  try:
+                      response = client.putFile(
+                          OBS_BUCKET,
+                          obs_key,
+                          str(REPORT_PATH),
+                      )
+                  except Exception as exc:
+                      warn(
+                          f"OBS upload failed or timed out after "
+                          f"{OBS_REQUEST_TIMEOUT_SECONDS}s: {exc}"
+                      )
+                      return
+
+                  if response.status >= 300:
+                      warn(
+                          f"Failed to upload {obs_key}: status={response.status}, "
+                          f"request_id={response.requestId}, "
+                          f"code={response.errorCode}, message={response.errorMessage}"
+                      )
+                      return
+
+                  print(
+                      f"Uploaded: {REPORT_PATH} -> "
+                      f"obs://{OBS_BUCKET}/{obs_key}"
+                  )
+                  print(f"OBS request ID: {response.requestId}")
+                  print(f"Download URL: {download_url}")
+              finally:
+                  try:
+                      client.close()
+                  except Exception as exc:
+                      warn(f"Failed to close OBS client: {exc}")
+
+              summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary_path:
+                  with open(summary_path, "a", encoding="utf-8") as summary:
+                      summary.write("## Failure analysis OBS upload\n\n")
+                      summary.write(f"- Report: {report_name}\n")
+                      summary.write(f"- Object: `obs://{OBS_BUCKET}/{obs_key}`\n")
+                      summary.write(f"- Download: [Open report]({download_url})\n")
+
+          try:
+              main()
+          except Exception as exc:
+              warn(f"Unexpected failure while uploading the report: {exc}")
+          PY
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::Failure report upload exited with status $status; ignoring."
+          fi
+          exit 0
