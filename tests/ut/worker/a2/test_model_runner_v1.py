@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
@@ -17,6 +19,39 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestSyncMetadataAcrossDP(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.is_moe_model", return_value=True)
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group", return_value=True)
+    @patch("vllm_ascend.worker.model_runner_v1.get_dp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce")
+    def test_syncs_graph_mode_when_mc2_skips_token_sync(
+        self,
+        mock_all_reduce,
+        mock_get_dp_group,
+        _mock_should_skip,
+        _mock_is_moe,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 2
+        runner.dp_rank = 0
+        runner.vllm_config = MagicMock()
+        runner.use_aclgraph = True
+        mock_get_dp_group.return_value.cpu_group = "cpu_group"
+        mock_all_reduce.side_effect = lambda tensor, **_: tensor.fill_(CUDAGraphMode.NONE.value)
+
+        num_tokens, tokens_across_dp, graph_mode = runner._sync_metadata_across_dp(
+            num_tokens=8,
+            cudagraph_mode=CUDAGraphMode.FULL,
+        )
+
+        self.assertEqual(num_tokens, 8)
+        torch.testing.assert_close(tokens_across_dp, torch.tensor([8, 8], dtype=torch.int32))
+        self.assertEqual(graph_mode, CUDAGraphMode.NONE)
+        mock_all_reduce.assert_called_once()
+        self.assertEqual(mock_all_reduce.call_args.kwargs["op"], dist.ReduceOp.MIN)
+        self.assertEqual(mock_all_reduce.call_args.kwargs["group"], "cpu_group")
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
