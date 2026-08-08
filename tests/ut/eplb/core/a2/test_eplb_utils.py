@@ -101,6 +101,23 @@ class TestAscendConfig(unittest.TestCase):
         self.assertTrue(torch.equal(rotated_tail_dp0, torch.tensor([3, 4], dtype=torch.int32)))
         self.assertTrue(torch.equal(rotated_tail_dp1, torch.tensor([0, 5], dtype=torch.int32)))
 
+    def test_generate_log2phy_map_selects_replicas_from_tensor(self):
+        global_expert_map = torch.tensor(
+            [
+                [0, 1, -1, -1],
+                [0, -1, 1, -1],
+                [-1, 0, -1, 1],
+                [-1, -1, 0, 1],
+            ],
+            dtype=torch.int32,
+        )
+
+        fallback = generate_log2phy_map(global_expert_map, ep_rank=1)
+        tp_rotated = generate_log2phy_map(global_expert_map, ep_rank=3, tp_size=2)
+
+        self.assertTrue(torch.equal(fallback, torch.tensor([2, 4, 6, 7], dtype=torch.int32)))
+        self.assertTrue(torch.equal(tp_rotated, torch.tensor([0, 4, 3, 7], dtype=torch.int32)))
+
     def test_init_eplb_config_without_eplb(self):
         self.vllm_config.additional_config = {"refresh": True}
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
