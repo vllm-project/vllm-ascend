@@ -177,7 +177,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
-    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     def test_process_weights_after_loading(self, mock_maybe_trans_nz, mock_get_ascend_config):
         mock_maybe_trans_nz.side_effect = identity
         mock_get_ascend_config.return_value.enable_fused_mc2 = 0
@@ -200,7 +200,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
-    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     def test_process_weights_after_loading_compressed_tensors(self, mock_maybe_trans_nz, mock_get_ascend_config):
         mock_maybe_trans_nz.side_effect = identity
         mock_get_ascend_config.return_value.enable_fused_mc2 = 0
