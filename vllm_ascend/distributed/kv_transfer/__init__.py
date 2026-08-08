@@ -19,6 +19,44 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 
 def register_connector():
+    # Override vLLM KV offloading specs with Ascend NPU handlers. The
+    # scheduler-side managers stay upstream; only worker-side transfers use
+    # torch.npu streams and the Ascend batched memcpy op.
+    try:
+        from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+    except ImportError:
+        pass
+    else:
+        for name, class_name in (
+            ("CPUOffloadingSpec", "NPUOffloadingSpec"),
+            ("NPUOffloadingSpec", "NPUOffloadingSpec"),
+            ("TieringOffloadingSpec", "NPUTieringOffloadingSpec"),
+            ("NPUTieringOffloadingSpec", "NPUTieringOffloadingSpec"),
+        ):
+            OffloadingSpecFactory._registry.pop(name, None)
+            OffloadingSpecFactory.register_spec(
+                name,
+                "vllm_ascend.kv_offload.npu",
+                class_name,
+            )
+
+    # Override the upstream filesystem secondary tier ("fs_python"). The
+    # upstream tier opens block files with O_DIRECT, whose alignment
+    # requirements the mmap-backed primary tier buffer does not generally
+    # satisfy (notably on 3FS/FUSE, surfacing as EINVAL). The Ascend tier
+    # reuses the upstream flow with buffered I/O by default.
+    try:
+        from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+    except ImportError:
+        pass
+    else:
+        SecondaryTierFactory._registry.pop("fs_python", None)
+        SecondaryTierFactory.register_tier(
+            "fs_python",
+            "vllm_ascend.kv_offload.fs_tier",
+            "AscendFileSystemTierManager",
+        )
+
     # override multi_connector as ascend_multi_connector
     if "MultiConnector" in KVConnectorFactory._registry:
         KVConnectorFactory._registry.pop("MultiConnector")
@@ -62,6 +100,14 @@ def register_connector():
         "LMCacheAscendConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
         "LMCacheConnectorV1",
+    )
+
+    if "OffloadingConnector" in KVConnectorFactory._registry:
+        KVConnectorFactory._registry.pop("OffloadingConnector")
+    KVConnectorFactory.register_connector(
+        "OffloadingConnector",
+        "vllm_ascend.distributed.kv_transfer.offloading_connector",
+        "NPUOffloadingConnector",
     )
 
     # Override the upstream SimpleCPUOffloadConnector with the NPU
