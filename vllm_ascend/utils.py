@@ -1053,10 +1053,7 @@ def get_cann_megamoe_buffer_params(
     dummy_token_capacity = get_cann_megamoe_dummy_token_capacity(num_experts, num_topk)
     num_max_tokens_per_rank = base_num_max_tokens_per_rank + dummy_token_capacity
     if not 1 <= num_max_tokens_per_rank <= 4096:
-        raise ValueError(
-            "CANN MegaMoe requires num_max_tokens_per_rank in [1, 4096], got "
-            f"{num_max_tokens_per_rank}."
-        )
+        raise ValueError(f"CANN MegaMoe requires num_max_tokens_per_rank in [1, 4096], got {num_max_tokens_per_rank}.")
     if ep_world_size not in {2, 4, 8, 16, 32}:
         raise ValueError(f"CANN MegaMoe only supports EP sizes 2, 4, 8, 16, and 32, got {ep_world_size}.")
     if num_experts % ep_world_size != 0:
@@ -1093,9 +1090,7 @@ def calculate_cann_megamoe_hccl_buffer_size() -> int:
     ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
     tp_size = parallel_config.tensor_parallel_size
     num_experts = int(model_config.get_num_experts())
-    num_topk = int(
-        getattr(hf_text_config, "num_experts_per_tok", getattr(hf_text_config, "top_k_experts", 0))
-    )
+    num_topk = int(getattr(hf_text_config, "num_experts_per_tok", getattr(hf_text_config, "top_k_experts", 0)))
     hidden = int(getattr(hf_text_config, "hidden_size", None) or model_config.get_hidden_size())
     num_max_tokens_per_rank, _, dummy_token_capacity, max_recv_token_num = get_cann_megamoe_buffer_params(
         math.ceil(vllm_config.scheduler_config.max_num_batched_tokens / tp_size),
