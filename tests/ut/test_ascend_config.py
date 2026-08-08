@@ -27,6 +27,7 @@ from vllm_ascend.ascend_config import (
     AscendConfig,
     AscendFusionConfig,
     EplbConfig,
+    FinegrainedTPConfig,
     ProfilingChunkConfig,
     RejectionSamplerConfig,
     SchedulerConfig,
@@ -637,6 +638,10 @@ class TestSchedulerConfig(TestBase):
                 {"scheduler_config": {"profiling_chunk_config": {"need_timng": False}}}
             )
 
+    def test_unknown_batch_job_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SchedulerConfig.from_additional_config({"scheduler_config": {"batch_job_sched_config": {"max_job": 2}}})
+
     def test_scheduler_switches_get_bool_validation(self):
         config = SchedulerConfig.from_additional_config(
             {
@@ -752,6 +757,10 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             RejectionSamplerConfig(posterior_threshold=1.5)
 
+    def test_finegrained_tp_config_rejects_negative_size(self):
+        with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
+            FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
+
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
@@ -817,6 +826,15 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(config.enable_transpose_kv_cache_by_block)
         self.assertEqual(config.weight_nz_mode, 2)
         self.assertFalse(enable_sp(vc))
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_weight_nz_mode_rejects_unknown_mode(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"weight_nz_mode": 3}
+
+        with self.assertRaisesRegex(ValueError, "weight_nz_mode must be one of 0, 1, or 2"):
+            init_ascend_config(vc)
 
     @skip("Deprecated env compatibility will be removed; additional_config is the supported path.")
     @_clean_up
@@ -910,6 +928,36 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         config = init_ascend_config(vc)
 
         self.assertTrue(config.enable_sparse_sfa_c8)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_c8_reshape_optim_is_derived_on_factory_path(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.additional_config = {
+            "enable_sparse_li_c8": "true",
+            "c8_enable_reshape_optim": "true",
+        }
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.c8_enable_reshape_optim)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_rejection_sampler_config_survives_factory(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {
+            "rejection_sampler_config": {
+                "enable_block_verify": "false",
+                "posterior_threshold": "0.8",
+            }
+        }
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.rejection_sampler_config.enable_block_verify)
+        self.assertEqual(config.rejection_sampler_config.posterior_threshold, 0.8)
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
