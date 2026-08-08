@@ -384,7 +384,7 @@ class TestRunningBlockReserver(TestBase):
     def setUp(self):
         super().setUp()
         self.config = BatchJobSchedConfig(
-            {
+            **{
                 "reserve_margin_blocks": 2,
                 "reserve_max_blocks": 8,
             }
@@ -507,7 +507,7 @@ class TestBatchJobAwareRequestQueue(TestBase):
     def setUp(self):
         super().setUp()
         self.config = BatchJobSchedConfig(
-            {
+            **{
                 "short_decode_token_threshold": 32,
                 "low_available_tokens_threshold": 4096,
                 "max_jobs": 20,

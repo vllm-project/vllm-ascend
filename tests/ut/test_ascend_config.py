@@ -735,6 +735,20 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_converged_bypass_fields_are_validated(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {
+            "enable_dsa_cp": "false",
+            "draft_window_size": "4096",
+        }
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.enable_dsa_cp)
+        self.assertEqual(config.draft_window_size, 4096)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_unknown_top_level_key_is_rejected(self, mock_fix):
         # A typo'd top-level key (not a declared field, not a bypass key) flows
         # into kwargs and extra="forbid" catches it. Previously the factory

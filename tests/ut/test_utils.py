@@ -185,6 +185,19 @@ class TestUtils(TestBase):
 
         mock_enable_sp.assert_not_called()
 
+    def test_enable_dsa_cp_reads_validated_ascend_config(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.model_config.hf_text_config.index_topk = 2048
+        mock_vllm_config.additional_config = {"enable_dsa_cp": True}
+        ascend_config = mock.MagicMock(enable_dsa_cp=False)
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp())
+
     def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
