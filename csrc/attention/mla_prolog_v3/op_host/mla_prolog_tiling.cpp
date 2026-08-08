@@ -364,8 +364,9 @@ ge::graphStatus MlaPrologTiling::SetAttrInfo()
         kcScale_ = *(context_->kcScale);
     }
 
+    // rope 开关对 MlaPrologV3 在 A2/A3(arch22) 与 A5(arch35) 均生效（由 ropeSin/ropeCos null 推断）
     enableRope_ = true;
-    if (GetCurNpuArch() == NpuArch::DAV_3510 && context_->doRope != nullptr) {
+    if (std::strncmp(context_->opType, V3_OP_NAME, OP_NAME_LEN) == 0 && context_->doRope != nullptr) {
         enableRope_ = *(context_->doRope);
     }
     return ge::GRAPH_SUCCESS;

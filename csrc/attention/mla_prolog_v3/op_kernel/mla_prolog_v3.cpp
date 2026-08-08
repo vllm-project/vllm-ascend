@@ -16,12 +16,11 @@
 #define MLA_PROLOG_VERSION 3
 #define GLOBAL_OVERFLOW_MODE_CTRL 60
 
-#if __has_include("arch35/kernel_mla_prolog_split_n.h")
+#if __CCE_AICORE__ == 310
 #include "arch35/kernel_mla_prolog_split_n.h"
 #include "arch35/kernel_mla_prolog_split_m.h"
 #else
-#include "arch35/kernel_mla_prolog_split_n.h"
-#include "arch35/kernel_mla_prolog_split_m.h"
+#include "arch22/kernel_mla_prolog_split_n.h"
 #endif
 using namespace MlaProlog;
 
