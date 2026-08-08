@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
@@ -9,10 +11,117 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+
+
+@dataclass(frozen=True)
+class AscendMLAMambaGQALayout:
+    """Four contiguous planes inside each existing shared raw tensor."""
+
+    block_size: int
+    conv_page_size_bytes: int
+    recurrent_page_size_bytes: int
+    shared_k_page_size_bytes: int
+    gqa_v_page_size_bytes: int
+
+    @property
+    def mature_page_size_bytes(self) -> int:
+        return self.conv_page_size_bytes + self.recurrent_page_size_bytes + self.shared_k_page_size_bytes
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.mature_page_size_bytes + self.gqa_v_page_size_bytes
+
+
+def get_mla_mamba_gqa_layout(
+    kv_cache_specs: Iterable[KVCacheSpec],
+) -> AscendMLAMambaGQALayout | None:
+    """Recognize the MLA/Mamba/GQA geometry that needs one appended V plane.
+
+    The existing Ascend shared tensor already contains contiguous conv,
+    recurrent/MLA-NoPE and MLA-RoPE planes. When compact GQA K and V each
+    match the RoPE plane, K can reuse that plane and only V needs to extend
+    the existing raw page. No new pool, block table or block-ID mapping is
+    required.
+    """
+
+    specs = list(kv_cache_specs)
+    mla_specs = [spec for spec in specs if isinstance(spec, AscendMLAAttentionSpec)]
+    mamba_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
+    gqa_specs = [
+        spec
+        for spec in specs
+        if isinstance(spec, FullAttentionSpec)
+        and not isinstance(spec, MLAAttentionSpec)
+        and spec.page_size_padded is not None
+        and spec.page_size_bytes > spec.unpadded_page_size_bytes
+    ]
+    if (
+        not mla_specs
+        or not mamba_specs
+        or not gqa_specs
+        or len(specs) != len(mla_specs) + len(mamba_specs) + len(gqa_specs)
+        or any(spec.mamba_cache_mode != "align" for spec in mamba_specs)
+    ):
+        return None
+
+    block_sizes = {spec.block_size for spec in (*mla_specs, *mamba_specs, *gqa_specs)}
+    if len(block_sizes) != 1:
+        return None
+    block_size = next(iter(block_sizes))
+
+    mamba_layouts = {
+        tuple(math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True))
+        for spec in mamba_specs
+    }
+    if len(mamba_layouts) != 1:
+        return None
+    state_sizes = next(iter(mamba_layouts))
+    if len(state_sizes) != 2:
+        return None
+    conv_page_size, recurrent_page_size = state_sizes
+
+    mla_page_sizes = {spec.unpadded_page_size_bytes for spec in mla_specs}
+    if len(mla_page_sizes) != 1:
+        return None
+    mla_page_size = next(iter(mla_page_sizes))
+    shared_k_page_size = mla_page_size - recurrent_page_size
+    if shared_k_page_size <= 0:
+        return None
+
+    gqa_layouts = {
+        (
+            spec.block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype),
+            spec.block_size * spec.num_kv_heads * (spec.head_size_v or spec.head_size) * get_dtype_size(spec.dtype),
+        )
+        for spec in gqa_specs
+    }
+    if gqa_layouts != {(shared_k_page_size, shared_k_page_size)}:
+        return None
+
+    layout = AscendMLAMambaGQALayout(
+        block_size=block_size,
+        conv_page_size_bytes=conv_page_size,
+        recurrent_page_size_bytes=recurrent_page_size,
+        shared_k_page_size_bytes=shared_k_page_size,
+        gqa_v_page_size_bytes=shared_k_page_size,
+    )
+    current_page_sizes = {spec.page_size_bytes for spec in (*mla_specs, *mamba_specs, *gqa_specs)}
+    if current_page_sizes not in (
+        {layout.mature_page_size_bytes},
+        {layout.page_size_bytes},
+    ):
+        return None
+    return layout
 
 
 @dataclass(frozen=True, kw_only=True)

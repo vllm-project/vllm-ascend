@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -93,6 +94,137 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=False)
+    def test_contiguous_hybrid_uses_one_raw_tensor_with_four_planes(
+        self,
+        _mock_enable_fa_quant,
+    ):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        num_blocks = 2
+        page_size = 537_600
+        mla_spec = AscendMLAAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+            cache_dtype_str="auto",
+        )
+        mamba_spec = MambaSpec(
+            block_size=384,
+            shapes=((23_040,), (98_304,)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=page_size,
+            mamba_cache_mode="align",
+        )
+        gqa_spec = FullAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=page_size * num_blocks,
+                    shared_by=["mla_attn", "mamba", "gqa_attn"],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["mla_attn"],
+                    kv_cache_spec=mla_spec,
+                ),
+                KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+                KVCacheGroupSpec(
+                    layer_names=["gqa_attn"],
+                    kv_cache_spec=gqa_spec,
+                ),
+            ],
+        )
+
+        mla_backend = MagicMock()
+        mla_backend.get_supported_kernel_block_sizes.return_value = [128]
+        mla_backend.get_kv_cache_shape.side_effect = lambda blocks, block_size, num_kv_heads, head_size: (
+            blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        gqa_backend = MagicMock()
+        gqa_backend.get_supported_kernel_block_sizes.return_value = [128]
+        gqa_backend.get_kv_cache_shape.side_effect = lambda blocks, block_size, num_kv_heads, head_size: (
+            2,
+            blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=mla_spec,
+                backend=mla_backend,
+                layer_names=["mla_attn"],
+            ),
+            SimpleNamespace(
+                kv_cache_spec=mamba_spec,
+                backend=None,
+                layer_names=["mamba"],
+            ),
+            SimpleNamespace(
+                kv_cache_spec=gqa_spec,
+                backend=gqa_backend,
+                layer_names=["gqa_attn"],
+            ),
+        ]
+        runner._get_attention_kv_cache_dims = (
+            lambda _layer_name, cache_spec: (512, 64)
+            if isinstance(cache_spec, AscendMLAAttentionSpec)
+            else (cache_spec.head_size, cache_spec.head_size_v)
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_tensor = raw_caches["mla_attn"]
+        self.assertIs(raw_tensor, raw_caches["mamba"])
+        self.assertIs(raw_tensor, raw_caches["gqa_attn"])
+        self.assertEqual(raw_tensor.numel(), page_size * num_blocks)
+        self.assertTrue(runner.hybrid_with_attn_and_mamba)
+
+        kv_caches = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+        )
+        conv_cache, recurrent_cache = kv_caches["mamba"]
+        mla_nope_cache, mla_rope_cache = kv_caches["mla_attn"]
+        gqa_k_cache, gqa_v_cache = kv_caches["gqa_attn"]
+
+        base_ptr = raw_tensor.data_ptr()
+        p0 = 46_080 * num_blocks
+        p1 = 393_216 * num_blocks
+        p2 = 49_152 * num_blocks
+        self.assertEqual(conv_cache.data_ptr(), base_ptr)
+        self.assertEqual(recurrent_cache.data_ptr(), base_ptr + p0)
+        self.assertEqual(mla_nope_cache.data_ptr(), base_ptr + p0)
+        self.assertEqual(mla_rope_cache.data_ptr(), base_ptr + p0 + p1)
+        self.assertEqual(gqa_k_cache.data_ptr(), base_ptr + p0 + p1)
+        self.assertEqual(gqa_v_cache.data_ptr(), base_ptr + p0 + p1 + p2)
+        self.assertTrue(
+            all(
+                cache.is_contiguous()
+                for cache in (
+                    conv_cache,
+                    recurrent_cache,
+                    mla_nope_cache,
+                    mla_rope_cache,
+                    gqa_k_cache,
+                    gqa_v_cache,
+                )
+            )
+        )
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
@@ -14,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -21,12 +23,17 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    get_mla_mamba_gqa_layout,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_get_kv_cache_groups_uniform_page_size,
     _ascend_resolve_kv_cache_block_sizes,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
@@ -110,6 +117,174 @@ def _make_vllm_config(
             decode_context_parallel_size=dcp,
         ),
     )
+
+
+def _make_four_plane_specs(scale: int) -> dict[str, KVCacheSpec]:
+    parent_page_size = 488_448 * scale
+    mla_spec = AscendMLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=scale,
+        head_size=576,
+        dtype=torch.bfloat16,
+        page_size_padded=parent_page_size,
+        cache_dtype_str="auto",
+    )
+    mamba_spec = MambaSpec(
+        block_size=384,
+        shapes=((23_040 * scale,), (98_304 * scale,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=parent_page_size,
+        mamba_cache_mode="align",
+    )
+    gqa_spec = FullAttentionSpec(
+        block_size=384,
+        num_kv_heads=scale,
+        head_size=64,
+        dtype=torch.bfloat16,
+        page_size_padded=parent_page_size,
+    )
+    return {
+        **{f"mla.{idx}": mla_spec for idx in range(24)},
+        **{f"mamba.{idx}": mamba_spec for idx in range(69)},
+        **{f"gqa.{idx}": gqa_spec for idx in range(5)},
+    }
+
+
+def _make_four_plane_groups(scale: int) -> list[KVCacheGroupSpec]:
+    return _ascend_get_kv_cache_groups_uniform_page_size(_make_four_plane_specs(scale))
+
+
+def _assert_four_plane_layout_rejected(specs: dict[str, KVCacheSpec]) -> None:
+    original_page_sizes = {name: spec.page_size_bytes for name, spec in specs.items()}
+
+    assert get_mla_mamba_gqa_layout(specs.values()) is None
+    _ascend_get_kv_cache_groups_uniform_page_size(specs)
+
+    assert {name: spec.page_size_bytes for name, spec in specs.items()} == original_page_sizes
+
+
+@pytest.mark.parametrize("scale", [1, 2], ids=["tp16", "tp8"])
+def test_contiguous_hybrid_keeps_upstream_group_topology(scale: int) -> None:
+    groups = _make_four_plane_groups(scale)
+
+    assert len(groups) == 20
+    assert max(len(group.layer_names) for group in groups) == 5
+    assert sum(isinstance(group.kv_cache_spec, MLAAttentionSpec) for group in groups) == 5
+    assert sum(isinstance(group.kv_cache_spec, MambaSpec) for group in groups) == 14
+    assert (
+        sum(
+            isinstance(group.kv_cache_spec, FullAttentionSpec) and not isinstance(group.kv_cache_spec, MLAAttentionSpec)
+            for group in groups
+        )
+        == 1
+    )
+    assert [group.kv_cache_spec.block_size for group in groups] == [384] * 20
+
+
+@pytest.mark.parametrize(
+    ("scale", "expected_planes"),
+    [
+        pytest.param(1, (46_080, 393_216, 49_152, 49_152), id="tp16"),
+        pytest.param(2, (92_160, 786_432, 98_304, 98_304), id="tp8"),
+    ],
+)
+def test_contiguous_hybrid_layout_appends_only_gqa_v(
+    scale: int,
+    expected_planes: tuple[int, int, int, int],
+) -> None:
+    specs = _make_four_plane_specs(scale)
+    layout = get_mla_mamba_gqa_layout(specs.values())
+
+    assert layout is not None
+    p0, p1, p2, p3 = expected_planes
+    assert layout.conv_page_size_bytes == p0
+    assert layout.recurrent_page_size_bytes == p1
+    assert layout.shared_k_page_size_bytes == p2
+    assert layout.gqa_v_page_size_bytes == p3
+    assert layout.mature_page_size_bytes == p0 + p1 + p2
+    assert layout.page_size_bytes == p0 + p1 + p2 + p3
+
+
+@pytest.mark.parametrize("scale", [1, 2], ids=["tp16", "tp8"])
+def test_contiguous_hybrid_keeps_five_shared_raw_tensors(scale: int) -> None:
+    groups = _make_four_plane_groups(scale)
+    layout = get_mla_mamba_gqa_layout(group.kv_cache_spec for group in groups)
+    assert layout is not None
+    num_blocks = 3
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(num_gpu_blocks_override=None),
+        kv_transfer_config=None,
+    )
+
+    kv_cache_config = get_kv_cache_config_from_groups(
+        vllm_config,
+        groups,
+        available_memory=5 * layout.page_size_bytes * num_blocks,
+    )
+
+    assert kv_cache_config.num_blocks == num_blocks
+    assert len(kv_cache_config.kv_cache_tensors) == 5
+    assert [tensor.size for tensor in kv_cache_config.kv_cache_tensors] == [layout.page_size_bytes * num_blocks] * 5
+    assert all(tensor.offset == 0 and tensor.block_stride == 0 for tensor in kv_cache_config.kv_cache_tensors)
+    shared_layers = [layer_name for tensor in kv_cache_config.kv_cache_tensors for layer_name in tensor.shared_by]
+    assert len(shared_layers) == len(set(shared_layers)) == 98
+
+
+def test_contiguous_hybrid_layout_ignores_mismatched_compact_planes() -> None:
+    specs = _make_four_plane_specs(1)
+    mismatched_gqa_spec = FullAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.bfloat16,
+        page_size_padded=488_448,
+    )
+    for idx in range(5):
+        specs[f"gqa.{idx}"] = mismatched_gqa_spec
+
+    assert get_mla_mamba_gqa_layout(specs.values()) is None
+    groups = _ascend_get_kv_cache_groups_uniform_page_size(specs)
+    assert len(groups) == 20
+    assert {group.kv_cache_spec.page_size_bytes for group in groups} == {488_448}
+
+
+def test_contiguous_hybrid_layout_rejects_unrelated_full_attention_leftover() -> None:
+    specs = _make_four_plane_specs(1)
+    specs["unrelated.attn"] = FullAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+
+    _assert_four_plane_layout_rejected(specs)
+
+
+def test_contiguous_hybrid_layout_rejects_generic_mla_spec() -> None:
+    specs = _make_four_plane_specs(1)
+    specs["mla.0"] = MLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        page_size_padded=488_448,
+        cache_dtype_str="auto",
+    )
+
+    _assert_four_plane_layout_rejected(specs)
+
+
+def test_contiguous_hybrid_layout_rejects_non_align_mamba() -> None:
+    specs = _make_four_plane_specs(1)
+    specs["mamba.0"] = MambaSpec(
+        block_size=384,
+        shapes=((23_040,), (98_304,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=488_448,
+        mamba_cache_mode="none",
+    )
+
+    _assert_four_plane_layout_rejected(specs)
 
 
 def _make_coordinator_for_effective_block_size(
