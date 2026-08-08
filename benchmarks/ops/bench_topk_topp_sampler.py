@@ -39,11 +39,7 @@ logging.getLogger("vllm_ascend.sample.sampler").setLevel(logging.WARNING)
 TOP_K_VALUES = [1, None, 128000, 4096]
 TOP_P_VALUES = [None, 1, 0.95, 0.5]
 
-CASES = [
-    {"top_k": k, "top_p": p}
-    for k in TOP_K_VALUES
-    for p in TOP_P_VALUES
-]
+CASES = [{"top_k": k, "top_p": p} for k in TOP_K_VALUES for p in TOP_P_VALUES]
 
 
 def _npu_top_k_top_p_direct(logits, k, p):
@@ -57,8 +53,7 @@ def _npu_top_k_top_p_direct(logits, k, p):
     return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
 
 
-def make_inputs(batch: int, vocab: int, k_val, p_val,
-                device: str, dtype: torch.dtype):
+def make_inputs(batch: int, vocab: int, k_val, p_val, device: str, dtype: torch.dtype):
     """Create logits, k tensor, p tensor for a given scenario."""
     logits = torch.randn(batch, vocab, device=device, dtype=dtype)
 
@@ -130,10 +125,8 @@ def main():
     parser.add_argument("--vocab", type=int, default=152000)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument("--dtype", type=str, default="float32",
-                        choices=["float32", "float16", "bfloat16"])
-    parser.add_argument("--no-plot", action="store_true",
-                        help="Skip visualization")
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--no-plot", action="store_true", help="Skip visualization")
     args = parser.parse_args()
 
     device = "npu"
@@ -145,16 +138,16 @@ def main():
     all_results = []
 
     # Header
-    print(f"\n{'='*72}")
-    print(f"A/B Benchmark: pytorch(NPU) vs npu_top_k_top_p(NPU direct)")
+    print(f"\n{'=' * 72}")
+    print("A/B Benchmark: pytorch(NPU) vs npu_top_k_top_p(NPU direct)")
     print(f"  batch={B}, vocab={V}, dtype={dtype}, device={device}")
     print(f"  warmup={args.warmup}, iters={args.iters}")
     print(f"  cases: {len(CASES)} (cross-product of TOP_K_VALUES x TOP_P_VALUES)")
-    print(f"{'='*72}")
+    print(f"{'=' * 72}")
 
     # Summary table (median only)
     print(f"\n{'Case':<22} {'A:pt_npu':>11} {'B:npu':>10} {'ratio':>8} {'best':>12}")
-    print(f"{'-'*66}")
+    print(f"{'-' * 66}")
 
     for case in CASES:
         k_val = case["top_k"]
@@ -163,10 +156,8 @@ def main():
 
         logits, k, p = make_inputs(B, V, k_val, p_val, device, dtype)
 
-        s_pt = bench_npu(_apply_top_k_top_p_pytorch, logits, k, p,
-                         args.warmup, args.iters)
-        s_npu = bench_npu(_npu_top_k_top_p_direct, logits, k, p,
-                          args.warmup, args.iters)
+        s_pt = bench_npu(_apply_top_k_top_p_pytorch, logits, k, p, args.warmup, args.iters)
+        s_npu = bench_npu(_npu_top_k_top_p_direct, logits, k, p, args.warmup, args.iters)
 
         medians = {}
         if s_pt is not None:
@@ -187,11 +178,12 @@ def main():
         all_results.append((name, s_pt, s_npu))
 
     # --- Mixed batch: per-request varying k/p (realistic production scenario) ---
-    print(f"\n{'='*72}")
+    print(f"\n{'=' * 72}")
     print("Mixed batch (per-request k/p all different, simulating real traffic):")
-    print(f"{'='*72}")
+    print(f"{'=' * 72}")
 
     import random
+
     random.seed(42)
 
     def make_mixed_inputs(batch, vocab, device, dtype, k_list, p_list):
@@ -206,15 +198,20 @@ def main():
     for i in range(B):
         choice = i % 5
         if choice == 0:
-            k_mix_1.append(1);       p_mix_1.append(1.0)
+            k_mix_1.append(1)
+            p_mix_1.append(1.0)
         elif choice == 1:
-            k_mix_1.append(4096);    p_mix_1.append(0.95)
+            k_mix_1.append(4096)
+            p_mix_1.append(0.95)
         elif choice == 2:
-            k_mix_1.append(V);       p_mix_1.append(1.0)
+            k_mix_1.append(V)
+            p_mix_1.append(1.0)
         elif choice == 3:
-            k_mix_1.append(V);       p_mix_1.append(0.5)
+            k_mix_1.append(V)
+            p_mix_1.append(0.5)
         else:
-            k_mix_1.append(128000);  p_mix_1.append(1.0)
+            k_mix_1.append(128000)
+            p_mix_1.append(1.0)
 
     # Pattern 2: random mix
     k_choices = [1, 10, 50, 4096, 128000, V]
@@ -227,9 +224,11 @@ def main():
     p_mix_3 = []
     for i in range(B):
         if i < B // 2:
-            k_mix_3.append(1);     p_mix_3.append(1.0)
+            k_mix_3.append(1)
+            p_mix_3.append(1.0)
         else:
-            k_mix_3.append(V);     p_mix_3.append(0.95)
+            k_mix_3.append(V)
+            p_mix_3.append(0.95)
 
     # Pattern 4: most requests have small k (<4096), one unrestricted, all p=0.95
     k_mix_4 = []
@@ -243,30 +242,28 @@ def main():
             k_mix_4.append(random.choice(small_k_pool))
 
     mixed_patterns = [
-        ("typical_prod",  k_mix_1, p_mix_1),
-        ("random_mix",    k_mix_2, p_mix_2),
+        ("typical_prod", k_mix_1, p_mix_1),
+        ("random_mix", k_mix_2, p_mix_2),
         ("half_k1_half_unrestricted", k_mix_3, p_mix_3),
         ("mostly_small_k_one_unrestricted", k_mix_4, p_mix_4),
     ]
 
     print(f"\n{'Pattern':<30} {'A:pt_npu':>11} {'B:npu':>10} {'ratio':>8} {'best':>12}")
-    print(f"{'-'*74}")
+    print(f"{'-' * 74}")
 
     for name, k_list, p_list in mixed_patterns:
         logits, k, p = make_mixed_inputs(B, V, device, dtype, k_list, p_list)
 
-        k_str = ",".join(str(x) for x in k_list[:min(8, B)])
-        p_str = ",".join(str(x) for x in p_list[:min(8, B)])
+        k_str = ",".join(str(x) for x in k_list[: min(8, B)])
+        p_str = ",".join(str(x) for x in p_list[: min(8, B)])
         if B > 8:
             k_str += ",..."
             p_str += ",..."
         print(f"  k=[{k_str}]")
         print(f"  p=[{p_str}]")
 
-        s_pt = bench_npu(_apply_top_k_top_p_pytorch, logits, k, p,
-                         args.warmup, args.iters)
-        s_npu = bench_npu(_npu_top_k_top_p_direct, logits, k, p,
-                          args.warmup, args.iters)
+        s_pt = bench_npu(_apply_top_k_top_p_pytorch, logits, k, p, args.warmup, args.iters)
+        s_npu = bench_npu(_npu_top_k_top_p_direct, logits, k, p, args.warmup, args.iters)
 
         medians = {}
         if s_pt is not None:
@@ -286,12 +283,12 @@ def main():
 
         all_results.append((name, s_pt, s_npu))
 
-    print(f"{'='*72}\n")
+    print(f"{'=' * 72}\n")
 
     # --- Correctness check ---
-    print(f"{'='*72}")
+    print(f"{'=' * 72}")
     print("Correctness check (top-k only, k=10):")
-    print(f"{'='*72}")
+    print(f"{'=' * 72}")
     logits, k, p = make_inputs(B, V, 10, None, device, dtype)
     out_pt = _apply_top_k_top_p_pytorch(logits.clone(), k, p)
     out_npu = _npu_top_k_top_p_direct(logits.clone(), k, p)
@@ -308,6 +305,7 @@ def main():
     if do_plot:
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
             import numpy as np
@@ -329,10 +327,8 @@ def main():
             x = np.arange(len(names))
             width = 0.35
 
-            ax.bar(x - width / 2, pt_vals, width, label="A: pytorch_npu",
-                   color="#4C72B0", alpha=0.85)
-            ax.bar(x + width / 2, npu_vals, width, label="B: npu_direct",
-                   color="#55A868", alpha=0.85)
+            ax.bar(x - width / 2, pt_vals, width, label="A: pytorch_npu", color="#4C72B0", alpha=0.85)
+            ax.bar(x + width / 2, npu_vals, width, label="B: npu_direct", color="#55A868", alpha=0.85)
 
             ax.set_ylabel("Median time (ms)")
             ax.set_title(title)
@@ -346,9 +342,8 @@ def main():
         plot_group(ax2, mixed_results, "Mixed batch patterns")
 
         fig.suptitle(
-            f"A/B Benchmark  (batch={B}, vocab={V}, "
-            f"dtype={dtype}, iters={args.iters})",
-            fontsize=14, fontweight="bold")
+            f"A/B Benchmark  (batch={B}, vocab={V}, dtype={dtype}, iters={args.iters})", fontsize=14, fontweight="bold"
+        )
         fig.tight_layout(rect=[0, 0, 1, 0.95])
 
         out_file = "bench_topk_topp_sampler.png"

@@ -1,4 +1,4 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -7,7 +7,6 @@ from vllm_ascend.sample.sampler import (
     AscendSampler,
     AscendTopKTopPSampler,
     _apply_top_k_top_p_torch_npu,
-    _apply_top_k_top_p_pytorch,
 )
 
 
@@ -65,10 +64,12 @@ class TestApplyTopKTopPTorchNpuNonReduce(TestBase):
     def test_mixed_k_batch(self, mock_config):
         """Mixed k values in batch: each row filtered by its own k."""
         mock_config.return_value.enable_reduce_sample = False
-        logits = torch.tensor([
-            [1.0, 3.0, 2.0, 5.0, 4.0],
-            [10.0, 50.0, 30.0, 20.0, 40.0],
-        ])
+        logits = torch.tensor(
+            [
+                [1.0, 3.0, 2.0, 5.0, 4.0],
+                [10.0, 50.0, 30.0, 20.0, 40.0],
+            ]
+        )
         k = torch.tensor([2, 3])
         result = _apply_top_k_top_p_torch_npu(logits, k, None)
 
@@ -123,17 +124,13 @@ class TestApplyTopKTopPTorchNpuReduceSample(TestBase):
         tp_group = MagicMock()
         tp_group.world_size = world_size
         tp_group.rank_in_group = rank
-        tp_group.all_gather = MagicMock(
-            side_effect=lambda x, dim=-1: x
-        )
+        tp_group.all_gather = MagicMock(side_effect=lambda x, dim=-1: x)
         return tp_group
 
     @patch("vllm_ascend.sample.sampler.get_tp_group")
     @patch("vllm_ascend.sample.sampler.get_ascend_config")
     @patch("vllm_ascend.sample.sampler.torch_npu")
-    def test_reduce_both_none_skips_npu(
-        self, mock_torch_npu, mock_config, mock_tp_group
-    ):
+    def test_reduce_both_none_skips_npu(self, mock_torch_npu, mock_config, mock_tp_group):
         """When k=None and p=None in reduce mode, npu_top_k_top_p is skipped."""
         mock_config.return_value.enable_reduce_sample = True
         mock_tp_group.return_value = self._make_mock_tp_group()
@@ -149,15 +146,11 @@ class TestApplyTopKTopPTorchNpuReduceSample(TestBase):
     @patch("vllm_ascend.sample.sampler.get_tp_group")
     @patch("vllm_ascend.sample.sampler.get_ascend_config")
     @patch("vllm_ascend.sample.sampler.torch_npu")
-    def test_reduce_with_k_calls_npu(
-        self, mock_torch_npu, mock_config, mock_tp_group
-    ):
+    def test_reduce_with_k_calls_npu(self, mock_torch_npu, mock_config, mock_tp_group):
         """When k is provided in reduce mode, npu_top_k_top_p is called."""
         mock_config.return_value.enable_reduce_sample = True
         mock_tp_group.return_value = self._make_mock_tp_group()
-        mock_torch_npu.npu_top_k_top_p = MagicMock(
-            side_effect=lambda x, k, p: x
-        )
+        mock_torch_npu.npu_top_k_top_p = MagicMock(side_effect=lambda x, k, p: x)
 
         logits = torch.tensor([[1.0, 3.0, 2.0]])
         k = torch.tensor([2])
@@ -168,15 +161,11 @@ class TestApplyTopKTopPTorchNpuReduceSample(TestBase):
     @patch("vllm_ascend.sample.sampler.get_tp_group")
     @patch("vllm_ascend.sample.sampler.get_ascend_config")
     @patch("vllm_ascend.sample.sampler.torch_npu")
-    def test_reduce_with_p_calls_npu(
-        self, mock_torch_npu, mock_config, mock_tp_group
-    ):
+    def test_reduce_with_p_calls_npu(self, mock_torch_npu, mock_config, mock_tp_group):
         """When p is provided in reduce mode, npu_top_k_top_p is called."""
         mock_config.return_value.enable_reduce_sample = True
         mock_tp_group.return_value = self._make_mock_tp_group()
-        mock_torch_npu.npu_top_k_top_p = MagicMock(
-            side_effect=lambda x, k, p: x
-        )
+        mock_torch_npu.npu_top_k_top_p = MagicMock(side_effect=lambda x, k, p: x)
 
         logits = torch.tensor([[1.0, 3.0, 2.0]])
         p = torch.tensor([0.9])
