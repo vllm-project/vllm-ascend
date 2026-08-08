@@ -41,6 +41,63 @@ NON_FULL_CUDAGRAPH_MODES = [
 ]
 
 
+class TestMultimodalImageTokenIndex:
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "Qwen2_5_VLForConditionalGeneration",
+            "Qwen3VLForConditionalGeneration",
+            "Qwen3VLMoeForConditionalGeneration",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForConditionalGeneration",
+            "Step3p7ForConditionalGeneration",
+            "Gemma4ForConditionalGeneration",
+            "Gemma4UnifiedForConditionalGeneration",
+        ],
+    )
+    def test_models_using_image_token_id(self, model_name: str):
+        config = SimpleNamespace(image_token_id=123, image_token_index=456)
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(model_name, config)
+
+        assert image_token_index == 123
+
+    def test_pixtral_uses_vision_config_image_token_id(self):
+        config = SimpleNamespace(
+            image_token_id=123,
+            image_token_index=456,
+            vision_config=SimpleNamespace(image_token_id=789),
+        )
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "PixtralForConditionalGeneration", config
+        )
+
+        assert image_token_index == 789
+
+    def test_kimi_uses_media_placeholder_token_id(self):
+        config = SimpleNamespace(
+            image_token_id=123,
+            image_token_index=456,
+            media_placeholder_token_id=789,
+        )
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "KimiK25ForConditionalGeneration", config
+        )
+
+        assert image_token_index == 789
+
+    def test_default_uses_image_token_index(self):
+        config = SimpleNamespace(image_token_id=123, image_token_index=456)
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "OtherForConditionalGeneration", config
+        )
+
+        assert image_token_index == 456
+
+
 class TestDisablePaddedDrafterBatchWithFullGraph:
     """Guard: ``disable_padded_drafter_batch=True`` + cuda graph + any full
     cudagraph mode must raise ``NotImplementedError``.
