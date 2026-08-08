@@ -30,7 +30,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
-from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
@@ -382,10 +381,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.3: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            prefill_query_start_loc = attn_metadata.prefill_query_start_loc
+            prefill_metadata = attn_metadata.non_spec_prefill_metadata
             prefill_state_indices = attn_metadata.prefill_state_indices
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
-            assert prefill_query_start_loc is not None
+            assert prefill_metadata is not None
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
             assert g_non_spec is not None
@@ -397,22 +396,56 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-            clear_ssm_states(initial_state, prefill_has_initial_state)
-            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=prefill_query_start_loc,
-                prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
+            # aclnn chunk op expects initial_state in (B, Nv, Dv, Dk) layout,
+            # which is exactly ssm_state's native (Nv, Dv, Dk)-per-seq layout
+            # (see MambaStateShapeCalculator.gated_delta_net_state_shape).
+            # Unlike the prior triton path (whose fwd_h sub-op used (B, Nv, Dk,
+            # Dv) and so required a transpose), NO transpose is needed here.
+            initial_state_full = ssm_state[prefill_state_indices].contiguous()
+            clear_ssm_states(initial_state_full, prefill_has_initial_state)
+
+            # q/k/v/g/beta are [1, T, H, *] (head_first=False, batch is flat B=1
+            # over the concatenated prefill tokens). The aclnn chunk_gated_delta
+            # rule op requires TND layout, so drop the leading batch dim.
+            # Note: this op does NOT l2-normalize q/k internally (the prior
+            # triton entry did via use_qk_l2norm_in_kernel=True), so do it here.
+            q_tnd = l2norm_fwd(query_non_spec.squeeze(0))  # (T, Nk, Dk)
+            k_tnd = l2norm_fwd(key_non_spec.squeeze(0))  # (T, Nk, Dk)
+            v_tnd = value_non_spec.squeeze(0)  # (T, Nv, Dv)
+            beta_tnd = beta_non_spec.squeeze(0)  # (T, Nv)
+            g_tnd = g_non_spec.squeeze(0)  # (T, Nv), fp32 log-gate
+
+            actual_seq_lengths = prefill_metadata.actual_seq_lengths
+            non_empty_indices = prefill_metadata.non_empty_indices
+            if non_empty_indices is None:
+                initial_state = initial_state_full
+            else:
+                initial_state = initial_state_full.index_select(0, non_empty_indices)
+                actual_seq_lengths = actual_seq_lengths.index_select(0, non_empty_indices)
+
+            scale = q_tnd.shape[-1] ** -0.5
+            core_attn_out_non_spec, last_recurrent_state = torch.ops._C_ascend.npu_chunk_gated_delta_rule(
+                q_tnd,
+                k_tnd,
+                v_tnd,
+                beta_tnd,
+                initial_state,
+                actual_seq_lengths,
+                g_tnd,
+                scale,
             )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+
+            # Op returns out=(T, Nv, Dv) bf16; restore the batch dim -> [1, T, Nv, Dv].
+            core_attn_out_non_spec = core_attn_out_non_spec.unsqueeze(0)
+            if non_empty_indices is not None:
+                initial_state_full.index_copy_(0, non_empty_indices, last_recurrent_state)
+                last_recurrent_state = initial_state_full
+
+            # final_state=(B, Nv, Dv, Dk), already matching ssm_state's native
+            # layout (no transpose needed, unlike the prior triton path).
+            # .contiguous() is a no-op here (the op returns an at::empty tensor,
+            # always contiguous) but kept for symmetry/defensiveness.
+            ssm_state[prefill_state_indices] = last_recurrent_state.contiguous().to(ssm_state.dtype)
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
