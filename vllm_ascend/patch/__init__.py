@@ -1068,28 +1068,31 @@
 # ** 25. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
-#   2. `DeepseekV32IndexerCache.get_attn_backend`
-#   3. `vllm.v1.worker.gpu.attn_utils.bind_kv_cache`
 #    Why:
 #       The current v2 worker still goes through the shared upstream v1 helper
 #       to build KV cache specs. For Ascend MLA layers that helper returns the
 #       generic `MLAAttentionSpec`, but NPU-side cache allocation and reshape
 #       logic expects `AscendMLAAttentionSpec`.
-#       SFA indexer cache layers also require the Ascend cache-only backend;
-#       the upstream indexer backend is GPU-specific.
-#       The shared helper imports `bind_kv_cache` by value, so its local
-#       reference is not updated by the existing Ascend worker-utils patch.
 #    How：
 #       Monkey-patch `get_kv_cache_spec` so regular attention layers keep the
 #       upstream behavior while MLA layers are rewritten to
 #       `AscendMLAAttentionSpec`, including the FA-quant head-size adjustment.
-#       Route SFA indexer cache layers to the existing
-#       `AscendSFAIndexerBackend`.
-#       Rebind the helper's local `bind_kv_cache` reference to the existing
-#       Ascend implementation.
 #    Related PR (if no, explain why):
 #       No. This is a plugin-side compatibility patch for the current upstream
 #       helper path.
+#    Future Plan:
+#       Remove this patch once upstream adds a backend hook for KV cache spec
+#       construction or v2 worker no longer depends on the shared v1 helper.
+#
+#   2. `DeepseekV32IndexerCache.get_attn_backend`
+#    Why:
+#       SFA indexer cache layers require the Ascend cache-only backend;
+#       the upstream indexer backend is GPU-specific.
+#    How：
+#       Route SFA indexer cache layers to the existing
+#       `AscendSFAIndexerBackend`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/13069
 #    Future Plan:
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
