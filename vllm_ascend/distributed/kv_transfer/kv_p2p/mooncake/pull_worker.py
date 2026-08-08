@@ -117,7 +117,7 @@ class MooncakePullRecvingThread(threading.Thread):
         self.ready_event = ready_event
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
-        self.remote_metadata: SizedDict[str, dict[int, MooncakePPTransferMetadata]] = SizedDict()
+        self.remote_metadata: SizedDict[str, MooncakeTransferMetadataGroups] = SizedDict()
         # Candidate producer TP ranks, cached independently for each engine:
         # engine_id -> remote_pp_rank -> (local_spec_index, remote_spec_index)
         # -> candidate_groups
@@ -201,7 +201,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
     def _build_remote_transfer_layout(
         self,
-        remote_metadata: dict[int, MooncakePPTransferMetadata],
+        remote_metadata: MooncakeTransferMetadataGroups,
     ) -> tuple[
         dict[int, dict[tuple[int, int], list[list[int]]]],
         dict[int, list[tuple[int, int]]],
@@ -218,13 +218,7 @@ class MooncakePullRecvingThread(threading.Thread):
         local_layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(self.layer_names)}
         matched_local_layer_indices: set[int] = set()
 
-        for remote_pp_rank, pp_metadata in sorted(remote_metadata.items()):
-            if pp_metadata.pcp_size != 1:
-                raise ValueError(
-                    "Mooncake pull temporarily requires remote pcp_size=1, "
-                    f"got {pp_metadata.pcp_size} for PP rank {remote_pp_rank}"
-                )
-
+        for remote_pp_rank, pp_metadata in sorted(remote_metadata.metadata_by_pp_rank.items()):
             layer_index_pairs: list[tuple[int, int]] = []
             spec_index_mapping: dict[int, int] = {}
             for remote_layer_index, layer_name in enumerate(pp_metadata.layer_names):
@@ -251,6 +245,8 @@ class MooncakePullRecvingThread(threading.Thread):
                     remote_spec_index,
                     self.kv_cache_specs[local_spec_index],
                     pp_metadata,
+                    remote_metadata.tp_size,
+                    remote_metadata.dcp_size,
                 )
                 for local_spec_index, remote_spec_index in sorted(spec_index_mapping.items())
             }
@@ -271,10 +267,12 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_spec_index: int,
         spec: KVCacheSpec,
         remote_metadata: MooncakePPTransferMetadata,
+        remote_tp_size: int,
+        remote_dcp_size: int,
     ) -> list[list[int]]:
         """Infer the spec's TP strategy and build its remote rank groups."""
         if isinstance(spec, MambaSpec):
-            return self._get_mamba_remote_tp_rank_groups(remote_metadata.tp_size)
+            return self._get_mamba_remote_tp_rank_groups(remote_tp_size)
         if remote_spec_index >= len(remote_metadata.spec_num_heads):
             raise ValueError(
                 f"Mooncake local spec {local_spec_index} maps to missing producer spec {remote_spec_index}"
@@ -286,26 +284,24 @@ class MooncakePullRecvingThread(threading.Thread):
             fixed_total_num_kv_heads = 1
         elif isinstance(spec, MLAAttentionSpec):
             local_dcp_size = self.dcp_size
-            remote_dcp_size = remote_metadata.dcp_size
             fixed_total_num_kv_heads = 1
         elif isinstance(spec, SlidingWindowSpec):
             local_dcp_size = remote_dcp_size = 1
         elif isinstance(spec, FullAttentionSpec):
             local_dcp_size = self.dcp_size
-            remote_dcp_size = remote_metadata.dcp_size
         else:
             raise NotImplementedError(f"Mooncake pull has no TP grouping rule for KV cache spec {type(spec).__name__}")
 
         total_num_kv_heads = self._infer_total_num_kv_heads(
             local_num_kv_heads=spec.num_kv_heads,
             remote_num_kv_heads=remote_metadata.spec_num_heads[remote_spec_index],
-            remote_tp_size=remote_metadata.tp_size,
+            remote_tp_size=remote_tp_size,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             fixed_total_num_kv_heads=fixed_total_num_kv_heads,
         )
         return self._get_attention_remote_tp_rank_groups(
-            remote_tp_size=remote_metadata.tp_size,
+            remote_tp_size=remote_tp_size,
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             total_num_kv_heads=total_num_kv_heads,
@@ -433,6 +429,11 @@ class MooncakePullRecvingThread(threading.Thread):
             )
         if not metadata.metadata_by_pp_rank:
             raise ValueError("Mooncake producer scheduler returned no PP metadata")
+        if metadata.pcp_size != 1:
+            raise ValueError(
+                "Mooncake pull temporarily requires remote pcp_size=1, "
+                f"got {metadata.pcp_size}"
+            )
 
         empty_pp_ranks = [
             pp_rank
@@ -447,7 +448,7 @@ class MooncakePullRecvingThread(threading.Thread):
             tp_rank
             for pp_metadata in metadata.metadata_by_pp_rank.values()
             for tp_rank in pp_metadata.metadata_by_tp_rank
-            if tp_rank < 0 or tp_rank >= pp_metadata.tp_size
+            if tp_rank < 0 or tp_rank >= metadata.tp_size
         }
         if invalid_tp_ranks:
             raise ValueError(f"Mooncake producer scheduler returned invalid TP ranks {sorted(invalid_tp_ranks)}")
@@ -457,7 +458,7 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_engine_id: str,
         remote_host: str,
         remote_port: int,
-    ) -> dict[int, MooncakePPTransferMetadata]:
+    ) -> MooncakeTransferMetadataGroups:
         cached_metadata = self.remote_metadata.get(remote_engine_id)
         if cached_metadata is not None:
             return cached_metadata
@@ -480,9 +481,8 @@ class MooncakePullRecvingThread(threading.Thread):
 
         transfer_metadata = self.decoder.decode(metadata_bytes)
         self._validate_remote_metadata(transfer_metadata, remote_engine_id)
-        remote_metadata = transfer_metadata.metadata_by_pp_rank
-        remote_tp_rank_groups, remote_layer_index_pairs = self._build_remote_transfer_layout(remote_metadata)
-        self.remote_metadata[remote_engine_id] = remote_metadata
+        remote_tp_rank_groups, remote_layer_index_pairs = self._build_remote_transfer_layout(transfer_metadata)
+        self.remote_metadata[remote_engine_id] = transfer_metadata
         self.remote_tp_rank_groups[remote_engine_id] = remote_tp_rank_groups
         self.remote_layer_index_pairs[remote_engine_id] = remote_layer_index_pairs
         logger.debug(
@@ -491,7 +491,7 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_tp_rank_groups,
             remote_layer_index_pairs,
         )
-        return remote_metadata
+        return transfer_metadata
 
 
 class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):

@@ -63,6 +63,8 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
         tp_size: int,
         pp_size: int,
+        pcp_size: int,
+        dcp_size: int,
         ready_event: threading.Event,
     ) -> None:
         super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
@@ -71,6 +73,8 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.port = port
         self.tp_size = tp_size
         self.pp_size = pp_size
+        self.pcp_size = pcp_size
+        self.dcp_size = dcp_size
         self.engine_id = engine_id
         metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
         self.encoded_metadata = encoder.encode(
@@ -78,6 +82,10 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 engine_id=engine_id,
                 scheduler_host=host,
                 scheduler_port=port,
+                pp_size=pp_size,
+                pcp_size=pcp_size,
+                dcp_size=dcp_size,
+                tp_size=tp_size,
                 metadata_by_pp_rank=metadata_by_pp_rank,
             )
         )
@@ -141,9 +149,6 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             "block_lens",
             "block_shapes",
             "block_size_scales",
-            "pcp_size",
-            "dcp_size",
-            "tp_size",
         )
         expected_tp_ranks = set(range(self.tp_size))
         merged: dict[int, MooncakePPTransferMetadata] = {}
@@ -157,12 +162,6 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
             reference_tp_rank = min(workers_by_tp_rank)
             reference = workers_by_tp_rank[reference_tp_rank]
-            if reference.tp_size != self.tp_size:
-                raise ValueError(
-                    "Mooncake worker metadata TP size mismatch for PP rank "
-                    f"{pp_rank}: expected {self.tp_size}, "
-                    f"got {reference.tp_size}"
-                )
 
             for tp_rank, worker_metadata in workers_by_tp_rank.items():
                 mismatched_fields = [
@@ -190,9 +189,6 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_lens=reference.block_lens,
                 block_shapes=reference.block_shapes,
                 block_size_scales=reference.block_size_scales,
-                pcp_size=reference.pcp_size,
-                dcp_size=reference.dcp_size,
-                tp_size=reference.tp_size,
                 metadata_by_tp_rank={
                     tp_rank: MooncakeTPTransferMetadata(
                         te_rpc_port=worker_metadata.te_rpc_port,
@@ -377,6 +373,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             metadata,
             self.tp_size,
             self.pp_size,
+            self.pcp_size,
+            self.dcp_size,
             ready_event,
         )
         self._sending_thread.start()
