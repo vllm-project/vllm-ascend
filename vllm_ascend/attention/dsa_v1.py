@@ -1553,16 +1553,20 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
-    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        num_tokens = o_proj_input.shape[0]
-        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
-        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
-        # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
+    def _wo_a_bmm(self, o_proj_input: torch.Tensor, num_tokens: int) -> torch.Tensor:
+        """wo_a transpose batch matmul, precision-aware.
+
+        Used in the single-card and oproj_tp o_proj paths. On A5 it runs the
+        FP8-quantized matmul (dynamic MX quant on the activation + quantized
+        batch matmul against wo_a's FP8 weight and weight_scale); elsewhere it
+        runs the BF16 batch matmul. The two share the same perm triple and
+        produce a (num_tokens, n_groups, o_lora_rank) tensor flattened to
+        (num_tokens, -1) for wo_b. Quantization is local per rank, so it
+        composes with the BF16 all_to_all / reduce_scatter around it without
+        touching the communication buffers or their ACL-graph addresses.
+        """
         if get_ascend_device_type() in {AscendDeviceType.A5}:
-            o = o_proj_input
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
                 o,
                 self.wo_a.weight,
@@ -1575,9 +1579,24 @@ class AscendDSAImpl(DSAAttentionImpl):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        elif oproj_tp_enable():
+        else:
+            o = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+        return o.reshape(num_tokens, -1)
+
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        num_tokens = o_proj_input.shape[0]
+        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
+        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
+        if oproj_tp_enable():
             oproj_group = get_otp_group()
             oproj_tp_size = oproj_group.world_size
             if self.n_local_groups % oproj_tp_size != 0:
@@ -1619,17 +1638,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             send[:, :num_tokens].copy_(o_proj_input.transpose(1, 0))
             dist.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
             o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
-            o_proj_input = o_proj_input.reshape(oproj_tp_size * exchange_num_tokens, -1)
+            # wo_a matmul: FP8-quantized on A5, BF16 otherwise. Quantization
+            # happens here -- after the BF16 all_to_all -- so each rank
+            # quantizes its own received activation locally and the comm
+            # buffers stay BF16.
+            o_proj_input = self._wo_a_bmm(o_proj_input, oproj_tp_size * exchange_num_tokens)
             o_proj_output = self.wo_b(o_proj_input)
             # reduce_scatter via a raw dist collective into an address-stable
             # static buffer. oproj_group.reduce_scatter is a list-based wrapper
@@ -1648,18 +1661,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
-            o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+            # Single-card path: A5 runs the FP8 quantized matmul, others BF16,
+            # decided inside _wo_a_bmm -- the same helper the oproj_tp path uses.
+            o = self._wo_a_bmm(o_proj_input, num_tokens)
+            output[...] = self.wo_b(o)
         return output
 
     def forward(  # type: ignore[override]
