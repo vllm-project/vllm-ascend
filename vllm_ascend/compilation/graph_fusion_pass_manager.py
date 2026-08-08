@@ -66,6 +66,16 @@ class GraphFusionPassManager:
 
             self.passes.append(MulsAddFusionPass(config))
 
+        if self.ascend_compilation_config.get("fuse_all_gather_matmul", True) and not is_310p():
+            from .passes.all_gather_matmul_pass import AllGatherMatmulFusionPass
+
+            self.passes.append(AllGatherMatmulFusionPass(config))
+
+        if self.ascend_compilation_config.get("fuse_matmul_reduce_scatter", True) and not is_310p():
+            from .passes.matmul_reduce_scatter_pass import MatmulReduceScatterFusionPass
+
+            self.passes.append(MatmulReduceScatterFusionPass(config))
+
         if config.compilation_config.pass_config.enable_sp:
             from .passes.sequence_parallelism import SequenceParallelismPass
             from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
