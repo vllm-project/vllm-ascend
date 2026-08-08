@@ -52,6 +52,7 @@
   cpu_only: true
   tests:
     - tests/ut
+    - tests/ut/examples
 
 # 310P
 - name: 310p
