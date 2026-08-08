@@ -93,6 +93,11 @@ class MoECommMethod(ABC):
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
         self.use_fusion_ops = set_gmmswigluquant_method()
+        self.lora_context = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
+        self.token_dispatcher.set_lora_context(lora_context)
 
     def prepare(
         self,
@@ -140,6 +145,12 @@ class MoECommMethod(ABC):
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
+
+        # The v0.23.0 runner stores LoRA state on the FusedMoE layer and
+        # passes it through MoEFusedExpertsInput. Refresh the long-lived
+        # dispatcher for every call so W8A8 routing keeps BF16 activations
+        # only for batches that actually contain LoRA tokens.
+        self.set_lora_context(fused_experts_input.lora_context)
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,

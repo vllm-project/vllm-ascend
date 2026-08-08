@@ -486,6 +486,81 @@ def test_allgather_token_dispatch_mxfp4_keeps_prequantized_scale():
     assert output.dynamic_scale is returned_scale
 
 
+@pytest.mark.parametrize(
+    ("no_lora", "expected_quant_mode", "expect_dynamic_scale"),
+    [
+        (False, -1, False),
+        (True, 1, True),
+    ],
+)
+def test_allgather_w8a8_lora_controls_dispatch_quantization(
+    no_lora,
+    expected_quant_mode,
+    expect_dynamic_scale,
+):
+    dispatcher = TokenDispatcherWithAllGather(
+        top_k=1,
+        num_experts=2,
+        num_local_experts=2,
+    )
+    dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=no_lora)))
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    returned_scale = torch.randn(2)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.W8A8,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1, 1], dtype=torch.int32),
+        returned_scale,
+    )
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=init_routing_output,
+    ) as mock_init_routing:
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    assert mock_init_routing.call_args.kwargs["quant_mode"] == expected_quant_mode
+    assert (output.dynamic_scale is not None) == expect_dynamic_scale
+
+
+def test_allgather_bf16_lora_keeps_unquantized_dispatch_path():
+    dispatcher = TokenDispatcherWithAllGather(
+        top_k=1,
+        num_experts=2,
+        num_local_experts=2,
+    )
+    dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=False)))
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.NONE,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1, 1], dtype=torch.int32),
+        None,
+    )
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=init_routing_output,
+    ) as mock_init_routing:
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
+    assert output.hidden_states is hidden_states
+    assert output.dynamic_scale is None
+
+
 class TestTokenDispatcherWithAllGather(TestBase):
     def setUp(self):
         # Mock dependencies

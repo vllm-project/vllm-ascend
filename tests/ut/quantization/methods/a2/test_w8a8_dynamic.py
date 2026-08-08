@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -13,6 +14,9 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.methods.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8_pdmix import (
+    AscendW8A8PDMixFusedMoeMethod,
 )
 
 
@@ -129,6 +133,19 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w2_weight_offset"].shape, (self.num_experts, self.hidden_size, 1))
 
+    def test_lora_rejects_derived_w8a8_schemes(self):
+        method = object.__new__(AscendW8A8PDMixFusedMoeMethod)
+        layer = SimpleNamespace(_ascend_moe_lora_context=object())
+
+        with self.assertRaisesRegex(NotImplementedError, "only the W8A8_DYNAMIC"):
+            method.apply(
+                layer=layer,
+                x=torch.empty(1, self.hidden_size),
+                router_logits=torch.empty(1, self.num_experts),
+                top_k=1,
+                renormalize=True,
+            )
+
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
     def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_select_experts, mock_extra_ctx):
@@ -150,6 +167,8 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
         layer.w2_weight_scale = torch.ones(self.num_experts, hidden_size, dtype=torch.float32)
         layer.swiglu_limit = 1000000
+        lora_context = object()
+        layer._ascend_moe_lora_context = lora_context
 
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
         router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
@@ -186,6 +205,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
+        self.assertIs(fused_experts_input.lora_context, lora_context)
 
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")

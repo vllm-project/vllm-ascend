@@ -223,6 +223,7 @@ class TestMoECommMethod(TestBase):
         w2 = torch.randn(16, 8).contiguous()
         topk_weights = dispatch_topk_weights
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 0], [1, 1]])
+        lora_context = MagicMock()
 
         # Make sure tensors are contiguous and have correct strides
         hidden_states = hidden_states.contiguous()
@@ -248,6 +249,7 @@ class TestMoECommMethod(TestBase):
                 need_trans=False,
                 dynamic_eplb=False,
                 quant=MoEQuantParams(),
+                lora_context=lora_context,
             )
         )
 
@@ -256,6 +258,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()
+        mock_td_instance.set_lora_context.assert_called_once_with(lora_context)
 
         # Verify unified_apply_mlp was called
         mock_unified_apply_mlp.assert_called_once()

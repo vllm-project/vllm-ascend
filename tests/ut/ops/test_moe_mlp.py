@@ -1,11 +1,23 @@
 import unittest
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp, unquant_apply_mlp
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.lora.quant_moe import (
+    apply_quant_moe_lora,
+    configure_quant_moe_lora_dispatch,
+)
+from vllm_ascend.ops.fused_moe.moe_mlp import (
+    cumsum_group_list,
+    unified_apply_mlp,
+    unquant_apply_mlp,
+)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEQuantParams,
@@ -15,6 +27,8 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
+QUANT_MOE_LORA = "vllm_ascend.lora.quant_moe"
 
 
 class TestCumsumGroupList(unittest.TestCase):
@@ -247,6 +261,228 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         self.assertEqual(quant_kwargs["activation"], MoEActivation.SWIGLUSTEP)
         self.assertEqual(quant_kwargs["swiglu_limit"], 5.0)
         mock_unquant.assert_not_called()
+
+
+class TestQuantMoELoRA(unittest.TestCase):
+    @staticmethod
+    def _compute_input(
+        *,
+        quant_type=QuantType.W8A8,
+        no_lora=False,
+        dynamic_scale=None,
+    ):
+        return MoEMlpComputeInput(
+            hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=dynamic_scale,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.ones(1, 8, 16, dtype=torch.int8)],
+                w2=[torch.ones(1, 8, 8, dtype=torch.int8)],
+                w1_scale=[torch.ones(1, 16)],
+                w2_scale=[torch.ones(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=quant_type),
+            fusion=True,
+            activation="silu",
+            need_trans=False,
+            dynamic_eplb=False,
+            expanded_row_idx=torch.tensor([0, 1], dtype=torch.int32),
+            topk_ids=torch.tensor([[0], [0]], dtype=torch.int32),
+            lora_context=SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=no_lora),
+            ),
+        )
+
+    def test_active_quant_lora_uses_extensible_dispatcher(self):
+        expected = torch.randn(2, 8)
+        mlp_compute_input = self._compute_input()
+
+        with (
+            patch(
+                f"{QUANT_MOE_LORA}.apply_quant_moe_lora",
+                return_value=expected,
+            ) as mock_lora,
+            patch(f"{MOE_MLP}.quant_apply_mlp") as mock_quant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_lora.assert_called_once()
+        mock_quant.assert_not_called()
+
+    def test_base_only_w8a8_keeps_existing_path(self):
+        expected = torch.randn(2, 8)
+        mlp_compute_input = self._compute_input(
+            no_lora=True,
+            dynamic_scale=torch.randn(2),
+        )
+
+        with (
+            patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch(f"{QUANT_MOE_LORA}.apply_quant_moe_lora") as mock_lora,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_quant.assert_called_once()
+        mock_lora.assert_not_called()
+
+    def test_unregistered_quant_type_is_rejected(self):
+        mlp_compute_input = self._compute_input(quant_type=QuantType.W4A8)
+
+        with self.assertRaisesRegex(NotImplementedError, "no implementation registered"):
+            apply_quant_moe_lora(mlp_compute_input=mlp_compute_input)
+
+    def test_dynamic_int8_backend_owns_dispatch_validation(self):
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+
+        with_quant = configure_quant_moe_lora_dispatch(
+            quant_type=QuantType.W8A8,
+            hidden_states=hidden_states,
+            dynamic_scale=None,
+            with_quant=True,
+        )
+
+        self.assertFalse(with_quant)
+        with self.assertRaisesRegex(NotImplementedError, "Dynamic INT8"):
+            configure_quant_moe_lora_dispatch(
+                quant_type=QuantType.W8A8,
+                hidden_states=torch.ones(2, 8, dtype=torch.int8),
+                dynamic_scale=torch.ones(2),
+                with_quant=True,
+            )
+
+    def test_injects_lora_at_bf16_boundaries(self):
+        hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+        quantized_input = torch.ones(2, 4, dtype=torch.int8)
+        input_scale = torch.ones(2, dtype=torch.float32)
+        gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+        activated = torch.randn(2, 3, dtype=torch.bfloat16)
+        quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+        activated_scale = torch.ones(2, dtype=torch.float32)
+        down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+        lora_context = SimpleNamespace()
+        routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+        expanded_row_idx = torch.tensor([0, 1], dtype=torch.int32)
+        topk_ids = torch.tensor([[0], [1]], dtype=torch.int32)
+        event = MagicMock(name="before_gmm2_evt")
+        stream = MagicMock(name="npu_stream")
+        stream.record_event.return_value = event
+
+        mlp_compute_input = replace(
+            self._compute_input(),
+            hidden_states=hidden_states,
+            group_list=torch.tensor([1, 1]),
+            weights=MoEWeights(
+                w1=[torch.ones(1, 4, 6, dtype=torch.int8)],
+                w1_scale=[torch.ones(1, 6)],
+                w2=[torch.ones(1, 3, 4, dtype=torch.int8)],
+                w2_scale=[torch.ones(1, 4, dtype=torch.bfloat16)],
+            ),
+            lora_context=lora_context,
+            expanded_row_idx=expanded_row_idx,
+            topk_ids=topk_ids,
+        )
+
+        with (
+            patch(f"{QUANT_MOE_LORA}._EXTRA_CTX") as mock_ctx,
+            patch("torch.npu.current_stream", return_value=stream),
+            patch.object(
+                DeviceOperator,
+                "npu_dynamic_quant",
+                side_effect=[
+                    (quantized_input, input_scale),
+                    (quantized_activated, activated_scale),
+                ],
+            ) as mock_quant,
+            patch(
+                f"{QUANT_MOE_LORA}.torch_npu.npu_grouped_matmul",
+                return_value=[gate_up_out],
+                create=True,
+            ) as mock_gmm1,
+            patch(
+                f"{QUANT_MOE_LORA}.torch_npu.npu_swiglu",
+                return_value=activated,
+                create=True,
+            ),
+            patch.object(
+                DeviceOperator,
+                "npu_grouped_matmul_gmm2",
+                return_value=down_out,
+            ) as mock_gmm2,
+            patch(
+                f"{QUANT_MOE_LORA}.moe_lora_apply_w13",
+                return_value=routing,
+            ) as mock_w13,
+            patch(f"{QUANT_MOE_LORA}.moe_lora_apply_w2") as mock_w2,
+        ):
+            mock_ctx.moe_comm_type = MoECommType.ALLGATHER
+            output, output_event = apply_quant_moe_lora(
+                mlp_compute_input=mlp_compute_input,
+            )
+
+        self.assertIs(output, down_out)
+        self.assertIs(output_event, event)
+        self.assertEqual(mock_quant.call_count, 2)
+        self.assertIs(
+            mock_quant.call_args_list[0].kwargs["hidden_states"],
+            hidden_states,
+        )
+        self.assertIs(
+            mock_quant.call_args_list[1].kwargs["hidden_states"],
+            activated,
+        )
+        self.assertIs(mock_gmm1.call_args.kwargs["x"][0], quantized_input)
+        self.assertIs(
+            mock_gmm2.call_args.kwargs["hidden_states"],
+            quantized_activated,
+        )
+        mock_w13.assert_called_once()
+        self.assertIs(mock_w13.call_args.args[0], lora_context)
+        self.assertIs(mock_w13.call_args.kwargs["gate_up_out"], gate_up_out)
+        self.assertIs(mock_w13.call_args.kwargs["hidden_states"], hidden_states)
+        self.assertIs(
+            mock_w13.call_args.kwargs["expanded_row_idx"],
+            expanded_row_idx,
+        )
+        self.assertIs(mock_w13.call_args.kwargs["topk_ids"], topk_ids)
+        mock_w2.assert_called_once_with(
+            lora_context,
+            down_out=down_out,
+            silu_out=activated,
+            lora_routing=routing,
+        )
+
+    def test_rejects_unsupported_execution_modes(self):
+        mlp_compute_input = self._compute_input()
+
+        with patch(f"{QUANT_MOE_LORA}._EXTRA_CTX") as mock_ctx:
+            mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+            with self.assertRaisesRegex(NotImplementedError, "FusedMC2"):
+                apply_quant_moe_lora(mlp_compute_input=mlp_compute_input)
+
+            mock_ctx.moe_comm_type = MoECommType.ALLGATHER
+            with self.assertRaisesRegex(NotImplementedError, "dynamic EPLB"):
+                apply_quant_moe_lora(
+                    mlp_compute_input=replace(
+                        mlp_compute_input,
+                        dynamic_eplb=True,
+                    )
+                )
+
+            with self.assertRaisesRegex(
+                AssertionError,
+                "Dispatch-side quantization",
+            ):
+                apply_quant_moe_lora(
+                    mlp_compute_input=replace(
+                        mlp_compute_input,
+                        hidden_states=torch.ones(2, 8, dtype=torch.int8),
+                        dynamic_scale=torch.ones(2),
+                    )
+                )
 
 
 if __name__ == "__main__":

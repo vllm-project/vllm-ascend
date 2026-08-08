@@ -15,6 +15,7 @@
 import ast
 import inspect
 import textwrap
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import TypedDict
 from unittest.mock import MagicMock, patch
@@ -916,6 +917,164 @@ class TestAscendFusedMoESharedExperts:
 
         torch.testing.assert_close(part1_out, gate_up)
         torch.testing.assert_close(part2_out, F.sigmoid(gate_out) * down_out)
+
+    def test_quantized_shared_experts_use_dense_wrappers_for_lora(
+        self,
+        monkeypatch,
+    ):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        nn.Module.__init__(layer)
+        gate_up_proj = MagicMock()
+        gate_up_proj.weight_scale = object()
+        gate_up_proj.side_effect = lambda value: (value * 2.0 + 1.0, None)
+        down_proj = MagicMock()
+        down_proj.weight_scale = object()
+        down_proj.side_effect = lambda value: (value * 2.0 + 1.0, None)
+        layer._shared_experts = SimpleNamespace(
+            gate_up_proj=gate_up_proj,
+            act_fn=nn.Identity(),
+            down_proj=down_proj,
+            expert_gate=None,
+        )
+        layer._ascend_moe_lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=False),
+        )
+        layer.quant_type = QuantType.W8A8
+        layer.multistream_overlap_shared_expert = False
+        hidden_states = torch.randn(2, 4)
+        current_stream = MagicMock()
+
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch.npu,
+            "current_stream",
+            lambda: current_stream,
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "shared_experts_calculation_stream",
+            MagicMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "npu_stream_switch",
+            lambda *args, **kwargs: nullcontext(),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch_npu,
+            "npu_quant_matmul",
+            MagicMock(side_effect=AssertionError("must use dense wrappers")),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+        )
+
+        output = layer._forward_shared_experts(
+            hidden_states,
+            fused_moe_module.FusedMoEEvents(
+                before_routed_experts=MagicMock(),
+            ),
+        )
+
+        expected = (hidden_states * 2.0 + 1.0) * 2.0 + 1.0
+        torch.testing.assert_close(output, expected)
+
+    def test_base_batch_keeps_raw_quant_shared_path_after_lora_wrapping(
+        self,
+        monkeypatch,
+    ):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        nn.Module.__init__(layer)
+        gate_weight = object()
+        gate_scale = object()
+        gate_scale_fp32 = object()
+        down_weight = object()
+        down_scale = object()
+        gate_base = SimpleNamespace(
+            weight=gate_weight,
+            weight_scale=gate_scale,
+            weight_scale_fp32=gate_scale_fp32,
+        )
+        down_base = SimpleNamespace(
+            weight=down_weight,
+            weight_scale=down_scale,
+        )
+        gate_wrapper = MagicMock(base_layer=gate_base)
+        down_wrapper = MagicMock(base_layer=down_base)
+        layer._shared_experts = SimpleNamespace(
+            gate_up_proj=gate_wrapper,
+            act_fn=nn.Identity(),
+            down_proj=down_wrapper,
+            expert_gate=None,
+        )
+        layer._ascend_moe_lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=True),
+        )
+        layer.quant_type = QuantType.W8A8
+        layer.multistream_overlap_shared_expert = False
+        hidden_states = torch.randn(2, 4)
+        quantized_input = torch.ones(2, 4, dtype=torch.int8)
+        input_scale = torch.ones(2)
+        gate_out = torch.ones(2, 8, dtype=torch.int32)
+        quantized_activation = torch.ones(2, 4, dtype=torch.int8)
+        activation_scale = torch.ones(2)
+        expected = torch.randn(2, 4)
+        current_stream = MagicMock()
+        quant_matmul = MagicMock(side_effect=[gate_out, expected])
+
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch.npu,
+            "current_stream",
+            lambda: current_stream,
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "shared_experts_calculation_stream",
+            MagicMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "npu_stream_switch",
+            lambda *args, **kwargs: nullcontext(),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch_npu,
+            "npu_dynamic_quant",
+            MagicMock(return_value=(quantized_input, input_scale)),
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch_npu,
+            "npu_quant_matmul",
+            quant_matmul,
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module.torch.ops._C_ascend,
+            "npu_dequant_swiglu_quant",
+            MagicMock(return_value=(quantized_activation, activation_scale)),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            fused_moe_legacy_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+        )
+
+        output = layer._forward_shared_experts(
+            hidden_states,
+            fused_moe_module.FusedMoEEvents(
+                before_routed_experts=MagicMock(),
+            ),
+        )
+
+        assert output is expected
+        gate_wrapper.assert_not_called()
+        down_wrapper.assert_not_called()
+        assert quant_matmul.call_count == 2
+        assert quant_matmul.call_args_list[0].args[1] is gate_weight
+        assert quant_matmul.call_args_list[0].args[2] is gate_scale
+        assert quant_matmul.call_args_list[1].args[1] is down_weight
+        assert quant_matmul.call_args_list[1].args[2] is down_scale
 
     @pytest.mark.parametrize("has_shared_experts", [False, True])
     def test_shared_forward_impl_routes_shared_output(self, monkeypatch, has_shared_experts):
