@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -53,7 +53,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
       export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -78,7 +78,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "Atlas inference products"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -210,24 +210,24 @@ Here are two accuracy evaluation methods.
 2. Run follow code to execute the accuracy evaluation.
 
     ```python
-  
+
     import os
     import mteb
-    
+
     from mteb.models.vllm_wrapper import VllmEncoderWrapper
-    
+
     if __name__ == "__main__":
-    
+
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    
+
         model = VllmEncoderWrapper(f"/root/.cache/Qwen3-Embedding-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     max_model_len=10240,
                                    )
-    
+
         cache = mteb.ResultCache("/home/data/mteb_data")
         tasks = mteb.get_tasks(tasks=["LeCaRDv2"])
         results = mteb.evaluate(model, tasks=tasks, cache=cache, encode_kwargs={"batch_size": 2}, overwrite_strategy="always")

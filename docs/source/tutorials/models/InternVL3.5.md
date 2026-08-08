@@ -20,8 +20,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 require 1 Atlas 800 A3 (64G × 16) node:
 
-- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64G × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)
-- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64G × 16) node [Download model weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)
+- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)
+- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)
 
 ## 4 Installation
 
@@ -76,15 +76,13 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
-
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 === "InternVL3_5-38B"
 
-    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) node.
 
     Run the following script to execute online inference.
 
@@ -129,7 +127,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "InternVL3_5-241B-A28B"
 
-    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) node.
 
     Run the following script to execute online inference.
 
@@ -223,8 +221,8 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 FAQ
 
-- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, refer to [FAQs](../../faqs.md).

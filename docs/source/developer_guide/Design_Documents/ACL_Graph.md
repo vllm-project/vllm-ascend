@@ -11,7 +11,7 @@ On Ascend, the design goal is the same as upstream static graph execution: reduc
 - Upstream vLLM design doc for generic graph concepts: [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/).
 - PyTorch graph documentation for generic capture and replay semantics: [Accelerating PyTorch with CUDA Graphs](https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/).
 - Ascend user guide for operational enablement: [Graph Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html).
-- Existing repo design note: `docs/source/developer_guide/Design_Documents/ACL_Graph.md`.
+- Existing repo design note: [ACL Graph](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/Design_Documents/ACL_Graph.html)
 
 This document intentionally does not re-explain upstream topics such as graph mode selection, dispatcher behavior, batch descriptor construction, capture bucketing, padding policy, or the generic meaning of full versus piecewise execution.
 

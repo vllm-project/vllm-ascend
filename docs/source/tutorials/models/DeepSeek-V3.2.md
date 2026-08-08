@@ -16,8 +16,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -33,7 +33,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -74,7 +74,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -121,7 +121,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-node Deployment
 
-- Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
+- Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 
 Run the following script to execute online inference.
 
@@ -157,7 +157,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 
 ### 5.2 Multi-node Deployment
 
-- `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8).
+- `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64GB × 8).
 
 Run the following scripts on two nodes respectively.
 
@@ -396,301 +396,301 @@ Parameter descriptions:
 
 1. `run_dp_template.sh` script
 
-=== "Node 0(Prefill)"
+    === "Node 0(Prefill)"
 
-    ```shell
-    nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.105 # change to your own ip
+        ```shell
+        nic_name="enp48s3u1u1" # change to your own nic name
+        local_ip=141.61.39.105 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_OP_EXPANSION_MODE="AIV"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
-    export HCCL_BUFFSIZE=256
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export VLLM_USE_V1=1
+        export HCCL_BUFFSIZE=256
 
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+        export ASCEND_AGGREGATE_ENABLE=1
+        export ASCEND_TRANSPORT_PRINT=1
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_A3_ENABLE=1
+        # Timeout (in seconds) for automatically releasing the prefiller's KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-        --profiler-config \
-        '{"profiler": "torch",
-        "torch_profiler_dir": "./vllm_profile",
-        "torch_profiler_with_stack": false}' \
-        --seed 1024 \
-        --served-model-name deepseek_v3.2 \
-        --max-model-len 68000 \
-        --max-num-batched-tokens 32560 \
-        --trust-remote-code \
-        --max-num-seqs 64 \
-        --gpu-memory-utilization 0.82 \
-        --quantization ascend \
-        --enforce-eager \
-        --no-enable-prefix-caching \
-        --additional-config '{"enable_dsa_cp": true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
+            --seed 1024 \
+            --served-model-name deepseek_v3.2 \
+            --max-model-len 68000 \
+            --max-num-batched-tokens 32560 \
+            --trust-remote-code \
+            --max-num-seqs 64 \
+            --gpu-memory-utilization 0.82 \
+            --quantization ascend \
+            --enforce-eager \
+            --no-enable-prefix-caching \
+            --additional-config '{"enable_dsa_cp": true}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeLayerwiseConnector",
+            "kv_role": "kv_producer",
+            "kv_port": "30000",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 16
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
                 }
-            }
-        }'
+            }'
 
-    ```
+        ```
 
-=== "Node 1(Prefill)"
+    === "Node 1(Prefill)"
 
-    ```shell
-    nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.113 # change to your own ip
+        ```shell
+        nic_name="enp48s3u1u1" # change to your own nic name
+        local_ip=141.61.39.113 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_OP_EXPANSION_MODE="AIV"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
-    export HCCL_BUFFSIZE=256
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export VLLM_USE_V1=1
+        export HCCL_BUFFSIZE=256
 
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+        export ASCEND_AGGREGATE_ENABLE=1
+        export ASCEND_TRANSPORT_PRINT=1
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_A3_ENABLE=1
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-        --profiler-config \
-        '{"profiler": "torch",
-        "torch_profiler_dir": "./vllm_profile",
-        "torch_profiler_with_stack": false}' \
-        --seed 1024 \
-        --served-model-name deepseek_v3.2 \
-        --max-model-len 68000 \
-        --max-num-batched-tokens 32560 \
-        --trust-remote-code \
-        --max-num-seqs 64 \
-        --gpu-memory-utilization 0.82 \
-        --quantization ascend \
-        --enforce-eager \
-        --no-enable-prefix-caching \
-        --additional-config '{"enable_dsa_cp": true}' \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
+            --seed 1024 \
+            --served-model-name deepseek_v3.2 \
+            --max-model-len 68000 \
+            --max-num-batched-tokens 32560 \
+            --trust-remote-code \
+            --max-num-seqs 64 \
+            --gpu-memory-utilization 0.82 \
+            --quantization ascend \
+            --enforce-eager \
+            --no-enable-prefix-caching \
+            --additional-config '{"enable_dsa_cp": true}' \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeLayerwiseConnector",
+            "kv_role": "kv_producer",
+            "kv_port": "30000",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 16
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
                 }
-            }
-        }'
-    ```
+            }'
+        ```
 
-=== "Node 0(Decode)"
+    === "Node 0(Decode)"
 
-    ```shell
-    nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.117 # change to your own ip
+        ```shell
+        nic_name="enp48s3u1u1" # change to your own nic name
+        local_ip=141.61.39.117 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_OP_EXPANSION_MODE="AIV"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    #Mooncake
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
+        #Mooncake
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
 
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
-    export HCCL_BUFFSIZE=256
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export VLLM_USE_V1=1
+        export HCCL_BUFFSIZE=256
 
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+        export ASCEND_AGGREGATE_ENABLE=1
+        export ASCEND_TRANSPORT_PRINT=1
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_A3_ENABLE=1
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
-    export TASK_QUEUE_ENABLE=1
+        export TASK_QUEUE_ENABLE=1
 
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
-        --profiler-config \
-        '{"profiler": "torch",
-        "torch_profiler_dir": "./vllm_profile",
-        "torch_profiler_with_stack": false}' \
-        --seed 1024 \
-        --served-model-name deepseek_v3.2 \
-        --max-model-len 68000 \
-        --max-num-batched-tokens 12 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
-        --trust-remote-code \
-        --max-num-seqs 4 \
-        --gpu-memory-utilization 0.95 \
-        --no-enable-prefix-caching \
-        --quantization ascend \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": "30100",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
+            --seed 1024 \
+            --served-model-name deepseek_v3.2 \
+            --max-model-len 68000 \
+            --max-num-batched-tokens 12 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
+            --trust-remote-code \
+            --max-num-seqs 4 \
+            --gpu-memory-utilization 0.95 \
+            --no-enable-prefix-caching \
+            --quantization ascend \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeLayerwiseConnector",
+            "kv_role": "kv_consumer",
+            "kv_port": "30100",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 16
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
                 }
-            }
-        }' \
-        --additional-config '{"recompute_scheduler_enable" : true}'
-    ```
+            }' \
+            --additional-config '{"recompute_scheduler_enable" : true}'
+        ```
 
-=== "Node 1(Decode)"
+    === "Node 1(Decode)"
 
-    ```shell
-    nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.181 # change to your own ip
+        ```shell
+        nic_name="enp48s3u1u1" # change to your own nic name
+        local_ip=141.61.39.181 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_OP_EXPANSION_MODE="AIV"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
 
-    #Mooncake
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
+        #Mooncake
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
 
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
-    export HCCL_BUFFSIZE=256
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export VLLM_USE_V1=1
+        export HCCL_BUFFSIZE=256
 
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+        export ASCEND_AGGREGATE_ENABLE=1
+        export ASCEND_TRANSPORT_PRINT=1
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_A3_ENABLE=1
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
-    export TASK_QUEUE_ENABLE=1
+        export TASK_QUEUE_ENABLE=1
 
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --enable-expert-parallel \
-        --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
-        --profiler-config \
-        '{"profiler": "torch",
-        "torch_profiler_dir": "./vllm_profile",
-        "torch_profiler_with_stack": false}' \
-        --seed 1024 \
-        --served-model-name deepseek_v3.2 \
-        --max-model-len 68000 \
-        --max-num-batched-tokens 12 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
-        --trust-remote-code \
-        --max-num-seqs 4 \
-        --gpu-memory-utilization 0.95 \
-        --no-enable-prefix-caching \
-        --quantization ascend \
-        --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": "30100",
-        "kv_connector_extra_config": {
-                "prefill": {
-                        "dp_size": 2,
-                        "tp_size": 16
-                },
-                "decode": {
-                        "dp_size": 8,
-                        "tp_size": 4
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
+            --profiler-config \
+            '{"profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+            "torch_profiler_with_stack": false}' \
+            --seed 1024 \
+            --served-model-name deepseek_v3.2 \
+            --max-model-len 68000 \
+            --max-num-batched-tokens 12 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
+            --trust-remote-code \
+            --max-num-seqs 4 \
+            --gpu-memory-utilization 0.95 \
+            --no-enable-prefix-caching \
+            --quantization ascend \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeLayerwiseConnector",
+            "kv_role": "kv_consumer",
+            "kv_port": "30100",
+            "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 16
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
                 }
-            }
-        }' \
-        --additional-config '{"recompute_scheduler_enable" : true}'
-    ```
+            }' \
+            --additional-config '{"recompute_scheduler_enable" : true}'
+        ```
 
-Once the preparation is done, you can start the server with the following command on each node:
-Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
+    Once the preparation is done, you can start the server with the following command on each node:
+    Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
 
 2. run server for each node:
 
@@ -747,10 +747,10 @@ Common Issues Tip: If you encounter issues with PD separation deployment, please
 
 Once your server is started, you can query the model with input prompts:
 
-**Note**:
+!!! note
 
-- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
-- `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
+    - `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
+    - `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
@@ -803,7 +803,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The performance result is:  
+The performance result is:
 
 **Hardware**: A3-752T, 4 node
 

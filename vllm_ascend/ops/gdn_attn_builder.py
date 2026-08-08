@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.gdn_attn import (
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
+    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -51,6 +52,33 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.argsort(tensor, stable=True)
 
 
+def _treat_single_token_prefills_with_state_as_decodes(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    """Match the stateful Mamba/GDN contract for uniform one-token rows.
+
+    Full-graph selection is shape based. A final one-token prompt chunk at a
+    PD handoff can therefore replay the same update graph as an ordinary
+    decode. Once a request already has recurrent state, the two cases must
+    construct identical GDN metadata, otherwise the replayed graph consumes
+    stale state indices. First-token prefills stay on the prefill path
+    because they have no prior state to update.
+    """
+    is_prefilling = common_attn_metadata.is_prefilling
+    seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+    if is_prefilling is None or seq_lens_cpu is None:
+        return common_attn_metadata
+
+    query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
+    prefill_to_decode = is_prefilling & (query_lens_cpu == 1) & (seq_lens_cpu > 1)
+    if not torch.any(prefill_to_decode).item():
+        return common_attn_metadata
+
+    is_prefilling = is_prefilling.clone()
+    is_prefilling[prefill_to_decode] = False
+    return common_attn_metadata.replace(is_prefilling=is_prefilling)
+
+
 @dataclass
 class GDNChunkedPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
@@ -61,7 +89,7 @@ class GDNChunkedPrefillMetadata:
     final_chunk_indices_chunk64: torch.Tensor
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
-    num_decodes: int = 0
+    num_decodes: int
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
 
@@ -168,6 +196,7 @@ def _build_non_spec_chunked_prefill_metadata(
     block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
 
     cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
+    num_decodes = sum(1 for seq_start, seq_end in zip(cu_seqlens_host, cu_seqlens_host[1:]) if seq_end - seq_start == 1)
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
     # can reuse them instead of calling _compact_empty_segments again.
     cu_seqlens_kern, _, keep_meta = _compact_empty_segments(cu_seqlens_host, None, device=device)
@@ -185,6 +214,7 @@ def _build_non_spec_chunked_prefill_metadata(
         final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(device=device, non_blocking=True),
         chunk_indices_large_block=chunk_indices_large_block.to(device=device, non_blocking=True),
         block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=True),
+        num_decodes=num_decodes,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
     )
@@ -295,6 +325,58 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         return spec_indices, non_spec_indices
 
+    def _pad_non_spec_decode_graph_inputs(
+        self,
+        state_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        *,
+        num_decode_tokens: int,
+        graph_batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Refresh the fixed inputs consumed by a non-spec decode graph.
+
+        ``num_decodes`` includes graph dummy requests, while every real
+        non-spec decode contributes exactly one token.  Therefore
+        ``num_decode_tokens`` is the real request count.  Dummy state rows must
+        be null and repeated terminal query offsets must produce zero-length
+        rows for both causal conv1d and recurrent GDN consumers.
+        """
+        assert num_decode_tokens <= graph_batch_size
+
+        padded_state_indices = self.non_spec_state_indices_tensor[:graph_batch_size]
+        padded_state_indices[num_decode_tokens:].fill_(NULL_BLOCK_ID)
+        padded_state_indices[:num_decode_tokens].copy_(
+            state_indices[:num_decode_tokens],
+            non_blocking=True,
+        )
+
+        padded_query_start_loc = self.non_spec_query_start_loc[: graph_batch_size + 1]
+        padded_query_start_loc[: num_decode_tokens + 1].copy_(
+            query_start_loc[: num_decode_tokens + 1],
+            non_blocking=True,
+        )
+        query_padding = padded_query_start_loc[num_decode_tokens + 1 :]
+        if query_padding.numel() > 0:
+            query_padding.copy_(
+                padded_query_start_loc[num_decode_tokens].expand_as(query_padding),
+                non_blocking=True,
+            )
+
+        return padded_state_indices, padded_query_start_loc
+
+    def _reset_spec_decode_graph_inputs(self, graph_batch_size: int) -> None:
+        """Make a captured spec branch a state no-op for this replay.
+
+        Full-graph capture always builds speculative GDN metadata when MTP is
+        enabled. A DP rank can later replay that graph without any runtime spec
+        requests. Refresh every persistent spec input consumed by the captured
+        conv1d/recurrent tasks so capture-time values cannot advance GDN state.
+        """
+        self.spec_state_indices_tensor[:graph_batch_size].fill_(PAD_SLOT_ID)
+        self.spec_query_start_loc[: graph_batch_size + 1].zero_()
+        self.num_accepted_tokens[:graph_batch_size].zero_()
+        self.spec_actual_seq_lengths[: graph_batch_size + 1].zero_()
+
     def _attach_non_spec_prefill_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
@@ -403,6 +485,57 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return attn_metadata
 
+    def _fold_spec_sized_prefill_chunks_into_spec(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        spec_sequence_masks_cpu: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Restore the pre-#11735 state contract for spec-sized prompt chunks.
+
+        Decode-graph dispatch is shape based: a prompt chunk of exactly
+        num_spec + 1 tokens (typically the final chunk of a prompt) is
+        shape-identical to a speculative decode row, so its step can replay a
+        decode graph. Before #11735 the replay refreshed conv1d parameters
+        from the live per-step metadata, so such a row still updated its own
+        state; afterwards the graph reads padded buffers that are only filled
+        for pure decode batches, leaving the row's conv/recurrent state stale
+        and its output garbled from the first decoded token. Fold the row
+        into the spec metadata with all tokens accepted, which advances its
+        state over the whole chunk exactly like the prefill path would. Rows
+        without prior state (first chunks) stay on the prefill path.
+        """
+        is_prefilling = common_attn_metadata.is_prefilling
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        if is_prefilling is None or seq_lens_cpu is None or num_accepted_tokens is None:
+            return spec_sequence_masks_cpu, num_accepted_tokens
+
+        # The common metadata CPU tensors are padded; only the leading entries
+        # correspond to requests in this batch.
+        num_reqs = min(
+            spec_sequence_masks_cpu.numel(),
+            is_prefilling.numel(),
+            seq_lens_cpu.numel(),
+        )
+        is_prefilling = is_prefilling[:num_reqs]
+        seq_lens_cpu = seq_lens_cpu[:num_reqs]
+        query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)[:num_reqs]
+        fold = (
+            is_prefilling
+            & ~spec_sequence_masks_cpu
+            & (query_lens_cpu == self.num_spec + 1)
+            & (seq_lens_cpu > query_lens_cpu)
+        )
+        fold_indices = fold.nonzero(as_tuple=True)[0]
+        if fold_indices.numel() == 0:
+            return spec_sequence_masks_cpu, num_accepted_tokens
+
+        spec_sequence_masks_cpu = spec_sequence_masks_cpu.clone()
+        spec_sequence_masks_cpu[fold_indices] = True
+        num_accepted_tokens = num_accepted_tokens.clone()
+        num_accepted_tokens[fold_indices.to(num_accepted_tokens.device)] = self.num_spec + 1
+        return spec_sequence_masks_cpu, num_accepted_tokens
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -411,7 +544,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
-        m = common_attn_metadata
+        m = _treat_single_token_prefills_with_state_as_decodes(common_attn_metadata)
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
@@ -438,6 +571,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_decode_draft_tokens_cpu,
                 0,
                 out=spec_sequence_masks_cpu,
+            )
+            spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
+                m, spec_sequence_masks_cpu, num_accepted_tokens
             )
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
@@ -640,8 +776,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        batch_size = m.num_actual_tokens
-
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -705,22 +839,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+            graph_batch_size = m.num_reqs
+            if self.use_spec_decode:
+                self._reset_spec_decode_graph_inputs(graph_batch_size)
+            (
                 non_spec_state_indices_tensor,
-                non_blocking=True,
-            )
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:batch_size]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
-            non_spec_conv1d_cache_indices = non_spec_state_indices_tensor
-
-            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc,
-                non_blocking=True,
+            ) = self._pad_non_spec_decode_graph_inputs(
+                non_spec_state_indices_tensor,
+                non_spec_query_start_loc,
+                num_decode_tokens=num_decode_tokens,
+                graph_batch_size=graph_batch_size,
             )
-            non_spec_num_query_tokens = non_spec_query_start_loc[-1]
-            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
-            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+            non_spec_conv1d_cache_indices = non_spec_state_indices_tensor
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,

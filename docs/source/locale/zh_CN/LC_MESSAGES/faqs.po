@@ -279,6 +279,20 @@ msgstr ""
 "在使用张量并行 (TP ≥ 2) 且高并发时启用 FlashComm_v1 "
 "(`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`)。它具有阈值保护，在可能降低性能的低并发场景下不会激活。"
 
+msgid ""
+"FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In "
+"some batch-size settings (particularly medium concurrency), FIA may exhibit "
+"suboptimal performance. The PA (Page Attention) operator can be manually "
+"enabled via `pa_shape_list` in `--additional-config`. When the runtime batch"
+" size matches a value in `pa_shape_list`, the framework switches to PA. This"
+" is a temporary tuning knob — future FIA optimizations will make this "
+"parameter obsolete."
+msgstr ""
+"FIA (Flash Attention) 是 vLLM-Ascend 中的默认注意力算子。在某些批次大小设置下（特别是中等并发），FIA "
+"可能表现出次优性能。PA (Page Attention) 算子可以通过 `--additional-config` 中的 "
+"`pa_shape_list` 手动启用。当运行时批次大小与 `pa_shape_list` 中的值匹配时，框架会切换到 "
+"PA。这是一个临时的调优参数——未来的 FIA 优化将使此参数过时。"
+
 msgid "# FAQs"
 msgstr "# 常见问题解答"
 
@@ -564,3 +578,7 @@ msgstr ""
 
 msgid "### 25. When should I enable FlashComm_v1?"
 msgstr "### 25. 何时应该启用 FlashComm_v1？"
+
+msgid ""
+"### 26. What is the difference between FIA and PA operators for attention?"
+msgstr "### 26. FIA 和 PA 注意力算子之间有什么区别？"

@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend im
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
+    GroupedBlockHashCache,
     infer_cache_family_ratio,
     LayerBatchReqMeta,
     LayerBlockRange,
@@ -714,6 +715,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         def should_skip(start: int, end: int) -> bool:
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
+        grouped_hash_cache: GroupedBlockHashCache = {}
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
             cache_family = self.token_database.group_cache_families["kv"].get(group_id)
@@ -770,6 +772,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_filter=chunk_filter,
                 shard_rank=self.tp_rank % self.put_step if pre_shard else None,
                 shard_size=self.put_step if pre_shard else None,
+                grouped_hash_cache=grouped_hash_cache,
             )
             for start, end, key, _block_hash, block_id in iterator:
                 starts.append(start)
@@ -814,6 +817,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         token_len,
                         req_meta.block_hashes,
                         kv_cache_group_id=group_id,
+                        grouped_hash_cache=grouped_hash_cache,
                     )
                 ]
                 if self.enable_kv_event
@@ -923,7 +927,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             key_list = []
             block_id_list: list[int] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
-            load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
+            grouped_hash_cache: GroupedBlockHashCache = {}
+            load_masks = self.token_database.load_mask(
+                req_meta.block_hashes,
+                token_len,
+                grouped_hash_cache=grouped_hash_cache,
+            )
             for group_id in group_ids:
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
@@ -946,6 +955,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                     chunk_filter=chunk_filter,
+                    grouped_hash_cache=grouped_hash_cache,
                 ):
                     addr, size, block_id = self._prepare_value(
                         start,

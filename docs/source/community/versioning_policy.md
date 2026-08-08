@@ -23,41 +23,42 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|
+| v0.24.0rc1  | v0.24.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 / 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |
 | v0.23.0rc1  | v0.23.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 / 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |
 | v0.22.1rc1  | v0.22.1           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
 | v0.21.0rc1  | v0.21.0           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
 | v0.20.2rc1  | v0.20.2           | >= 3.10, < 3.12 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.8.post1 |
 | v0.19.1rc1  | v0.19.1           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             | v0.3.8.post1 |
 | v0.18.0     | v0.18.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0.post1+git4c901a4 | 3.2.0.dev20260322 | v0.3.9       |
-| v0.18.0rc1  | v0.18.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |              |
-| v0.17.0rc1  | v0.17.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |              |
-| v0.16.0rc1  | v0.16.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |              |
-| v0.15.0rc1  | v0.15.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |              |
-| v0.14.0rc1  | v0.14.1           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |              |
-| v0.13.0rc3  | v0.13.0           | >= 3.10, < 3.12 | 8.5.1       | 2.8.0  / 2.8.0.post2            | 3.2.0             |              |
-| v0.13.0     | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post2            | 3.2.0             |              |
-| v0.13.0rc2  | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post1            | 3.2.0             |              |
-| v0.13.0rc1  | v0.13.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |                   |              |
-| v0.12.0rc1  | v0.12.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |                   |              |
-| v0.11.0     | v0.11.0           | >= 3.9, < 3.12 | 8.3.RC2      | 2.7.1 / 2.7.1.post1             |                   |              |
-| v0.11.0rc3  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |                   |              |
-| v0.11.0rc2  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1                   |                   |              |
-| v0.11.0rc1  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC1     | 2.7.1 / 2.7.1                   |                   |              |
-| v0.11.0rc0  | v0.11.0rc3        | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |                   |              |
-| v0.10.2rc1  | v0.10.2           | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |                   |              |
-| v0.10.1rc1  | v0.10.1/v0.10.1.1 | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |                   |              |
-| v0.10.0rc1  | v0.10.0           | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |                   |              |
-| v0.9.2rc1   | v0.9.2            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250619 |                   |              |
-| v0.9.1      | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             |                   |              |
-| v0.9.1rc3   | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             |                   |              |
-| v0.9.1rc2   | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             |                   |              |
-| v0.9.1rc1   | v0.9.1            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250528 |                   |              |
-| v0.9.0rc2   | v0.9.0            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
-| v0.9.0rc1   | v0.9.0            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
-| v0.8.5rc1   | v0.8.5.post1      | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
-| v0.8.4rc2   | v0.8.4            | >= 3.9, < 3.12  | 8.0.0       | 2.5.1 / 2.5.1                   |                   |              |
-| v0.7.3.post1| v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
-| v0.7.3      | v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |                   |              |
+| v0.18.0rc1  | v0.18.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       |
+| v0.17.0rc1  | v0.17.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       |
+| v0.16.0rc1  | v0.16.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       |
+| v0.15.0rc1  | v0.15.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       |
+| v0.14.0rc1  | v0.14.1           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0             |    N/A       |
+| v0.13.0rc3  | v0.13.0           | >= 3.10, < 3.12 | 8.5.1       | 2.8.0  / 2.8.0.post2            | 3.2.0             |    N/A       |
+| v0.13.0     | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post2            | 3.2.0             |    N/A       |
+| v0.13.0rc2  | v0.13.0           | >= 3.10, < 3.12 | 8.5.0       | 2.8.0  / 2.8.0.post1            | 3.2.0             |    N/A       |
+| v0.13.0rc1  | v0.13.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  | N/A               |    N/A       |
+| v0.12.0rc1  | v0.12.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  | N/A               |    N/A       |
+| v0.11.0     | v0.11.0           | >= 3.9, < 3.12 | 8.3.RC2      | 2.7.1 / 2.7.1.post1             | N/A               |    N/A       |
+| v0.11.0rc3  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1.post1             | N/A               |    N/A       |
+| v0.11.0rc2  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1                   | N/A               |    N/A       |
+| v0.11.0rc1  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC1     | 2.7.1 / 2.7.1                   | N/A               |    N/A       |
+| v0.11.0rc0  | v0.11.0rc3        | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       | N/A               |    N/A       |
+| v0.10.2rc1  | v0.10.2           | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       | N/A               |    N/A       |
+| v0.10.1rc1  | v0.10.1/v0.10.1.1 | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       | N/A               |    N/A       |
+| v0.10.0rc1  | v0.10.0           | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       | N/A               |    N/A       |
+| v0.9.2rc1   | v0.9.2            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250619 | N/A               |    N/A       |
+| v0.9.1      | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             | N/A               |    N/A       |
+| v0.9.1rc3   | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             | N/A               |    N/A       |
+| v0.9.1rc2   | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             | N/A               |    N/A       |
+| v0.9.1rc1   | v0.9.1            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250528 | N/A               |    N/A       |
+| v0.9.0rc2   | v0.9.0            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   | N/A               |    N/A       |
+| v0.9.0rc1   | v0.9.0            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   | N/A               |    N/A       |
+| v0.8.5rc1   | v0.8.5.post1      | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   | N/A               |    N/A       |
+| v0.8.4rc2   | v0.8.4            | >= 3.9, < 3.12  | 8.0.0       | 2.5.1 / 2.5.1                   | N/A               |    N/A       |
+| v0.7.3.post1| v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   | N/A               |    N/A       |
+| v0.7.3      | v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   | N/A               |    N/A       |
 
 !!! note
 
@@ -75,6 +76,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.07.30 | Release candidates, v0.24.0rc1            |
 | 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |
 | 2026.06.16 | Release candidates, v0.21.0rc1            |
@@ -154,7 +156,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|<https://github.com/vllm-project/vllm/issues/22693>|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|930|wangxiyuan|
 
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.
@@ -188,7 +190,7 @@ Notes:
 
 ## Software dependency management
 
-- `torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable version to [PyPI](https://pypi.org/project/torch-npu)
+- `torch-npu`: TorchNPU releases a stable version to [PyPI](https://pypi.org/project/torch-npu)
   every 3 months, a development version (aka the POC version) every month, and a nightly version every day.
   The PyPI stable version **CAN** be used in vLLM Ascend final version, the monthly dev version **ONLY CAN** be used in
   vLLM Ascend RC version for rapid iteration, and the nightly version **CANNOT** be used in any vLLM Ascend version or branch.
