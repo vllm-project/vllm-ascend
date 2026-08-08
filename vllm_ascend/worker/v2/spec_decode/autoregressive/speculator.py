@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_forward_context import override_mrv2_is_draft_forward
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
@@ -262,14 +263,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Override AutoRegressiveSpeculator._run_model for Ascend NPUs."""
-        last_hidden_states, hidden_states = super()._run_model(
-            num_tokens,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-            mm_inputs,
-        )
+        with override_mrv2_is_draft_forward():
+            last_hidden_states, hidden_states = super()._run_model(
+                num_tokens,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                mm_inputs,
+            )
         self._ascend_update_seq_lens(attn_metadata)
         return last_hidden_states, hidden_states
 

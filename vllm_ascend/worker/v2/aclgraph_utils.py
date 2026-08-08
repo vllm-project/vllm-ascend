@@ -36,6 +36,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.worker.v2.sp_utils import _all_gather_hidden_states_and_aux
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -174,7 +175,29 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
-        return self.original_model(*args, **kwargs)
+        output = self.original_model(*args, **kwargs)
+
+        # Under MRV2 + FlashComm1 the target forward returns TP-local hidden
+        # states (num_tokens / TP rows). During FULL graph capture, gather them
+        # back to the full sequence inside the graph so the capture buffers see
+        # the same row count upstream vLLM expects; the runtime path then skips
+        # its outer all-gather when the rows are already full
+        # (NPUModelRunner.execute_model). PIECEWISE keeps the TP-local output
+        # and relies on the outer all-gather exactly as before.
+        try:
+            forward_context = get_forward_context()
+        except AssertionError:
+            return output
+        if (
+            _EXTRA_CTX.flash_comm_v1_enabled
+            and not self.is_draft_model
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and not isinstance(output, IntermediateTensors)
+        ):
+            num_tokens = _EXTRA_CTX.num_tokens
+            if num_tokens is not None:
+                output = _all_gather_hidden_states_and_aux(output, num_tokens)
+        return output
 
     def get_original_model(self):
         return self.original_model

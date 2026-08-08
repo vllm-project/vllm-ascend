@@ -194,6 +194,7 @@ class NPUModelRunner(GPUModelRunner):
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
+        set_potential_max_tokens(vllm_config)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
 
@@ -233,10 +234,11 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.is_last_pp_rank
             and state is not None
+            and state.hidden_states is not None
+            and state.hidden_states.shape[0] < state.input_batch.num_tokens_after_padding
             and _flashcomm_enabled(self.vllm_config, state.input_batch.num_tokens_after_padding)
         ):
-            num_tokens = state.input_batch.num_tokens
-            assert state.hidden_states is not None
+            num_tokens = state.input_batch.num_tokens_after_padding
             gathered_output = _all_gather_hidden_states_and_aux(
                 (state.hidden_states, state.aux_hidden_states)
                 if state.aux_hidden_states is not None

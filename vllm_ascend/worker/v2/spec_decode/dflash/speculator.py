@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
+from vllm_ascend.ascend_forward_context import override_mrv2_is_draft_forward
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
@@ -70,6 +71,29 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         # created by super().init_cudagraph_manager without a speculator ref.
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
+
+    @torch.inference_mode()
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> torch.Tensor:
+        """Override DFlashSpeculator._run_model so MRv2 marks draft forwards.
+
+        AscendDSparkSpeculator also resolves to this override via its MRO
+        (AscendDFlashSpeculator, DSparkSpeculator).
+        """
+        with override_mrv2_is_draft_forward():
+            return super()._run_model(
+                num_tokens,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+            )
 
     def set_attn(
         self,

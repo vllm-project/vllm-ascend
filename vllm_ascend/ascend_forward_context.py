@@ -31,6 +31,7 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_MRV2_IS_DRAFT_FORWARD: ContextVar[bool] = ContextVar("_MRV2_IS_DRAFT_FORWARD", default=False)
 _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
     "w8a8",
     "w4a8",
@@ -64,6 +65,26 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
+
+
+@contextmanager
+def override_mrv2_is_draft_forward():
+    """Mark the enclosed forward path as a speculative-draft forward.
+
+    MRv2 builds the base forward context inside upstream vLLM, so Ascend's
+    platform hook cannot tell whether the current forward is the target or
+    the draft model. A ContextVar keeps this MRv2-only state scoped to the
+    draft forward without adding default fallback behavior.
+    """
+    token = _MRV2_IS_DRAFT_FORWARD.set(True)
+    try:
+        yield
+    finally:
+        _MRV2_IS_DRAFT_FORWARD.reset(token)
+
+
+def get_mrv2_is_draft_forward() -> bool:
+    return _MRV2_IS_DRAFT_FORWARD.get()
 
 
 def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
