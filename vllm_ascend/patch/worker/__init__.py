@@ -38,6 +38,7 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
+    import vllm_ascend.patch.worker.patch_multimodal_merge_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 
 # torchair/npugraph_ex is only available on NPU; silently skip when missing
