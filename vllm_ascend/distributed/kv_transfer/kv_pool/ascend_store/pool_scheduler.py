@@ -290,15 +290,26 @@ class KVPoolScheduler:
     def _make_layerwise_gva_keys_for_hit_check(self, group_id: int, block_hash_hex: str) -> list[str]:
         """Generate all-rank GVA keys for scheduler-side hit check.
 
-        Single-group uses PR #11585 format; multi-group includes group_id.
-        Returns one key per head_or_tp_rank (ranks in the same put_step
-        group share one key for MLA).
+        Returns one key per PCP, DCP, PP, and head_or_tp rank. Ranks in the
+        same put_step group share one key when DCP is disabled.
         """
         head_or_tp_ranks = self.tp_size // self.put_step
         if len(self.kv_cache_group_ids) > 1:
-            return [f"{self.model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
+            return [
+                f"{self.model_name}@{group_id}@{block_hash_hex}@{h}@pcp{pcp}@dcp{dcp}@pp{pp}"
+                for pcp in range(self.pcp_size)
+                for dcp in range(self.dcp_size)
+                for h in range(head_or_tp_ranks)
+                for pp in range(self.pp_size)
+            ]
         else:
-            return [f"{self.model_name}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
+            return [
+                f"{self.model_name}@{block_hash_hex}@{h}@pcp{pcp}@dcp{dcp}@pp{pp}"
+                for pcp in range(self.pcp_size)
+                for dcp in range(self.dcp_size)
+                for h in range(head_or_tp_ranks)
+                for pp in range(self.pp_size)
+            ]
 
     def _get_layerwise_gva_hit_tokens(
         self,

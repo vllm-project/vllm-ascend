@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -246,6 +246,11 @@ msgstr "3.2.0.dev20260322"
 #: ../../source/community/versioning_policy.md
 msgid "v0.18.0rc1"
 msgstr "v0.18.0rc1"
+
+#: ../../source/community/versioning_policy.md
+#: ../../source/community/versioning_policy.md:62
+msgid "N/A"
+msgstr "不适用"
 
 #: ../../source/community/versioning_policy.md
 msgid "v0.17.0rc1"
@@ -914,10 +919,6 @@ msgid "End of Life (EOL)"
 msgstr "生命周期终止"
 
 #: ../../source/community/versioning_policy.md:62
-msgid "N/A"
-msgstr "不适用"
-
-#: ../../source/community/versioning_policy.md:62
 msgid "Branch no longer accepting changes"
 msgstr "分支不再接受变更"
 
@@ -1034,8 +1035,10 @@ msgid "rfc/long_seq_optimization"
 msgstr "rfc/long_seq_optimization"
 
 #: ../../source/community/versioning_policy.md:62
-msgid "<https://github.com/vllm-project/vllm/issues/22693>"
-msgstr "<https://github.com/vllm-project/vllm/issues/22693>"
+msgid ""
+"[RFC: long sequence optimization #22693](https://github.com/vllm-"
+"project/vllm/issues/22693)"
+msgstr "[RFC：长序列优化 #22693](https://github.com/vllm-project/vllm/issues/22693)"
 
 #: ../../source/community/versioning_policy.md:62
 msgid "930"
@@ -1202,16 +1205,15 @@ msgstr "软件依赖管理"
 
 #: ../../source/community/versioning_policy.md:191
 msgid ""
-"`torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable "
-"version to [PyPI](https://pypi.org/project/torch-npu) every 3 months, a "
-"development version (aka the POC version) every month, and a nightly version"
-" every day. The PyPI stable version **CAN** be used in vLLM Ascend final "
-"version, the monthly dev version **ONLY CAN** be used in vLLM Ascend RC "
-"version for rapid iteration, and the nightly version **CANNOT** be used in "
-"any vLLM Ascend version or branch."
+"`torch-npu`: TorchNPU releases a stable version to "
+"[PyPI](https://pypi.org/project/torch-npu) every 3 months, a development "
+"version (aka the POC version) every month, and a nightly version every day. "
+"The PyPI stable version **CAN** be used in vLLM Ascend final version, the "
+"monthly dev version **ONLY CAN** be used in vLLM Ascend RC version for rapid"
+" iteration, and the nightly version **CANNOT** be used in any vLLM Ascend "
+"version or branch."
 msgstr ""
-"`torch-npu`：Ascend PyTorch扩展（torch-"
-"npu）每3个月向[PyPI](https://pypi.org/project/torch-"
-"npu)发布一个稳定版本，每月发布一个开发版本（即POC版本），每日发布一个夜间构建版本。PyPI稳定版本**可以**用于vLLM "
-"Ascend正式版本，月度开发版本**仅可**用于vLLM Ascend RC版本以支持快速迭代，夜间构建版本**不得**用于任何vLLM "
-"Ascend版本或分支。"
+"`torch-npu`：TorchNPU 每3个月向 [PyPI](https://pypi.org/project/torch-npu) "
+"发布一个稳定版本，每月发布一个开发版本（即POC版本），每天发布一个夜间版本。PyPI 稳定版本**可以**用于 vLLM Ascend "
+"最终版本，月度开发版本**仅可**用于 vLLM Ascend RC 版本以进行快速迭代，而夜间版本**不能**用于任何 vLLM Ascend "
+"版本或分支。"

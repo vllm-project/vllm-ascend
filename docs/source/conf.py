@@ -56,6 +56,7 @@ extensions = [
     "myst_parser",
     "sphinxarg.ext",
     "sphinx_design",
+    "tools.docs_i18n.sphinx_extension",
     "sphinx_togglebutton",
     "sphinx_substitution_extensions",
     "tools.docs_codegen.sphinx_extension",
@@ -84,7 +85,7 @@ myst_substitutions = {
     "pip_vllm_ascend_version": "0.23.0rc1",
     "pip_vllm_version": "0.23.0",
     # CANN image tag paired with the vllm_ascend_version above
-    "cann_image_tag": "9.0.1-910b-ubuntu22.04-py3.12",
+    "cann_image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
     "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
     # vLLM tag for main branch
@@ -92,11 +93,11 @@ myst_substitutions = {
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
-    "main_cann_version": "9.0.1",
+    "main_cann_version": "9.1.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0.post2",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0.post4",
     # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.1",
+    "main_triton_ascend_version": "3.2.2",
 }
 
 # For cross-file header anchors

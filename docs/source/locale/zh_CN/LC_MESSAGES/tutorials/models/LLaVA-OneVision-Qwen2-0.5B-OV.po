@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -99,10 +99,10 @@ msgstr "您可以直接使用官方 Docker 镜像运行 `LLaVA-OneVision-Qwen2-0
 #: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:27
 msgid ""
 "Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
+"your node. Refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
+"根据您的机器类型选择镜像，并在您的节点上启动docker镜像。请参阅[使用docker](../../installation.md#set-up-"
 "using-docker)。"
 
 #: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:49

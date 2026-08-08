@@ -79,7 +79,7 @@ To run the proxy server, you need to specify the host and port for each vLLM DP 
 # For example, we have already started two DP instances in single node:
 # python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12342
 # By default, launch_online_dp.py will launch vLLM instances from starting port 9000,
-# so the vLLM ports for DP0 and DP1 are 9000 and 9001 separately.
+# so the vLLM ports for DP0 and DP1 are 9000 and 9001 respectively.
 # Then you can start the load-balance proxy server by:
 cd examples/external_online_dp
 python dp_load_balance_proxy_server.py \

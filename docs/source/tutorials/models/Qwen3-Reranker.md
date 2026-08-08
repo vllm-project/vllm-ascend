@@ -83,8 +83,8 @@ docker run --rm \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
-:sync: Atlas inference products
+::::{tab-item} Atlas 300I DUO
+:sync: Atlas 300I DUO
 
 ```{code-block} bash
    :substitutions:
@@ -142,8 +142,8 @@ vllm serve Qwen/Qwen3-Reranker-0.6B \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
-:sync: Atlas inference products
+::::{tab-item} Atlas 300I DUO
+:sync: Atlas 300I DUO
 
 ```{code-block} bash
    :substitutions:
@@ -159,16 +159,16 @@ vllm serve Qwen/Qwen3-Reranker-0.6B \
   --max-model-len 1024
 ```
 
-    Required  Parameter Descriptions:
+Required  Parameter Descriptions:
 
-    `--compilation-config` For Atlas inference products, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 ::::
 :::::
 
 Key Parameter Descriptions:
 
-- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas inference products if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -262,25 +262,25 @@ Here are two accuracy evaluation methods.
 2. Run follow code to execute the accuracy evaluation.
 
     ```python
-  
+
     import os
-    
+
     from mteb.models.vllm_wrapper import VllmCrossEncoderWrapper
-    
+
     if __name__ == "__main__":
         import mteb
-    
+
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    
+
         model = VllmCrossEncoderWrapper(f"/home/data/Qwen3-Reranker-0.6B",
                                     revision="norm",
                                     dtype="float16",
                                     enforce_eager=True,
                                     max_model_len=10240,
                                     hf_overrides={"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": True})
-    
+
         cache = mteb.ResultCache("/home/data/mteb_data")
         tasks = mteb.get_tasks(
             task_types=["Reranking"],

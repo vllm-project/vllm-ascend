@@ -17,12 +17,13 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
@@ -75,7 +76,7 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
     def store_mask(self, token_len, num_prompt_tokens=None):
         return self.masks
 
-    def load_mask(self, block_hashes, token_len):
+    def load_mask(self, block_hashes, token_len, grouped_hash_cache=None):
         return self.masks
 
     def mask_allows_chunk(self, masks, kv_cache_group_id, start):
@@ -241,6 +242,49 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h1")])
         self.assertEqual(events[0].parent_block_hash, maybe_convert_block_hash(b"h0"))
+
+    def test_save_reuses_grouped_hashes_for_kv_events(self):
+        store = FakeStore([0, 0])
+        db = ChunkedTokenDatabase(
+            [KeyMetadata("m", 0, 0, 0, 0)],
+            [16],
+            None,
+            hash_block_size=8,
+        )
+        db.set_group_buffers({0: [1000]}, {0: [16]}, {0: [1]}, group_num_layers={0: 1})
+        thread = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+            enable_kv_event=True,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            current_event=None,
+            token_ids=list(range(32)),
+            original_block_size=16,
+        )
+        thread.add_stored_request("r1")
+        thread.request_queue.put(request)
+
+        with patch.object(
+            config_data,
+            "_rehash_block_hash_group",
+            wraps=config_data._rehash_block_hash_group,
+        ) as rehash:
+            thread._handle_request(request)
+
+        self.assertEqual(rehash.call_count, 2)
+        self.assertEqual(len(thread.get_kv_events()), 2)
 
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")

@@ -18,7 +18,7 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend Atlas inference products 48 GB NPU. Download the model weights from [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
+The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU. Download the model weights from [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
 
@@ -55,7 +55,7 @@ docker run --rm \
 
 ::::
 
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
    :substitutions:
@@ -97,11 +97,11 @@ f you prefer to build from source instead of using the Docker image, install vLL
 
 :::{note}
 
-    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
-    ```bash
-    pip uninstall -y triton-ascend triton
-    ```
+```bash
+pip uninstall -y triton-ascend triton
+```
 
 To verify the source installation:
 
@@ -131,7 +131,7 @@ vllm serve your_model_path \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
    :substitutions:
@@ -209,7 +209,7 @@ The following settings are starting points rather than globally optimal configur
 | --- | --- | --- |
 | Low latency | `--tensor-parallel-size 1`, `--max-model-len 4096` | Use short audio inputs and avoid sharing the NPU with other workloads. |
 | High throughput | Increase request concurrency after establishing the latency baseline | Monitor NPU memory and end-to-end latency; do not use synthetic text-only requests as a proxy for ASR traffic. |
-| Long audio | Increase `--max-model-len` only as required | On Atlas inference products, keep the value conservative because attention-mask memory grows with the configured maximum length. |
+| Long audio | Increase `--max-model-len` only as required | On Atlas 300I DUO, keep the value conservative because attention-mask memory grows with the configured maximum length. |
 
 For general parameter tuning, refer to the [Performance Tuning Guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
 
@@ -217,10 +217,10 @@ For general parameter tuning, refer to the [Performance Tuning Guide](../../deve
 
 For common environment, installation, and general parameter issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section covers model- and hardware-specific guidance.
 
-### Atlas inference products runs out of memory during startup
+### Atlas 300I DUO runs out of memory during startup
 
 **Symptom:** The server fails with an out-of-memory error while initializing attention.
 
-**Cause:** On Atlas inference products, an automatically detected large context length can create a full causal attention mask whose memory consumption grows quadratically with `max_model_len`.
+**Cause:** On Atlas 300I DUO, an automatically detected large context length can create a full causal attention mask whose memory consumption grows quadratically with `max_model_len`.
 
 **Solution:** Always set `--max-model-len` explicitly to a conservative value, such as `4096`, and increase it only after verifying available NPU memory.

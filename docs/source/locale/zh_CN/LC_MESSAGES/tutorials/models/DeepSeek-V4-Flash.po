@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -96,12 +96,12 @@ msgstr "3.1 模型权重"
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:26
 msgid ""
 "`DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 "
-"(128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model "
+"(128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model "
 "weight](https://www.modelscope.cn/models/Eco-"
 "Tech/DeepSeek-V4-Flash-w8a8-mtp)"
 msgstr ""
-"`DeepSeek-V4-Flash-w8a8-mtp`（量化版本）：需要 1 个 Atlas 800 A3（128G × 8）节点或 1 个 "
-"Atlas 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"`DeepSeek-V4-Flash-w8a8-mtp`（量化版本）：需要1个Atlas 800 A3（128GB × 8）节点或1个Atlas 800"
+" A2（64GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/DeepSeek-V4-Flash-w8a8-mtp)"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:28
@@ -199,10 +199,10 @@ msgstr "5.1 单节点在线部署"
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 "
-"Atlas 800 A3 (128G × 8) or 1 Atlas 800 A2 (64G × 8)."
+"Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8)."
 msgstr ""
-"单节点部署在同一节点内完成 Prefill 和 Decode。量化模型 `DeepSeek-V4-Flash-w8a8-mtp` 可部署在 1 个 "
-"Atlas 800 A3（128G × 8）或 1 个 Atlas 800 A2（64G × 8）上。"
+"单节点部署在同一节点内完成Prefill和Decode。量化模型`DeepSeek-V4-Flash-w8a8-mtp`可部署在1个Atlas 800 "
+"A3（128GB × 8）或1个Atlas 800 A2（64GB × 8）上。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:150
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:198
@@ -210,7 +210,7 @@ msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:243
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:849
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:856
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
 
@@ -223,17 +223,67 @@ msgstr "`--max-model-len` 指定最大上下文长度，即单个请求的输入
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:246
 msgid ""
+"`--max-num-seqs` indicates the maximum number of requests that each DP group"
+" is allowed to process. If the number of requests sent to the service "
+"exceeds this limit, the excess requests will remain in a waiting state and "
+"will not be scheduled. Note that the time spent in the waiting state is also"
+" counted in metrics such as TTFT and TPOT. Therefore, when testing "
+"performance, it is generally recommended that `--max-num-seqs` * `--data-"
+"parallel-size` >= the actual total concurrency."
+msgstr ""
+"`--max-num-seqs` "
+"表示每个DP组允许处理的最大请求数。如果发送到服务的请求数超过此限制，多余的请求将保持等待状态且不会被调度。请注意，等待状态所花费的时间也会计入TTFT和TPOT等指标中。因此，在进行性能测试时，通常建议`--max-"
+"num-seqs` * `--data-parallel-size` >= 实际总并发数。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:247
+msgid ""
+"`--max-num-batched-tokens` is the maximum number of tokens processed in one "
+"scheduler step. A larger value can improve prefill efficiency but consumes "
+"more activation memory."
+msgstr ""
+"`--max-num-batched-tokens` "
+"是单个调度步骤中处理的最大token数。较大的值可以提高prefill效率，但会消耗更多的激活内存。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:248
+msgid ""
+"`--data-parallel-size` sets the global number of data parallel ranks, while "
+"`--tensor-parallel-size` sets the tensor parallel size within each DP rank. "
+"Configure them together according to the deployment topology and available "
+"NPUs."
+msgstr ""
+"`--data-parallel-size` 设置全局数据并行秩的数量，而`--tensor-parallel-"
+"size`设置每个DP秩内的张量并行大小。请根据部署拓扑和可用的NPU一起配置它们。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:249
+msgid ""
+"`--enable-expert-parallel` enables expert parallelism for MoE layers. Do not"
+" mix MoE tensor parallelism and expert parallelism in the same MoE layer."
+msgstr "`--enable-expert-parallel` 为MoE层启用专家并行。请勿在同一MoE层中混合使用MoE张量并行和专家并行。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:250
+msgid ""
 "`--no-enable-prefix-caching` indicates that prefix caching is disabled. To "
 "enable it, remove this option."
 msgstr "`--no-enable-prefix-caching` 表示禁用前缀缓存。如需启用，请移除该选项。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:247
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:251
+msgid ""
+"`--block-size` sets the KV cache block size. To enable the experimental 4K "
+"prefix cache hit support, change it from `128` to `32`."
+msgstr "`--block-size` 设置KV缓存块大小。要启用实验性的4K前缀缓存命中支持，请将其从`128`改为`32`。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:252
+msgid ""
+"`--quantization ascend` enables Ascend quantization for the W8A8 model."
+msgstr "`--quantization ascend` 为W8A8模型启用Ascend量化。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:253
 msgid ""
 "`--speculative-config` configures the MTP (Multi-Token Prediction) "
 "speculative decoding to accelerate inference."
 msgstr "`--speculative-config` 配置 MTP（多 token 预测）推测解码以加速推理。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:248
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:254
 #, python-brace-format
 msgid ""
 "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` enables "
@@ -242,19 +292,34 @@ msgstr ""
 "`--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` "
 "在解码阶段启用完整的 ACL 图执行，以减少调度延迟。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:249
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:255
 msgid ""
 "`--async-scheduling` enables asynchronous scheduling to overlap CPU "
 "scheduling with NPU computation."
 msgstr "`--async-scheduling` 启用异步调度，使 CPU 调度与 NPU 计算重叠。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:250
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:256
+msgid ""
+"`--additional-config` enables Ascend-specific optimizations. "
+"`enable_npugraph_ex` enables enhanced ACL graph execution, "
+"`enable_static_kernel: false` keeps static-kernel compilation disabled, "
+"`enable_cpu_binding` enables Ascend-native CPU binding, `enable_dsa_cp` "
+"enables DSA context parallelism, and `multistream_overlap_shared_expert` "
+"overlaps shared expert computation for better MoE throughput. DSA-CP depends"
+" on FlashComm1, and both options must be enabled explicitly."
+msgstr ""
+"`--additional-config` "
+"启用Ascend特定优化。`enable_npugraph_ex`启用增强的ACL图执行，`enable_static_kernel: "
+"false`保持静态内核编译禁用，`enable_cpu_binding`启用Ascend原生CPU绑定，`enable_dsa_cp`启用DSA上下文并行，`multistream_overlap_shared_expert`重叠共享专家计算以提高MoE吞吐量。DSA-"
+"CP依赖FlashComm1，且两个选项都必须显式启用。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:257
 msgid ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication "
 "optimization."
 msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 启用 FlashComm 通信优化。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:252
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:259
 msgid ""
 "Common Issues Tip: If you encounter issues, please refer to the [Public "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
@@ -263,27 +328,27 @@ msgstr ""
 "常见问题提示：如果遇到问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) 进行故障排除。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:254
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:261
 msgid "Service Verification:"
 msgstr "服务验证："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:272
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:888
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:279
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:898
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:274
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:890
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:281
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:900
 msgid ""
 "The service returns HTTP 200 OK with a JSON response containing the "
 "`choices` field."
 msgstr "服务返回 HTTP 200 OK，JSON 响应中包含 `choices` 字段。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:276
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:283
 msgid "5.2 Multi-Node PD Separation Deployment"
 msgstr "5.2 多节点 PD 分离部署"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:278
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:285
 msgid ""
 "We recommend using Mooncake for deployment: "
 "[Mooncake](../features/pd_disaggregation_mooncake_multi_node.md)."
@@ -291,14 +356,14 @@ msgstr ""
 "我们推荐使用 Mooncake "
 "进行部署：[Mooncake](../features/pd_disaggregation_mooncake_multi_node.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:280
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:287
 msgid ""
 "In the standard single-node deployment mode, Prefill (prompt processing) and"
 " Decode (token generation) tasks run on the same set of NPUs. This can lead "
 "to two issues:"
 msgstr "在标准单节点部署模式下，Prefill（提示处理）和 Decode（token 生成）任务运行在同一组 NPU 上。这可能导致两个问题："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:282
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:289
 msgid ""
 "**Prefill preemption interrupts Decode**: Prefill is a compute-intensive "
 "task that processes the entire input context at once, while Decode generates"
@@ -310,7 +375,7 @@ msgstr ""
 "token。当新用户请求到达时，其 Prefill 阶段可能会抢占并中断正在进行的 Decode 任务，导致抖动和更高的每个输出 token "
 "时间（TPOT）延迟。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:283
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:290
 msgid ""
 "**Inflexible resource allocation**: Prefill and Decode have fundamentally "
 "different computational characteristics — Prefill is compute-bound and "
@@ -320,7 +385,7 @@ msgid ""
 msgstr ""
 "**资源分配不灵活**：Prefill和Decode具有根本不同的计算特性——Prefill是计算密集型和内存带宽密集型，而Decode是内存带宽受限型。在相同硬件上运行它们会迫使做出折中，无法使两者都达到最优。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:285
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:292
 msgid ""
 "PD (Prefill-Decode) separation addresses these issues by running Prefill and"
 " Decode on dedicated node groups, each configured independently. This "
@@ -331,34 +396,34 @@ msgstr ""
 "PD（Prefill-"
 "Decode）分离通过将Prefill和Decode运行在专用节点组上（每组独立配置）来解决这些问题。对于需要同时保证稳定延迟和高吞吐量的并发多用户生产部署，推荐采用此架构。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:287
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:294
 msgid ""
 "The following sections describe PD separation deployment on both Atlas 800 "
-"A3 (128G × 8) and Atlas 800 A2 (64G × 8) multi-node environments."
-msgstr "以下章节将介绍在Atlas 800 A3（128G × 8）和Atlas 800 A2（64G × 8）多节点环境下的PD分离部署。"
+"A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments."
+msgstr "以下章节介绍在Atlas 800 A3（128GB × 8）和Atlas 800 A2（64GB × 8）多节点环境下的PD分离部署。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:289
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:296
 msgid "5.2.1 A3 Series PD Separation Deployment"
 msgstr "5.2.1 A3系列PD分离部署"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:291
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:298
 msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3"
-" (128G × 8) multi-node environment with 1P1D for better performance."
+" (128GB × 8) multi-node environment with 1P1D for better performance."
 msgstr ""
-"本节展示在Atlas 800 A3（128G × 8）多节点环境下，采用1P1D配置以获得更好性能的DeepSeek-V4-Flash部署指南。"
+"本节介绍DeepSeek-V4-Flash在Atlas 800 A3（128GB × 8）多节点环境下采用1P1D配置以获得更优性能的部署指南。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:293
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:585
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:300
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:592
 msgid "Before you start, please:"
 msgstr "开始前，请："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:295
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:587
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:302
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:594
 msgid "Prepare the script `launch_online_dp.py` on each node."
 msgstr "在每个节点上准备脚本`launch_online_dp.py`。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:397
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:404
 msgid "Parameter descriptions:"
 msgstr "参数说明："
 
@@ -479,34 +544,34 @@ msgstr "9000"
 msgid "Starting port for each vLLM engine instance on this node."
 msgstr "此节点上每个vLLM引擎实例的起始端口。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:409
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:656
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:416
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:663
 msgid "Prepare the script `run_dp_template.sh` on each node."
 msgstr "在每个节点上准备脚本`run_dp_template.sh`。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:411
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:563
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:827
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:418
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:570
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:834
 msgid "Prefill node"
 msgstr "Prefill节点"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:482
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:570
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:836
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:489
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:577
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:843
 msgid "Decode node"
 msgstr "Decode节点"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:561
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:825
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:568
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:832
 msgid "Start the server with the following command on each node."
 msgstr "在每个节点上使用以下命令启动服务器。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:577
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:845
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:584
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:852
 msgid "Deploy the P-D disaggregation proxy."
 msgstr "部署P-D分离代理。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:579
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:586
 msgid ""
 "Refer to [Prefill-Decode Disaggregation "
 "(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy "
@@ -515,23 +580,24 @@ msgstr ""
 "请参考[Prefill-Decode分离 "
 "(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)部署P-D分离代理。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:581
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:588
 msgid "5.2.2 A2 Series PD Separation Deployment"
 msgstr "5.2.2 A2系列PD分离部署"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:583
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:590
 msgid ""
 "This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2"
-" (64G × 8) multi-node environment with 4\\*1P 1\\*4D for better performance."
+" (64GB × 8) multi-node environment with 4\\*1P 1\\*4D for better "
+"performance."
 msgstr ""
-"本节展示在Atlas 800 A2（64G × 8）多节点环境下，采用4\\*1P "
-"1\\*4D配置以获得更好性能的DeepSeek-V4-Flash部署指南。"
+"本节介绍DeepSeek-V4-Flash在Atlas 800 A2（64GB × 8）多节点环境下采用4\\*1P "
+"1\\*4D配置以获得更优性能的部署指南。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:658
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:665
 msgid "Prefill node (4 P nodes share the same script)"
 msgstr "Prefill节点（4个P节点共享同一脚本）"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:660
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:667
 msgid ""
 "For each P instance, only these two configuration values need to be "
 "modified: `kv_port` and `engine_id`. The `engine_id` should start from 0 and"
@@ -540,18 +606,18 @@ msgid ""
 msgstr ""
 "对于每个P实例，只需修改以下两个配置值：`kv_port`和`engine_id`。`engine_id`应从0开始依次递增，而`kv_port`（例如`30100`）对于每个P实例必须唯一，如30000、30100等。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:739
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:746
 msgid "Decode node (4 D nodes share the same script)"
 msgstr "Decode节点（4个D节点共享同一脚本）"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:834
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:841
 msgid ""
 "For each P instance, only the `--dp-address` parameter differs and must be "
 "configured as the IP address of the service within the same subnet as the "
 "other instances."
 msgstr "对于每个P实例，只有`--dp-address`参数不同，必须配置为与其他实例在同一子网内的服务IP地址。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:843
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:850
 msgid ""
 "For each D instance, only the `--dp-rank-start` parameter differs, which "
 "should be configured as 0, 8, 16, and 24 respectively. Each instance's "
@@ -561,7 +627,7 @@ msgstr ""
 "对于每个D实例，只有`--dp-rank-start`参数不同，应分别配置为0、8、16和24。每个实例的`--dp-"
 "address`必须设置为主D节点的IP地址，即`--dp-rank-start`设置为0的Decode实例的IP。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:847
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:854
 msgid ""
 "The proxy is also implemented by referring to [Prefill-Decode Disaggregation"
 " (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)."
@@ -569,13 +635,37 @@ msgstr ""
 "代理的实现同样参考[Prefill-Decode分离 "
 "(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:851
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:858
+msgid ""
+"`--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager "
+"enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the "
+"service may OOM during startup."
+msgstr ""
+"`--no-disable-hybrid-kv-cache-manager` 保持混合KV缓存管理器启用。DeepSeek-V4 KV "
+"Pool部署需要此标志；否则，服务在启动期间可能会发生OOM。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:859
+msgid ""
+"`--enforce-eager` forces eager execution on prefill nodes instead of graph "
+"compilation."
+msgstr "`--enforce-eager` 强制在prefill节点上使用即时执行模式，而不是图编译。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:860
+msgid ""
+"`kv_connector_extra_config.prefill.dp_size/tp_size` and "
+"`decode.dp_size/tp_size` must match the actual global DP and TP layout on "
+"the prefill and decode sides."
+msgstr ""
+"`kv_connector_extra_config.prefill.dp_size/tp_size` 和 "
+"`decode.dp_size/tp_size` 必须与prefill和decode侧的实际全局DP和TP布局相匹配。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:861
 msgid ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization "
 "function on the prefill nodes."
 msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`：在prefill节点上启用通信优化功能。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:852
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:862
 msgid ""
 "`recompute_scheduler_enable: true`: enables the recomputation scheduler. "
 "When the KV Cache of the decode node is insufficient, requests will be sent "
@@ -585,24 +675,24 @@ msgstr ""
 "`recompute_scheduler_enable: true`：启用重计算调度器。当decode节点的KV "
 "Cache不足时，请求将被发送到prefill节点重新计算KV Cache。在PD分离场景中，仅在decode节点上启用此配置。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:853
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:863
 msgid ""
 "`MooncakeHybridConnector`: the KV transfer connector used for PD separation,"
 " transferring KV Cache between prefill and decode nodes."
 msgstr ""
 "`MooncakeHybridConnector`：用于PD分离的KV传输连接器，在prefill和decode节点之间传输KV Cache。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:854
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:864
 msgid ""
 "`enable_shared_expert_dp: true`: enables data parallelism for shared "
 "experts, applicable to MoE models."
 msgstr "`enable_shared_expert_dp: true`：为共享专家启用数据并行，适用于MoE模型。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:856
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:866
 msgid "Deployment Verification:"
 msgstr "部署验证："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:858
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:868
 msgid ""
 "After the PD separation service is fully started, send a request through the"
 " proxy port on the prefill master node to verify that Prefill and Decode "
@@ -614,7 +704,7 @@ msgstr ""
 "PD分离服务完全启动后，通过prefill主节点上的代理端口发送请求，验证Prefill和Decode节点是否协同工作正常。代理验证方法请参考[Prefill-"
 "Decode分离 (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:860
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:870
 msgid ""
 "Common Issues Tip: If you encounter issues with PD separation deployment, "
 "please refer to the [Public "
@@ -623,11 +713,11 @@ msgid ""
 msgstr ""
 "常见问题提示：如果遇到PD分离部署问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行故障排除。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:862
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:872
 msgid "5.2.3 Ultra-Long Sequence Deployment"
 msgstr "5.2.3 超长序列部署"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:864
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:874
 msgid ""
 "For ultra-long sequence scenarios, support can be achieved by adjusting the "
 "PD (Prefill/Decode) ratio and the model parallelism strategy. For example, "
@@ -636,43 +726,43 @@ msgid ""
 msgstr ""
 "对于超长序列场景，可以通过调整PD（Prefill/Decode）比例和模型并行策略来提供支持。例如，在1M序列场景中，可以使用1\\*4P-1\\*4D的比例，并将模型并行设置为DP4TP8模式。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:866
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:876
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:868
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:878
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示查询模型："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:870
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:880
 msgid ""
 "In <node0_ip>:<port>, use the IP address and port number of the primary "
 "node. If the primary and standby nodes are separated, use the IP address and"
 " port number of the proxy node."
 msgstr "在<node0_ip>:<port>中，使用主节点的IP地址和端口号。如果主备节点分离，请使用代理节点的IP地址和端口号。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:892
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:902
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:894
-msgid "Here are two accuracy evaluation methods."
-msgstr "以下是两种精度评估方法。"
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:904
+msgid "Here is the accuracy evaluation method using AISBench."
+msgstr "以下是使用AISBench进行精度评估的方法。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:896
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:909
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:906
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:919
 msgid "Using AISBench"
 msgstr "使用AISBench"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:898
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:908
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:900
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:910
 msgid "After execution, you can get the result."
 msgstr "执行后，您将获得结果。"
 
@@ -717,8 +807,8 @@ msgid "88.17"
 msgstr "88.17"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:194
-msgid "1 Atlas 800 A3 (128G × 8)"
-msgstr "1 Atlas 800 A3 (128G × 8)"
+msgid "1 Atlas 800 A3 (128GB × 8)"
+msgstr "1个Atlas 800 A3（128GB × 8）"
 
 #: ../../source/tutorials/models/DeepSeek-V4-Flash.md:194
 msgid "GSM8K"
@@ -728,11 +818,11 @@ msgstr "GSM8K"
 msgid "96.30"
 msgstr "96.30"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:907
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:917
 msgid "8 Performance Evaluation"
 msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:911
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:921
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -741,25 +831,25 @@ msgstr ""
 "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:913
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:923
 msgid "Using vLLM Benchmark"
 msgstr "使用vLLM基准测试"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:915
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:925
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
-msgstr "更多详情请参考[vllm基准测试](https://docs.vllm.ai/en/latest/contributing/)。"
+msgstr "更多详细信息，请参阅 [vllm 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:917
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:927
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:919
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:929
 msgid "9.1 Recommended Configurations"
 msgstr "9.1 推荐配置"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:921
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:931
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration depends "
@@ -769,11 +859,11 @@ msgid ""
 msgstr ""
 "**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第9.2节进行调优。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:923
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:933
 msgid "Table 1: Scenario Overview"
 msgstr "表1：场景概览"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:925
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:935
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes."
 msgstr "`*NPU总数`表示所有节点使用的NPU总数。"
@@ -842,7 +932,7 @@ msgstr "单节点（A3）"
 msgid "8 (A3)"
 msgstr "8 (A3)"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:934
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:944
 msgid "Table 2: Detailed Node Configuration"
 msgstr "表2：详细节点配置"
 
@@ -938,40 +1028,21 @@ msgstr "60"
 msgid "120"
 msgstr "120"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:943
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:953
 msgid ""
 "For complete startup commands and parameter descriptions, please refer to "
 "the deployment examples in [Chapter 5](#5-online-service-deployment)."
 msgstr "完整的启动命令和参数说明，请参考[第5章](#5-online-service-deployment)中的部署示例。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:945
-msgid "**Notice:**"
-msgstr "**注意：**"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:947
-msgid ""
-"`max-model-len` and `max-num-seqs` need to be set according to the actual "
-"usage scenario. For other settings, please refer to the "
-"[Deployment](#5-online-service-deployment) chapter."
-msgstr ""
-"`max-model-len`和`max-num-seqs`需要根据实际使用场景设置。其他设置请参考[部署](#5-online-service-"
-"deployment)章节。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:949
-msgid ""
-"Currently, we support 4K prefix cache hit in an experimental manner. You "
-"only need to change the value of --block-size from 128 to 32 in the service."
-msgstr "目前，我们以实验方式支持4K前缀缓存命中。您只需将服务中的--block-size值从128改为32即可。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:951
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:955
 msgid "9.2 Tuning Guidelines"
 msgstr "9.2 调优指南"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:953
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:957
 msgid "9.2.1 General Tuning Reference"
 msgstr "9.2.1 通用调优参考"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:955
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:959
 msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -979,18 +1050,18 @@ msgid ""
 msgstr ""
 "调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:957
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:961
 msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:959
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:963
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:961
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:965
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "
@@ -998,3 +1069,19 @@ msgid ""
 " only covers model-specific issues."
 msgstr ""
 "常见环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
+
+#~ msgid "**Notice:**"
+#~ msgstr "**注意：**"
+
+#~ msgid ""
+#~ "`max-model-len` and `max-num-seqs` need to be set according to the actual "
+#~ "usage scenario. For other settings, please refer to the "
+#~ "[Deployment](#5-online-service-deployment) chapter."
+#~ msgstr ""
+#~ "`max-model-len`和`max-num-seqs`需要根据实际使用场景设置。其他设置请参考[部署](#5-online-service-"
+#~ "deployment)章节。"
+
+#~ msgid ""
+#~ "Currently, we support 4k prefix cache hit in an experimental manner. You "
+#~ "only need to change the value of --block-size from 128 to 32 in the service."
+#~ msgstr "目前，我们以实验方式支持4k前缀缓存命中。您只需将服务中的--block-size值从128改为32即可。"

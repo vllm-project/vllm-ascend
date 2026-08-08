@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -291,8 +291,8 @@ msgid "1 Atlas 800 A2"
 msgstr "1 Atlas 800 A2"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:81
-msgid "ominidocbench"
-msgstr "ominidocbench"
+msgid "omnidocbench"
+msgstr "omnidocbench"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:81
 msgid "66.86"
@@ -327,8 +327,8 @@ msgstr "**输入/输出**：1080P/256"
 #: ../../source/tutorials/models/DeepSeekOCR2.md:224
 msgid ""
 "**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card "
-"is 864 TPS (Token Per Second)."
-msgstr "**性能**：TTFT = 2s，TPOT = 200ms，每卡平均性能为 864 TPS（每秒 Token 数）。"
+"is 864TPS (Token Per Second)."
+msgstr "**性能**：TTFT = 2s，TPOT = 200ms，每张卡的平均性能为864TPS（每秒令牌数）。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:226
 msgid "9 Performance Tuning"
@@ -356,8 +356,8 @@ msgstr "表 1：场景概览"
 #: ../../source/tutorials/models/DeepSeekOCR2.md:234
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
-"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
-msgstr "`*NPU总数` 表示所有节点使用的 NPU 总数。1 节点 = 1 台 Atlas 800 A3 服务器（64G × 16 NPU）。"
+"node = 1 Atlas 800 A3 server (64GB × 16 NPUs)."
+msgstr "`*Total NPUs`表示所有节点上使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64GB × 16个NPU）。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:81
 msgid "Scenario"
@@ -421,7 +421,7 @@ msgid ""
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+"请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:248
 msgid "10 FAQ"

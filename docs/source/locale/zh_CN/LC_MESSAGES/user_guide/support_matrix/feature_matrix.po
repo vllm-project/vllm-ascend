@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-07 10:56+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,8 +21,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:1
-msgid "Feature × Feature"
-msgstr "功能 × 功能"
+msgid "Feature Matrix"
+msgstr "功能矩阵"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md:3
 msgid ""
@@ -187,26 +187,26 @@ msgstr "共享专家 DP"
 #: ../../source/user_guide/support_matrix/feature_matrix.md
 msgid ""
 "[Quantization "
-"W4A4](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+"W4A4](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html)"
 msgstr ""
 "[量化 "
-"W4A4](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+"W4A4](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
 msgid ""
 "[Quantization "
-"W4A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+"W4A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html)"
 msgstr ""
 "[量化 "
-"W4A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+"W4A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
 msgid ""
 "[Quantization "
-"W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+"W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html)"
 msgstr ""
 "[量化 "
-"W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+"W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
 msgid "<abbr title=\"Tensor Parallel\">TP</abbr>"

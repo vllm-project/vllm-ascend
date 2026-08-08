@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -83,11 +83,11 @@ msgstr "3.1 模型权重"
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:21
 msgid ""
 "The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend "
-"Atlas inference products 48 GB NPU. Download the model weights from "
-"[ModelScope](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
+"Atlas 300I DUO 48 GB NPU. Download the model weights from "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)."
 msgstr ""
-"BF16 模型可使用一张昇腾 910B 64 GB NPU 或一张昇腾 Atlas 推理产品 48 GB NPU 部署。从 "
-"[ModelScope](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) 下载模型权重。"
+"BF16模型可以使用一个Ascend 910B 64 GB NPU或一个Ascend Atlas 300I DUO 48 GB "
+"NPU进行部署。从[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)下载模型权重。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:23
 msgid ""
@@ -115,8 +115,8 @@ msgid "Atlas A2 inference products"
 msgstr "Atlas A2 推理产品"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:85
 msgid ""
@@ -140,6 +140,14 @@ msgid ""
 " vLLM-Ascend following the [Installation Guide](../../installation.md)."
 msgstr ""
 "如果您希望从源码构建而非使用 Docker 镜像，请按照[安装指南](../../installation.md)安装 vLLM-Ascend。"
+
+#: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:100
+msgid ""
+"For Atlas 300I DUO, source installation may pull in `triton` and `triton-"
+"ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:"
+msgstr ""
+"对于Atlas 300I DUO，源码安装可能会引入`triton`和`triton-ascend`。在Atlas 300I DUO上运行vLLM-"
+"Ascend之前，请先卸载它们："
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:106
 msgid "To verify the source installation:"
@@ -319,9 +327,9 @@ msgstr "仅在必要时增加`--max-model-len`"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:169
 msgid ""
-"On Atlas inference products, keep the value conservative because attention-"
-"mask memory grows with the configured maximum length."
-msgstr "在Atlas推理产品上，保持该值为保守值，因为注意力掩码内存会随配置的最大长度增长。"
+"On Atlas 300I DUO, keep the value conservative because attention-mask memory"
+" grows with the configured maximum length."
+msgstr "在Atlas 300I DUO上，请保持该值保守，因为注意力掩码内存会随配置的最大长度增长。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:214
 msgid ""
@@ -343,8 +351,8 @@ msgstr ""
 "关于常见环境、安装和通用参数问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本节涵盖模型和硬件特定的指导。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:220
-msgid "Atlas inference products runs out of memory during startup"
-msgstr "Atlas推理产品在启动时内存不足"
+msgid "Atlas 300I DUO runs out of memory during startup"
+msgstr "Atlas 300I DUO在启动过程中内存不足"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:222
 msgid ""
@@ -354,11 +362,12 @@ msgstr "**症状：** 服务器在初始化注意力机制时因内存不足错�
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:224
 msgid ""
-"**Cause:** On Atlas inference products, an automatically detected large "
-"context length can create a full causal attention mask whose memory "
-"consumption grows quadratically with `max_model_len`."
+"**Cause:** On Atlas 300I DUO, an automatically detected large context length"
+" can create a full causal attention mask whose memory consumption grows "
+"quadratically with `max_model_len`."
 msgstr ""
-"**原因：** 在Atlas推理产品上，自动检测到的大上下文长度可能会创建完整的因果注意力掩码，其内存消耗随`max_model_len`呈二次增长。"
+"**原因：**在Atlas 300I "
+"DUO上，自动检测到的大上下文长度可能会生成完整的因果注意力掩码，其内存消耗随`max_model_len`呈二次方增长。"
 
 #: ../../source/tutorials/models/Qwen3-ASR-1.7B.md:226
 msgid ""
@@ -366,3 +375,6 @@ msgid ""
 "value, such as `4096`, and increase it only after verifying available NPU "
 "memory."
 msgstr "**解决方案：** 始终将`--max-model-len`显式设置为保守值（例如`4096`），并在验证可用NPU内存后才增加该值。"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"

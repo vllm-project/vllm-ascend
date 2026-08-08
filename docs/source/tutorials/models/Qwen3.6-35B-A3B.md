@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B Deployment Tutorial
+# Qwen3.6-35B-A3B
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
@@ -18,8 +18,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas inference products. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
-- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas inference products. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
+- `Qwen3.6-35B-A3B` (BF16 version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B).
+- `Qwen3.6-35B-A3B-w8a8` (quantized version): requires 1 Atlas A3 inference products (64G x 16) node, 1 Atlas A2 inference products (64G x 8) node, or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8).
 
 It is recommended to download the model weight to `/root/.cache/`.
 
@@ -27,7 +27,7 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p` for Atlas inference products.
+Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:|vllm_ascend_version|` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p` for Atlas 300I DUO.
 
 Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
 
@@ -112,7 +112,7 @@ docker run --rm \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
 :substitutions:
@@ -158,7 +158,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
 
 :::{note}
-For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
 ```bash
 pip uninstall -y triton-ascend triton
@@ -170,7 +170,7 @@ pip uninstall -y triton-ascend triton
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas inference products. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 Atlas A3 inference products (64G x 16) or 1 Atlas A2 inference products (64G x 8), or Atlas 300I DUO. The W8A8 version needs `--quantization ascend`.
 
 :::::{tab-set}
 ::::{tab-item} Atlas A2 inference products / Atlas A3 inference products
@@ -231,7 +231,7 @@ vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
 - `--async-scheduling` enables asynchronous scheduling, which can improve high-concurrency throughput.
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -255,12 +255,12 @@ vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
 **Key parameters:**
 
 - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
-- `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
-- `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
+- `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
+- `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
 - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
-- `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
+- `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
 - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
 
@@ -293,6 +293,11 @@ Here are two accuracy evaluation methods.
 ### 7.1 Using AISBench
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+| ------- | ------- | ------ | ---- | --------------------- |
+| mmmu | - | accuracy | gen | 83.3 |
+| gpqa | - | accuracy | gen | 83.3 |
 
 ### 7.2 Using Language Model Evaluation Harness
 

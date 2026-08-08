@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -36,16 +36,16 @@ msgid "Preparation"
 msgstr "准备工作"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:7
-msgid "Run the container:"
-msgstr "运行容器："
+msgid "1.Run the container"
+msgstr "1.运行容器"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:31
-msgid "Configure your environment:"
-msgstr "配置环境："
+msgid "2.Configure your environment"
+msgstr "2.配置环境"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:49
-msgid "Install vLLM and vLLM Ascend:"
-msgstr "安装vLLM和vLLM Ascend："
+msgid "3.Install vLLM and vLLM Ascend"
+msgstr "3.安装vLLM和vLLM Ascend"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:61
 msgid ""
@@ -61,12 +61,12 @@ msgid ""
 "Make sure your vLLM and vLLM Ascend are installed after your Python "
 "configuration is completed, because these packages will build binary files "
 "using python in current environment. If you install vLLM and vLLM Ascend "
-"before completing section 1.1, the binary files will not use the optimized "
-"python."
+"before completing [Configure your environment](#2configure-your-"
+"environment), the binary files will not use the optimized python."
 msgstr ""
 "请确保在完成Python配置后再安装vLLM和vLLM "
-"Ascend，因为这些包会使用当前环境中的Python构建二进制文件。如果在完成1.1节之前安装vLLM和vLLM "
-"Ascend，二进制文件将无法使用优化后的Python。"
+"Ascend，因为这些包会使用当前环境中的python构建二进制文件。如果在完成[配置环境](#2configure-your-"
+"environment)之前安装vLLM和vLLM Ascend，二进制文件将不会使用优化后的python。"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:67
 msgid "Optimizations"
@@ -85,9 +85,9 @@ msgid ""
 "**jemalloc** is a memory allocator that improves performance for multi-"
 "threaded scenarios and can reduce memory fragmentation. jemalloc uses a "
 "local thread memory manager to allocate variables, which can avoid lock "
-"competition between threads and can hugely optimize performance."
+"contention between threads and can hugely optimize performance."
 msgstr ""
-"**jemalloc**是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc使用本地线程内存管理器分配变量，能够避免线程间的锁竞争，从而大幅优化性能。"
+"**jemalloc**是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc使用本地线程内存管理器来分配变量，可以避免线程之间的锁竞争，从而大幅优化性能。"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:85
 msgid "1.2. Tcmalloc"
@@ -97,11 +97,11 @@ msgstr "1.2. Tcmalloc"
 msgid ""
 "**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that "
 "improves overall performance while ensuring low latency by introducing a "
-"multi-level cache structure, reducing mutex contention and optimizing large "
+"multi-level cache structure, reducing lock contention and optimizing large "
 "object processing flow. Find more "
 "[details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)."
 msgstr ""
-"**TCMalloc（线程缓存malloc）**是一种通用内存分配器，通过引入多级缓存结构、减少互斥锁竞争并优化大对象处理流程，在保证低延迟的同时提升整体性能。更多[详情](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)。"
+"**TCMalloc（线程缓存Malloc）**是一种通用内存分配器，通过引入多级缓存结构、减少锁竞争和优化大对象处理流程，在保证低延迟的同时提升整体性能。了解更多[详情](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)。"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:108
 msgid "2. `torch_npu` Optimization"
@@ -206,8 +206,8 @@ msgid ""
 msgstr "这些设置必须在宿主机操作系统上以root权限应用，而非容器内部。"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:167
-msgid "4.1"
-msgstr "4.1"
+msgid "4.1 Set CPU Frequency Governor to `performance`"
+msgstr "4.1将CPU频率调节器设置为`performance`"
 
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:169
 msgid "Set CPU Frequency Governor to `performance`"
@@ -347,3 +347,6 @@ msgstr "典型推荐范围：50000–100000"
 #: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:248
 msgid "Higher values encourage threads to stay on the same CPU core"
 msgstr "较高的值鼓励线程停留在同一CPU核心上"
+
+#~ msgid "4.1"
+#~ msgstr "4.1"

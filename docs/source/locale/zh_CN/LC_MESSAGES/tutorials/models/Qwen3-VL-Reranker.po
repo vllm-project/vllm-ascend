@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -53,7 +53,7 @@ msgid ""
 "features](../../user_guide/support_matrix/supported_models.md) to get the "
 "model's supported feature matrix."
 msgstr ""
-"请参考[支持的功能](../../user_guide/support_matrix/supported_models.md)获取该模型支持的功能矩阵。"
+"请参考[支持的模型](../../user_guide/support_matrix/supported_models.md)获取该模型支持的功能矩阵。"
 
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md:11
 msgid "3 Prerequisites"
@@ -117,8 +117,8 @@ msgid "A2 series"
 msgstr "A2 系列"
 
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md:114
 msgid ""
@@ -175,6 +175,18 @@ msgstr "将此文件保存到您选择的位置（例如 `./qwen3_vl_reranker.ji
 msgid "A3/A2 series"
 msgstr "A3/A2 系列"
 
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:198
+msgid "Required  Parameter Descriptions:"
+msgstr "必需参数说明："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:200
+msgid ""
+"`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, "
+"the size of cudagraph_capture_sizes is restricted."
+msgstr ""
+"`--compilation-config` 对于Atlas 300I "
+"DUO，由于硬件流数量有限，cudagraph_capture_sizes的大小受到限制。"
+
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md:204
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
@@ -182,14 +194,14 @@ msgstr "关键参数说明："
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md:206
 msgid ""
 "`--max-model-len` represents the context length, which is the maximum value "
-"of the input plus output for a single request. For Atlas inference products "
-"if automatic parsing resolves to a large context length, allocating this "
-"mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to "
-"set an explicit and conservative value, such as --max-model-len 1024."
+"of the input plus output for a single request. For Atlas 300I DUO if "
+"automatic parsing resolves to a large context length, allocating this mask "
+"(O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set "
+"an explicit and conservative value, such as --max-model-len 1024."
 msgstr ""
-"`--max-model-len` 表示上下文长度，即单个请求的输入加输出的最大值。对于 Atlas "
-"推理产品，如果自动解析得到较大的上下文长度，分配此掩码 (O(max_model_len^2)) 可能会超出 NPU 内存并触发 "
-"OOM。请务必设置一个明确且保守的值，例如 --max-model-len 1024。"
+"`--max-model-len`表示上下文长度，即单个请求的输入加输出的最大值。对于Atlas 300I "
+"DUO，如果自动解析得到较大的上下文长度，分配此掩码（O(max_model_len^2)）可能会超出NPU内存并触发OOM。请务必设置明确且保守的值，例如"
+"--max-model-len 1024。"
 
 #: ../../source/tutorials/models/Qwen3-VL-Reranker.md:208
 msgid ""
@@ -293,3 +305,6 @@ msgid ""
 msgstr ""
 "关于常见的环境、安装和通用参数问题，请参考[公共 "
 "FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"

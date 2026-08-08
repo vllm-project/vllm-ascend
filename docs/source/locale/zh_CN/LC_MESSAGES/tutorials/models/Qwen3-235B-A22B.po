@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -114,8 +114,12 @@ msgid "Qwen3-235B-A22B (BF16)"
 msgstr "Qwen3-235B-A22B (BF16)"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md
-msgid "1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)"
-msgstr "1 台 Atlas 800I A3 (64G × 16), 1 台 Atlas 800I A2 (64G × 8)"
+msgid ""
+"1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 "
+"(32GB × 8)"
+msgstr ""
+"1台Atlas 800I A3（64GB × 16）、1台Atlas 800I A2（64GB × 8）、2台Atlas 800I A2 （32GB ×"
+" 8）"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md
 msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B)"
@@ -195,8 +199,8 @@ msgid "**Docker Run:**"
 msgstr "**Docker 运行：**"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:86
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md
 msgid "A3 series"
@@ -298,15 +302,13 @@ msgid "Atlas 800I A2/A3:"
 msgstr "Atlas 800I A2/A3："
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:246
-#: ../../source/tutorials/models/Qwen3-235B-A22B.md:585
 msgid ""
 "[vLLM Serving Arguments "
-"documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments)"
-" — Additional parameter details for vLLM serve commands."
+"documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — "
+"Additional parameter details for vLLM serve commands."
 msgstr ""
-"[vLLM "
-"服务参数文档](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments)"
-" — vLLM serve 命令的附加参数详情。"
+"[vLLM服务参数文档](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — "
+"vLLM服务命令的其他参数详情。"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:247
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:586
@@ -354,8 +356,8 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:266
 msgid ""
-"**Hardware**: 3 × Atlas 800 A3 (64G × 16), one for Prefill, two for Decode."
-msgstr "**硬件**：3 台 Atlas 800 A3（64G × 16），一台用于 Prefill，两台用于 Decode。"
+"**Hardware**: 3 × Atlas 800 A3 (64GB × 16), one for Prefill, two for Decode."
+msgstr "**硬件**：3台Atlas 800 A3（64GB × 16），一台用于Prefill，两台用于Decode。"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:268
 msgid "First, prepare `launch_online_dp.py` on each node:"
@@ -408,6 +410,16 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)。"
 
+#: ../../source/tutorials/models/Qwen3-235B-A22B.md:585
+msgid ""
+"[vLLM Serving Arguments "
+"documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments)"
+" — Additional parameter details for vLLM serve commands."
+msgstr ""
+"[vLLM "
+"服务参数文档](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments)"
+" — vLLM serve 命令的附加参数详情。"
+
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:599
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
@@ -442,7 +454,6 @@ msgstr ""
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:622
-#: ../../source/tutorials/models/Qwen3-235B-A22B.md:669
 msgid ""
 "The following is an example configuration for the accuracy evaluation config"
 " file:"
@@ -479,6 +490,12 @@ msgstr ""
 "有关安装、数据集下载和配置等设置详情，请参考[使用 "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) 了解详细信息。"
+
+#: ../../source/tutorials/models/Qwen3-235B-A22B.md:669
+msgid ""
+"The following is an example configuration for the performance evaluation "
+"config file:"
+msgstr "以下是性能评估配置文件示例："
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:700
 msgid ""
@@ -613,8 +630,8 @@ msgid "Single-Node (TP8, CP2)"
 msgstr "单节点（TP8，CP2）"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:583
-msgid "16-NPU TP with Context Parallelism extends context to 135K tokens"
-msgstr "16-NPU TP结合上下文并行将上下文扩展至135K Token"
+msgid "16-NPU TP with Context Parallelism extends context to 135k tokens"
+msgstr "16-NPU TP结合上下文并行将上下文扩展到135k个token"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:746
 msgid ""
@@ -630,7 +647,7 @@ msgid "Configuration"
 msgstr "配置"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:583
-msgid "#NPUs"
+msgid "NPUs"
 msgstr "NPU数量"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:583
@@ -706,8 +723,8 @@ msgstr "<u>单节点PD混合部署——高吞吐量：</u>"
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:760
 msgid ""
 "Single-node PD hybrid deployment optimized for maximum throughput on Atlas "
-"800I A3 (64G × 16):"
-msgstr "针对Atlas 800I A3（64G × 16）优化最大吞吐量的单节点PD混合部署："
+"800I A3 (64GB × 16):"
+msgstr "单节点PD混合部署，针对Atlas 800I A3（64GB × 16）优化以最大化吞吐量："
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:803
 msgid "<u>Single-node PD Hybrid — Low Latency:</u>"
@@ -768,16 +785,16 @@ msgstr "问：Qwen3-235B-A22B 需要什么硬件？"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:906
 msgid ""
-"For BF16: 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, "
-"or 2 Atlas 800I A2 (32G × 8) nodes. For W8A8 quantized version, the hardware"
-" requirements are similar."
+"For BF16: 1 Atlas 800I A3 (64GB × 16) node, 1 Atlas 800I A2 (64GB × 8) node,"
+" or 2 Atlas 800I A2 (32GB × 8) nodes. For W8A8 quantized version, the "
+"hardware requirements are similar."
 msgstr ""
-"对于 BF16：1 个 Atlas 800I A3（64G × 16）节点、1 个 Atlas 800I A2（64G × 8）节点或 2 个 "
-"Atlas 800I A2（32G × 8）节点。对于 W8A8 量化版本，硬件要求类似。"
+"对于BF16：1台Atlas 800I A3（64GB × 16）节点、1台Atlas 800I A2（64GB × 8）节点或2台Atlas 800I"
+" A2（32GB × 8）节点。对于W8A8量化版本，硬件要求类似。"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:908
-msgid "Q: How do I enable long context beyond 40K?"
-msgstr "问：如何启用超过 40K 的长上下文？"
+msgid "Q: How do I enable long context beyond 40k?"
+msgstr "问：如何启用超过40k的长上下文？"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:910
 #, python-brace-format

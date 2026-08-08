@@ -750,7 +750,7 @@ class BaseDeviceAdaptor:
             key_quant_mode=2,
             value_quant_mode=2,
             rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
-            return_softmax_lse=True,
+            return_softmax_lse=return_lse,
         )
         if not isinstance(result, tuple):
             if return_lse:

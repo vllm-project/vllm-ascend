@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -26,14 +26,16 @@ msgstr "问题工作流指南"
 
 #: ../../source/community/issue-workflow-guidelines.md:3
 msgid ""
-"This document defines the standard lifecycle for Issues in the vLLM Ascend "
-"project — from creation through triage, active handling, and final closure. "
-"It establishes consistent label usage, owner assignment, and communication "
-"expectations to ensure smooth collaboration between contributors and "
-"maintainers."
+"This document defines the standard lifecycle for "
+"[Issues](https://github.com/vllm-project/vllm-ascend/issues) in the vLLM "
+"Ascend project — from creation through triage, active handling, and final "
+"closure. It establishes consistent label usage, owner assignment, and "
+"communication expectations to ensure smooth collaboration between "
+"contributors and maintainers."
 msgstr ""
-"本文档定义了 vLLM Ascend 项目中 Issue "
-"的标准生命周期——从创建、分类、主动处理到最终关闭。它建立了统一的标签使用、负责人分配和沟通期望，以确保贡献者与维护者之间的顺畅协作。"
+"本文档定义了 vLLM Ascend 项目中 [Issues](https://github.com/vllm-project/vllm-"
+"ascend/issues) "
+"的标准生命周期——从创建、分类、积极处理到最终关闭。它确立了统一的标签使用、负责人分配和沟通期望，以确保贡献者与维护者之间的顺畅协作。"
 
 #: ../../source/community/issue-workflow-guidelines.md:5
 msgid "1. Label Categories"
@@ -280,16 +282,16 @@ msgstr "当值班维护者首次接手问题时："
 
 #: ../../source/community/issue-workflow-guidelines.md:61
 msgid ""
-"Apply `triaged` to signal that the issue can be classified and Add the "
+"Apply `triaged` to signal that the issue can be classified and add the "
 "relevant module label so the issue can be routed to the appropriate module "
 "maintainer for detailed triage."
-msgstr "应用 `triaged` 标签表示问题可以进行分类，并添加相关的模块标签，以便将问题路由到相应的模块维护者进行详细分类。"
+msgstr "应用 `triaged` 标签表示该问题可以被分类，并添加相关的模块标签，以便将问题路由到相应的模块维护者进行详细分类。"
 
 #: ../../source/community/issue-workflow-guidelines.md:62
 msgid ""
 "Apply `triage review` to signal that the issue requires more review and "
-"specitfic analysis before classification."
-msgstr "应用 `triage review` 标签表示问题在分类前需要更多审查和具体分析。"
+"specific analysis before classification."
+msgstr "应用 `triage review` 标签表示该问题在分类之前需要更多的审查和具体分析。"
 
 #: ../../source/community/issue-workflow-guidelines.md:64
 msgid "Phase 2 — Triage and Analysis"

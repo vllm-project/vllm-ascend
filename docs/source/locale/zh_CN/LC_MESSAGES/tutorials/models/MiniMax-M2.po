@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -119,8 +119,8 @@ msgid "M2.7 W8A8 quantized version"
 msgstr "M2.7 W8A8 量化版本"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
-msgid "1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8)"
-msgstr "1× Atlas 800 A3 (64G × 16) 或 1× Atlas 800I A2 (64G × 8)"
+msgid "1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8)"
+msgstr "1× Atlas 800 A3（64GB × 16）或 1× Atlas 800I A2（64GB × 8）"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
 msgid ""
@@ -140,10 +140,10 @@ msgstr "M2.5 W8A8 量化版本"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
 msgid ""
-"[MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
+"[MiniMax-M2.5-w8a8-QuaRot](https://www.modelscope.cn/models/Eco-"
 "Tech/MiniMax-M2.5-w8a8-QuaRot)"
 msgstr ""
-"[MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
+"[MiniMax-M2.5-w8a8-QuaRot](https://www.modelscope.cn/models/Eco-"
 "Tech/MiniMax-M2.5-w8a8-QuaRot)"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
@@ -163,8 +163,8 @@ msgstr ""
 "ascend/MiniMax-M2.7-w8a8c8-QuaRot)"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
-msgid "`Eagle3` (M2.7)"
-msgstr "`Eagle3` (M2.7)"
+msgid "`EAGLE3` (M2.7)"
+msgstr "`EAGLE3`（M2.7）"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
 msgid "M2.7 speculative decoding head model"
@@ -176,15 +176,15 @@ msgstr "与基础模型节点数匹配"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
 msgid ""
-"[MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-"
+"[MiniMax-M2.7-eagle-model](https://www.modelscope.cn/models/Eco-"
 "Tech/MiniMax-M2.7-eagle-model-short)"
 msgstr ""
-"[MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-"
+"[MiniMax-M2.7-eagle-model](https://www.modelscope.cn/models/Eco-"
 "Tech/MiniMax-M2.7-eagle-model-short)"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
-msgid "`Eagle3` (M2.5)"
-msgstr "`Eagle3` (M2.5)"
+msgid "`EAGLE3` (M2.5)"
+msgstr "`EAGLE3`（M2.5）"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
 msgid "M2.5 speculative decoding head model"
@@ -192,10 +192,10 @@ msgstr "M2.5 推测解码头模型"
 
 #: ../../source/tutorials/models/MiniMax-M2.md
 msgid ""
-"[MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-"
+"[MiniMax-M2.5-eagle-model](https://www.modelscope.cn/models/vllm-"
 "ascend/MiniMax-M2.5-eagle-model-0318)"
 msgstr ""
-"[MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-"
+"[MiniMax-M2.5-eagle-model](https://www.modelscope.cn/models/vllm-"
 "ascend/MiniMax-M2.5-eagle-model-0318)"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:31
@@ -421,8 +421,8 @@ msgstr ""
 
 #: ../../source/tutorials/models/MiniMax-M2.md:297
 msgid ""
-"**Hardware**: 2× Atlas 800 A3 (64G × 16), one for Prefill, one for Decode."
-msgstr "**硬件**：2× Atlas 800 A3（64G × 16），一个用于 Prefill，一个用于 Decode。"
+"**Hardware**: 2× Atlas 800 A3 (64GB × 16), one for Prefill, one for Decode."
+msgstr "**硬件**：2× Atlas 800 A3（64GB × 16），一个用于 Prefill，一个用于 Decode。"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:299
 msgid ""
@@ -648,9 +648,9 @@ msgstr "9.1 推荐配置"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:645
 msgid ""
-"The following configurations are validated on the self-test report "
-"(AR20260326132822) and are categorized by use case."
-msgstr "以下配置已在自测报告（AR20260326132822）上验证，并按使用场景分类。"
+"The following configurations are validated in internal testing and are "
+"categorized by use case."
+msgstr "以下配置已在内部测试中验证，并按使用场景进行分类。"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:287
 msgid "Scenario"
@@ -709,8 +709,8 @@ msgid "Short Seq High Throughput"
 msgstr "短序列高吞吐"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:287
-msgid "3.5K → 1.5K"
-msgstr "3.5K → 1.5K"
+msgid "3.5k → 1.5k"
+msgstr "3.5k → 1.5k"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:287
 msgid "1P2D PD separation"
@@ -766,8 +766,8 @@ msgstr "长序列高吞吐"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:287
 #, python-format
-msgid "128K → 1K <br>（90% cache hit）"
-msgstr "128K → 1K <br>（90%缓存命中）"
+msgid "128k → 1k <br> (90% cache hit)"
+msgstr "128k → 1k <br>（90% 缓存命中）"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:287
 msgid "1P1D PD separation"
@@ -827,7 +827,7 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:664
 msgid "9.2.2 Model-Specific Optimizations"
@@ -1060,18 +1060,26 @@ msgstr "答：工具调用任务推荐使用`--reasoning-parser minimax_m2_appen
 
 #: ../../source/tutorials/models/MiniMax-M2.md:698
 msgid ""
-"**Q: Why is the `reasoning` field often empty after using "
-"`minimax_m2_append_think`?**"
-msgstr "**问：使用`minimax_m2_append_think`后`reasoning`字段为何经常为空？**"
+"**Q: Why is the `reasoning` field often empty when using "
+"`minimax_m2_append_think`, and how should I choose the right `--reasoning-"
+"parser`?**"
+msgstr ""
+"**问：使用 `minimax_m2_append_think` 时，为什么 `reasoning` 字段经常为空，我应该如何选择正确的 "
+"`--reasoning-parser`？**"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:700
 msgid ""
-"A: This is expected. The parser keeps `<think>...</think>` inside `content`."
-" If you mainly rely on the reasoning semantics of `/v1/responses`, use "
-"`--reasoning-parser minimax_m2` instead."
+"A: This is expected behavior. The `minimax_m2_append_think` parser retains "
+"`<think>...</think>` blocks directly inside the `content` field instead of "
+"separating them. If your downstream application relies on the standard "
+"reasoning semantics of `/v1/responses` (where the thinking process and final"
+" answer are separated), you should use `--reasoning-parser minimax_m2` to "
+"ensure the dedicated `reasoning` field is properly populated."
 msgstr ""
-"答：这是预期行为。解析器将`<think>...</think>`保留在`content`中。如果主要依赖`/v1/responses`的推理语义，请改用`--reasoning-"
-"parser minimax_m2`。"
+"答：这是预期行为。`minimax_m2_append_think` 解析器会将 `<think>...</think>` 块直接保留在 "
+"`content` 字段中，而不是将其分离出来。如果您的下游应用依赖于 `/v1/responses` "
+"的标准推理语义（即思考过程和最终答案分离），则应使用 `--reasoning-parser minimax_m2` 以确保专用的 "
+"`reasoning` 字段被正确填充。"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:702
 msgid ""
@@ -1107,26 +1115,32 @@ msgstr ""
 "memory-utilization`（例如从 0.9 降至 0.85），或减少并发请求数量。"
 
 #: ../../source/tutorials/models/MiniMax-M2.md:710
-msgid "**Q: How should I choose `--reasoning-parser`?**"
-msgstr "**问：如何选择 `--reasoning-parser`？**"
-
-#: ../../source/tutorials/models/MiniMax-M2.md:712
-msgid ""
-"A: This guide uses `minimax_m2_append_think` so that `<think>...</think>` is"
-" kept in `content`. If you mainly rely on the reasoning semantics of "
-"`/v1/responses`, consider using `--reasoning-parser minimax_m2`."
-msgstr ""
-"答：本指南使用 `minimax_m2_append_think` 以便在 `content` 中保留 "
-"`<think>...</think>`。如果您主要依赖 `/v1/responses` 的推理语义，建议使用 `--reasoning-parser "
-"minimax_m2`。"
-
-#: ../../source/tutorials/models/MiniMax-M2.md:714
 msgid "**Q: Which ports must be accessible?**"
 msgstr "**问：哪些端口必须可访问？**"
 
-#: ../../source/tutorials/models/MiniMax-M2.md:716
+#: ../../source/tutorials/models/MiniMax-M2.md:712
 msgid ""
 "A: At minimum, expose the serving port (e.g., `8000`). For multi-node "
 "deployment, also ensure HCCL communication ports and DP RPC ports are "
 "accessible."
 msgstr "答：至少需开放服务端口（例如 `8000`）。对于多节点部署，还需确保 HCCL 通信端口和 DP RPC 端口可访问。"
+
+#~ msgid ""
+#~ "A: This is expected. The parser keeps `<think>...</think>` inside `content`."
+#~ " If you mainly rely on the reasoning semantics of `/v1/responses`, use "
+#~ "`--reasoning-parser minimax_m2` instead."
+#~ msgstr ""
+#~ "答：这是预期行为。解析器将`<think>...</think>`保留在`content`中。如果主要依赖`/v1/responses`的推理语义，请改用`--reasoning-"
+#~ "parser minimax_m2`。"
+
+#~ msgid "**Q: How should I choose `--reasoning-parser`?**"
+#~ msgstr "**问：如何选择 `--reasoning-parser`？**"
+
+#~ msgid ""
+#~ "A: This guide uses `minimax_m2_append_think` so that `<think>...</think>` is"
+#~ " kept in `content`. If you mainly rely on the reasoning semantics of "
+#~ "`/v1/responses`, consider using `--reasoning-parser minimax_m2`."
+#~ msgstr ""
+#~ "答：本指南使用 `minimax_m2_append_think` 以便在 `content` 中保留 "
+#~ "`<think>...</think>`。如果您主要依赖 `/v1/responses` 的推理语义，建议使用 `--reasoning-parser "
+#~ "minimax_m2`。"

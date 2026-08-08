@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -79,55 +79,115 @@ msgstr "支持场景"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:18
 msgid ""
-"Currently context parallel can be used together with most other features, "
-"supported features are as follows:"
-msgstr "目前上下文并行可与大多数其他功能配合使用，支持的功能如下："
+"CP(Context Parallel) supports eager and graph execution, prefix caching, "
+"chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the "
+"model and hardware combinations documented by vLLM Ascend. The following "
+"table shows whether each feature can be combined with DCP across devices and"
+" attention backends:"
+msgstr ""
+"CP（上下文并行）支持vLLM "
+"Ascend文档记录的模型和硬件组合上的即时执行、图执行、前缀缓存、分块预填充、推测解码、P/D分离和MLAPO。下表显示了各功能在不同设备和注意力后端上是否可以与DCP结合使用："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Eager"
-msgstr "Eager模式"
+msgid "Device"
+msgstr "设备"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Graph"
-msgstr "Graph模式"
+msgid "Attention Backend"
+msgstr "注意力后端"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Prefix <br> Cache"
-msgstr "前缀<br>缓存"
+msgid "Chunked Prefill + CP"
+msgstr "分块预填充 + CP"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Chunked <br> Prefill"
-msgstr "分块<br>预填充"
+msgid "Prefix Caching + CP"
+msgstr "前缀缓存 + CP"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "SpecDecode <br> (MTP)"
-msgstr "SpecDecode<br>（MTP）"
+msgid "Graph Mode + CP"
+msgstr "图模式 + CP"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "PD <br> disaggregation"
-msgstr "PD<br>解耦"
+msgid "P/D Disaggregation + CP"
+msgstr "P/D分离 + CP"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "MLAPO"
-msgstr "MLAPO"
+msgid "MLAPO + CP"
+msgstr "MLAPO + CP"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "**PCP**"
-msgstr "**PCP**"
+msgid "Speculative Decoding + CP"
+msgstr "推测解码 + CP"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "✅"
-msgstr "✅"
+msgid "Ascend A2/A3"
+msgstr "Ascend A2/A3"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "**DCP**"
-msgstr "**DCP**"
+msgid "MLA/GQA"
+msgstr "MLA/GQA"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:25
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🟢 Supported"
+msgstr "🟢 支持"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🟢 Supported (MLA)<br>— Not applicable (GQA)"
+msgstr "🟢 支持（MLA）<br>— 不适用（GQA）"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🟢 P/D disaggregation<br>🔴 PD-mixed deployment"
+msgstr "🟢 P/D分离<br>🔴 PD混合部署"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "SFA"
+msgstr "SFA"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Ascend 950"
+msgstr "Ascend 950"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🔵 Experimental"
+msgstr "🔵 实验性"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🔵 Experimental (MLA)<br>— Not applicable (GQA)"
+msgstr "🔵 实验性（MLA）<br>— 不适用（GQA）"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🔵 P/D disaggregation<br>🔴 PD-mixed deployment"
+msgstr "🔵 P/D分离<br>🔴 PD混合部署"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "🔴 Not supported"
+msgstr "🔴 不支持"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:27
+msgid "🟢 **Supported**: Combining the feature with DCP is supported."
+msgstr "🟢 **支持**：支持将该功能与DCP结合使用。"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:28
+msgid ""
+"🔵 **Experimental**: Combining the feature with DCP is experimentally "
+"supported; interfaces and functionality may change."
+msgstr "🔵 **实验性**：将该功能与DCP结合使用处于实验性支持阶段；接口和功能可能会发生变化。"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:29
+msgid "🔴 **Not supported**: Combining the feature with DCP is not supported."
+msgstr "🔴 **不支持**：不支持将该功能与DCP结合使用。"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:30
+msgid ""
+"**Not applicable**: The feature does not apply to this attention backend."
+msgstr "**不适用**：该功能不适用于此注意力后端。"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:32
 msgid "How to use Context Parallel"
 msgstr "如何使用上下文并行"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:27
+#: ../../source/user_guide/feature_guide/context_parallel.md:34
 msgid ""
 "You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and "
 "`decode_context_parallel_size`, refer to the following example:"
@@ -135,15 +195,15 @@ msgstr ""
 "您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用 "
 "`PCP` 和 `DCP`，参考以下示例："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:29
+#: ../../source/user_guide/feature_guide/context_parallel.md:36
 msgid "Offline example:"
 msgstr "离线示例："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:48
+#: ../../source/user_guide/feature_guide/context_parallel.md:55
 msgid "Online example:"
 msgstr "在线示例："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:57
+#: ../../source/user_guide/feature_guide/context_parallel.md:64
 msgid ""
 "The total world size is `tensor_parallel_size` * "
 "`prefill_context_parallel_size`, so the examples above need 4 NPUs for each."
@@ -151,32 +211,32 @@ msgstr ""
 "总世界大小为 `tensor_parallel_size` * "
 "`prefill_context_parallel_size`，因此上述示例各需要4个NPU。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:59
+#: ../../source/user_guide/feature_guide/context_parallel.md:66
 msgid "Constraints"
 msgstr "约束条件"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:61
+#: ../../source/user_guide/feature_guide/context_parallel.md:68
 msgid "While using DCP, the following constraints must be met:"
 msgstr "使用DCP时，必须满足以下约束条件："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:62
+#: ../../source/user_guide/feature_guide/context_parallel.md:69
 msgid "For MLA-based model, such as DeepSeek-R1:"
 msgstr "对于基于MLA的模型，例如DeepSeek-R1："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:63
+#: ../../source/user_guide/feature_guide/context_parallel.md:70
 msgid "`tensor_parallel_size >= decode_context_parallel_size`"
 msgstr "`tensor_parallel_size >= decode_context_parallel_size`"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:64
+#: ../../source/user_guide/feature_guide/context_parallel.md:71
 #, python-format
 msgid "`tensor_parallel_size % decode_context_parallel_size == 0`"
 msgstr "`tensor_parallel_size % decode_context_parallel_size == 0`"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:65
+#: ../../source/user_guide/feature_guide/context_parallel.md:72
 msgid "For GQA-based model, such as Qwen3-235B:"
 msgstr "对于基于GQA的模型，例如Qwen3-235B："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:66
+#: ../../source/user_guide/feature_guide/context_parallel.md:73
 msgid ""
 "`(tensor_parallel_size // num_key_value_heads) >= "
 "decode_context_parallel_size`"
@@ -184,7 +244,7 @@ msgstr ""
 "`(tensor_parallel_size // num_key_value_heads) >= "
 "decode_context_parallel_size`"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:67
+#: ../../source/user_guide/feature_guide/context_parallel.md:74
 #, python-format
 msgid ""
 "`(tensor_parallel_size // num_key_value_heads) % "
@@ -193,7 +253,7 @@ msgstr ""
 "`(tensor_parallel_size // num_key_value_heads) % "
 "decode_context_parallel_size == 0`"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:69
+#: ../../source/user_guide/feature_guide/context_parallel.md:76
 msgid ""
 "While using Context Parallel in KV cache transfer-needed scenario (e.g. KV "
 "pooling, PD disaggregation), to simplify KV cache transmission, "
@@ -204,22 +264,22 @@ msgstr ""
 "在需要KV缓存传输的场景（例如KV池化、PD解耦）中使用上下文并行时，为简化KV缓存传输，`cp_kv_cache_interleave_size` "
 "必须设置为与KV缓存 `block_size`（默认值：128）相同的值，该参数指定CP以块交错方式分割KV缓存。例如："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:80
+#: ../../source/user_guide/feature_guide/context_parallel.md:87
 msgid "Experimental Results"
 msgstr "实验结果"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:82
+#: ../../source/user_guide/feature_guide/context_parallel.md:89
 msgid ""
 "To evaluate the effectiveness of Context Parallel in long sequence LLM "
 "inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy "
-"PD disaggregate instances in the environment of 64 cards Ascend Atlas A3 "
+"PD disaggregated instances in the environment of 64 cards Ascend Atlas A3 "
 "inference products*64G (A3), the configuration and performance data are as "
 "follows."
 msgstr ""
-"为了评估上下文并行在长序列LLM推理场景中的有效性，我们使用 **DeepSeek-R1-W8A8** 和 "
-"**Qwen3-235B**，在64卡Ascend Atlas A3推理产品*64G（A3）环境中部署PD解耦实例，配置和性能数据如下。"
+"为了评估上下文并行在长序列LLM推理场景中的有效性，我们使用**DeepSeek-R1-W8A8**和**Qwen3-235B**，在64卡昇腾Atlas"
+" A3推理产品*64G（A3）环境中部署PD分离实例，配置和性能数据如下。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:84
+#: ../../source/user_guide/feature_guide/context_parallel.md:91
 msgid "DeepSeek-R1-W8A8:"
 msgstr "DeepSeek-R1-W8A8："
 
@@ -271,7 +331,7 @@ msgstr "TTFT：15.9s <br> TPOT：78ms"
 msgid "TTFT: 46.0s <br> TPOT: 83ms"
 msgstr "TTFT：46.0s <br> TPOT：83ms"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:91
+#: ../../source/user_guide/feature_guide/context_parallel.md:98
 msgid "Qwen3-235B:"
 msgstr "Qwen3-235B："
 
@@ -306,3 +366,26 @@ msgstr "TTFT：8.9s <br> TPOT：86ms"
 #: ../../source/user_guide/feature_guide/context_parallel.md
 msgid "TTFT: 22.7s <br> TPOT: 121ms"
 msgstr "TTFT：22.7s <br> TPOT：121ms"
+
+#~ msgid ""
+#~ "Currently context parallel can be used together with most other features, "
+#~ "supported features are as follows:"
+#~ msgstr "目前上下文并行可与大多数其他功能配合使用，支持的功能如下："
+
+#~ msgid "Eager"
+#~ msgstr "Eager模式"
+
+#~ msgid "Graph"
+#~ msgstr "Graph模式"
+
+#~ msgid "SpecDecode <br> (MTP)"
+#~ msgstr "SpecDecode<br>（MTP）"
+
+#~ msgid "**PCP**"
+#~ msgstr "**PCP**"
+
+#~ msgid "✅"
+#~ msgstr "✅"
+
+#~ msgid "**DCP**"
+#~ msgstr "**DCP**"

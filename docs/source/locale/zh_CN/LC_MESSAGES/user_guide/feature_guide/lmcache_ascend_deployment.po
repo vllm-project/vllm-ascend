@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -71,9 +71,9 @@ msgstr "手动安装"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:55
 msgid ""
-"Assuming your working directory is ```/workspace``` and vllm/vllm-ascend "
-"have already been installed."
-msgstr "假设工作目录为 ```/workspace```，且 vllm/vllm-ascend 已安装。"
+"Assuming your working directory is `/workspace` and vllm/vllm-ascend have "
+"already been installed."
+msgstr "假设您的工作目录是 `/workspace`，并且 vllm/vllm-ascend 已经安装完成。"
 
 #: ../../source/user_guide/feature_guide/lmcache_ascend_deployment.md:57
 msgid "Install LMCache Repo"

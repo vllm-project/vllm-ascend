@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
-The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. Atlas inference products use the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
+The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. Atlas 300I DUO uses the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -24,28 +24,28 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64G × 16), 1 Atlas A2 inference products (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions for Atlas A2/A3 inference products:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64G × 16) or 1 Atlas A2 inference products (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-8B-W4A8 | W4A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
-**Quantized Versions for Atlas inference products:**
+**Quantized Versions for Atlas 300I DUO:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W8A8SC | W8A8SC | Atlas inference products (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
-| Qwen3-14B-W8A8SC | W8A8SC | Atlas inference products (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
-| Qwen3-32B-W8A8SC | W8A8SC | Atlas inference products (TP4) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
+| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
+| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -69,7 +69,7 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 **Docker Run:**
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 :::::{tab-set}
 ::::{tab-item} Atlas A3 inference products
@@ -153,7 +153,7 @@ docker run --rm \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
    :substitutions:
@@ -210,7 +210,7 @@ Expected result: The version information is displayed, matching the pulled image
 If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
 
 :::{note}
-For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
 ```bash
 pip uninstall -y triton-ascend triton
@@ -277,7 +277,7 @@ vllm serve your_model_path \
     --data-parallel-size 1 \
     --tensor-parallel-size 2 \
     --served-model-name qwen3 \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --max-model-len 40960 \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 64 \
@@ -302,9 +302,9 @@ vllm serve your_model_path \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
-Atlas inference products use the W8A8SC-310 quantized weights from the Eco-Tech official ModelScope repository. Keep an explicit `--max-model-len` for 310P deployment to avoid OOM caused by oversized attention mask allocation.
+Atlas 300I DUO uses the W8A8SC-310 quantized weights from the Eco-Tech official ModelScope repository. Keep an explicit `--max-model-len` for 310P deployment to avoid OOM caused by oversized attention mask allocation.
 
 Qwen3-8B-W8A8SC:
 
@@ -436,17 +436,17 @@ models = [
         abbr='vllm-api-general-chat',
         path="your_model_path",
         model="qwen3",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "127.0.0.1",
-        host_port = 2001,
-        max_out_len = 32768,
-        batch_size = 32,
+        request_rate=0,
+        retry=2,
+        host_ip="127.0.0.1",
+        host_port=2001,
+        max_out_len=32768,
+        batch_size=32,
         trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0.6,
-            top_k = 20,
-            top_p = 0.95,
+        generation_kwargs=dict(
+            temperature=0.6,
+            top_k=20,
+            top_p=0.95,
         ),
         pred_postprocessor=dict(type=extract_non_reasoning_content)
     )
@@ -492,7 +492,7 @@ models = [
         trust_remote_code=False,
         generation_kwargs=dict(
             temperature=0,
-            ignore_eos = True
+            ignore_eos=True
         ),
     )
 ]
@@ -549,7 +549,7 @@ After several minutes, you will get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | FUSED_MC2 | EP Switch | Async Scheduling |
+| Scenario | Configuration | NPUs | TP | DP | FUSED_MC2 | EP Switch | Async Scheduling |
 |----------|---------------|-------|----|----|-------------|--------------|--------------|
 | High Throughput | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |

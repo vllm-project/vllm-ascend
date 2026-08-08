@@ -22,15 +22,15 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
-**Quantized Versions for Atlas inference products:**
+**Quantized Versions for Atlas 300I DUO:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas inference products (48G,2 cards) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas 300I DUO (48GB,2 cards) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -38,13 +38,13 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 :::{note}
 
-    Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
+Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
 
-    - **Embedding layer**: BF16 (no quantization)
-    - **Q/K normalization** (q_norm, k_norm): BF16
-    - **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
-    - **MoE routing gate** (mlp.gate): BF16
-    - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
+- **Embedding layer**: BF16 (no quantization)
+- **Q/K normalization** (q_norm, k_norm): BF16
+- **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
+- **MoE routing gate** (mlp.gate): BF16
+- **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 :::
 
 ## 4 Installation
@@ -94,8 +94,8 @@ docker run \
 
 :::{note}
 
-    A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-    If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 :::
 
 ::::
@@ -131,7 +131,7 @@ docker run \
     ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
 ```{code-block} bash
    :substitutions:
@@ -200,10 +200,12 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
 :::{note}
 
-    For Atlas inference products, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas inference products:
+For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
-    pip uninstall -y triton-ascend triton
-     
+```bash
+pip uninstall -y triton-ascend triton
+```
+
 :::
 **Installation Verification:**
 
@@ -230,52 +232,53 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 :::::{tab-set}
 ::::{tab-item} Atlas A2 inference products / Atlas A3 inference products
 
-    ```bash
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-    export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
-    export HCCL_BUFFSIZE=1024
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve your_model_path \
-        --served-model-name qwen3 \
-        --trust-remote-code \
-        --max-num-seqs 100 \
-        --max-model-len 40960 \
-        --max-num-batched-tokens 16384 \
-        --tensor-parallel-size 4 \
-        --enable-expert-parallel \
-        --quantization ascend \
-        --distributed_executor_backend "mp" \
-        --no-enable-prefix-caching \
-        --async-scheduling \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
-        --gpu-memory-utilization 0.95 \
-        --port 8000 \
-        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
-    ```
+vllm serve your_model_path \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --max-num-seqs 100 \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --gpu-memory-utilization 0.95 \
+    --port 8000 \
+    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
+```
+
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
-    ```bash
-    export VLLM_USE_MODELSCOPE=True
-    export ASCEND_RT_VISIBLE_DEVICES=0,1
+```bash
+export VLLM_USE_MODELSCOPE=True
+export ASCEND_RT_VISIBLE_DEVICES=0,1
 
-    vllm serve your_model_path  \
-        --host 127.0.0.1 \
-        --port 8000 \
-        --tensor-parallel-size 2 \
-        --max-num-seqs 32 \
-        --served_model_name qwen3 \
-        --dtype float16 \
-        --quantization ascend \
-        --max-model-len 16384 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
-        --no-enable-prefix-caching
-    ```
+vllm serve your_model_path  \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --tensor-parallel-size 2 \
+    --max-num-seqs 32 \
+    --served_model_name qwen3 \
+    --dtype float16 \
+    --quantization ascend \
+    --max-model-len 16384 \
+    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
+    --no-enable-prefix-caching
+```
 
 ::::
 :::::
@@ -283,13 +286,13 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 Key parameters:
 
 - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
-- `--dtype float16` is used for Atlas inference products to match the Atlas inference execution path.
-- `--max-model-len 16384` is intentionally conservative. On Atlas inference products, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
-- `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas inference products.
+- `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
+- `--max-model-len 16384` is intentionally conservative. On Atlas 300I DUO, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
+- `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
 - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-- `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas inference products serving path.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas inference products.
-- `--no-enable-prefix-caching` is the default recommendation for this Atlas inference products example to reduce memory pressure.
+- `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas 300I DUO serving path.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
+- `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
 
 :::{note}
@@ -302,11 +305,11 @@ Key parameters:
 
 :::{tip}
 
-    For parameter details, refer to:
+For parameter details, refer to:
 
-    - [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
-    - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
-    - [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
+- [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
+- [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
 :::
 
 **Service Verification:**
@@ -335,10 +338,10 @@ curl http://localhost:8000/v1/chat/completions \
 ```
 
 :::{note}
-    Adjust the following fields based on your deployment:
+Adjust the following fields based on your deployment:
 
-    - **URL** (`http://localhost:8000`): Replace `localhost` and `8000` with your server IP and the `--port` value from the `vllm serve` command.
-    - **`model`**: Must match the `--served-model-name` value from the `vllm serve` command (e.g., `qwen3`).
+- **URL** (`http://localhost:8000`): Replace `localhost` and `8000` with your server IP and the `--port` value from the `vllm serve` command.
+- **`model`**: Must match the `--served-model-name` value from the `vllm serve` command (e.g., `qwen3`).
 :::
 Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
 
@@ -398,11 +401,11 @@ For dataset preparation, please refer to the [AISBench Datasets Guide](https://g
 
 :::{note}
 
-    vLLM-Ascend also supports the following evaluation tools:
+vLLM-Ascend also supports the following evaluation tools:
 
-    - [lm_eval](../../developer_guide/evaluation/using_lm_eval.md)
-    - [OpenCompass](../../developer_guide/evaluation/using_opencompass.md)
-    - [EvalScope](../../developer_guide/evaluation/using_evalscope.md)
+- [lm_eval](../../developer_guide/evaluation/using_lm_eval.md)
+- [OpenCompass](../../developer_guide/evaluation/using_opencompass.md)
+- [EvalScope](../../developer_guide/evaluation/using_evalscope.md)
 :::
 **Accuracy Results (Atlas 800I A3, vLLM-Ascend v0.22.1rc, W8A8):**
 
@@ -555,11 +558,11 @@ vllm serve your_model_path \
 
 :::{tip}
 
-    Example AISBench settings for this configuration:
+Example AISBench settings for this configuration:
 
-    - `request_rate`: 0
-    - `batch_size`: 32
-    - Input/Output length: 2048/2048 or 3500/1500
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 2048/2048 or 3500/1500
 :::
 **High Throughput Configuration:**
 
@@ -591,11 +594,11 @@ vllm serve your_model_path \
 
 :::{tip}
 
-    Example AISBench settings for this configuration:
+Example AISBench settings for this configuration:
 
-    - `request_rate`: 0
-    - `batch_size`: 32
-    - Input/Output length: 2048/2048 or 3500/1500
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 2048/2048 or 3500/1500
 :::
 **Long Context Configuration:**
 
@@ -629,11 +632,11 @@ vllm serve your_model_path \
 
 :::{tip}
 
-    Example AISBench settings for this configuration:
+Example AISBench settings for this configuration:
 
-    - `request_rate`: 0
-    - `batch_size`: 32
-    - Input/Output length: 65536/1024 or 131072/1024
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 65536/1024 or 131072/1024
 :::
 
 ### 9.2 Tuning Guidelines

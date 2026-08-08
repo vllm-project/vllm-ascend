@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -139,12 +139,12 @@ msgstr "Ascend 910、Ascend 910 Pro B（Ascend-cann-kernels-910）尚未规划"
 
 #: ../../source/faqs.md:30
 msgid ""
-"From a technical view, vllm-ascend supports devices if torch-npu is "
+"From a technical view, vllm-ascend supports devices if TorchNPU is "
 "supported. Otherwise, we have to implement it by using custom ops. We also "
 "welcome you to join us to improve together."
 msgstr ""
-"从技术角度看，只要 torch-npu 支持，vllm-ascend "
-"就支持相应设备。否则，我们需要通过自定义算子来实现。我们也欢迎您加入我们，共同改进。"
+"从技术角度来看，如果 TorchNPU 受支持，vllm-ascend "
+"即可支持相应设备。否则，我们需要通过自定义算子来实现。我们也欢迎您加入我们，共同改进。"
 
 #: ../../source/faqs.md:32
 msgid "2. How to get our docker containers?"
@@ -186,8 +186,8 @@ msgid "**Importing Docker images in environment without internet access:**"
 msgstr "**在无网络环境中导入 Docker 镜像：**"
 
 #: ../../source/faqs.md:74
-msgid "3. What models does vllm-ascend supports?"
-msgstr "3.vllm-ascend 支持哪些模型？"
+msgid "3. What models does vllm-ascend support?"
+msgstr "3.vllm-ascend支持哪些模型？"
 
 #: ../../source/faqs.md:76
 msgid ""
@@ -240,8 +240,8 @@ msgstr ""
 "support/6) 中的 ascend 频道并发布您的主题。"
 
 #: ../../source/faqs.md:87
-msgid "5. What features does vllm-ascend V1 supports?"
-msgstr "5.vllm-ascend V1 支持哪些功能？"
+msgid "5. What features does vllm-ascend V1 support?"
+msgstr "5.vllm-ascend V1支持哪些功能？"
 
 #: ../../source/faqs.md:89
 msgid ""
@@ -291,8 +291,8 @@ msgid ""
 msgstr "如果以上所有步骤均无效，请随时提交 GitHub issue。"
 
 #: ../../source/faqs.md:109
-msgid "7. How vllm-ascend work with vLLM?"
-msgstr "7.vllm-ascend 如何与 vLLM 协同工作？"
+msgid "7. How does vllm-ascend work with vLLM?"
+msgstr "7.vllm-ascend如何与vLLM协同工作？"
 
 #: ../../source/faqs.md:111
 msgid ""
@@ -507,10 +507,10 @@ msgstr "设置以下环境参数："
 #: ../../source/faqs.md:204
 msgid ""
 "16. How to fix the error \"ImportError: Please install vllm[audio] for audio"
-" support\" for the multi-modal models？"
+" support\" for the multi-modal models?"
 msgstr ""
-"16.如何修复多模态模型的\"ImportError: Please install vllm[audio] for audio "
-"support\"错误？"
+"16.如何修复多模态模型的错误\"ImportError: Please install vllm[audio] for audio "
+"support\"？"
 
 #: ../../source/faqs.md:206
 msgid ""
@@ -606,12 +606,12 @@ msgstr "18.如何安装自定义版本的 torch_npu？"
 
 #: ../../source/faqs.md:232
 msgid ""
-"torch-npu will be overridden  when installing vllm-ascend. If you need to "
-"install a specific version of torch-npu, you can manually install the "
-"specified version of torch-npu after vllm-ascend is installed."
+"TorchNPU will be overridden  when installing vllm-ascend. If you need to "
+"install a specific version of TorchNPU, you can manually install the "
+"specified version of TorchNPU after vllm-ascend is installed."
 msgstr ""
-"安装 vllm-ascend 时，torch-npu 将被覆盖。如果您需要安装特定版本的 torch-npu，可以在安装 vllm-ascend "
-"后手动安装指定版本的 torch-npu。"
+"安装 vllm-ascend 时，TorchNPU 将被覆盖。如果您需要安装特定版本的 TorchNPU，可以在安装 vllm-ascend "
+"后手动安装指定版本的 TorchNPU。"
 
 #: ../../source/faqs.md:234
 msgid ""
@@ -689,8 +689,8 @@ msgid ""
 msgstr "您可以使用 `Dockerfile*` 中的默认值作为参考。例如："
 
 #: ../../source/faqs.md:285
-msgid "22. Why TPOT increases drastically as concurrency grows?"
-msgstr "22.为什么 TPOT 会随着并发增长而急剧增加？"
+msgid "22. Why does TPOT increase drastically as concurrency grows?"
+msgstr "22.为什么TPOT会随着并发量的增长而急剧增加？"
 
 #: ../../source/faqs.md:287
 msgid ""
@@ -755,12 +755,11 @@ msgstr "23.如何在单节点和多节点部署之间选择？"
 msgid ""
 "Single-node deployment is recommended when the model fits within the memory "
 "of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 "
-"× 64G cards, multi-NPU within a single node (TP) is sufficient. Multi-node "
+"× 64GB cards, multi-NPU within a single node (TP) is sufficient. Multi-node "
 "deployment is only needed when the total NPU count exceeds a single node's "
 "capacity."
 msgstr ""
-"当模型适合单个节点 NPU 的内存时，建议使用单节点部署。对于像 Qwen3-32B (BF16) 这样需要 4 × 64G 卡的模型，单个节点内的多 "
-"NPU（TP）就足够了。仅当总 NPU 数量超过单个节点容量时才需要多节点部署。"
+"当模型适合单节点NPU内存时，建议采用单节点部署。对于像Qwen3-32B（BF16）这样需要4×64GB卡的模型，单节点内的多NPU（TP）就足够了。只有当NPU总数超过单节点容量时，才需要多节点部署。"
 
 #: ../../source/faqs.md:299
 msgid "24. What quantization method should I use?"

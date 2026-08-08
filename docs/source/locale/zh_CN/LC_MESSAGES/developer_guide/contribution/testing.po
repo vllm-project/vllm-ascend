@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -49,7 +49,7 @@ msgid "You can run the unit tests on CPUs with the following steps:"
 msgstr "您可以通过以下步骤在CPU上运行单元测试："
 
 #: ../../source/developer_guide/contribution/testing.md
-msgid "Single card"
+msgid "Single-card"
 msgstr "单卡"
 
 #: ../../source/developer_guide/contribution/testing.md:97
@@ -59,7 +59,7 @@ msgid ""
 msgstr "启动容器后，您应安装所需的软件包："
 
 #: ../../source/developer_guide/contribution/testing.md
-msgid "Multi cards"
+msgid "Multi-cards"
 msgstr "多卡"
 
 #: ../../source/developer_guide/contribution/testing.md:153
@@ -110,10 +110,6 @@ msgstr ""
 #: ../../source/developer_guide/contribution/testing.md:163
 msgid "You can run the unit tests using `pytest`:"
 msgstr "您可以使用 `pytest` 运行单元测试："
-
-#: ../../source/developer_guide/contribution/testing.md
-msgid "Single-card"
-msgstr "单卡"
 
 #: ../../source/developer_guide/contribution/testing.md
 msgid "Multi-card"
@@ -189,49 +185,27 @@ msgstr ""
 "离线测试示例：[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)"
 
-#: ../../source/developer_guide/contribution/testing.md:319
-msgid ""
-"Online test example: "
-"[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)"
-msgstr ""
-"在线测试示例：[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)"
-
 #: ../../source/developer_guide/contribution/testing.md:320
-msgid ""
-"Correctness test example: "
-"[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
-msgstr ""
-"正确性测试示例：[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-"
-"project/vllm-"
-"ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
-
-#: ../../source/developer_guide/contribution/testing.md:322
 msgid ""
 "The CI resource is limited, and you might need to reduce the number of "
 "layers of a model. Below is an example of how to generate a reduced layer "
 "model:"
 msgstr "CI 资源有限，您可能需要减少模型的层数。以下是如何生成精简层模型的示例："
 
-#: ../../source/developer_guide/contribution/testing.md:324
+#: ../../source/developer_guide/contribution/testing.md:322
 msgid ""
 "Fork the original model repo in modelscope. All the files in the repo except"
 " for weights are required."
 msgstr "在 modelscope 中复刻原始模型仓库。需要仓库中除权重文件外的所有文件。"
 
-#: ../../source/developer_guide/contribution/testing.md:325
+#: ../../source/developer_guide/contribution/testing.md:323
 #, python-brace-format
 msgid ""
 "Set `num_hidden_layers` to the expected number of layers, e.g., "
 "`{\"num_hidden_layers\": 2,}`"
 msgstr "将 `num_hidden_layers` 设置为期望的层数，例如 `{\"num_hidden_layers\": 2,}`"
 
-#: ../../source/developer_guide/contribution/testing.md:326
+#: ../../source/developer_guide/contribution/testing.md:324
 msgid ""
 "Copy the following python script as `generate_random_weight.py`. Set the "
 "relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` "
@@ -240,11 +214,11 @@ msgstr ""
 "将以下 Python 脚本复制为 `generate_random_weight.py`。根据需要设置相关参数 "
 "`MODEL_LOCAL_PATH`、`DIST_DTYPE` 和 `DIST_MODEL_PATH`："
 
-#: ../../source/developer_guide/contribution/testing.md:344
+#: ../../source/developer_guide/contribution/testing.md:342
 msgid "Run doctest"
 msgstr "运行 doctest"
 
-#: ../../source/developer_guide/contribution/testing.md:346
+#: ../../source/developer_guide/contribution/testing.md:344
 msgid ""
 "vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to "
 "run all doctests in the doc files. The doctest is a good way to make sure "
@@ -254,7 +228,7 @@ msgstr ""
 "vllm-ascend 提供了一个 `vllm-ascend/tests/e2e/run_doctests.sh` 命令来运行文档文件中的所有 "
 "doctest。Doctest 是确保文档保持最新且示例保持可执行的好方法，可以在本地按如下方式运行："
 
-#: ../../source/developer_guide/contribution/testing.md:354
+#: ../../source/developer_guide/contribution/testing.md:352
 msgid ""
 "This will reproduce the same environment as the CI. See "
 "[labeled_doctest.yaml](https://github.com/vllm-project/vllm-"
@@ -263,15 +237,15 @@ msgstr ""
 "这将重现与 CI 相同的环境。请参阅 [labeled_doctest.yaml](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml)。"
 
-#: ../../source/developer_guide/contribution/testing.md:356
+#: ../../source/developer_guide/contribution/testing.md:354
 msgid "Run docs link check"
 msgstr "运行文档链接检查"
 
-#: ../../source/developer_guide/contribution/testing.md:358
+#: ../../source/developer_guide/contribution/testing.md:356
 msgid "You can validate external links in the Sphinx docs locally with:"
 msgstr "您可以在本地使用以下命令验证 Sphinx 文档中的外部链接："
 
-#: ../../source/developer_guide/contribution/testing.md:364
+#: ../../source/developer_guide/contribution/testing.md:362
 msgid ""
 "To check links in a specific Markdown file, pass the file to `sphinx-build`."
 " For example, to check only `docs/source/user_guide/release_notes.md`:"
@@ -279,14 +253,40 @@ msgstr ""
 "要检查特定 Markdown 文件中的链接，请将该文件传递给 `sphinx-build`。例如，仅检查 "
 "`docs/source/user_guide/release_notes.md`："
 
-#: ../../source/developer_guide/contribution/testing.md:373
+#: ../../source/developer_guide/contribution/testing.md:371
 msgid "The detailed report will be written to:"
 msgstr "详细报告将写入："
 
-#: ../../source/developer_guide/contribution/testing.md:375
+#: ../../source/developer_guide/contribution/testing.md:373
 msgid "`docs/_build/linkcheck/output.txt`"
 msgstr "`docs/_build/linkcheck/output.txt`"
 
-#: ../../source/developer_guide/contribution/testing.md:376
+#: ../../source/developer_guide/contribution/testing.md:374
 msgid "`docs/_build/linkcheck/output.json`"
 msgstr "`docs/_build/linkcheck/output.json`"
+
+#~ msgid "Single card"
+#~ msgstr "单卡"
+
+#~ msgid "Multi cards"
+#~ msgstr "多卡"
+
+#~ msgid ""
+#~ "Online test example: "
+#~ "[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-"
+#~ "project/vllm-"
+#~ "ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)"
+#~ msgstr ""
+#~ "在线测试示例：[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-"
+#~ "project/vllm-"
+#~ "ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)"
+
+#~ msgid ""
+#~ "Correctness test example: "
+#~ "[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-"
+#~ "project/vllm-"
+#~ "ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
+#~ msgstr ""
+#~ "正确性测试示例：[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-"
+#~ "project/vllm-"
+#~ "ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"

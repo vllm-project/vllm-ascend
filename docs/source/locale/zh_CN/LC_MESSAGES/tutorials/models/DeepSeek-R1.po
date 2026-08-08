@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -144,8 +144,8 @@ msgstr "A3 系列"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:45
 #: ../../source/tutorials/models/DeepSeek-R1.md:89
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 Docker 镜像。"
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md
 msgid "A2 series"
@@ -226,12 +226,12 @@ msgstr "对于单节点部署，建议使用 `dp4tp4` 而非 `dp2tp8`。"
 msgid ""
 "`--max-model-len` specifies the maximum context length - that is, the sum of"
 " input and output tokens for a single request. For performance testing with "
-"an input length of 3.5K and output length of 1.5K, a value of `16384` is "
+"an input length of 3.5k and output length of 1.5k, a value of `16384` is "
 "sufficient, however, for precision testing, please set it to at least "
 "`35000`."
 msgstr ""
-"`--max-model-len` 指定最大上下文长度，即单个请求的输入和输出 token 之和。对于输入长度 3.5K、输出长度 1.5K "
-"的性能测试，`16384` 的值已足够，但对于精度测试，请将其设置为至少 `35000`。"
+"`--max-model-"
+"len`指定最大上下文长度，即单个请求的输入和输出token之和。对于输入长度为3.5k、输出长度为1.5k的性能测试，`16384`的值就足够了，但对于精度测试，请将其设置为至少`35000`。"
 
 #: ../../source/tutorials/models/DeepSeek-R1.md:182
 msgid ""

@@ -1,4 +1,4 @@
-# KV Cache Pool（Ascend Store）Deployment Guide
+# KV Cache Pool (Ascend Store) Deployment Guide
 
 ## Contents
 
@@ -60,7 +60,8 @@ export PYTHONHASHSEED=0
         ```bash
         cat /etc/hccn.conf
         ```
-        For A5 series, additionally mount:
+
+        For Ascend 950 Products, additionally mount:
         * devices: `/dev/ummu`, `/dev/uburma`
         * commands: `/usr/bin/urma_admin`
         * configurations: `/lib/route.conf`, `/etc/hccl_rootinfo.json`
@@ -84,9 +85,9 @@ export PYTHONHASHSEED=0
 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A5 series | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
+| Ascend 950 Products | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
 | 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
-| 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
+| 800 I/T A3 series | RoCE-based deployment | `export HCCL_INTRA_ROCE_ENABLE=1` | Required when the deployment uses the RoCE path. |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### Run Mooncake Master
@@ -112,12 +113,12 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 }
 ```
 
-**metadata_server**: Configured as **P2PHANDSHAKE**.  
+**metadata_server**: Configured as **P2PHANDSHAKE**.
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
-**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.
 **prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
 #### 2. Start mooncake_master
@@ -156,9 +157,9 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-#A5 UBOE
+#Ascend 950 Products UBOE
 #export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-#A5 UB
+#Ascend 950 Products UB
 #export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
 #Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
@@ -214,7 +215,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                     "lookup_rpc_port":"0",
                     "backend": "mooncake"
                 }
-            }  
+            }
         ]
     }
     }'
@@ -239,9 +240,9 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-#A5 UBOE
+#Ascend 950 Products UBOE
 #export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-#A5 UB
+#Ascend 950 Products UB
 #export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
@@ -360,9 +361,9 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-#A5 UBOE
+#Ascend 950 Products UBOE
 #export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-#A5 UB
+#Ascend 950 Products UB
 #export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
@@ -407,7 +408,7 @@ Long question:
 curl -s http://localhost:8100/v1/completions -H "Content-Type: application/json" -d '{ "model": "/xxxxx/Qwen2.5-7B-Instruct", "prompt": "Given the accelerating impacts of climate change—including rising sea levels, increasing frequency of extreme weather events, loss of biodiversity, and adverse effects on agriculture and human health—there is an urgent need for a robust, globally coordinated response. However, international efforts are complicated by a range of factors: economic disparities between high-income and low-income countries, differing levels of industrialization, varying access to clean energy technologies, and divergent political systems that influence climate policy implementation. In this context, how can global agreements like the Paris Accord be redesigned or strengthened to not only encourage but effectively enforce emission reduction targets? Furthermore, what mechanisms can be introduced to promote fair and transparent technology transfer, provide adequate financial support for climate adaptation in vulnerable regions, and hold nations accountable without exacerbating existing geopolitical tensions or disproportionately burdening those with historically lower emissions?", "max_completion_tokens": 256, "temperature":0.0 }'
 ```
 
-Note: For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, it is recommended to perform a warm-up phase before running actual performance benchmarks.
+Note: For MooncakeStore with RoCE-based Device-to-Device communication enabled, it is recommended to perform a warm-up phase before running actual performance benchmarks.
 
 This is because HCCL one-sided communication connections are created lazily after the instance is launched when Device-to-Device communication is involved. Currently, full-mesh connections between all devices are required. Establishing these connections introduces a one-time time overhead and persistent device memory consumption (4 MB of device memory per connection).
 
@@ -477,7 +478,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
+**Memcache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
 
 ```shell
 pip install memfabric-hybrid
@@ -752,35 +753,31 @@ Starting from the `mmc-local.conf` configured in [Configuring the memcache Confi
 
 ```shell
 ock.mmc.local_service.storage.enabled = true
-ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2:/dev/nvmexn3:/dev/nvmexn4:/dev/nvmexn5:/dev/nvmexn6:/dev/nvmexn7:/dev/nvmexn8
+ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
 ubsio.mem.size_in_gb = 10
 ubsio.standalone.device_count = 8
-```
-
-When starting vLLM, explicitly set `UBSIO_CONFIG_PATH` to the same file as `MMC_LOCAL_CONFIG_PATH`:
-
-```shell
-export UBSIO_CONFIG_PATH=${MMC_LOCAL_CONFIG_PATH}
+ubsio.standalone.force_new_disk = true
 ```
 
 | Field | Description |
 | :--- | :--- |
 | `ock.mmc.local_service.storage.enabled` | Set to `true` to enable SSD caching. |
-| `ubsio.disk.path` | **Required when SSD caching is enabled. The configured SSDs or partitions must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). |
-| `ubsio.mem.size_in_gb` | Per-process UBS IO memory pool size in GB. The recommended value is `10`. The supported range is an integer from `0` to `1024`; SSD caching requires at least `5` GB per process. The total allocation must not exceed the node memory available after reserving memory for the operating system, vLLM, and the Memcache DRAM pool. |
+| `ubsio.disk.path` | **Required when SSD caching is enabled. Specify the target SSD block devices, partitions, or loop devices directly. The configured devices must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). |
+| `ubsio.mem.size_in_gb` | Per-process UBS IO memory pool size in GB. The recommended value is `10`. The supported range is an integer from `0` to `3072`; SSD caching requires at least `5` GB per process. The total allocation must not exceed the node memory available after reserving memory for the operating system, vLLM, and the Memcache DRAM pool. |
 | `ubsio.standalone.device_count` | Number of local services whose `ock.mmc.local_service.dram.size` is not `0`. |
+| `ubsio.standalone.force_new_disk` | Controls whether UBS IO initializes the configured SSD devices as new disks instead of recovering their existing metadata. Set to `true` because the current version does not support fault recovery. |
 
-When adjusting the recommended value, calculate the maximum permitted per-process value by dividing the node memory available to UBS IO by the number of DRAM-enabled local services, rounding down, and capping the result at `1024`:
+When adjusting the recommended value, calculate the maximum permitted per-process value by dividing the node memory available to UBS IO by the number of DRAM-enabled local services, rounding down, and capping the result at `3072`:
 
 ```text
-maximum ubsio.mem.size_in_gb = min(1024, floor(available node memory for UBS IO (GB) / number of DRAM-enabled local services))
+maximum ubsio.mem.size_in_gb = min(3072, floor(available node memory for UBS IO (GB) / number of DRAM-enabled local services))
 ```
 
 For example, if `200` GB is available to UBS IO and four local services have DRAM enabled, the upper limit is `50` GB per process, so the recommended value `ubsio.mem.size_in_gb = 10` is valid. If the calculated upper limit is less than `5`, free more node memory or reduce the number of DRAM-enabled local services.
 
 For SSD caching, `10` GB per process is generally sufficient and does not need to be configured much larger. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [`ubsio.wcache.evict_water_level`](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
 
-For disk partitioning, capacity, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
+For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
 
 ### Separated Deployment of MemCache and vLLM
 

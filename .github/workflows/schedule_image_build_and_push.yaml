@@ -82,6 +82,12 @@ jobs:
           - name: A3 openEuler
             dockerfile: Dockerfile.a3.openEuler
             suffix: 'a3-openeuler'
+          - name: A5 Ubuntu
+            dockerfile: Dockerfile.a5
+            suffix: 'a5'
+          - name: A5 openEuler
+            dockerfile: Dockerfile.a5.openEuler
+            suffix: 'a5-openeuler'
           - name: 310P Ubuntu
             dockerfile: Dockerfile.310p
             suffix: '310p'
@@ -123,6 +129,12 @@ jobs:
           - name: A3 openEuler
             dockerfile: Dockerfile.a3.openEuler
             suffix: 'a3-openeuler'
+          - name: A5 Ubuntu
+            dockerfile: Dockerfile.a5
+            suffix: 'a5'
+          - name: A5 openEuler
+            dockerfile: Dockerfile.a5.openEuler
+            suffix: 'a5-openeuler'
           - name: 310P Ubuntu
             dockerfile: Dockerfile.310p
             suffix: '310p'

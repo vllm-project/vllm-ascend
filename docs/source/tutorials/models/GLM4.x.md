@@ -1,6 +1,6 @@
 # GLM-4.5/4.6/4.7
 
-## Introduction
+## 1 Introduction
 
 GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications.
 
@@ -8,27 +8,27 @@ The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `GLM-4.5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5).
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
-- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
-- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
+- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Since it is now supported, you can use the following quantization scheme to add mtp weights to the quantized weights.
+- `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
 - `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Installation
+## 4 Installation
 
 You can use our official docker image to run `GLM-4.x` directly.
 
@@ -81,7 +81,7 @@ docker run --rm \
 ::::{tab-item} A2 series
 :sync: A2
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -121,9 +121,9 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
 - Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
@@ -163,7 +163,7 @@ The parameters are explained as follows:
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
@@ -265,9 +265,9 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
 
-### Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM-4.7` in a multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -616,7 +616,7 @@ Before you start, please
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -665,7 +665,7 @@ Once the preparation is done, you can start the server with the following comman
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
 
-### Request Forwarding
+### 5.4 Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -696,7 +696,7 @@ python load_balance_proxy_server_example.py \
       9300 9301 9302 9303
 ```
 
-## Functional Verification
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -705,19 +705,19 @@ curl -H "Accept: application/json" \
     -H "Content-type: application/json" \
     -X POST \
     -d '{
-        "model": "glm", 
-        "messages": [{ 
-            "role": "user", 
-            "content": "The future of AI is" 
-        }], 
-        "stream": false, 
-        "ignore_eos": false, 
-        "temperature": 0, 
-        "max_tokens": 200 
+        "model": "glm",
+        "messages": [{
+            "role": "user",
+            "content": "The future of AI is"
+        }],
+        "stream": false,
+        "ignore_eos": false,
+        "temperature": 0,
+        "max_tokens": 200
     }' http://<node0_ip>:<port>/v1/chat/completions
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
@@ -736,7 +736,7 @@ Here are two accuracy evaluation methods.
 
 Not tested yet.
 
-## Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -778,7 +778,7 @@ vllm bench serve \
 
 After about several minutes, you can get the performance evaluation result.
 
-## Best Practices
+## 9 Performance Tuning
 
 In this chapter, we recommend best practices for three scenarios:
 
@@ -787,9 +787,9 @@ In this chapter, we recommend best practices for three scenarios:
 - High-throughput: For short sequences with high throughput: we also recommend setting `dp2 tp8`
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
-## FAQ
+## 10 FAQ
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 

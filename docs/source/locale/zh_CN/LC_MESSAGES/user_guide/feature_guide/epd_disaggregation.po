@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -81,11 +81,11 @@ msgstr "为什么使用解耦编码器？"
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:17
 msgid ""
 "A **disaggregated encoder** runs the vision-encoder stage of a multimodal "
-"LLM in a process that is separate from the pre-fill / decoder stage. "
+"LLM in a process that is separate from the prefill / decoder stage. "
 "Deploying these two stages in independent vLLM instances brings three "
 "practical benefits:"
 msgstr ""
-"**解耦编码器**在与预填充/解码阶段分离的进程中运行多模态 LLM 的视觉编码器阶段。将这两个阶段部署在独立的 vLLM 实例中带来了三个实际好处："
+"**分离式编码器**在多模态LLM中，将视觉编码器阶段运行在与预填充/解码阶段分离的进程中。将这两个阶段部署在独立的vLLM实例中，可带来三个实际好处："
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:19
 msgid "**Independent, fine-grained scaling**"
@@ -117,8 +117,8 @@ msgstr "纯语言请求完全绕过视觉编码器。"
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:28
 msgid ""
 "Encoder output is injected only at required attention layers, shortening the"
-" pre-fill critical path."
-msgstr "编码器输出仅在所需的注意力层注入，缩短了预填充关键路径。"
+" prefill critical path."
+msgstr "编码器输出仅在所需的注意力层注入，从而缩短预填充关键路径。"
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:30
 msgid "**Cross-process reuse and caching of encoder outputs**"
@@ -191,8 +191,8 @@ msgstr "**编码器实例** – 一个用于执行视觉编码的 vLLM 实例。
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:59
 msgid ""
-"**Prefill/Decode (PD) instance(s)** – runs language pre-fill and decode."
-msgstr "**预填充/解码（PD）实例** – 运行语言预填充和解码。"
+"**Prefill/Decode (PD) instance(s)** – runs language prefill and decode."
+msgstr "**预填充/解码（PD）实例**——运行语言预填充和解码。"
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:60
 msgid ""
@@ -227,8 +227,8 @@ msgid "*Worker role* – loads the embeddings into memory."
 msgstr "*工作器角色* – 将嵌入加载到内存中。"
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:71
-msgid "**EPD Load Balancing Proxy** -"
-msgstr "**EPD 负载均衡代理** -"
+msgid "**EPD Load Balancing Proxy**"
+msgstr "**EPD负载均衡代理**"
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:72
 msgid ""

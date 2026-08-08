@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-04 01:39+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -41,22 +41,22 @@ msgstr ""
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:7
 msgid ""
 "This document describes deployment and verification of these models on "
-"**Atlas inference products** and **Atlas 200I Pro**, including environment "
+"**Atlas 300I DUO** and **Atlas 200I Pro**, including environment "
 "preparation, Docker installation, single-node online deployment, functional "
 "verification, and tuning notes."
 msgstr ""
-"本文档描述了在 **Atlas 推理产品** 和 **Atlas 200I Pro** 上部署和验证这些模型的方法，包括环境准备、Docker "
+"本文档描述了在 **Atlas 300I DUO** 和 **Atlas 200I Pro** 上部署和验证这些模型的过程，包括环境准备、Docker "
 "安装、单节点在线部署、功能验证和调优说明。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:9
 msgid ""
 "It is **strongly recommended to use the latest release candidate (rc) "
 "version or the latest official version** of `vllm-ascend`. Support for "
-"Qwen3.5-2B/4B/9B on Atlas inference products and Atlas 200I Pro starts from "
-"`vllm-ascend:v0.23.0rc1`."
+"Qwen3.5-2B/4B/9B on Atlas 300I DUO and Atlas 200I Pro starts from `vllm-"
+"ascend:v0.23.0rc1`."
 msgstr ""
-"**强烈建议使用** `vllm-ascend` 的最新候选发布（rc）版本或最新正式版本。Atlas 推理产品和 Atlas 200I Pro 上对 "
-"Qwen3.5-2B/4B/9B 的支持从 `vllm-ascend:v0.23.0rc1` 开始。"
+"**强烈建议使用 `vllm-ascend` 的最新候选版本（rc）或最新正式版本**。从 `vllm-ascend:v0.23.0rc1` 开始支持在"
+" Atlas 300I DUO 和 Atlas 200I Pro 上运行 Qwen3.5-2B/4B/9B。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:11
 msgid "2 Supported Features"
@@ -111,12 +111,12 @@ msgid "FP16"
 msgstr "FP16"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "Atlas inference products or Atlas 200I Pro"
-msgstr "Atlas 推理产品或 Atlas 200I Pro"
+msgid "Atlas 300I DUO or Atlas 200I Pro"
+msgstr "Atlas 300I DUO 或 Atlas 200I Pro"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "[Download](https://modelscope.cn/models/Qwen/Qwen3.5-2B)"
-msgstr "[下载](https://modelscope.cn/models/Qwen/Qwen3.5-2B)"
+msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B)"
+msgstr "[下载](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B)"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:256
@@ -124,8 +124,8 @@ msgid "Qwen3.5-4B"
 msgstr "Qwen3.5-4B"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "[Download](https://modelscope.cn/models/Qwen/Qwen3.5-4B)"
-msgstr "[下载](https://modelscope.cn/models/Qwen/Qwen3.5-4B)"
+msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B)"
+msgstr "[下载](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B)"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:256
@@ -133,8 +133,8 @@ msgid "Qwen3.5-9B"
 msgstr "Qwen3.5-9B"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "[Download](https://modelscope.cn/models/Qwen/Qwen3.5-9B)"
-msgstr "[下载](https://modelscope.cn/models/Qwen/Qwen3.5-9B)"
+msgid "[Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B)"
+msgstr "[下载](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B)"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:27
 msgid ""
@@ -171,12 +171,12 @@ msgstr ""
 "Pro，请使用匹配的 `-310p-openeuler` 镜像。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:41
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动 docker 镜像。"
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 msgid "Atlas 200I Pro"
@@ -184,9 +184,9 @@ msgstr "Atlas 200I Pro"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:74
 msgid ""
-"Start the docker image on your each node. Adjust `--device=/dev/davinci0` "
+"Start the docker image on each node. Adjust `--device=/dev/davinci0` "
 "according to the NPU ID you want to use."
-msgstr "在每个节点上启动 docker 镜像。根据您要使用的 NPU ID 调整 `--device=/dev/davinci0`。"
+msgstr "在每个节点上启动docker镜像。根据您要使用的NPU ID调整`--device=/dev/davinci0`。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md
 msgid "Ubuntu 24.04"
@@ -228,10 +228,11 @@ msgstr "完整的安装步骤，请参考[安装](../../installation.md)。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:169
 msgid ""
-"On Atlas inference products and Atlas 200I Pro, you may need to uninstall "
-"`triton-ascend` and `triton` to avoid dependency conflicts:"
+"On Atlas 300I DUO and Atlas 200I Pro, you may need to uninstall `triton-"
+"ascend` and `triton` to avoid dependency conflicts:"
 msgstr ""
-"在 Atlas 推理产品和 Atlas 200I Pro 上，您可能需要卸载 `triton-ascend` 和 `triton` 以避免依赖冲突："
+"在 Atlas 300I DUO 和 Atlas 200I Pro 上，您可能需要卸载 `triton-ascend` 和 `triton` "
+"以避免依赖冲突："
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:176
 msgid ""
@@ -257,10 +258,10 @@ msgstr "5.1 单节点在线部署"
 msgid ""
 "Single-node deployment completes both Prefill and Decode within the same "
 "node. `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` can be deployed on Atlas "
-"inference products or Atlas 200I Pro."
+"300I DUO or Atlas 200I Pro."
 msgstr ""
 "单节点部署在同一节点内完成 Prefill 和 Decode。`Qwen3.5-2B`、`Qwen3.5-4B` 和 `Qwen3.5-9B` "
-"可以部署在 Atlas 推理产品或 Atlas 200I Pro 上。"
+"可以部署在 Atlas 300I DUO 或 Atlas 200I Pro 上。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:190
 msgid ""
@@ -290,55 +291,55 @@ msgstr "关键参数说明："
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:289
 msgid ""
 "`--tensor-parallel-size` sets the tensor parallel size. Prefer **TP=1** on "
-"Atlas 200I Pro. On Atlas inference products, **TP=1** and **TP=2** are both "
-"supported; choose according to the available devices."
+"Atlas 200I Pro. On Atlas 300I DUO, **TP=1** and **TP=2** are both supported;"
+" choose according to the available devices."
 msgstr ""
 "`--tensor-parallel-size` 设置张量并行大小。在 Atlas 200I Pro 上优先使用 **TP=1**。在 Atlas "
-"推理产品上，**TP=1** 和 **TP=2** 都支持；根据可用设备选择。"
+"300I DUO 上，**TP=1** 和 **TP=2** 均受支持；请根据可用设备进行选择。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:290
 msgid ""
 "`--max-model-len` represents the context length (input plus output for a "
-"single request). On Atlas inference products and Atlas 200I Pro, configure "
-"this value according to the actual device memory; setting it too high may "
-"cause OOM."
+"single request). On Atlas 300I DUO and Atlas 200I Pro, configure this value "
+"according to the actual device memory; setting it too high may cause OOM."
 msgstr ""
-"`--max-model-len` 表示上下文长度（单个请求的输入加输出）。在 Atlas 推理产品和 Atlas 200I Pro "
-"上，根据实际设备内存配置此值；设置过高可能导致 OOM。"
+"`--max-model-len` 表示上下文长度（单个请求的输入加输出）。在 Atlas 300I DUO 和 Atlas 200I Pro "
+"上，请根据实际设备内存配置该值；设置过高可能导致 OOM。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:291
 msgid ""
 "`--max-num-seqs` indicates the maximum number of requests that can be "
-"processed concurrently. On Atlas inference products and Atlas 200I Pro, "
-"configure this value according to the actual device memory; setting it too "
-"high may cause OOM."
+"processed concurrently. On Atlas 300I DUO and Atlas 200I Pro, configure this"
+" value according to the actual device memory; setting it too high may cause "
+"OOM."
 msgstr ""
-"`--max-num-seqs` 表示可以并发处理的最大请求数。在 Atlas 推理产品和 Atlas 200I Pro "
-"上，根据实际设备内存配置此值；设置过高可能导致 OOM。"
+"`--max-num-seqs` 表示可以并发处理的最大请求数。在 Atlas 300I DUO 和 Atlas 200I Pro "
+"上，请根据实际设备内存配置该值；设置过高可能导致 OOM。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:292
 msgid ""
 "`--gpu-memory-utilization` represents the proportion of HBM that vLLM will "
-"use for actual inference. On Atlas inference products and Atlas 200I Pro, "
-"configure this value according to the actual device memory; setting it too "
-"high may cause OOM. The default value is `0.9`."
+"use for actual inference. On Atlas 300I DUO and Atlas 200I Pro, configure "
+"this value according to the actual device memory; setting it too high may "
+"cause OOM. The default value is `0.9`."
 msgstr ""
-"`--gpu-memory-utilization` 表示 vLLM 将用于实际推理的 HBM 比例。在 Atlas 推理产品和 Atlas 200I "
-"Pro 上，根据实际设备内存配置此值；设置过高可能导致 OOM。默认值为 `0.9`。"
+"`--gpu-memory-utilization` 表示 vLLM 将用于实际推理的 HBM 比例。在 Atlas 300I DUO 和 Atlas "
+"200I Pro 上，请根据实际设备内存配置该值；设置过高可能导致 OOM。默认值为 `0.9`。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:293
 msgid ""
-"`--dtype float16` must be set on Atlas inference products and Atlas 200I "
-"Pro. These devices only support the FP16 data type."
-msgstr "在Atlas推理产品和Atlas 200I Pro上必须设置`--dtype float16`。这些设备仅支持FP16数据类型。"
+"`--dtype float16` must be set on Atlas 300I DUO and Atlas 200I Pro. These "
+"devices only support the FP16 data type."
+msgstr ""
+"在 Atlas 300I DUO 和 Atlas 200I Pro 上必须设置 `--dtype float16`。这些设备仅支持 FP16 数据类型。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:294
 msgid ""
 "`--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On "
-"Atlas inference products and Atlas 200I Pro, only `float16` is supported."
+"Atlas 300I DUO and Atlas 200I Pro, only `float16` is supported."
 msgstr ""
-"`--mamba-ssm-cache-dtype`设置Mamba SSM缓存的数据类型。在Atlas推理产品和Atlas 200I "
-"Pro上，仅支持`float16`。"
+"`--mamba-ssm-cache-dtype` 设置 Mamba SSM 缓存的数据类型。在 Atlas 300I DUO 和 Atlas 200I"
+" Pro 上，仅支持 `float16`。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:295
 msgid ""
@@ -396,7 +397,7 @@ msgstr "如果服务启动成功，将显示以下启动日志："
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:313
 msgid "6 Functional Verification"
-msgstr "6功能验证"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:315
 msgid ""
@@ -424,7 +425,7 @@ msgstr "预期结果：服务返回HTTP 200 OK。JSON响应中包含带有生成
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:348
 msgid "7 Accuracy Evaluation"
-msgstr "7精度评估"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:350
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:398
@@ -441,10 +442,11 @@ msgstr ""
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:354
 msgid ""
 "After execution, you can get the result. Here are the accuracy results of "
-"`Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` on Atlas inference products for"
-" reference only."
+"`Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` on Atlas 300I DUO for reference"
+" only."
 msgstr ""
-"执行后可获取结果。以下是`Qwen3.5-2B`、`Qwen3.5-4B`和`Qwen3.5-9B`在Atlas推理产品上的精度结果，仅供参考。"
+"执行后，您可以获得结果。以下是 `Qwen3.5-2B`、`Qwen3.5-4B` 和 `Qwen3.5-9B` 在 Atlas 300I DUO "
+"上的精度结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:356
 msgid "**Accuracy Evaluation Config File:**"
@@ -516,7 +518,7 @@ msgstr "82.33"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:396
 msgid "8 Performance Evaluation"
-msgstr "8性能评估"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:400
 msgid ""
@@ -529,7 +531,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:402
 msgid "9 Performance Tuning"
-msgstr "9性能调优"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:404
 msgid "9.1 Recommended Configurations"
@@ -544,16 +546,17 @@ msgstr "**注意**：以下配置仅供参考。最佳配置取决于模型大�
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:408
 msgid ""
-"**Atlas inference products / Atlas 200I Pro**: Currently only the TP "
-"scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas inference"
-" products, **TP=1** and **TP=2** are both supported; choose according to the"
-" available devices. Configure `--max-model-len`, `--max-num-seqs`, and "
-"`--gpu-memory-utilization` based on the actual device memory; setting them "
-"too high may cause OOM."
+"**Atlas 300I DUO / Atlas 200I Pro**: Currently only the TP scenario is "
+"supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I DUO, **TP=1** "
+"and **TP=2** are both supported; choose according to the available devices. "
+"Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-"
+"utilization` based on the actual device memory; setting them too high may "
+"cause OOM."
 msgstr ""
-"**Atlas推理产品/Atlas 200I Pro**：目前仅支持TP场景。在Atlas 200I "
-"Pro上优先使用**TP=1**。在Atlas推理产品上，**TP=1**和**TP=2**均支持；根据可用设备选择。根据实际设备内存配置`--max-"
-"model-len`、`--max-num-seqs`和`--gpu-memory-utilization`；设置过高可能导致OOM。"
+"**Atlas 300I DUO / Atlas 200I Pro**：目前仅支持 TP 场景。在 Atlas 200I Pro 上优先使用 "
+"**TP=1**。在 Atlas 300I DUO 上，**TP=1** 和 **TP=2** 均受支持；请根据可用设备进行选择。请根据实际设备内存配置"
+" `--max-model-len`、`--max-num-seqs` 和 `--gpu-memory-utilization`；设置过高可能导致 "
+"OOM。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:410
 msgid "9.2 Tuning Guidelines"
@@ -572,11 +575,11 @@ msgid ""
 "Please refer to the [Feature "
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
-msgstr "详细功能描述请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+msgstr "详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:416
 msgid "10 FAQ"
-msgstr "10常见问题"
+msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/Qwen3.5-Dense.md:418
 msgid ""
@@ -586,3 +589,6 @@ msgid ""
 msgstr ""
 "关于常见环境、安装和通用参数问题，请参考[vLLM-"
 "Ascend公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"

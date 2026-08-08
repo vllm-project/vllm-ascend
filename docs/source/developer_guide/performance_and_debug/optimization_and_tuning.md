@@ -4,7 +4,7 @@ This guide aims to help users improve vLLM Ascend performance at the system leve
 
 ## Preparation
 
-Run the container:
+### 1.Run the container
 
 ```{code-block} bash
    :substitutions:
@@ -28,7 +28,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Configure your environment:
+### 2.Configure your environment
 
 ```{code-block} bash
    :substitutions:
@@ -46,7 +46,7 @@ echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-security 
 apt update && apt install wget gcc g++ libnuma-dev git vim -y
 ```
 
-Install vLLM and vLLM Ascend:
+### 3.Install vLLM and vLLM Ascend
 
 ```{code-block} bash
    :substitutions:
@@ -61,7 +61,7 @@ export VLLM_USE_MODELSCOPE=True
 Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vLLM Ascend are installed correctly.
 
 :::{note}
-Make sure your vLLM and vLLM Ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vLLM Ascend before completing section 1.1, the binary files will not use the optimized python.
+Make sure your vLLM and vLLM Ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vLLM Ascend before completing [Configure your environment](#2configure-your-environment), the binary files will not use the optimized python.
 :::
 
 ## Optimizations
@@ -70,7 +70,7 @@ Make sure your vLLM and vLLM Ascend are installed after your Python configuratio
 
 #### 1.1. jemalloc
 
-**jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock competition between threads and can hugely optimize performance.
+**jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock contention between threads and can hugely optimize performance.
 
 ```{code-block} bash
    :substitutions:
@@ -84,7 +84,7 @@ export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 #### 1.2. Tcmalloc
 
-**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
+**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing lock contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
 ```{code-block} bash
    :substitutions:
@@ -164,7 +164,7 @@ This section describes operating system–level optimizations applied on the hos
 These settings must be applied on the host OS and with root privileges. Not inside containers.
 :::
 
-#### 4.1
+#### 4.1 Set CPU Frequency Governor to `performance`
 
 Set CPU Frequency Governor to `performance`
 

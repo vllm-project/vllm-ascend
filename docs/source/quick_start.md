@@ -5,7 +5,7 @@
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](../../docs/source/tutorials/models/Qwen3-30B-A3B.md).
-- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md).
 
 ## Prerequisites
 
@@ -15,13 +15,15 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- Atlas inference products
+- Atlas 950DT inference series (Atlas 950DT)
+- Atlas 300I DUO
+- Atlas 200I Pro
 
 ## Requirements
 
 :::::{tab-set}
 
-::::{tab-item} Atlas A2/A3 inference products
+::::{tab-item} Atlas A2/A3/950DT inference products
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
@@ -30,30 +32,30 @@ This section guides you through container-based environment setup and large mode
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.1](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |  
-    | CANN          | == 9.0.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.1                        | Required for libatb.so, enables advanced tensor operations |
+    | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+    | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
+    | TorchNPU      | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
+    | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
 
 ```{note}
-Atlas inference products use CANN 9.1.0 beta and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas inference products do not support `triton` or `triton-ascend`.
+Atlas 300I DUO uses CANN 9.1.0 and `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
 
-Atlas inference products and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 ```
 
 ::::
 
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 
  | Software      | Supported version                | Note                                      |
  |---------------|----------------------------------|-------------------------------------------|
- | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1/releasenote/9.1.0-beta.1/release-note.md) | Required for CANN |
- | CANN          | == 9.1.0                | Required for vllm-ascend and torch-npu    |
- | torch-npu     | == 2.10.0                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
- | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+ | Ascend HDK    | Refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+ | CANN          | == 9.1.0                | Required for vllm-ascend and TorchNPU    |
+ | TorchNPU      | == 2.10.0.post4         | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+ | torch         | == 2.10.0               | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
  | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
  | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
 
@@ -62,7 +64,7 @@ Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up u
 
 ## Setup environment using container
 
-Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
+Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
 
 :::::{tab-set}
 ::::{tab-item} Ubuntu
@@ -77,6 +79,8 @@ export DEVICE=/dev/davinci0
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 # Atlas A3:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+# Atlas 950DT:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
@@ -99,9 +103,9 @@ apt-get update -y && apt-get install -y curl
 
 ::::
 
-::::{tab-item} Ubuntu (Atlas inference products)
+::::{tab-item} Ubuntu (Atlas 300I DUO)
 
-The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -143,6 +147,8 @@ export DEVICE=/dev/davinci0
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 # Atlas A3:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3-openeuler
+# Atlas 950DT:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-950dt-openeuler
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 docker run --rm \
 --name vllm-ascend \
@@ -165,9 +171,9 @@ yum update -y && yum install -y curl
 
 ::::
 
-::::{tab-item} openEuler (Atlas inference products)
+::::{tab-item} openEuler (Atlas 300I DUO)
 
-The following command applies to Atlas inference products. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
 
 ```{code-block} bash
    :substitutions:
@@ -223,7 +229,6 @@ Create and run a simple inference test. The `example.py` can be like:
 
 ```python
 from vllm import LLM, SamplingParams
-
 prompts = [
     "Hello, my name is",
     "The future of AI is",
@@ -335,8 +340,8 @@ vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` to stop
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
-  VLLM_PID=$(pgrep -f "vllm serve")
-  kill -2 "$VLLM_PID"
+VLLM_PID=$(pgrep -f "vllm serve")
+kill -2 "$VLLM_PID"
 ```
 
 The output is as below:

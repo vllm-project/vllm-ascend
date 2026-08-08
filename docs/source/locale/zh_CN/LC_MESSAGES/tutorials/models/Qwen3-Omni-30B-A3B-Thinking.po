@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -295,9 +295,9 @@ msgstr "5 在线服务部署"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:216
 msgid ""
-"PS:Because the model has fewer parameters, it doesn’t involve the PD "
-"separation scenario."
-msgstr "注意：由于该模型参数较少，不涉及 PD 分离场景。"
+"Because the model has fewer parameters, it doesn’t involve the PD separation"
+" scenario."
+msgstr "由于该模型参数较少，不涉及PD分离场景。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:218
 msgid "5.1 Single-Node Online Deployment"
@@ -419,20 +419,19 @@ msgstr "使用EvalScope"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:361
 msgid ""
-"As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset,"
-" and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online "
-"mode."
+"As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test "
+"dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in "
+"online mode."
 msgstr ""
-"以`gsm8k` `omnibench` "
-"`bbh`数据集作为测试数据集为例，在线模式下运行`Qwen3-Omni-30B-A3B-Thinking`的精度评估。"
+"以`gsm8k`、`omni_bench`、`bbh`数据集作为测试数据集为例，在在线模式下对`Qwen3-Omni-30B-A3B-Thinking`进行精度评估。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:363
 msgid ""
 "Refer to [Using "
 "evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-"
-"evalscope-using-pip) for `evalscope`installation."
+"evalscope-using-pip) for `evalscope` installation."
 msgstr ""
-"`evalscope`安装请参考[使用evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-"
+"`evalscope`的安装请参考[使用evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-"
 "evalscope-using-pip)。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:364
@@ -440,7 +439,7 @@ msgid "Run `evalscope` to execute the accuracy evaluation."
 msgstr "运行`evalscope`执行精度评估。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:379
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:420
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:419
 msgid ""
 "After execution, you can get the result, here is the result of "
 "`Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only."
@@ -458,41 +457,40 @@ msgstr "使用vLLM Benchmark"
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:397
 msgid ""
 "Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example. "
-"Refer to vllm benchmark for more details. Refer to [vLLM "
-"Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details."
+"Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
 msgstr ""
-"以`Qwen3-Omni-30B-A3B-Thinking`的性能评估为例。更多详情请参考vllm benchmark。更多详情请参考[vLLM "
-"Benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+"以`Qwen3-Omni-30B-A3B-Thinking`为例进行性能评估。更多详情请参考[vLLM基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:401
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:400
 msgid "There are three `vllm bench` subcommands:"
 msgstr "`vllm bench`有三个子命令："
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:403
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:402
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：对单批请求的延迟进行基准测试。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:404
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:403
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：对在线服务吞吐量进行基准测试。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:405
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:404
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：对离线推理吞吐量进行基准测试。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:407
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:406
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以`serve`为例。运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:450
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:449
 msgid "9 Performance Tuning"
 msgstr "9 性能调优"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:452
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:451
 msgid "9.1 Recommended Configurations"
 msgstr "9.1 推荐配置"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:454
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:453
 msgid ""
 "**Note**: The following configurations are validated in specific test "
 "environments and are for reference only. The optimal configuration depends "
@@ -502,7 +500,7 @@ msgid ""
 msgstr ""
 "**注意**：以下配置在特定测试环境中验证，仅供参考。最佳配置取决于最大输入/输出长度、前缀缓存命中率、精度要求和部署机器比例等因素。建议根据实际情况参考第9.2节进行调优。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:456
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:455
 msgid "Table 1: Scenario Overview"
 msgstr "表1：场景概览"
 
@@ -570,7 +568,7 @@ msgstr "长上下文"
 msgid "Reduces concurrent sequences to accommodate longer max-model-len"
 msgstr "减少并发序列以容纳更长的max-model-len"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:464
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:463
 msgid ""
 "`*Total NPUs` indicates the total number of NPUs used across all nodes. On "
 "Atlas 800I A3, each NPU contains two dies (chips), so TP4 requires 4 chips ="
@@ -578,7 +576,7 @@ msgid ""
 msgstr ""
 "`*NPU总数`表示所有节点使用的NPU总数。在Atlas 800I A3上，每个NPU包含两个die（芯片），因此TP4需要4个芯片 = 2个NPU。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:466
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:465
 msgid "Table 2: Detailed Node Configuration"
 msgstr "表2：详细节点配置"
 
@@ -658,60 +656,60 @@ msgstr "14"
 msgid "YaRN"
 msgstr "YaRN"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:474
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:473
 msgid ""
 "For detailed parameter descriptions, please refer to the deployment examples"
 " in Section 5."
 msgstr "详细参数说明请参考第5节的部署示例。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:476
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:475
 msgid "**Low Latency Configuration:**"
 msgstr "**低时延配置：**"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:506
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:542
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:579
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:505
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:541
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:578
 msgid "Example AISBench settings for this configuration:"
 msgstr "此配置的AISBench设置示例："
+
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:507
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:543
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:580
+msgid "`request_rate`: 0"
+msgstr "`request_rate`：0"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:508
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:544
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:581
-msgid "`request_rate`: 0"
-msgstr "`request_rate`：0"
-
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:509
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:545
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:582
 msgid "`batch_size`: 32"
 msgstr "`batch_size`：32"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:510
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:546
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:509
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:545
 msgid "Input/Output length: 2048/2048 or 3500/1500"
 msgstr "输入/输出长度：2048/2048 或 3500/1500"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:513
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:512
 msgid "**High Throughput Configuration:**"
 msgstr "**高吞吐配置：**"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:549
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:548
 msgid "**Long Context Configuration:**"
 msgstr "**长上下文配置：**"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:583
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:582
 msgid "Input/Output length: 65536/1024 or 131072/1024"
 msgstr "输入/输出长度：65536/1024 或 131072/1024"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:586
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:585
 msgid "9.2 Tuning Guidelines"
 msgstr "9.2 调优指南"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:588
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:587
 msgid "9.2.1 General Tuning Reference"
 msgstr "9.2.1 通用调优参考"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:590
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:589
 msgid ""
 "Please refer to the [Public Performance Tuning "
 "Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
@@ -719,13 +717,13 @@ msgid ""
 "Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。详细功能说明请参考[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。详细功能说明请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:593
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:592
 msgid "10 FAQ"
 msgstr "10 常见问题"
 
-#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:595
+#: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:594
 msgid ""
 "For common environment, installation, and general parameter issues, please "
 "refer to the [Public "

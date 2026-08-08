@@ -63,8 +63,8 @@ For detailed information on supported models, please refer to [supported models]
 - OS: Linux
 - Software:
     - Python >= 3.10, < 3.13
-    - CANN == 9.0.1 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
-    - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
+    - CANN == 9.1.0 (For Ascend HDK version, please refer to the [CANN 9.1.0 Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md))
+    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post4
     - vLLM (the same version as vllm-ascend)
 
 ## Getting Started

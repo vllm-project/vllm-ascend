@@ -22,7 +22,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
+Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas 300I DUO:
 
 - `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
@@ -32,7 +32,7 @@ Requires 1 card on Ascend950DT series (96G × 8) node.
 
 Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
 
-- `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+- `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
 Requires 1 card on Ascend950DT series (96G × 8) node.
 
@@ -124,7 +124,7 @@ docker run --rm \
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 :sync: atlas
 
 ```{code-block} bash
@@ -197,7 +197,7 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    ```
 
 :::{note}
-Atlas inference products do not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
+Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
 
 ```bash
 pip uninstall -y triton-ascend triton
@@ -289,7 +289,7 @@ Run docker container to start the vLLM server on single-NPU:
 ```
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 :sync: atlas
 
 ```bash
@@ -322,11 +322,11 @@ Run docker container to start the vLLM server on single-NPU:
 ```
 
 :::{note}
-On Atlas inference products:
+On Atlas 300I DUO:
 
 - Only `float16` dtype is supported.
 - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, replace `--compilation-config` with `--enforce-eager`.
-- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas inference products.
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
 :::
 
 ::::
@@ -334,9 +334,9 @@ On Atlas inference products:
 
 Key Parameter Descriptions:
 
-- Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
+- Add the `--max_model_len` option to avoid the ValueError that occurs when the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 
-If your service start successfully, you can see the info shown below:
+If your service starts successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [2736]
@@ -413,7 +413,7 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 | mmmu_val | 0.5389 | 0.0159 |
 
 ::::
-::::{tab-item} Atlas inference products
+::::{tab-item} Atlas 300I DUO
 :sync: atlas
 
 **Using AISBench**
@@ -455,7 +455,7 @@ The performance evaluation must be conducted in an online mode. Take the `serve`
 vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result.
+After several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
 
@@ -467,10 +467,10 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K context)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|
-|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
-|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
-|Multimodal<br>(1080P)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
+|High Throughput<br>(16k context)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128k, no prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
+|Long Context<br>(128k, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080p)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
@@ -478,10 +478,10 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|Weight Version|
 |--------|-------------|-----|--|--|-------------------|--------------------|---|
-|High Throughput / Low Latency (16K)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
-|Long Context (128K, no cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
-|Long Context (128K, with cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
-|Multimodal (1080P)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
+|High Throughput / Low Latency (16k)|Server / Single Machine|1|1|1|~16k|3|Qwen3-VL-8B-Instruct|
+|Long Context (128k, no cache)|Server / Single Machine|1|1|1|128k|3|Qwen3-VL-8B-Instruct|
+|Long Context (128k, with cache)|Server / Single Machine|1|1|1|128k|3|Qwen3-VL-8B-Instruct|
+|Multimodal (1080p)|Server / Single Machine|1|1|1|~16k|3|Qwen3-VL-8B-Instruct|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
@@ -494,7 +494,7 @@ After about several minutes, you can get the performance evaluation result.
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

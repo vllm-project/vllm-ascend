@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-07 10:56+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -55,282 +55,909 @@ msgid "Text-Only Language Models"
 msgstr "纯文本语言模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:14
-#: ../../source/user_guide/support_matrix/supported_models.md:115
+#: ../../source/user_guide/support_matrix/supported_models.md:127
 msgid "Generative Models"
 msgstr "生成式模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:16
-#: ../../source/user_guide/support_matrix/supported_models.md:117
+#: ../../source/user_guide/support_matrix/supported_models.md:129
 msgid "Core Supported Models"
 msgstr "核心支持的模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:22
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "A2/A3"
-msgstr "A2/A3"
+msgid "Ascend 950 Products"
+msgstr "Ascend 950 产品"
 
-#: ../../source/user_guide/support_matrix/supported_models.md
-msgid "Atlas inference products"
-msgstr "Atlas 推理产品"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:53
-#: ../../source/user_guide/support_matrix/supported_models.md:149
-msgid "Extended Compatible Models"
-msgstr "扩展兼容模型"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
 #: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "Model"
 msgstr "模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
 #: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "Support"
 msgstr "支持情况"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
 #: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "Note"
 msgstr "备注"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
 #: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "BF16"
+msgstr "BF16"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "Supported Hardware"
 msgstr "支持的硬件"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "DeepSeek Distill (Qwen/Llama)"
-msgstr "DeepSeek Distill (Qwen/Llama)"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
 #: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "W8A8"
+msgstr "W8A8"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Chunked Prefill"
+msgstr "分块预填充"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Automatic Prefix Cache"
+msgstr "自动前缀缓存"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "LoRA"
+msgstr "LoRA"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Speculative Decoding"
+msgstr "投机解码"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Async Scheduling"
+msgstr "异步调度"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Tensor Parallel"
+msgstr "张量并行"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Pipeline Parallel"
+msgstr "流水线并行"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Expert Parallel"
+msgstr "专家并行"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Data Parallel"
+msgstr "数据并行"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Prefill-decode Disaggregation"
+msgstr "预填充-解码分离"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Piecewise AclGraph"
+msgstr "分段AclGraph"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Fullgraph AclGraph"
+msgstr "全图AclGraph"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "max-model-len"
+msgstr "max-model-len"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "MLP Weight Prefetch"
+msgstr "MLP权重预取"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Doc"
+msgstr "文档"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeek V4-Flash"
+msgstr "DeepSeek V4-Flash"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeek V4-Pro"
+msgstr "DeepSeek V4-Pro"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+msgid "DeepSeek-V3.1"
+msgstr "DeepSeek-V3.1"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "✅"
 msgstr "✅"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Qwen3-based"
-msgstr "基于 Qwen3"
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "240k"
+msgstr "240k"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Qwen2"
-msgstr "Qwen2"
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
+msgstr "[DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Qwen2.5"
-msgstr "Qwen2.5"
+#: ../../source/user_guide/support_matrix/supported_models.md:22
+msgid "GLM-5.1"
+msgstr "GLM-5.1"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Qwen2-based"
-msgstr "基于 Qwen2"
+#: ../../source/user_guide/support_matrix/supported_models.md
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "A2/A3"
+msgstr "A2/A3"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "QwQ-32B"
-msgstr "QwQ-32B"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "1M"
+msgstr "1M"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Llama2/3/3.1/3.2"
-msgstr "Llama2/3/3.1/3.2"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)"
+msgstr "[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Internlm"
-msgstr "Internlm"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)"
+msgstr "[DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeek V3/3.1"
+msgstr "DeepSeek V3/3.1"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeek V3.2"
+msgstr "DeepSeek V3.2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "160k"
+msgstr "160k"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md)"
+msgstr "[DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeek R1"
+msgstr "DeepSeek R1"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "128k"
+msgstr "128k"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md)"
+msgstr "[DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+msgid "Qwen3-Dense"
+msgstr "Qwen3-Dense"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+msgid "[Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md)"
+msgstr "[Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+msgid "Qwen3-30B-A3B"
+msgstr "Qwen3-30B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+msgid "[Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md)"
+msgstr "[Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "Qwen3-Coder-30B-A3B"
+msgstr "Qwen3-Coder-30B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "🔵"
 msgstr "🔵"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
-msgstr "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md)"
+msgstr "[Qwen3-Coder-30B-A3B](../../tutorials/models/Qwen3-Coder-30B-A3B.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Baichuan"
-msgstr "Baichuan"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "Qwen3-235B-A22B"
+msgstr "Qwen3-235B-A22B"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Baichuan2"
-msgstr "Baichuan2"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "256k"
+msgstr "256k"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Phi-4-mini"
-msgstr "Phi-4-mini"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md)"
+msgstr "[Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "MiniCPM"
-msgstr "MiniCPM"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "Qwen3-Next"
+msgstr "Qwen3-Next"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "MiniCPM3"
-msgstr "MiniCPM3"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[Qwen3-Next](../../tutorials/models/Qwen3-Next.md)"
+msgstr "[Qwen3-Next](../../tutorials/models/Qwen3-Next.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Ernie4.5"
-msgstr "Ernie4.5"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "GLM-4.x"
+msgstr "GLM-4.x"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Ernie4.5-Moe"
-msgstr "Ernie4.5-Moe"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "198k"
+msgstr "198k"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Gemma-2"
-msgstr "Gemma-2"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[GLM-4.x](../../tutorials/models/GLM4.x.md)"
+msgstr "[GLM-4.x](../../tutorials/models/GLM4.x.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Gemma-3"
-msgstr "Gemma-3"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "GLM-5/5.1"
+msgstr "GLM-5/5.1"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Phi-3/4"
-msgstr "Phi-3/4"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "200k"
+msgstr "200k"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Mistral/Mistral-Instruct"
-msgstr "Mistral/Mistral-Instruct"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[GLM-5](../../tutorials/models/GLM5.md)"
+msgstr "[GLM-5](../../tutorials/models/GLM5.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "Hy3-preview"
-msgstr "Hy3-preview"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "GLM-5.2"
+msgstr "GLM-5.2"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "A3"
-msgstr "A3"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[GLM-5](../../tutorials/models/GLM5.2.md)"
+msgstr "[GLM-5](../../tutorials/models/GLM5.2.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-msgid "DeepSeek V2.5"
-msgstr "DeepSeek V2.5"
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "Kimi-K2-Thinking"
+msgstr "Kimi-K2-Thinking"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
+msgstr "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "DeepSeekOCR2"
+msgstr "DeepSeekOCR2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md)"
+msgstr "[DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "MiniMax-M2.5/2.7"
+msgstr "MiniMax-M2.5/2.7"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "A2/A3/Ascend950 (Ascend950 experimental)"
+msgstr "A2/A3/Ascend950（Ascend950实验性）"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "❌"
+msgstr "❌"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "🟡"
 msgstr "🟡"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "[MiniMax-M2](../../tutorials/models/MiniMax-M2.md)"
+msgstr "[MiniMax-M2](../../tutorials/models/MiniMax-M2.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "Qwen2.5-Math-RM-72B"
+msgstr "Qwen2.5-Math-RM-72B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+msgid "vllm-rm, tensor_parallel_size=4, max_model_len=4096"
+msgstr "vllm-rm，tensor_parallel_size=4，max_model_len=4096"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "4096"
+msgstr "4096"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:33
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
+msgstr "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+msgid "20k"
+msgstr "20k"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:57
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "16k"
+msgstr "16k"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:65
+#: ../../source/user_guide/support_matrix/supported_models.md:171
+msgid "Extended Compatible Models"
+msgstr "扩展兼容模型"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "DeepSeek Distill (Qwen/Llama)"
+msgstr "DeepSeek Distill (Qwen/Llama)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Qwen3-based"
+msgstr "基于 Qwen3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Qwen2"
+msgstr "Qwen2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Qwen2.5"
+msgstr "Qwen2.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Qwen2-based"
+msgstr "基于 Qwen2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "QwQ-32B"
+msgstr "QwQ-32B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Llama2/3/3.1/3.2"
+msgstr "Llama2/3/3.1/3.2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Internlm"
+msgstr "Internlm"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
+msgstr "[#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Baichuan"
+msgstr "Baichuan"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Baichuan2"
+msgstr "Baichuan2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Phi-4-mini"
+msgstr "Phi-4-mini"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "MiniCPM"
+msgstr "MiniCPM"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "MiniCPM3"
+msgstr "MiniCPM3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Ernie4.5"
+msgstr "Ernie4.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Ernie4.5-Moe"
+msgstr "Ernie4.5-Moe"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Gemma-2"
+msgstr "Gemma-2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Gemma-3"
+msgstr "Gemma-3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Phi-3/4"
+msgstr "Phi-3/4"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Mistral/Mistral-Instruct"
+msgstr "Mistral/Mistral-Instruct"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "Hy3-preview"
+msgstr "Hy3-preview"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "A3"
+msgstr "A3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+msgid "DeepSeek V2.5"
+msgstr "DeepSeek V2.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:55
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "Need test"
 msgstr "需要测试"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:55
 msgid "Mllama"
 msgstr "Mllama"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:44
+#: ../../source/user_guide/support_matrix/supported_models.md:55
 msgid "MiniMax-Text"
 msgstr "MiniMax-Text"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:81
+#: ../../source/user_guide/support_matrix/supported_models.md:93
 msgid "Pooling Models"
 msgstr "池化模型"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:113
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "Qwen3-Embedding"
+msgstr "Qwen3-Embedding"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "[Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)"
+msgstr "[Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "Qwen3-VL-Embedding"
+msgstr "Qwen3-VL-Embedding"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "[Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)"
+msgstr "[Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "Qwen3-Reranker"
+msgstr "Qwen3-Reranker"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "[Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)"
+msgstr "[Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "Qwen3-VL-Reranker"
+msgstr "Qwen3-VL-Reranker"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "[Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)"
+msgstr "[Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "Molmo"
+msgstr "Molmo"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "[1942](https://github.com/vllm-project/vllm-ascend/issues/1942)"
+msgstr "[1942](https://github.com/vllm-project/vllm-ascend/issues/1942)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "XLM-RoBERTa-based"
+msgstr "基于XLM-RoBERTa"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "Bert"
+msgstr "Bert"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:99
+msgid "Reward Model, gsm8k_correctness accuracy=0.80"
+msgstr "奖励模型，gsm8k_correctness准确率=0.80"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "FP16"
+msgstr "FP16"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "FP16; embedding and scoring"
+msgstr "FP16；嵌入和评分"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "Qwen2.5-based"
+msgstr "基于Qwen2.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:114
+msgid "FP16 classification"
+msgstr "FP16分类"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:125
 msgid "Multimodal Language Models"
 msgstr "多模态语言模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Qwen2-VL"
-msgstr "Qwen2-VL"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Qwen3.5-397B-A17B"
+msgstr "Qwen3.5-397B-A17B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Qwen3-Omni"
-msgstr "Qwen3-Omni"
+msgid "Ascend 950DT"
+msgstr "昇腾950DT"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "QVQ"
-msgstr "QVQ"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "1010000"
+msgstr "1010000"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Qwen2-Audio"
-msgstr "Qwen2-Audio"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
+msgstr "[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Aria"
-msgstr "Aria"
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Qwen3.6-27B"
+msgstr "Qwen3.6-27B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "LLaVA-Next"
-msgstr "LLaVA-Next"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "262144"
+msgstr "262144"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "LLaVA-Next-Video"
-msgstr "LLaVA-Next-Video"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid ""
+"[Qwen3.5-27B / "
+"Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
+msgstr ""
+"[Qwen3.5-27B / "
+"Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "MiniCPM-V"
-msgstr "MiniCPM-V"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Qwen3-VL"
+msgstr "Qwen3-VL"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Mistral3"
-msgstr "Mistral3"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md)"
+msgstr "[Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Phi-3-Vision/Phi-3.5-Vision"
-msgstr "Phi-3-Vision/Phi-3.5-Vision"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Qwen3-VL-30B-A3B/Qwen3-VL-235B-A22B"
+msgstr "Qwen3-VL-30B-A3B/Qwen3-VL-235B-A22B"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Gemma3"
-msgstr "Gemma3"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid ""
+"[Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)/[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
+msgstr ""
+"[Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)/[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "Llama3.2"
-msgstr "Llama3.2"
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Qwen3.5-27B / Qwen3.6-27B"
+msgstr "Qwen3.5-27B / Qwen3.6-27B"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Qwen3.6-35B-A3B"
+msgstr "Qwen3.6-35B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
+msgstr "[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Qwen3-Omni-30B-A3B-Thinking"
+msgstr "Qwen3-Omni-30B-A3B-Thinking"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid ""
+"[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)"
+msgstr ""
+"[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid "Kimi-K2.5/Kimi-K2.6"
+msgstr "Kimi-K2.5/Kimi-K2.6"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:144
+msgid ""
+"[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
+msgstr ""
+"[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Qwen3.5-Dense"
+msgstr "Qwen3.5-Dense"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md)"
+msgstr "[Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Qwen3.5-35B-A3B"
+msgstr "Qwen3.5-35B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
+msgstr "[Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
+msgstr "[Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+#: ../../source/user_guide/support_matrix/supported_models.md:158
 msgid "PaddleOCR-VL"
 msgstr "PaddleOCR-VL"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md)"
+msgstr "[PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "Qwen3-ASR"
+msgstr "Qwen3-ASR"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:158
+msgid "[Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md)"
+msgstr "[Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Qwen2-VL"
+msgstr "Qwen2-VL"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Qwen3-Omni"
+msgstr "Qwen3-Omni"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "QVQ"
+msgstr "QVQ"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Qwen2-Audio"
+msgstr "Qwen2-Audio"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Aria"
+msgstr "Aria"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "LLaVA-Next"
+msgstr "LLaVA-Next"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "LLaVA-Next-Video"
+msgstr "LLaVA-Next-Video"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "MiniCPM-V"
+msgstr "MiniCPM-V"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Mistral3"
+msgstr "Mistral3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Phi-3-Vision/Phi-3.5-Vision"
+msgstr "Phi-3-Vision/Phi-3.5-Vision"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Gemma3"
+msgstr "Gemma3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
+msgid "Llama3.2"
+msgstr "Llama3.2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "Llama4"
 msgstr "Llama4"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
-msgid "❌"
-msgstr "❌"
-
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "[1972](https://github.com/vllm-project/vllm-ascend/issues/1972)"
 msgstr "[1972](https://github.com/vllm-project/vllm-ascend/issues/1972)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "Keye-VL-8B-Preview"
 msgstr "Keye-VL-8B-Preview"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "[1961](https://github.com/vllm-project/vllm-ascend/issues/1961)"
 msgstr "[1961](https://github.com/vllm-project/vllm-ascend/issues/1961)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "Florence-2"
 msgstr "Florence-2"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "[2259](https://github.com/vllm-project/vllm-ascend/issues/2259)"
 msgstr "[2259](https://github.com/vllm-project/vllm-ascend/issues/2259)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "GLM-4V"
 msgstr "GLM-4V"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "[2260](https://github.com/vllm-project/vllm-ascend/issues/2260)"
 msgstr "[2260](https://github.com/vllm-project/vllm-ascend/issues/2260)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL"
 msgstr "InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "[2064](https://github.com/vllm-project/vllm-ascend/issues/2064)"
 msgstr "[2064](https://github.com/vllm-project/vllm-ascend/issues/2064)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "Whisper"
 msgstr "Whisper"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "[2262](https://github.com/vllm-project/vllm-ascend/issues/2262)"
 msgstr "[2262](https://github.com/vllm-project/vllm-ascend/issues/2262)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:135
+#: ../../source/user_guide/support_matrix/supported_models.md:156
 msgid "Ultravox"
 msgstr "Ultravox"
+
+#~ msgid "Atlas inference products"
+#~ msgstr "Atlas 推理产品"

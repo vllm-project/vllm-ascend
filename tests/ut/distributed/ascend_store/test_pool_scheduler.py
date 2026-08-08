@@ -29,6 +29,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     LookupKeyClient,
     get_zmq_rpc_path_lookup,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+    KVPoolWorker,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1139,6 +1142,31 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
         request.block_hashes = [b"\xaa", b"\xbb"]
         result = scheduler._get_layerwise_gva_hit_tokens(request, 32, 0)
         self.assertEqual(result, 32)
+
+    def test_gva_hit_check_includes_all_parallel_ranks(self):
+        scheduler = object.__new__(KVPoolScheduler)
+        scheduler.model_name = "llama-7b"
+        scheduler.tp_size = 2
+        scheduler.put_step = 2
+        scheduler.pcp_size = 2
+        scheduler.dcp_size = 2
+        scheduler.pp_size = 2
+        worker = object.__new__(KVPoolWorker)
+        worker.model_name = scheduler.model_name
+
+        for num_groups, group_id in ((1, 0), (2, 1)):
+            scheduler.kv_cache_group_ids = list(range(num_groups))
+            worker.num_kv_cache_groups = num_groups
+            keys = scheduler._make_layerwise_gva_keys_for_hit_check(group_id, "deadbeef")
+            expected_key_count = (
+                scheduler.pcp_size * scheduler.dcp_size * (scheduler.tp_size // scheduler.put_step) * scheduler.pp_size
+            )
+            self.assertEqual(len(keys), expected_key_count)
+            for worker.pcp_rank in range(scheduler.pcp_size):
+                for worker.dcp_rank in range(scheduler.dcp_size):
+                    for worker.head_or_tp_rank in range(scheduler.tp_size // scheduler.put_step):
+                        for worker.pp_rank in range(scheduler.pp_size):
+                            self.assertIn(worker._make_layerwise_gva_key(group_id, "deadbeef"), keys)
 
     def test_partial_hit(self):
         scheduler = self._make_scheduler()

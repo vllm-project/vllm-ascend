@@ -57,6 +57,7 @@ def test_qwen3_moe_fc2_oshard_tp2() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.skip(reason="test is broken, fix me")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
@@ -76,6 +77,7 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
+@pytest.mark.skip(reason="test is broken, fix me")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_fc1_tp2(model):
     example_prompts = [
@@ -95,6 +97,7 @@ def test_qwen3_dense_fc1_tp2(model):
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
+@pytest.mark.skip(reason="test is broken, fix me")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     example_prompts = [

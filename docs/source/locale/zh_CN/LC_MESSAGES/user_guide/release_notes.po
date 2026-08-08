@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -632,14 +632,14 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:85
 msgid ""
-"DeepSeek V4 Pro on A3 and A5 can show continuously increasing memory usage "
-"in both P/D-disaggregated and co-located deployments, eventually causing OOM"
-" or service instability. [#12345](https://github.com/vllm-project/vllm-"
-"ascend/issues/12345)"
+"DeepSeek V4 Pro on A3 and Ascend 950 Products can show continuously "
+"increasing memory usage in both P/D-disaggregated and co-located "
+"deployments, eventually causing OOM or service instability. "
+"[#12345](https://github.com/vllm-project/vllm-ascend/issues/12345)"
 msgstr ""
-"A3和A5上的DeepSeek V4 "
-"Pro在P/D分离和共置部署中均可能显示持续增加的内存使用，最终导致OOM或服务不稳定。[#12345](https://github.com/vllm-"
-"project/vllm-ascend/issues/12345)"
+"DeepSeek V4 Pro 在 A3 和 Ascend 950 产品上，在 P/D 分离部署和共置部署中均可能显示内存使用量持续增长，最终导致 "
+"OOM 或服务不稳定。[#12345](https://github.com/vllm-project/vllm-"
+"ascend/issues/12345)"
 
 #: ../../source/user_guide/release_notes.md:86
 #, python-format
@@ -672,13 +672,12 @@ msgid ""
 "We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is"
 " the first release candidate for the v0.22.1 release line, building on "
 "v0.21.0rc1 and aligning the plugin with upstream vLLM v0.22.1. Please follow"
-" the [official "
-"doc](https://docs.vllm.ai/projects/ascend/en/releases-v0.22.1rc) to get "
-"started."
+" the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.22.1rc/) to "
+"get started."
 msgstr ""
-"我们很高兴地宣布 vLLM Ascend 的 v0.22.1rc1 版本发布。这是 v0.22.1 发布系列的第一个候选版本，基于 v0.21.0rc1"
-" 构建，并使插件与上游 vLLM v0.22.1 "
-"保持一致。请按照[官方文档](https://docs.vllm.ai/projects/ascend/en/releases-v0.22.1rc)开始使用。"
+"我们很高兴地宣布 vLLM Ascend 的 v0.22.1rc1 版本发布。这是 v0.22.1 版本线的首个候选版本，基于 v0.21.0rc1 "
+"构建，并使插件与上游 vLLM v0.22.1 "
+"保持一致。请按照[官方文档](https://docs.vllm.ai/projects/ascend/en/v0.22.1rc/)开始使用。"
 
 #: ../../source/user_guide/release_notes.md:95
 msgid ""
@@ -2150,11 +2149,11 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:316
 msgid ""
-"Upgraded PyTorch and torch-npu to 2.10.0. [#9128](https://github.com/vllm-"
+"Upgraded PyTorch and TorchNPU to 2.10.0. [#9128](https://github.com/vllm-"
 "project/vllm-ascend/pull/9128)"
 msgstr ""
-"将PyTorch和torch-npu升级至2.10.0。[#9128](https://github.com/vllm-project/vllm-"
-"ascend/pull/9128)"
+"已将 PyTorch 和 TorchNPU 升级到 2.10.0。[#9128](https://github.com/vllm-"
+"project/vllm-ascend/pull/9128)"
 
 #: ../../source/user_guide/release_notes.md:320
 msgid ""
@@ -2697,19 +2696,19 @@ msgstr ""
 #: ../../source/user_guide/release_notes.md:403
 #, python-brace-format
 msgid ""
-"**torch-npu**: Upgraded to 2.9.0.post1+git4c901a4 because of some known "
+"**TorchNPU**: Upgraded to 2.9.0.post1+git4c901a4 because of some known "
 "issue. This version can't install by default, please upgrade manually. We "
 "can get installation pkg from this link: <https://vllm-ascend.obs.cn-"
 "north-4.myhuaweicloud.com/vllm-"
 "ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>."
-" **PS:** If CANN has been upgraded to version 9.0.0, please upgrade torch-"
-"npu version to 2.9.0.post2 synchronously."
+" **PS:** If CANN has been upgraded to version 9.0.0, please upgrade TorchNPU"
+" version to 2.9.0.post2 synchronously."
 msgstr ""
-"**torch-"
-"npu**：因已知问题升级至2.9.0.post1+git4c901a4。此版本默认无法安装，请手动升级。您可以从以下链接获取安装包：<https://vllm-"
+"**TorchNPU**：由于某些已知问题，已升级到 "
+"2.9.0.post1+git4c901a4。此版本无法默认安装，请手动升级。我们可以从此链接获取安装包：<https://vllm-"
 "ascend.obs.cn-north-4.myhuaweicloud.com/vllm-"
-"ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>。"
-" **注意：** 如果CANN已升级至9.0.0版本，请同步将torch-npu版本升级至2.9.0.post2。"
+"ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>。**注意：**"
+" 如果 CANN 已升级到 9.0.0 版本，请同步将 TorchNPU 版本升级到 2.9.0.post2。"
 
 #: ../../source/user_guide/release_notes.md:404
 #, python-brace-format
@@ -4472,19 +4471,19 @@ msgstr ""
 #: ../../source/user_guide/release_notes.md:658
 #, python-brace-format
 msgid ""
-"**torch-npu**: Please upgrade to 2.9.0.post1+git4c901a4 because of some "
-"known issue. This version can't install by default, please upgrade manually."
-" We can get installation pkg from this link: <https://vllm-ascend.obs.cn-"
+"**TorchNPU**: Please upgrade to 2.9.0.post1+git4c901a4 because of some known"
+" issue. This version can't install by default, please upgrade manually. We "
+"can get installation pkg from this link: <https://vllm-ascend.obs.cn-"
 "north-4.myhuaweicloud.com/vllm-"
 "ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>."
-" **PS:** If CANN has been upgraded to version 9.0.0, please upgrade torch-"
-"npu version to 2.9.0.post2 synchronously."
+" **PS:** If CANN has been upgraded to version 9.0.0, please upgrade TorchNPU"
+" version to 2.9.0.post2 synchronously."
 msgstr ""
-"**torch-"
-"npu**：由于已知问题，请升级至2.9.0.post1+git4c901a4。此版本无法默认安装，请手动升级。安装包可通过此链接获取：<https://vllm-"
+"**TorchNPU**：由于某些已知问题，请升级到 "
+"2.9.0.post1+git4c901a4。此版本无法默认安装，请手动升级。我们可以从此链接获取安装包：<https://vllm-"
 "ascend.obs.cn-north-4.myhuaweicloud.com/vllm-"
-"ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>。"
-" **附注：** 如果CANN已升级至9.0.0版本，请同步将torch-npu版本升级至2.9.0.post2。"
+"ascend/torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl>。**注意：**"
+" 如果 CANN 已升级到 9.0.0 版本，请同步将 TorchNPU 版本升级到 2.9.0.post2。"
 
 #: ../../source/user_guide/release_notes.md:660
 msgid "v0.18.0rc1 - 2026.04.01"
@@ -6388,9 +6387,9 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:1005
 msgid ""
-"**torch-npu**: Upgraded to 2.8.0.post2. It's installed in the docker "
+"**TorchNPU**: Upgraded to 2.8.0.post2. It's installed in the docker "
 "container by default."
-msgstr "**torch-npu**：升级至 2.8.0.post2。默认安装在 Docker 容器中。"
+msgstr "**TorchNPU**：已升级到 2.8.0.post2。该版本默认安装在 docker 容器中。"
 
 #: ../../source/user_guide/release_notes.md:1006
 msgid ""
@@ -6824,10 +6823,10 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:1086
 msgid ""
-"torch-npu is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-"
+"TorchNPU is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-"
 "ascend/pull/6112)"
 msgstr ""
-"torch-npu 升级至 2.9.0 [#6112](https://github.com/vllm-project/vllm-"
+"TorchNPU 已升级到 2.9.0 [#6112](https://github.com/vllm-project/vllm-"
 "ascend/pull/6112)"
 
 #: ../../source/user_guide/release_notes.md:1090
@@ -7067,13 +7066,12 @@ msgstr "CANN 升级至 8.5.0"
 
 #: ../../source/user_guide/release_notes.md:1142
 msgid ""
-"torch-npu is upgraded to 2.8.0.post1. Please note that the post version will"
-" not be installed by default. Please install it by hand from [pypi "
+"TorchNPU is upgraded to 2.8.0.post1. Please note that the post version will "
+"not be installed by default. Please install it by hand from [pypi "
 "mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/)."
 msgstr ""
-"torch-npu 升级至 "
-"2.8.0.post1。请注意，post版本不会默认安装，请从[pypi镜像](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-"
-"npu/)手动安装。"
+"TorchNPU 已升级到 2.8.0.post1。请注意，post 版本不会默认安装。请从 [pypi "
+"镜像](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/)手动安装。"
 
 #: ../../source/user_guide/release_notes.md:1143
 msgid "triton-ascend is upgraded to 3.2.0"
@@ -7517,14 +7515,14 @@ msgstr "升级须知"
 #: ../../source/user_guide/release_notes.md:1237
 #: ../../source/user_guide/release_notes.md:1303
 msgid ""
-"torch-npu is upgraded to 2.7.1.post1. Please note that the package is pushed"
-" to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-"
+"TorchNPU is upgraded to 2.7.1.post1. Please note that the package is pushed "
+"to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-"
 "npu/). So it's hard to add it to auto dependence. Please install it by "
 "yourself."
 msgstr ""
-"torch-npu 已升级至 2.7.1.post1。请注意，该包已推送至 [pypi "
+"TorchNPU 已升级到 2.7.1.post1。请注意，该包已推送到 [pypi "
 "镜像](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-"
-"npu/)，因此难以加入自动依赖，请自行安装。"
+"npu/)。因此很难将其添加到自动依赖中。请自行安装。"
 
 #: ../../source/user_guide/release_notes.md:1238
 msgid "CANN is upgraded to 8.3.rc2."
@@ -7791,9 +7789,9 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:1285
 msgid ""
-"CANN is upgraded to 8.3.RC2, PyTorch and torch-npu are upgraded to 2.8.0. "
+"CANN is upgraded to 8.3.RC2, PyTorch and TorchNPU are upgraded to 2.8.0. "
 "Don't forget to install them."
-msgstr "CANN 已升级至 8.3.RC2，PyTorch 和 torch-npu 已升级至 2.8.0。请记得安装它们。"
+msgstr "CANN 已升级到 8.3.RC2，PyTorch 和 TorchNPU 已升级到 2.8.0。别忘了安装它们。"
 
 #: ../../source/user_guide/release_notes.md:1286
 msgid "Python 3.9 support is dropped to keep the same with vLLM v0.12.0"
@@ -8111,11 +8109,11 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:1356
 msgid ""
-"CANN is upgraded to 8.3.RC1. Torch-npu is upgraded to 2.7.1. "
+"CANN is upgraded to 8.3.RC1. TorchNPU is upgraded to 2.7.1. "
 "[#3945](https://github.com/vllm-project/vllm-ascend/pull/3945) "
 "[#3896](https://github.com/vllm-project/vllm-ascend/pull/3896)"
 msgstr ""
-"CANN 升级至 8.3.RC1。Torch-npu 升级至 2.7.1。[#3945](https://github.com/vllm-"
+"CANN 已升级到 8.3.RC1。TorchNPU 已升级到 2.7.1。[#3945](https://github.com/vllm-"
 "project/vllm-ascend/pull/3945) [#3896](https://github.com/vllm-project/vllm-"
 "ascend/pull/3896)"
 
@@ -8224,8 +8222,8 @@ msgstr "已知问题"
 #: ../../source/user_guide/release_notes.md:1378
 msgid ""
 "The memory may be leaked and the service may be stuck after long time "
-"serving. This is a bug from torch-npu, we'll upgrade and fix it soon."
-msgstr "长时间服务后可能出现内存泄漏和服务卡死。这是torch-npu的一个缺陷，我们将尽快升级修复。"
+"serving. This is a bug from TorchNPU, we'll upgrade and fix it soon."
+msgstr "长时间服务后可能会出现内存泄漏和服务卡住的情况。这是 TorchNPU 的一个 bug，我们将尽快升级并修复。"
 
 #: ../../source/user_guide/release_notes.md:1379
 msgid ""
@@ -9040,9 +9038,9 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:1529
 msgid ""
-"Torch-npu is upgraded to 2.5.1.post1. CANN is upgraded to 8.2.RC1. Don't "
+"TorchNPU is upgraded to 2.5.1.post1. CANN is upgraded to 8.2.RC1. Don't "
 "forget to upgrade them."
-msgstr "Torch-npu 已升级至 2.5.1.post1。CANN 已升级至 8.2.RC1。请勿忘记升级它们。"
+msgstr "TorchNPU 已升级到 2.5.1.post1。CANN 已升级到 8.2.RC1。别忘了升级它们。"
 
 #: ../../source/user_guide/release_notes.md:1533
 msgid ""
@@ -10081,11 +10079,11 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:1698
 msgid ""
-"Upgraded torch-npu to 2.5.1.post1 in [#2135](https://github.com/vllm-"
+"Upgraded TorchNPU to 2.5.1.post1 in [#2135](https://github.com/vllm-"
 "project/vllm-ascend/pull/2135)"
 msgstr ""
-"在[#2135](https://github.com/vllm-project/vllm-ascend/pull/2135)中将torch-"
-"npu升级至2.5.1.post1。"
+"已在 [#2135](https://github.com/vllm-project/vllm-ascend/pull/2135) 中将 "
+"TorchNPU 升级到 2.5.1.post1"
 
 #: ../../source/user_guide/release_notes.md:1699
 msgid ""
@@ -11426,13 +11424,13 @@ msgstr "将CANN升级到8.1.RC1以启用分块预填充和自动前缀缓存功�
 #: ../../source/user_guide/release_notes.md:1935
 msgid ""
 "Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version of"
-" torch-npu now. Now users don't need to install the torch-npu by hand. The "
-"2.5.1 version of torch-npu will be installed automatically. "
+" TorchNPU now. Now users don't need to install the TorchNPU by hand. The "
+"2.5.1 version of TorchNPU will be installed automatically. "
 "[#662](https://github.com/vllm-project/vllm-ascend/pull/662)"
 msgstr ""
-"将PyTorch升级至2.5.1。vLLM Ascend现已不再依赖torch-npu的开发版本。用户无需手动安装torch-"
-"npu，系统将自动安装torch-npu 2.5.1版本。[#662](https://github.com/vllm-project/vllm-"
-"ascend/pull/662)"
+"将 PyTorch 升级到 2.5.1。vLLM Ascend 现在不再依赖 TorchNPU 的开发版本。用户现在无需手动安装 "
+"TorchNPU。TorchNPU 的 2.5.1 版本将自动安装。[#662](https://github.com/vllm-"
+"project/vllm-ascend/pull/662)"
 
 #: ../../source/user_guide/release_notes.md:1936
 msgid ""
@@ -11704,13 +11702,13 @@ msgstr ""
 #: ../../source/user_guide/release_notes.md:1993
 msgid ""
 "Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version of"
-" torch-npu now. Now users don't need to install the torch-npu by hand. The "
-"2.5.1 version of torch-npu will be installed automatically. "
+" TorchNPU now. Now users don't need to install the TorchNPU by hand. The "
+"2.5.1 version of TorchNPU will be installed automatically. "
 "[#661](https://github.com/vllm-project/vllm-ascend/pull/661)"
 msgstr ""
-"将 PyTorch 升级至 2.5.1。vLLM Ascend 不再依赖 torch-npu 的开发版本。用户现在无需手动安装 torch-"
-"npu，torch-npu 的 2.5.1 版本将自动安装。[#661](https://github.com/vllm-project/vllm-"
-"ascend/pull/661)"
+"将 PyTorch 升级到 2.5.1。vLLM Ascend 现在不再依赖 TorchNPU 的开发版本。用户现在无需手动安装 "
+"TorchNPU。TorchNPU 的 2.5.1 版本将自动安装。[#661](https://github.com/vllm-"
+"project/vllm-ascend/pull/661)"
 
 #: ../../source/user_guide/release_notes.md:1997
 msgid ""

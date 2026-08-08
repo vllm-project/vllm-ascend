@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -75,26 +75,26 @@ msgstr "工作原理"
 msgid "In `vllm_ascend/patch`, you can see the code structure as follows:"
 msgstr "在 `vllm_ascend/patch` 中，你可以看到如下代码结构："
 
-#: ../../source/developer_guide/Design_Documents/patch.md:29
+#: ../../source/developer_guide/Design_Documents/patch.md:28
 msgid ""
 "**platform**: The patch code in this directory is for patching the code in "
-"vLLM main process. It's called by "
+"vLLM Main process. It's called by "
 "`vllm_ascend/platform::NPUPlatform::pre_register_and_update` very early when"
 " vLLM is initialized."
 msgstr ""
-"**platform**：此目录中的补丁代码用于修补 vLLM 主进程中的代码。它在 vLLM 初始化时很早的阶段由 "
-"`vllm_ascend/platform::NPUPlatform::pre_register_and_update` 调用。"
+"**platform**：此目录中的补丁代码用于修补 vLLM 主进程中的代码。它在 vLLM 初始化时由 "
+"`vllm_ascend/platform::NPUPlatform::pre_register_and_update` 很早就调用。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:30
+#: ../../source/developer_guide/Design_Documents/patch.md:29
 msgid ""
 "For online mode, vLLM process calls the platform patch in "
 "`vllm/vllm/engine/arg_utils.py::AsyncEngineArgs.add_cli_args` when parsing "
-"the cli args."
+"the CLI args."
 msgstr ""
-"对于在线模式，vLLM 进程在解析 CLI 参数时，会在 "
-"`vllm/vllm/engine/arg_utils.py::AsyncEngineArgs.add_cli_args` 中调用平台补丁。"
+"对于在线模式，vLLM 进程在解析 CLI 参数时调用 "
+"`vllm/vllm/engine/arg_utils.py::AsyncEngineArgs.add_cli_args` 中的平台补丁。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:31
+#: ../../source/developer_guide/Design_Documents/patch.md:30
 msgid ""
 "For offline mode, vLLM process calls the platform patch in "
 "`vllm/vllm/engine/arg_utils.py::EngineArgs.create_engine_config` when "
@@ -103,30 +103,30 @@ msgstr ""
 "对于离线模式，vLLM 进程在解析输入参数时，会在 "
 "`vllm/vllm/engine/arg_utils.py::EngineArgs.create_engine_config` 中调用平台补丁。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:32
+#: ../../source/developer_guide/Design_Documents/patch.md:31
 msgid ""
 "**worker**: The patch code in this directory is for patching the code in "
 "vLLM worker process. It's called by "
-"`vllm_ascend/worker/worker::NPUWorker::__init__` when the vLLM worker "
+"`vllm_ascend/worker/worker::NPUWorker::__init__` when the vLLM Worker "
 "process is initialized."
 msgstr ""
 "**worker**：此目录中的补丁代码用于修补 vLLM 工作进程中的代码。它在 vLLM 工作进程初始化时由 "
 "`vllm_ascend/worker/worker::NPUWorker::__init__` 调用。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:33
+#: ../../source/developer_guide/Design_Documents/patch.md:32
 msgid ""
-"For both online and offline mode, vLLM engine core process calls the worker "
+"For both online and offline mode, vLLM EngineCore process calls the worker "
 "patch in `vllm/vllm/worker/worker_base.py::WorkerWrapperBase.init_worker` "
 "when initializing the worker process."
 msgstr ""
-"对于在线和离线模式，vLLM 引擎核心进程在初始化工作进程时，会在 "
-"`vllm/vllm/worker/worker_base.py::WorkerWrapperBase.init_worker` 中调用工作进程补丁。"
+"对于在线和离线模式，vLLM EngineCore 进程在初始化工作进程时调用 "
+"`vllm/vllm/worker/worker_base.py::WorkerWrapperBase.init_worker` 中的工作补丁。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:35
+#: ../../source/developer_guide/Design_Documents/patch.md:34
 msgid "How to write a patch"
 msgstr "如何编写补丁"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:37
+#: ../../source/developer_guide/Design_Documents/patch.md:36
 msgid ""
 "Before writing a patch, following the principle above, we should patch the "
 "least code. If it's necessary, we can patch the code in either **platform** "
@@ -136,19 +136,19 @@ msgstr ""
 "在编写补丁之前，遵循上述原则，我们应该修补最少的代码。如果有必要，我们可以在 **platform** 或 **worker** "
 "文件夹中修补代码。以下是一个修补 vLLM 中 `distributed` 模块的示例。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:39
+#: ../../source/developer_guide/Design_Documents/patch.md:38
 msgid ""
 "Decide which version of vLLM we should patch. For example, after analysis, "
 "here we want to patch both `0.10.0` and `main` of vLLM."
 msgstr "决定我们应该修补哪个版本的 vLLM。例如，经过分析，这里我们想要修补 vLLM 的 `0.10.0` 和 `main` 版本。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:40
+#: ../../source/developer_guide/Design_Documents/patch.md:39
 msgid ""
 "Decide which process we should patch. For example, here `distributed` "
 "belongs to the vLLM main process, so we should patch `platform`."
 msgstr "决定我们应该修补哪个进程。例如，这里的 `distributed` 属于 vLLM 主进程，所以我们应该修补 `platform`。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:41
+#: ../../source/developer_guide/Design_Documents/patch.md:40
 #, python-brace-format
 msgid ""
 "Create the patch file in the right folder. The file should be named as "
@@ -158,11 +158,11 @@ msgstr ""
 "在正确的文件夹中创建补丁文件。文件应命名为 `patch_{module_name}.py`。此处的示例是 "
 "`vllm_ascend/patch/platform/patch_distributed.py`。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:42
+#: ../../source/developer_guide/Design_Documents/patch.md:41
 msgid "Write your patch code in the new file. Here is an example:"
 msgstr "在新文件中编写你的补丁代码。示例如下："
 
-#: ../../source/developer_guide/Design_Documents/patch.md:54
+#: ../../source/developer_guide/Design_Documents/patch.md:53
 msgid ""
 "Import the patch file in `__init__.py`. In this example, add `import "
 "vllm_ascend.patch.platform.patch_distributed` into "
@@ -172,13 +172,13 @@ msgstr ""
 "vllm_ascend.patch.platform.patch_distributed` 添加到 "
 "`vllm_ascend/patch/platform/__init__.py` 中。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:55
+#: ../../source/developer_guide/Design_Documents/patch.md:54
 msgid ""
 "Add the description of the patch in `vllm_ascend/patch/__init__.py`. The "
 "description format is as follows:"
 msgstr "在 `vllm_ascend/patch/__init__.py` 中添加补丁的描述。描述格式如下："
 
-#: ../../source/developer_guide/Design_Documents/patch.md:71
+#: ../../source/developer_guide/Design_Documents/patch.md:70
 msgid ""
 "Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should "
 "contain the Unit Test and E2E Test as well. You can find more details in "
@@ -187,11 +187,11 @@ msgstr ""
 "添加单元测试和端到端测试。vLLM Ascend "
 "中任何新添加的代码都应包含单元测试和端到端测试。你可以在[测试指南](../contribution/testing.md)中找到更多详细信息。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:73
+#: ../../source/developer_guide/Design_Documents/patch.md:72
 msgid "Limitations"
 msgstr "限制"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:75
+#: ../../source/developer_guide/Design_Documents/patch.md:74
 msgid ""
 "In V1 Engine, vLLM starts three kinds of processes: Main process, EngineCore"
 " process and Worker process. Now vLLM Ascend can only patch the code in Main"
@@ -204,7 +204,7 @@ msgstr ""
 "默认只能修补主进程和工作进程中的代码。如果你想修补在 EngineCore 进程中运行的代码，你需要在设置期间完整地修补 EngineCore 进程。在"
 " `vllm.v1.engine.core` 中找到完整代码。请完整地重写 `EngineCoreProc` 和 `DPEngineCoreProc`。"
 
-#: ../../source/developer_guide/Design_Documents/patch.md:76
+#: ../../source/developer_guide/Design_Documents/patch.md:75
 msgid ""
 "If you are running edited vLLM code, the version of vLLM may be changed "
 "automatically. For example, if you run the edited vLLM based on v0.9.n, the "

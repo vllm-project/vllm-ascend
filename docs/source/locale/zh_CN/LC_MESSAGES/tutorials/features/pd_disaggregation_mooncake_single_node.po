@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -31,9 +31,9 @@ msgstr "快速开始"
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:5
 msgid ""
 "vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide "
-"provides step-by-step instructions to verify this features in resource-"
+"provides step-by-step instructions to verify this feature in resource-"
 "constrained environments."
-msgstr "vLLM-Ascend 现已支持预填充-解码（PD）分离部署。本指南提供分步说明，帮助您在资源受限的环境中验证该功能。"
+msgstr "vLLM-Ascend 现已支持预填充-解码（PD）分离。本指南提供分步说明，帮助您在资源受限环境中验证此功能。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:7
 msgid ""
@@ -112,12 +112,12 @@ msgstr ""
 "项目。参考以下命令："
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:104
-msgid "(Optional) Replace go install url if the network is poor."
+msgid "(Optional) Replace go install URL if the network is poor."
 msgstr "（可选）如果网络状况不佳，请替换 go install 的 URL。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:111
-msgid "Install mpi."
-msgstr "安装 mpi。"
+msgid "Install MPI."
+msgstr "安装 MPI。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:117
 msgid ""
@@ -165,9 +165,10 @@ msgstr "解码器"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:234
 msgid ""
-"If you want to run \"2P1D\", please set ASCEND_RT_VISIBLE_DEVICES and port "
-"to different values for each P process."
-msgstr "如果要运行“2P1D”，请为每个 P 进程设置不同的 ASCEND_RT_VISIBLE_DEVICES 和端口。"
+"If you want to run \"2P1D\" (two Prefiller and one Decoder), please set "
+"ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process."
+msgstr ""
+"如果您想运行“2P1D”（两个预填充进程和一个解码进程），请为每个 P 进程设置不同的 ASCEND_RT_VISIBLE_DEVICES 和端口。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:236
 msgid "Example Proxy for Deployment"
@@ -198,7 +199,7 @@ msgid "--port"
 msgstr "--port"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:192
-msgid "Port of proxy"
+msgid "Proxy port"
 msgstr "代理端口"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:192
@@ -206,7 +207,7 @@ msgid "--prefiller-port"
 msgstr "--prefiller-port"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:192
-msgid "All ports of prefill"
+msgid "All prefiller ports"
 msgstr "所有预填充端口"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:192
@@ -214,8 +215,8 @@ msgid "--decoder-ports"
 msgstr "--decoder-ports"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:192
-msgid "All ports of decoder"
-msgstr "所有解码器端口"
+msgid "All decoder ports"
+msgstr "所有解码端口"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:256
 msgid "Verification"
@@ -224,3 +225,12 @@ msgstr "验证"
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_single_node.md:258
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"
+
+#~ msgid "Port of proxy"
+#~ msgstr "代理端口"
+
+#~ msgid "All ports of prefill"
+#~ msgstr "所有预填充端口"
+
+#~ msgid "All ports of decoder"
+#~ msgstr "所有解码器端口"

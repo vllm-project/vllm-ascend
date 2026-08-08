@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   lint-and-select-tests:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' || github.event.label.name == 'ready-a5' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -50,6 +50,8 @@ jobs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      has_tests_a5: ${{ steps.scope_a5.outputs.has_tests || steps.noop_a5.outputs.has_tests }}
+      test_groups_a5: ${{ steps.scope_a5.outputs.test_groups || steps.noop_a5.outputs.test_groups }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
@@ -144,7 +146,7 @@ jobs:
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1
@@ -152,7 +154,7 @@ jobs:
           pip install uv
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uc-manager
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          uv pip install -r requirements-dev.txt
 
       - name: Run pre-commit
         env:
@@ -201,6 +203,27 @@ jobs:
             echo "matched_modules="
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select A5 tests
+        id: scope_a5
+        if: steps.filter.outputs.src == 'true'
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git fetch origin ${{ github.base_ref }}
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --diff-base origin/${{ github.base_ref }} \
+            --modules a5 \
+            --runner-override a5_x4
+
+      - name: Set no-tests output for A5 when source paths unchanged
+        id: noop_a5
+        if: steps.filter.outputs.src != 'true'
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+          } >> "$GITHUB_OUTPUT"
+          
   run-selected-tests:
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
@@ -214,3 +237,17 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+  run-selected-tests-a5:
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    strategy:
+      matrix:
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups_a5 }}

@@ -40,6 +40,12 @@
 #                paths after directory scanning)
 
 # === Modules ===
+# A5 (Ascend 950) curated test suite
+- name: a5
+  optional: true
+  tests:
+    - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+
 # Default CPU UT module - always runs all CPU UTs in every PR
 - name: default_cpu_ut
   optional: false

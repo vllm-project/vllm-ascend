@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-07-31 09:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,8 +21,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:1
-msgid "Long-Sequence Context Parallel (Deepseek)"
-msgstr "长序列上下文并行（Deepseek）"
+msgid "Long-Sequence Context Parallel (DeepSeek)"
+msgstr "长序列上下文并行（DeepSeek）"
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:3
 msgid "Getting Started"
@@ -43,7 +43,7 @@ msgstr "vLLM-Ascend现已支持带上下文并行选项的长序列。本指南�
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:11
 msgid ""
-"Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers"
+"Take the DeepSeek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers"
 " to deploy the “1P1D” architecture. Node p is deployed across multiple "
 "machines, while node d is deployed on a single machine. Assume the IP of the"
 " prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and "
@@ -54,10 +54,10 @@ msgid ""
 "introduce additional communication and small operator overhead. Therefore, "
 "we will not enable the DCP feature on node d."
 msgstr ""
-"以Deepseek-V3.1-w8a8模型为例，使用3台Atlas 800T "
-"A3服务器部署“1P1D”架构。节点p跨多台机器部署，节点d部署在单台机器上。假设预填充服务器IP为192.0.0.1（prefill "
-"1）和192.0.0.2（prefill 2），解码服务器为192.0.0.3（decoder "
-"1）。每台服务器使用8个NPU共16个芯片部署一个服务实例。本示例中，我们将在节点p上启用上下文并行功能以改善TTFT。虽然在节点d上启用DCP功能可减少内存使用，但会引入额外的通信和小算子开销，因此我们不在节点d上启用DCP功能。"
+"以DeepSeek-V3.1-w8a8模型为例，使用3台Atlas 800T "
+"A3服务器部署“1P1D”架构。节点p跨多台机器部署，而节点d部署在单台机器上。假设预填充服务器IP为192.0.0.1（prefill "
+"1）和192.0.0.2（prefill 2），解码器服务器为192.0.0.3（decoder 1）。每台服务器上使用8个NPU "
+"16芯片部署一个服务实例。在当前示例中，我们将在节点p上启用上下文并行特性以提升TTFT。虽然在节点d上启用DCP特性可以减少内存占用，但会引入额外的通信和小算子开销。因此，我们不会在节点d上启用DCP特性。"
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:13
 msgid "Environment Preparation"

@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-07 10:56+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -70,8 +70,8 @@ msgid ""
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
 
 #: ../../source/tutorials/models/InternVL3.5.md:17
-msgid "3 Environment Preparation"
-msgstr "3 环境准备"
+msgid "3 Prerequisites"
+msgstr "3 前提条件"
 
 #: ../../source/tutorials/models/InternVL3.5.md:19
 msgid "3.1 Model Weight"
@@ -83,19 +83,19 @@ msgstr "需要 1 个 Atlas 800 A3 (64G × 16) 节点："
 
 #: ../../source/tutorials/models/InternVL3.5.md:23
 msgid ""
-"`InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64G × 16) node [Download "
+"`InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download "
 "model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)"
 msgstr ""
-"`InternVL3_5-38B-w8a8`：需要 1 个 Atlas 800 A3 (64G × 16) 节点 "
+"`InternVL3_5-38B-w8a8`：需要1个Atlas 800 A3（64GB × 16）节点 "
 "[下载模型权重](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)"
 
 #: ../../source/tutorials/models/InternVL3.5.md:24
 msgid ""
-"`InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64G × 16) node "
+"`InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node "
 "[Download model "
 "weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
 msgstr ""
-"`InternVL3_5-241B-A28B-w8a8`：需要 1 个 Atlas 800 A3 (64G × 16) 节点 "
+"`InternVL3_5-241B-A28B-w8a8`：需要1个Atlas 800 A3（64GB × 16）节点 "
 "[下载模型权重](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
 
 #: ../../source/tutorials/models/InternVL3.5.md:26
@@ -136,7 +136,7 @@ msgstr "从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
-msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
+msgstr "如果您想部署多节点环境，您需要在每个节点上设置环境。"
 
 #: ../../source/tutorials/models/InternVL3.5.md:81
 msgid "5 Online Service Deployment"
@@ -146,47 +146,23 @@ msgstr "5 在线服务部署"
 msgid "5.1 Single-Node Online Deployment"
 msgstr "5.1 单节点在线部署"
 
-#: ../../source/tutorials/models/InternVL3.5.md
-msgid "InternVL3_5-38B"
-msgstr "InternVL3_5-38B"
+#: ../../source/tutorials/models/InternVL3.5.md:85
+msgid "=== \"InternVL3_5-38B\""
+msgstr "=== \"InternVL3_5-38B\""
 
-#: ../../source/tutorials/models/InternVL3.5.md:92
-msgid ""
-"Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 "
-"(64G × 16) ."
-msgstr "量化模型 `InternVL3_5-38B-w8a8` 可部署在 1 个 Atlas 800 A3 (64G × 16) 上。"
+#: ../../source/tutorials/models/InternVL3.5.md:130
+msgid "=== \"InternVL3_5-241B-A28B\""
+msgstr "=== \"InternVL3_5-241B-A28B\""
 
-#: ../../source/tutorials/models/InternVL3.5.md:94
-#: ../../source/tutorials/models/InternVL3.5.md:141
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
-
-#: ../../source/tutorials/models/InternVL3.5.md:96
-#: ../../source/tutorials/models/InternVL3.5.md:143
-#: ../../source/tutorials/models/InternVL3.5.md:240
-msgid ""
-"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
-msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
-
-#: ../../source/tutorials/models/InternVL3.5.md
-msgid "InternVL3_5-241B-A28B"
-msgstr "InternVL3_5-241B-A28B"
-
-#: ../../source/tutorials/models/InternVL3.5.md:139
-msgid ""
-"Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 "
-"A3 (64G × 16) ."
-msgstr "量化模型 `InternVL3_5-241B-A28B-w8a8` 可部署在 1 个 Atlas 800 A3 (64G × 16) 上。"
-
-#: ../../source/tutorials/models/InternVL3.5.md:186
+#: ../../source/tutorials/models/InternVL3.5.md:176
 msgid "**Notice:**"
 msgstr "**注意：**"
 
-#: ../../source/tutorials/models/InternVL3.5.md:188
+#: ../../source/tutorials/models/InternVL3.5.md:178
 msgid "Some configurations for optimization are shown below:"
 msgstr "以下是一些用于优化的配置："
 
-#: ../../source/tutorials/models/InternVL3.5.md:190
+#: ../../source/tutorials/models/InternVL3.5.md:180
 msgid ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce "
 "communication and computation overhead on prefill node. With FlashComm "
@@ -195,65 +171,83 @@ msgstr ""
 "`VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化以减少 prefill 节点上的通信和计算开销。启用 "
 "FlashComm 后，layer_sharding 列表不能包含 o_proj 作为元素。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:191
+#: ../../source/tutorials/models/InternVL3.5.md:181
 msgid ""
-"`VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: "
-"dispatch_gmm_combine_decode and dispatch_ffn_combine operator."
-msgstr ""
-"`VLLM_ASCEND_ENABLE_FUSED_MC2`：启用以下融合算子：dispatch_gmm_combine_decode 和 "
-"dispatch_ffn_combine 算子。"
+"`VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe "
+"fused operator."
+msgstr "`VLLM_ASCEND_ENABLE_FUSED_MC2`：启用 dispatch_ffn_combine/mega_moe 融合算子。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:193
+#: ../../source/tutorials/models/InternVL3.5.md:182
 msgid ""
-"Please refer to the following python file for further explanation and "
-"restrictions of the environment variables above: "
-"[envs.py](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/vllm_ascend/envs.py)"
+"The above parameters are validated in a specific test environment for "
+"reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-"
+"num-batched-tokens`, and `--gpu-memory-utilization` based on your actual "
+"input/output length, concurrency, and hardware configuration."
 msgstr ""
-"有关上述环境变量的进一步解释和限制，请参考以下 Python 文件：[envs.py](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/vllm_ascend/envs.py)"
+"上述参数在特定测试环境中验证，仅供参考。请根据您的实际输入/输出长度、并发数和硬件配置调整 `--max-model-len`、`--max-num-"
+"seqs`、`--max-num-batched-tokens` 和 `--gpu-memory-utilization`。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:195
+#: ../../source/tutorials/models/InternVL3.5.md:183
+msgid ""
+"For Ascend-specific options passed through `--additional-config`, refer to "
+"[Additional "
+"Configuration](../../user_guide/configuration/additional_config.md). For "
+"Ascend-specific environment variables, refer to [Environment "
+"Variables](../../user_guide/configuration/env_vars.md)."
+msgstr ""
+"有关通过 `--additional-config` 传递的 Ascend "
+"特定选项，请参阅[附加配置](../../user_guide/configuration/additional_config.md)。有关 "
+"Ascend 特定的环境变量，请参阅[环境变量](../../user_guide/configuration/env_vars.md)。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:185
+msgid "5.2 Multi-Node PD Separation Deployment"
+msgstr "5.2 多节点 PD 分离部署"
+
+#: ../../source/tutorials/models/InternVL3.5.md:187
+msgid "Not support yet."
+msgstr "暂不支持。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:189
 msgid "6 Functional Verification"
 msgstr "6 功能验证"
 
-#: ../../source/tutorials/models/InternVL3.5.md:197
+#: ../../source/tutorials/models/InternVL3.5.md:191
 msgid ""
 "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/InternVL3.5.md:214
+#: ../../source/tutorials/models/InternVL3.5.md:208
 msgid "Expected Result:"
 msgstr "预期结果："
 
-#: ../../source/tutorials/models/InternVL3.5.md:220
+#: ../../source/tutorials/models/InternVL3.5.md:214
 msgid "7 Accuracy Evaluation"
 msgstr "7 精度评估"
 
-#: ../../source/tutorials/models/InternVL3.5.md:222
+#: ../../source/tutorials/models/InternVL3.5.md:216
 msgid "7.1 Using AISBench"
 msgstr "7.1 使用 AISBench"
 
-#: ../../source/tutorials/models/InternVL3.5.md:224
+#: ../../source/tutorials/models/InternVL3.5.md:218
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详情请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:226
+#: ../../source/tutorials/models/InternVL3.5.md:220
 msgid "After execution, you can get the result."
 msgstr "执行后，您可以获取结果。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:228
-msgid "8 Performance"
-msgstr "8 性能"
+#: ../../source/tutorials/models/InternVL3.5.md:222
+msgid "8 Performance Evaluation"
+msgstr "8 性能评估"
 
-#: ../../source/tutorials/models/InternVL3.5.md:230
+#: ../../source/tutorials/models/InternVL3.5.md:224
 msgid "8.1 Using AISBench"
 msgstr "8.1 使用 AISBench"
 
-#: ../../source/tutorials/models/InternVL3.5.md:232
+#: ../../source/tutorials/models/InternVL3.5.md:226
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -263,17 +257,205 @@ msgstr ""
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:234
+#: ../../source/tutorials/models/InternVL3.5.md:228
 msgid "8.2 Using vLLM Benchmark"
 msgstr "8.2 使用 vLLM Benchmark"
 
-#: ../../source/tutorials/models/InternVL3.5.md:236
+#: ../../source/tutorials/models/InternVL3.5.md:230
 msgid ""
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
-msgstr ""
-"更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
+msgstr "更多详情请参考[vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/InternVL3.5.md:238
+#: ../../source/tutorials/models/InternVL3.5.md:232
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
+
+#: ../../source/tutorials/models/InternVL3.5.md:234
+msgid "9.1 Recommended Configurations"
+msgstr "9.1 推荐配置"
+
+#: ../../source/tutorials/models/InternVL3.5.md:236
+msgid "Table 1: Scenario Overview"
+msgstr "表 1：场景概览"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Deployment Mode"
+msgstr "部署模式"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "*Total NPUs"
+msgstr "*NPU 总数"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Weight Version"
+msgstr "权重版本"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Key Considerations"
+msgstr "关键注意事项"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "InternVL3_5-241B-A28B-w8a8 High Throughput"
+msgstr "InternVL3_5-241B-A28B-w8a8 高吞吐"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Single node deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "8 (A3)"
+msgstr "8 (A3)"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "InternVL3_5-241B-A28B-w8a8"
+msgstr "InternVL3_5-241B-A28B-w8a8"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "For short-sequence high throughput, try tp4dp2"
+msgstr "对于短序列高吞吐，可尝试 tp4dp2"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "InternVL3_5-38B-w8a8 High Throughput"
+msgstr "InternVL3_5-38B-w8a8 高吞吐"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "4 (A3)"
+msgstr "4 (A3)"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "InternVL3_5-38B-w8a8"
+msgstr "InternVL3_5-38B-w8a8"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "For short-sequence high throughput, try tp4"
+msgstr "对于短序列高吞吐，可尝试 tp4"
+
+#: ../../source/tutorials/models/InternVL3.5.md:243
+msgid "Table 2: Detailed Node Configuration"
+msgstr "表 2：详细节点配置"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "NPUs"
+msgstr "NPU"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "TP"
+msgstr "TP"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "DP"
+msgstr "DP"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Max Num Seqs"
+msgstr "最大序列数"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Max Num Batched Tokens"
+msgstr "最大批处理 Token 数"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Max Model Len"
+msgstr "最大模型长度"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Single-Node (A3)"
+msgstr "单节点 (A3)"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "2"
+msgstr "2"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "4"
+msgstr "4"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "1"
+msgstr "1"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "32"
+msgstr "32"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "16384"
+msgstr "16384"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "135000"
+msgstr "135000"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "4096"
+msgstr "4096"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "40960"
+msgstr "40960"
+
+#: ../../source/tutorials/models/InternVL3.5.md:250
+msgid "9.2 Tuning Guidelines"
+msgstr "9.2 调优指南"
+
+#: ../../source/tutorials/models/InternVL3.5.md:252
+msgid ""
+"Please refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for tuning methods. Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr ""
+"有关调优方法，请参阅[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。有关详细的功能描述，请参阅[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:255
 msgid "9 FAQ"
 msgstr "9 常见问题解答"
+
+#: ../../source/tutorials/models/InternVL3.5.md:257
+msgid ""
+"Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md)."
+msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"
+
+#~ msgid ""
+#~ "If you want to deploy multi-node environment, you need to set up environment"
+#~ " on each node."
+#~ msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
+
+#~ msgid "3 Environment Preparation"
+#~ msgstr "3 环境准备"
+
+#~ msgid ""
+#~ "Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 "
+#~ "(64G × 16) node."
+#~ msgstr "量化模型`InternVL3_5-38B-w8a8`可部署在1个Atlas 800 A3（64G × 16）节点上。"
+
+#~ msgid "Run the following script to execute online inference."
+#~ msgstr "运行以下脚本执行在线推理。"
+
+#~ msgid ""
+#~ "Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 "
+#~ "A3 (64G × 16) node."
+#~ msgstr "量化模型`InternVL3_5-241B-A28B-w8a8`可部署在1个Atlas 800 A3（64G × 16）节点上。"
+
+#~ msgid ""
+#~ "Please refer to the following python file for further explanation and "
+#~ "restrictions of the environment variables above: "
+#~ "[envs.py](https://github.com/vllm-project/vllm-"
+#~ "ascend/blob/main/vllm_ascend/envs.py)"
+#~ msgstr ""
+#~ "有关上述环境变量的进一步解释和限制，请参考以下 Python 文件：[envs.py](https://github.com/vllm-"
+#~ "project/vllm-ascend/blob/main/vllm_ascend/envs.py)"
+
+#~ msgid ""
+#~ "Common Issues Tip: If you encounter issues, refer to [FAQs](../../faqs.md)."
+#~ msgstr "常见问题提示：如果遇到问题，请参考[常见问题解答](../../faqs.md)。"

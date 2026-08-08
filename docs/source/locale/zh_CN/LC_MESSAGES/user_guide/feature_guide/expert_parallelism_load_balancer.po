@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -64,15 +64,17 @@ msgstr "模型"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:16
 msgid ""
-"All MOE models supported by vLLM-Ascend. But we have only verified the "
+"All MoE models supported by vLLM-Ascend. But we have only verified the "
 "performance on deepseek-v3.1/r1 models."
-msgstr "vLLM-Ascend支持的所有MOE模型。但我们仅在deepseek-v3.1/r1模型上验证了性能。"
+msgstr "vLLM-Ascend 支持所有 MoE 模型。但我们仅在 deepseek-v3.1/r1 模型上验证了性能。"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:19
 msgid ""
-"[!IMPORTANT] Ascend A5 does not support using EPLB with quant type "
-"\"W4A8MXFP4\", \"W4A16\", \"W4A16MXFP4\"."
-msgstr "[!IMPORTANT] Ascend A5不支持将EPLB与量化类型\"W4A8MXFP4\"、\"W4A16\"、\"W4A16MXFP4\"配合使用。"
+"[!IMPORTANT] Ascend 950 Products does not support using EPLB with quant type"
+" \"W4A8MXFP4\", \"W4A16\", \"W4A16MXFP4\"."
+msgstr ""
+"[!IMPORTANT] Ascend 950 产品不支持将 EPLB 与量化类型 "
+"\"W4A8MXFP4\"、\"W4A16\"、\"W4A16MXFP4\" 一起使用。"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:22
 msgid "MOE QuantType"
@@ -217,11 +219,11 @@ msgid ""
 " vLLM-Ascend EPLB. Enable dynamic balancing with auto-tuned parameters. "
 "Adjust expert_heat_collection_interval and algorithm_execution_interval "
 "based on workload patterns. In the current version, we recommend using the "
-"following: policy of swift balancer(2)."
+"following: policy of SwiftBalanceEplb(2)."
 msgstr ""
-"我们需要添加环境变量`export DYNAMIC_EPLB=\"true\"`来启用vLLM-Ascend "
-"EPLB。启用带自动调优参数的动态均衡。根据工作负载模式调整expert_heat_collection_interval和algorithm_execution_interval。在当前版本中，我们建议使用以下配置：swift"
-" balancer(2)策略。"
+"我们需要添加环境变量 `export DYNAMIC_EPLB=\"true\"` 来启用 vLLM-Ascend "
+"EPLB。启用动态均衡并自动调整参数。根据工作负载模式调整 expert_heat_collection_interval 和 "
+"algorithm_execution_interval。在当前版本中，我们建议使用以下策略：SwiftBalanceEplb(2)。"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md
 msgid "Parameter"
@@ -569,10 +571,10 @@ msgstr "algorithm_execution_interval：应≥ 50以避免启动期间过早平�
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:210
 msgid ""
-"num_redundant_experts: Must match (num_experts + num_redundant_experts) is "
-"divisible by expert-parallel size."
+"num_redundant_experts: (num_experts + num_redundant_experts) must be "
+"divisible by the expert-parallel size."
 msgstr ""
-"num_redundant_experts：必须满足(num_experts + num_redundant_experts)可被专家并行度整除。"
+"num_redundant_experts：(num_experts + num_redundant_experts) 必须能被专家并行大小整除。"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:212
 msgid "Hardware Requirements:"
@@ -600,14 +602,14 @@ msgstr "监控与验证："
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:218
 msgid ""
-"Track metrics: Search for [Expert Hotness] in log, we will calculate the "
-"peak-to-average ratio of the load for each layer at different ranks, and "
+"Track metrics: Search for [Expert Hotness] in the log. We will calculate the"
+" peak-to-average ratio of the load for each layer at different ranks, and "
 "then find their mean and maximum values. Current means actual peak-to-"
 "average ratio, update means estimated peak-to-average ratio after algorithm "
 "adjustment."
 msgstr ""
-"跟踪指标：在日志中搜索[Expert "
-"Hotness]，我们将计算不同rank上每层负载的峰值与平均值之比，然后找出其均值和最大值。Current表示实际的峰值与平均值之比，update表示算法调整后的预估峰值与平均值之比。"
+"跟踪指标：在日志中搜索 [Expert Hotness]。我们将计算每个层在不同 rank "
+"上的负载峰值均值比，然后找出它们的平均值和最大值。Current 表示实际的峰值均值比，update 表示算法调整后的预估峰值均值比。"
 
 #: ../../source/user_guide/feature_guide/expert_parallelism_load_balancer.md:219
 msgid "Use vLLM monitor to detect imbalances during runtime."

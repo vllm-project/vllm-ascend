@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
+    GroupedBlockHashCache,
     KeyMetadata,
     LayerBlockRange,
     LayerLoadTask,
@@ -274,38 +275,10 @@ class KVPoolWorker:
         self._allocated_gvas: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
-        # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
-        # layer_idx_in_group is the index of the physical layer within the
-        # group (not the index in layer_names). Multiple layer_names at the
-        # same physical layer (e.g. indexer.k_cache + attn) are treated as
-        # multiple cache tensors of ONE layer (caches_per_layer > 1).
-        self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
-
-        if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
-            for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                # Map each unique physical layer to a sequential layer_idx_in_group
-                phys_to_layer_idx: dict[int, int] = {}
-                for layer_name in group_spec.layer_names:
-                    physical_layer = self._extract_physical_layer_index(layer_name)
-                    if physical_layer >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
-                        continue
-                    if physical_layer not in phys_to_layer_idx:
-                        phys_to_layer_idx[physical_layer] = len(phys_to_layer_idx)
-
-                # Add one entry per unique physical layer (no duplicates)
-                for physical_layer, layer_idx_in_group in phys_to_layer_idx.items():
-                    existing = self.physical_layer_to_group_layers.setdefault(physical_layer, [])
-                    entry = (group_id, layer_idx_in_group)
-                    if entry not in existing:
-                        existing.append(entry)
-
-                logger.info(
-                    "layerwise group %d: %d layer_names, %d unique physical layers, caches_per_layer=%d",
-                    group_id,
-                    len(group_spec.layer_names),
-                    len(phys_to_layer_idx),
-                    len(group_spec.layer_names) // max(1, len(phys_to_layer_idx)),
-                )
+        # Registration provides the authoritative layer layout.  In
+        # particular, model_config.get_num_layers() only reports the local PP
+        # target layers and does not include registered MTP draft layers.
+        self.local_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
@@ -317,10 +290,9 @@ class KVPoolWorker:
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
-            "layerwise config: num_layers=%d num_groups=%d physical_layer_to_group_layers_sample=%s",
+            "layerwise config: num_layers=%d num_groups=%d",
             self.num_layers,
             self.num_kv_cache_groups,
-            {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
@@ -612,8 +584,6 @@ class KVPoolWorker:
         physical_layers = set()
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= getattr(self.hf_config, "num_hidden_layers", self.num_layers):
-                continue
             physical_layers.add(phys)
             cache_or_caches = self.kv_caches[layer_name]
             for cache in self._as_cache_tuple(cache_or_caches):
@@ -626,6 +596,38 @@ class KVPoolWorker:
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
         self.group_num_layers[group_id] = len(physical_layers)
+
+    def _configure_registered_layerwise_layers(self, cache_groups: list[tuple[int, list[str]]]) -> None:
+        """Map registered physical layers to dense local and group indices."""
+        groups_by_physical: dict[int, list[tuple[int, int]]] = {}
+
+        for group_id, layer_names in cache_groups:
+            group_physical_layers: list[int] = []
+            seen_in_group: set[int] = set()
+            for layer_name in layer_names:
+                physical_layer = self._extract_physical_layer_index(layer_name)
+                if physical_layer not in seen_in_group:
+                    seen_in_group.add(physical_layer)
+                    group_physical_layers.append(physical_layer)
+
+            for layer_idx_in_group, physical_layer in enumerate(group_physical_layers):
+                groups_by_physical.setdefault(physical_layer, []).append((group_id, layer_idx_in_group))
+
+        physical_layers = sorted(groups_by_physical)
+        self.local_layer_to_group_layers = {
+            local_layer: groups_by_physical[physical_layer]
+            for local_layer, physical_layer in enumerate(physical_layers)
+        }
+
+        original_num_layers = self.num_layers
+        self.num_layers = len(physical_layers)
+        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        logger.info(
+            "KVPoolWorker: configured %d registered layers (was %d).",
+            self.num_layers,
+            original_num_layers,
+        )
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
@@ -703,27 +705,17 @@ class KVPoolWorker:
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
+        cache_groups: list[tuple[int, list[str]]]
         if self.kv_cache_config is not None and self.use_hybrid:
-            for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                self._infer_cache_group_metadata(group_id, group_spec.layer_names)
+            cache_groups = [
+                (group_id, [layer_name for layer_name in group_spec.layer_names if layer_name in kv_caches])
+                for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups)
+            ]
         else:
-            self._infer_cache_group_metadata(0, list(kv_caches.keys()))
-
-        # group_num_layers is computed from the actual kv_caches dict which
-        # includes ALL attention layers (main + MTP). For single-group models,
-        # sum(group_num_layers.values()) equals the physical layer count
-        # (including MTP). For multi-group models, it counts (group, layer)
-        # pairs which is NOT the physical layer count — keep the original
-        # num_layers (physical layers) in that case.
-        original_num_layers = self.num_layers
-        new_num_layers = sum(self.group_num_layers.values())
-        if self.num_kv_cache_groups == 1 and new_num_layers != original_num_layers:
-            self.num_layers = new_num_layers
-            logger.info(
-                "KVPoolWorker: updated num_layers %d -> %d (includes MTP/spec-decode draft layers).",
-                original_num_layers,
-                self.num_layers,
-            )
+            cache_groups = [(0, list(kv_caches.keys()))]
+        for group_id, layer_names in cache_groups:
+            self._infer_cache_group_metadata(group_id, layer_names)
+        self._configure_registered_layerwise_layers(cache_groups)
 
         self.page_size_bytes = sum(self.block_len)
         self.token_database.set_group_buffers(
@@ -791,7 +783,12 @@ class KVPoolWorker:
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            load_masks = self.token_database.load_mask(request.block_hashes, token_len)
+            grouped_hash_cache: GroupedBlockHashCache = {}
+            load_masks = self.token_database.load_mask(
+                request.block_hashes,
+                token_len,
+                grouped_hash_cache=grouped_hash_cache,
+            )
             for group_id in load_group_ids:
                 if group_id >= len(request.block_ids_by_group):
                     continue
@@ -817,6 +814,7 @@ class KVPoolWorker:
                     kv_cache_group_id=group_id,
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
+                    grouped_hash_cache=grouped_hash_cache,
                 ):
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
@@ -889,10 +887,9 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        # Only the first rank in each put_step group saves to the
-        # pool.  Other ranks in the same group share the same KV cache
-        # (e.g. MLA latent), so they skip save to avoid redundant writes.
-        if self.tp_rank % self.put_step != 0:
+        # DCP ranks own different KV shards. Without DCP, only the first rank
+        # in each put_step group saves the shared KV cache (e.g. MLA latent).
+        if self.dcp_size <= 1 and self.tp_rank % self.put_step != 0:
             return
         block_size = self._get_effective_group_block_size(group_id)
         request_block_ranges = []
@@ -992,28 +989,34 @@ class KVPoolWorker:
     def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
         """Generate GVA key for layerwise transfer.
 
-        Single-group models use the PR #11585 format (model@hash@rank) for
-        backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups.
+        Include CP and PP ranks because each worker stores its local cache and
+        dense local layer range in its own GVA allocation.
         """
         if self.num_kv_cache_groups > 1:
-            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
+            return (
+                f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
+                f"@pcp{self.pcp_rank}@dcp{self.dcp_rank}@pp{self.pp_rank}"
+            )
         else:
-            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+            return (
+                f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+                f"@pcp{self.pcp_rank}@dcp{self.dcp_rank}@pp{self.pp_rank}"
+            )
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
-        per-group GVAs. Key format: model@group_id@hash@head_or_tp_rank
-        (multi-group) or model@hash@head_or_tp_rank (single-group, backward
-        compat with PR #11585).
+        per-group GVAs. Key format:
+        model@group_id@hash@head_or_tp_rank@pcp_rank@dcp_rank@pp_rank
+        (multi-group) or model@hash@head_or_tp_rank@pcp_rank@dcp_rank@pp_rank
+        (single-group).
         """
         if not self.use_gva_layerwise:
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
-        if self.tp_rank % self.put_step != 0:
+        if self.dcp_size <= 1 and self.tp_rank % self.put_step != 0:
             return
         for request in requests:
             if request.can_save is None or not request.can_save:
@@ -1337,17 +1340,17 @@ class KVPoolWorker:
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
-        for physical_layer in range(self.num_layers):
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
+        for local_layer in range(self.num_layers):
+            group_layers = self.local_layer_to_group_layers.get(local_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+                self._process_save_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         self._prepare_load_gvas(requests)
-        for physical_layer in range(self.num_layers):
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
+        for local_layer in range(self.num_layers):
+            group_layers = self.local_layer_to_group_layers.get(local_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_load_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+                self._process_load_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         self._build_shared_load_data()
 
     def _submit_ready_layer_loads(self) -> None:
@@ -1626,20 +1629,27 @@ class KVPoolWorker:
         block_hashes: list[BlockHash],
         group_id: int,
         use_layerwise: bool,
+        grouped_hash_cache: GroupedBlockHashCache,
     ) -> tuple[list[str], list[int], list[int]]:
         keys: list[str] = []
         starts: list[int] = []
         ends: list[int] = []
         if use_layerwise:
             for start, end, pool_key in self.token_database.process_tokens(
-                token_len, block_hashes, kv_cache_group_id=group_id
+                token_len,
+                block_hashes,
+                kv_cache_group_id=group_id,
+                grouped_hash_cache=grouped_hash_cache,
             ):
                 keys.extend(item.to_string() for item in pool_key.split_layers(self.num_layers))
                 starts.append(start)
                 ends.append(end)
         else:
             for start, end, key_string, _ in self.token_database.process_token_key_strings(
-                token_len, block_hashes, kv_cache_group_id=group_id
+                token_len,
+                block_hashes,
+                kv_cache_group_id=group_id,
+                grouped_hash_cache=grouped_hash_cache,
             ):
                 keys.append(key_string)
                 starts.append(start)
@@ -1661,17 +1671,25 @@ class KVPoolWorker:
         try:
             hits = []
             kv_cache_group_ids = kv_cache_group_ids or [0]
+            grouped_hash_cache: GroupedBlockHashCache = {}
             coordinator_hit = self._lookup_with_coordinator(
                 token_len,
                 block_hashes,
                 kv_cache_group_ids,
                 use_layerwise,
                 include_all_ranks=False,
+                grouped_hash_cache=grouped_hash_cache,
             )
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
+                keys, starts, ends = self._build_lookup_keys(
+                    token_len,
+                    block_hashes,
+                    group_id,
+                    use_layerwise,
+                    grouped_hash_cache,
+                )
 
                 if not keys:
                     hits.append(0)
@@ -1753,13 +1771,13 @@ class KVPoolWorker:
         kv_cache_group_ids: list[int],
         use_layerwise: bool,
         include_all_ranks: bool,
+        grouped_hash_cache: GroupedBlockHashCache,
         hbm_hit_tokens: int = 0,
     ) -> int | None:
         if self.cache_coordinator is None or use_layerwise:
             return None
         if sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
             return None
-
         exists: set[tuple[int, bytes]] = set()
         aligned_len = (
             (token_len + self.cache_coordinator.lcm_block_size - 1)
@@ -1777,7 +1795,10 @@ class KVPoolWorker:
             effective_block_size = get_cache_family_granularity(base_block_size, cache_family)
             if hbm_hit_tokens:
                 grouped_hashes = get_block_hashes(
-                    block_hashes, effective_block_size, self.token_database.hash_block_size
+                    block_hashes,
+                    effective_block_size,
+                    self.token_database.hash_block_size,
+                    grouped_hash_cache=grouped_hash_cache,
                 )
                 exists.update(
                     (group_id, block_hash_to_bytes(chunk_hash))
@@ -1800,6 +1821,7 @@ class KVPoolWorker:
                 mask_num=lookup_start,
                 kv_cache_group_id=group_id,
                 chunk_filter=chunk_filter,
+                grouped_hash_cache=grouped_hash_cache,
             ):
                 variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
                 keys.extend(variants)
@@ -1831,6 +1853,7 @@ class KVPoolWorker:
             token_len,
             ExternalCachedBlockPool(exists),
             apply_eagle=False,
+            grouped_hash_cache=grouped_hash_cache,
         )
         logger.debug(
             "KV pool coordinator lookup final token_len=%d groups=%s hit=%d",
@@ -1857,6 +1880,7 @@ class KVPoolWorker:
             hits: list[list[int]] = []
             max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
+            grouped_hash_cache: GroupedBlockHashCache = {}
             coordinator_hit = self._lookup_with_coordinator(
                 token_len,
                 block_hashes,
@@ -1864,11 +1888,18 @@ class KVPoolWorker:
                 use_layerwise,
                 include_all_ranks=True,
                 hbm_hit_tokens=hbm_hit_tokens,
+                grouped_hash_cache=grouped_hash_cache,
             )
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
+                keys, starts, ends = self._build_lookup_keys(
+                    token_len,
+                    block_hashes,
+                    group_id,
+                    use_layerwise,
+                    grouped_hash_cache,
+                )
 
                 if not keys:
                     return 0

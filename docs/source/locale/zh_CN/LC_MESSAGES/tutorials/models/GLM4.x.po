@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-08-05 06:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -25,8 +25,8 @@ msgid "GLM-4.5/4.6/4.7"
 msgstr "GLM-4.5/4.6/4.7"
 
 #: ../../source/tutorials/models/GLM4.x.md:3
-msgid "Introduction"
-msgstr "简介"
+msgid "1 Introduction"
+msgstr "1 引言"
 
 #: ../../source/tutorials/models/GLM4.x.md:5
 msgid ""
@@ -46,8 +46,8 @@ msgid ""
 msgstr "本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点与多节点部署、精度及性能评估。"
 
 #: ../../source/tutorials/models/GLM4.x.md:11
-msgid "Supported Features"
-msgstr "支持特性"
+msgid "2 Supported Features"
+msgstr "2 支持的特性"
 
 #: ../../source/tutorials/models/GLM4.x.md:13
 msgid ""
@@ -64,12 +64,12 @@ msgid ""
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/GLM4.x.md:17
-msgid "Environment Preparation"
-msgstr "环境准备"
+msgid "3 Prerequisites"
+msgstr "3 前提条件"
 
 #: ../../source/tutorials/models/GLM4.x.md:19
-msgid "Model Weight"
-msgstr "模型权重"
+msgid "3.1 Model Weight"
+msgstr "3.1 模型权重"
 
 #: ../../source/tutorials/models/GLM4.x.md:21
 msgid ""
@@ -105,18 +105,18 @@ msgid ""
 "`GLM-4.6-w8a8`(Quantized version without mtp): [Download model "
 "weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm"
 " does not support GLM4.6 mtp in October, we do not provide an mtp version. "
-"Last month, it was supported; you can use the following quantization scheme "
-"to add mtp weights to the quantized weights."
+"Since it is now supported, you can use the following quantization scheme to "
+"add mtp weights to the quantized weights."
 msgstr ""
-"`GLM-4.6-w8a8`（不含mtp的量化版本）：[下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8)。由于vllm在十月份不支持GLM4.6的mtp，我们未提供mtp版本。上个月已支持该功能；您可以使用以下量化方案将mtp权重添加到量化权重中。"
+"`GLM-4.6-w8a8`（无mtp量化版本）：[下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8)。由于vllm在十月份不支持GLM4.6的mtp，我们未提供mtp版本。现在已支持，您可以使用以下量化方案将mtp权重添加到量化权重中。"
 
 #: ../../source/tutorials/models/GLM4.x.md:26
 msgid ""
-"`GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download "
-"model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp)."
+"`GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp)."
 msgstr ""
 "`GLM-4.7-w8a8-with-float-"
-"mtp`（不含mtp的量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-"
+"mtp`（含mtp量化版本）：[下载模型权重](https://www.modelscope.cn/models/Eco-"
 "Tech/GLM-4.7-W8A8-floatmtp)。"
 
 #: ../../source/tutorials/models/GLM4.x.md:27
@@ -135,8 +135,8 @@ msgid ""
 msgstr "建议将模型权重下载到多节点共享目录中，例如`/root/.cache/`。"
 
 #: ../../source/tutorials/models/GLM4.x.md:31
-msgid "Installation"
-msgstr "安装"
+msgid "4 Installation"
+msgstr "4 安装"
 
 #: ../../source/tutorials/models/GLM4.x.md:33
 msgid "You can use our official docker image to run `GLM-4.x` directly."
@@ -147,16 +147,13 @@ msgid "A3 series"
 msgstr "A3系列"
 
 #: ../../source/tutorials/models/GLM4.x.md:42
+#: ../../source/tutorials/models/GLM4.x.md:85
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动Docker镜像。"
 
 #: ../../source/tutorials/models/GLM4.x.md
 msgid "A2 series"
 msgstr "A2系列"
-
-#: ../../source/tutorials/models/GLM4.x.md:85
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动Docker镜像。"
 
 #: ../../source/tutorials/models/GLM4.x.md:118
 msgid ""
@@ -177,12 +174,12 @@ msgid ""
 msgstr "如果您想部署多节点环境，需要在每个节点上进行环境配置。"
 
 #: ../../source/tutorials/models/GLM4.x.md:124
-msgid "Deployment"
-msgstr "部署"
+msgid "5 Online Service Deployment"
+msgstr "5 在线服务部署"
 
 #: ../../source/tutorials/models/GLM4.x.md:126
-msgid "Single-node Deployment"
-msgstr "单节点部署"
+msgid "5.1 Single-node Deployment"
+msgstr "5.1 单节点部署"
 
 #: ../../source/tutorials/models/GLM4.x.md:128
 msgid "In low-latency scenarios, we recommend a single-machine deployment."
@@ -224,8 +221,8 @@ msgstr ""
 "size）场景下禁用`flashcomm1`特性。对于长序列且高并发场景，您可以启用此特性以获得更好的Prefill性能。"
 
 #: ../../source/tutorials/models/GLM4.x.md:166
-msgid "Multi-node Deployment"
-msgstr "多节点部署"
+msgid "5.2 Multi-node Deployment"
+msgstr "5.2 多节点部署"
 
 #: ../../source/tutorials/models/GLM4.x.md:168
 msgid ""
@@ -246,14 +243,14 @@ msgid "**Node 1**"
 msgstr "**节点1**"
 
 #: ../../source/tutorials/models/GLM4.x.md:268
-msgid "Prefill-Decode Disaggregation"
-msgstr "Prefill-Decode分离部署"
+msgid "5.3 Prefill-Decode Disaggregation"
+msgstr "5.3 预填充-解码分离"
 
 #: ../../source/tutorials/models/GLM4.x.md:270
 msgid ""
-"We'd like to show the deployment guide of `GLM-4.7` on multi-node "
+"We'd like to show the deployment guide of `GLM-4.7` in a multi-node "
 "environment with 2P1D for better performance."
-msgstr "我们将展示`GLM-4.7`在多节点环境下采用2P1D配置以获得更好性能的部署指南。"
+msgstr "我们希望在多节点环境中展示`GLM-4.7`的部署指南，采用2P1D配置以获得更好的性能。"
 
 #: ../../source/tutorials/models/GLM4.x.md:272
 msgid "Before you start, please"
@@ -294,8 +291,8 @@ msgid ""
 msgstr "准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
 
 #: ../../source/tutorials/models/GLM4.x.md:668
-msgid "Request Forwarding"
-msgstr "请求转发"
+msgid "5.4 Request Forwarding"
+msgstr "5.4 请求转发"
 
 #: ../../source/tutorials/models/GLM4.x.md:670
 msgid ""
@@ -309,8 +306,8 @@ msgstr ""
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
 #: ../../source/tutorials/models/GLM4.x.md:699
-msgid "Functional Verification"
-msgstr "功能验证"
+msgid "6 Functional Verification"
+msgstr "6 功能验证"
 
 #: ../../source/tutorials/models/GLM4.x.md:701
 msgid ""
@@ -318,8 +315,8 @@ msgid ""
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/GLM4.x.md:720
-msgid "Accuracy Evaluation"
-msgstr "精度评估"
+msgid "7 Accuracy Evaluation"
+msgstr "7 精度评估"
 
 #: ../../source/tutorials/models/GLM4.x.md:722
 msgid "Here are two accuracy evaluation methods."
@@ -410,8 +407,8 @@ msgid "Not tested yet."
 msgstr "尚未测试。"
 
 #: ../../source/tutorials/models/GLM4.x.md:739
-msgid "Performance"
-msgstr "性能"
+msgid "8 Performance Evaluation"
+msgstr "8 性能评估"
 
 #: ../../source/tutorials/models/GLM4.x.md:743
 msgid ""
@@ -464,8 +461,8 @@ msgid ""
 msgstr "大约几分钟后，您即可获得性能评估结果。"
 
 #: ../../source/tutorials/models/GLM4.x.md:781
-msgid "Best Practices"
-msgstr "最佳实践"
+msgid "9 Performance Tuning"
+msgstr "9 性能调优"
 
 #: ../../source/tutorials/models/GLM4.x.md:783
 msgid "In this chapter, we recommend best practices for three scenarios:"
@@ -493,14 +490,14 @@ msgstr "高吞吐量：高吞吐量的短序列：同样建议设置 `dp2 tp8`"
 msgid ""
 "**Notice:** `max-model-len` and `max-num-seqs` need to be set according to "
 "the actual usage scenario. For other settings, please refer to the "
-"**[Deployment](#deployment)** chapter."
+"**[Deployment](#5-online-service-deployment)** chapter."
 msgstr ""
-"**注意：** `max-model-len` 和 `max-num-seqs` 需要根据实际使用场景设置。其他设置请参考 "
-"**[部署](#deployment)** 章节。"
+"**注意：** `max-model-len` 和 `max-num-seqs` 需要根据实际使用场景进行设置。其他设置请参考 "
+"**[部署](#5-online-service-deployment)** 章节。"
 
 #: ../../source/tutorials/models/GLM4.x.md:792
-msgid "FAQ"
-msgstr "常见问题"
+msgid "10 FAQ"
+msgstr "10 常见问题"
 
 #: ../../source/tutorials/models/GLM4.x.md:794
 msgid ""
@@ -524,3 +521,15 @@ msgid ""
 msgstr ""
 "答：首先减小 `--max-num-seqs` 和 `--max-model-len`。如有必要，降低并发度和负载测试压力（例如 `max-"
 "concurrency` / `num-prompts`）。"
+
+#~ msgid "Start the docker image on your each node."
+#~ msgstr "在每个节点上启动Docker镜像。"
+
+#~ msgid "Environment Preparation"
+#~ msgstr "环境准备"
+
+#~ msgid "Deployment"
+#~ msgstr "部署"
+
+#~ msgid "Best Practices"
+#~ msgstr "最佳实践"
