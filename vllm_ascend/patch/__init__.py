@@ -583,6 +583,20 @@
 # ===============
 # Entries are listed in alphabetical order by file name.
 #
+# ** 0. File: worker/patch_lora_compile_wrapper.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper`
+#    Why:
+#       The upstream wrapper owns one compiled callable. Ascend needs separate
+#       full-graph resources for base and LoRA execution.
+#    How:
+#       Create LoRA, base, and one-token-base compiled callables when LoRA and
+#       `cudagraph_specialize_lora` are enabled.
+#    Related PR (if no, explain why):
+#       No. vLLM does not currently provide generic multi-variant compilation.
+#    Future Plan:
+#       Remove this patch when vLLM provides independent compile variants.
+#
 # ** 1. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
