@@ -38,7 +38,7 @@ class TestSyncMetadataAcrossDP(unittest.TestCase):
         runner.dp_size = 2
         runner.dp_rank = 0
         runner.vllm_config = MagicMock()
-        runner._use_aclgraph = MagicMock(return_value=True)
+        runner.use_aclgraph = True
         mock_get_dp_group.return_value.cpu_group = "cpu_group"
         mock_all_reduce.side_effect = lambda tensor, **_: tensor.fill_(CUDAGraphMode.NONE.value)
 

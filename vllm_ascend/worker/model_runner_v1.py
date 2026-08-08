@@ -687,7 +687,7 @@ class NPUModelRunner(GPUModelRunner):
             return num_tokens, None, cudagraph_mode
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
-            if not is_draft_model and is_moe_model(self.vllm_config) and self._use_aclgraph():
+            if not is_draft_model and is_moe_model(self.vllm_config) and self.use_aclgraph:
                 # MC2 supports per-rank token counts, but graph/eager HCCL submissions must match across DP ranks.
                 mode_tensor = torch.tensor(cudagraph_mode.value, device="cpu", dtype=torch.int32)
                 dist.all_reduce(mode_tensor, op=dist.ReduceOp.MIN, group=get_dp_group().cpu_group)
