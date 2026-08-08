@@ -197,6 +197,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    get_mla_mamba_gqa_layout,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -4025,6 +4026,9 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        hybrid_gqa_layout = get_mla_mamba_gqa_layout(
+            layer_kv_cache_spec.values()
+        )
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -4239,8 +4243,20 @@ class NPUModelRunner(GPUModelRunner):
                                 rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
                                     current_kv_cache_spec.dtype
                                 )
-                                conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                                mature_tensor_size = raw_k_tensor.numel()
+                                if hybrid_gqa_layout is not None:
+                                    assert (
+                                        current_kv_cache_spec.page_size_bytes
+                                        == hybrid_gqa_layout.page_size_bytes
+                                    )
+                                    mature_tensor_size = (
+                                        hybrid_gqa_layout.mature_page_size_bytes
+                                        * num_blocks
+                                    )
+                                conv_block_padding_size = mature_tensor_size - nope_page_size - rope_page_size
+                                raw_kv_tensor = raw_k_tensor[
+                                    conv_block_padding_size:mature_tensor_size
+                                ]
                                 raw_k_tensor = raw_kv_tensor[:nope_page_size]
                                 raw_v_tensor = raw_kv_tensor[nope_page_size:]
                     else:

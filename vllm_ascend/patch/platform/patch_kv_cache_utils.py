@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
@@ -17,7 +19,37 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import get_mla_mamba_gqa_layout
+
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+
+
+def _ascend_get_kv_cache_groups_uniform_page_size(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    """Append GQA V inside each existing shared raw page, then group upstream."""
+
+    layout = get_mla_mamba_gqa_layout(kv_cache_spec.values())
+    if layout is not None:
+        changed = False
+        for layer_name, spec in list(kv_cache_spec.items()):
+            if spec.page_size_bytes != layout.page_size_bytes:
+                kv_cache_spec[layer_name] = replace(
+                    spec,
+                    page_size_padded=layout.page_size_bytes,
+                )
+                changed = True
+        if changed:
+            logger.info(
+                "Appending one contiguous GQA V plane to each existing "
+                "MLA/Mamba shared KV tensor (page %d -> %d bytes); logical "
+                "KV groups and scheduler block size remain unchanged.",
+                layout.mature_page_size_bytes,
+                layout.page_size_bytes,
+            )
+
+    return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -246,6 +278,7 @@ def _get_kv_cache_config_deepseek_v4(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _ascend_get_kv_cache_groups_uniform_page_size
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and

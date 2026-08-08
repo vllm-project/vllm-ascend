@@ -291,6 +291,7 @@ class TestAscendMLAMetadata(TestBase):
         self.assertEqual(metadata.head_dim, head_dim)
         self.assertEqual(metadata.attn_mask, attn_mask)
         self.assertEqual(metadata.attn_state, attn_state)
+        self.assertTrue(metadata.causal)
         self.assertEqual(metadata.decode, decode)
         self.assertEqual(metadata.prefill, prefill)
 
@@ -394,6 +395,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.positions = torch.Tensor([1, 2, 3, 4, 5, 6]).int()
+        common_metadata.causal = False
         block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
         common_metadata.block_table_tensor = block_table
         mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
@@ -401,6 +403,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
         self.assertEqual(metadata.decode.block_table.shape[0], 8)
+        self.assertFalse(metadata.causal)
 
     def test_reorder_batch(self):
         ascend_config = MagicMock()

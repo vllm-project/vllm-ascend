@@ -3,6 +3,11 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
+from vllm_ascend.transformers_utils.configs.kimi_k3 import (
+    K3DSparkConfig,
+    register_k3_dspark_config,
+)
+
 _orig_post_init = SpeculativeConfig.__post_init__
 
 if TYPE_CHECKING:
@@ -12,6 +17,12 @@ else:
     PretrainedConfig = Any
 
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
+
+
+# This patch may be imported before the model plugin entry point runs. Register
+# the lightweight config here as well so ModelConfig can parse the draft before
+# speculative post-init normalizes its architecture.
+register_k3_dspark_config()
 
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -156,8 +167,10 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
 def _dspark_post_init(self):
     _orig_post_init(self)
     if self.use_dspark():
-        draft_model_config = getattr(self, "draft_model_config", None)
-        draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        draft_model_config = self.draft_model_config
+        if draft_model_config is None:
+            raise ValueError("DSpark requires a draft model config.")
+        draft_hf_config = draft_model_config.hf_config
         # deepseek v4 dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore
@@ -173,6 +186,21 @@ def _dspark_post_init(self):
                 raise ValueError(
                     "Qwen3/GQA DSpark requires num_speculative_tokens to match "
                     f"the trained block_size ({block_size}); got "
+                    f"{self.num_speculative_tokens}."
+                )
+
+        # Upstream DSpark normalization rewrites the config's model_type and
+        # architecture in place. The concrete config class remains intact, so
+        # restore K3 from that explicit type contract instead of probing for
+        # optional sentinel attributes shared by other draft families.
+        if isinstance(draft_hf_config, K3DSparkConfig):
+            draft_hf_config.model_type = K3DSparkConfig.model_type
+            draft_hf_config.architectures = ["K3DSparkModel"]
+            self.update_arch_()
+            if self.num_speculative_tokens != draft_hf_config.block_size:
+                raise ValueError(
+                    "K3 dspark requires num_speculative_tokens to match the "
+                    f"trained block_size ({draft_hf_config.block_size}); got "
                     f"{self.num_speculative_tokens}."
                 )
 

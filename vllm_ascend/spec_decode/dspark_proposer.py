@@ -12,8 +12,13 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.transformers_utils.configs.kimi_k3 import (
+    K3_DSPARK_USE_MLA_ROPE,
+    K3DSparkConfig,
+)
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -208,6 +213,22 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
+
+        # Kimi-K3 MLA dspark: the MLA metadata builder derives use_mla_rope
+        # from the TARGET's hf_text_config (K3 target is NoPE), so the draft
+        # groups' builders would emit identity cos/sin while the draft's
+        # context KV is written with real YaRN rotations -- silently breaking
+        # the draft's positional alignment. The builders created above serve
+        # draft layers only, so flip them to the draft's own RoPE setting.
+        draft_hf_config = self.draft_model_config.hf_config
+        if isinstance(draft_hf_config, K3DSparkConfig):
+            for attn_group in self.draft_attn_groups:
+                for builder in attn_group.metadata_builders:
+                    if not isinstance(builder, AscendMLAMetadataBuilder):
+                        raise TypeError(
+                            f"K3 DSpark requires Ascend MLA metadata builders, got {type(builder).__name__}."
+                        )
+                    builder.use_mla_rope = K3_DSPARK_USE_MLA_ROPE
 
         name_to_gid = {
             ln: gid
