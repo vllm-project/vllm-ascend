@@ -16,10 +16,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     """Worker transfer information exchanged during the P/D handshake.
 
-    Per-spec fields use the flattened KV-cache spec order. In particular,
-    kernel_block_sizes records the block size seen by worker kernels after
-    expanding a logical/spec block. All per-layer fields use layer_names
-    order; each nested list preserves that layer's cache tensor order.
+    Per-spec fields use the flattened KV-cache spec order. All per-layer
+    fields use layer_names order; each nested list preserves that layer's
+    cache tensor order.
     """
 
     engine_id: str
@@ -27,8 +26,6 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_size: int
     num_blocks: int
     spec_block_sizes: list[int]
-    kernel_block_sizes: list[int]
-    spec_num_heads: list[int | None]
     layer_names: list[str]
     group_indices: list[int]
     spec_indices: list[int]
@@ -41,17 +38,6 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     handshake_port: int = 0
 
     def __post_init__(self) -> None:
-        num_specs = len(self.spec_block_sizes)
-        per_spec_fields = {
-            "kernel_block_sizes": self.kernel_block_sizes,
-            "spec_num_heads": self.spec_num_heads,
-        }
-        for field_name, values in per_spec_fields.items():
-            if len(values) != num_specs:
-                raise ValueError(
-                    f"Mooncake transfer metadata field {field_name!r} has {len(values)} specs, expected {num_specs}."
-                )
-
         num_layers = len(self.layer_names)
         per_layer_fields = {
             "group_indices": self.group_indices,
@@ -101,8 +87,6 @@ class MooncakePPTransferMetadata:
     block_size: int
     num_blocks: int
     spec_block_sizes: list[int]
-    kernel_block_sizes: list[int]
-    spec_num_heads: list[int | None]
     layer_names: list[str]
     group_indices: list[int]
     spec_indices: list[int]
