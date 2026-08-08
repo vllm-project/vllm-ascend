@@ -771,12 +771,12 @@ class ShortRequestFirstConfig:
 class SchedulerConfig:
     """Configuration object for ``additional_config["scheduler_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). The three-level precedence
-    (nested scheduler_config > top-level legacy > env) is resolved in a
-    ``before`` model_validator that handles ``ArgsKwargs``, preserving the
-    original deprecation warnings. Sub-configs (ShortRequestFirstConfig /
-    ProfilingChunkConfig / BatchJobSchedConfig) are typed fields that pydantic
-    coerces from nested dicts.
+    Migrated to ``@config`` (pydantic dataclass). ``from_additional_config``
+    resolves the precedence (nested scheduler_config > top-level legacy >
+    default), preserving the original deprecation warnings, and then constructs
+    this class from final configuration values. Sub-configs
+    (ShortRequestFirstConfig / ProfilingChunkConfig / BatchJobSchedConfig) are
+    typed fields that pydantic coerces from nested dicts.
     """
 
     enable_balance_scheduling: Any = False
@@ -784,19 +784,10 @@ class SchedulerConfig:
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
-    # Injected for three-level precedence resolution (not user input):
-    _additional_config: dict[str, Any] = dataclasses.field(kw_only=True, repr=False)
-    _balance_env_value: Any = dataclasses.field(kw_only=True, repr=False)
 
-    @model_validator(mode="before")
     @classmethod
-    def _resolve_three_level_precedence(cls, data: Any) -> Any:
-        if not isinstance(data, ArgsKwargs):
-            return data
-        kw = dict(data.kwargs)
-        additional_config = kw.pop("_additional_config", {})
-        balance_env_value = kw.pop("_balance_env_value", False)
-
+    def from_additional_config(cls, additional_config: dict[str, Any]) -> SchedulerConfig:
+        """Resolve legacy fallbacks and construct the final config."""
         scheduler_config = additional_config.get("scheduler_config")
         if scheduler_config is None:
             scheduler_config = {}
@@ -805,7 +796,7 @@ class SchedulerConfig:
                 f"additional_config.scheduler_config must be a dict, got {type(scheduler_config).__name__}."
             )
 
-        def _resolve(config_key: str, default: Any, env_key: str | None = None) -> Any:
+        def _resolve(config_key: str, default: Any) -> Any:
             if config_key in scheduler_config:
                 if config_key in additional_config:
                     logger.warning_once(
@@ -822,29 +813,18 @@ class SchedulerConfig:
                     config_key,
                 )
                 return additional_config[config_key]
-            if env_key is not None and env_key in os.environ:
-                logger.info_once(
-                    "AscendConfig.scheduler_config.%s falls back to environment variable %s with value %s. "
-                    "Please use additional_config.scheduler_config.%s instead, because %s will be removed in the "
-                    "next release.",
-                    config_key,
-                    env_key,
-                    default,
-                    config_key,
-                    env_key,
-                )
             return default
 
-        # Scalar fields: resolve via three-level precedence
-        kw["enable_balance_scheduling"] = _resolve(
-            "enable_balance_scheduling", balance_env_value, "VLLM_ASCEND_BALANCE_SCHEDULING"
+        return cls(
+            # VLLM_ASCEND_BALANCE_SCHEDULING is being sunset; do not carry its
+            # environment fallback into the new construction path.
+            enable_balance_scheduling=_resolve("enable_balance_scheduling", False),
+            recompute_scheduler_enable=_resolve("recompute_scheduler_enable", False),
+            # Let pydantic coerce the resolved dicts into typed sub-configs.
+            short_request_first_config=_resolve("short_request_first_config", {}),
+            profiling_chunk_config=_resolve("profiling_chunk_config", {}),
+            batch_job_sched_config=_resolve("batch_job_sched_config", {}),
         )
-        kw["recompute_scheduler_enable"] = _resolve("recompute_scheduler_enable", False)
-        # Sub-config dicts: resolve then let pydantic coerce dict→dataclass
-        kw["short_request_first_config"] = _resolve("short_request_first_config", {})
-        kw["profiling_chunk_config"] = _resolve("profiling_chunk_config", {})
-        kw["batch_job_sched_config"] = _resolve("batch_job_sched_config", {})
-        return ArgsKwargs(data.args, kw)
 
 
 class SparseKVOffloadConfig:
@@ -931,13 +911,9 @@ def init_ascend_config(vllm_config):
         return _ASCEND_CONFIG
 
     # Pre-construct sub-configs that need special injection.
-    from vllm_ascend import envs as ascend_envs
-
     xlite = XliteGraphConfig(**additional_config.get("xlite_graph_config", {}))  # type: ignore[call-arg]
     finegrained = FinegrainedTPConfig(**additional_config.get("finegrained_tp_config", {}))  # type: ignore[call-arg]
-    sched = SchedulerConfig(
-        _additional_config=additional_config, _balance_env_value=ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING
-    )  # type: ignore[call-arg]
+    sched = SchedulerConfig.from_additional_config(additional_config)
     sparse_kv = SparseKVOffloadConfig(vllm_config, additional_config.get("sparse_kv_offload_config", {}))
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
     # pre-step; the resolved path is passed as the dump_config_path field.
