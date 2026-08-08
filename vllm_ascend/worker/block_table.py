@@ -3,7 +3,7 @@ import torch
 from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
@@ -30,15 +30,6 @@ class BlockTable:
         self.max_num_reqs = max_num_reqs
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
-        compress_ratio = 1
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        ):
-            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
-            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
-                compress_ratio = kv_cache_spec.compress_ratio
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
@@ -46,7 +37,6 @@ class BlockTable:
             and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
         ):
             max_num_blocks_per_req = max_num_blocks_per_req * self.dcp_world_size
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory

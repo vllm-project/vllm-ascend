@@ -66,17 +66,17 @@ def group_and_unify_kv_cache_specs(
     if not any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
         return None
 
-    ratio_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
+    logical_block_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     grouped_swa_mla_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     for name, spec in kv_cache_spec.items():
         if isinstance(spec, SlidingWindowMLASpec):
             grouped_swa_mla_specs[spec.block_size][name] = spec
         elif isinstance(spec, MLAAttentionSpec):
-            ratio_specs[spec.compress_ratio][name] = spec
+            logical_block_specs[spec.block_size][name] = spec
 
     mla_uniform_specs = []
-    for ratio in sorted(ratio_specs, key=lambda r: (r != 4, r)):
-        spec_dict = ratio_specs[ratio]
+    for block_size in sorted(logical_block_specs):
+        spec_dict = logical_block_specs[block_size]
         assert len(spec_dict) > 0
         mla_uniform_specs.append(UniformTypeKVCacheSpecs.from_specs(spec_dict))
     assert mla_uniform_specs is not None

@@ -92,19 +92,24 @@ from vllm_ascend.utils import (
 )
 
 
-def _get_ascend_dsa_backend():
-    # Keep this lazy to avoid vLLM model-inspection circular imports.
-    from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+def get_dsv4_block_sizes() -> dict[int, list[list[int]]]:
+    """Return DeepSeek V4 physical cache geometry for the current device.
 
-    return AscendDSABackend
-
-
-def _dsv4_block_sizes():
-    # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
-    # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
-    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
-
-    return DSV4_BLOCK_SIZES
+    The dictionary key is the user-facing physical ``cache_config.block_size``.
+    Each value contains ``[main, swa, c4_state, c128_state]`` block sizes and
+    the two padded page sizes used by compressor state caches.
+    """
+    if get_ascend_device_type() in {AscendDeviceType.A5}:
+        return {
+            128: [[128, 128, 8, 16], [16896, 81920]],
+            64: [[64, 64, 4, 8], [8448, 40960]],
+            32: [[32, 32, 2, 4], [4224, 20480]],
+        }
+    return {
+        128: [[128, 128, 8, 32], [16640, 131072]],
+        64: [[64, 64, 4, 16], [8320, 65536]],
+        32: [[32, 32, 2, 8], [4160, 32768]],
+    }
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -121,7 +126,7 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
+        pads = get_dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
         return AscendSlidingWindowMLASpec(
@@ -137,7 +142,16 @@ class AscendCompressorStateCache(CompressorStateCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
+        # Keep these imports lazy to avoid a model-inspection circular import.
+        if self.compress_ratio == 4:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC4StateBackend
+
+            return AscendDSAC4StateBackend
+        if self.compress_ratio == 128:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC128StateBackend
+
+            return AscendDSAC128StateBackend
+        raise ValueError(f"Unsupported DeepSeek V4 state-cache compression ratio: {self.compress_ratio}")
 
 
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
@@ -158,9 +172,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-        block_size = _dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0]
+        storage_block_size = get_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=block_size,
+            block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -174,7 +188,16 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
+        # Keep these imports lazy to avoid a model-inspection circular import.
+        if self.compress_ratio == 4:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend
+
+            return AscendDSAC4Backend
+        if self.compress_ratio == 128:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC128Backend
+
+            return AscendDSAC128Backend
+        raise ValueError(f"Unsupported DeepSeek V4 indexer compression ratio: {self.compress_ratio}")
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -189,7 +212,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
         self.dtype = dtype
 
-        self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
+        self.block_size = get_dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if get_ascend_device_type() in {AscendDeviceType.A5}:
@@ -210,7 +233,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
+        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
+
+        return AscendDSASWABackend
 
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
@@ -662,7 +687,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
+                block_size=get_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
             )
         elif compress_ratio == 128:
             self.state_cache = AscendCompressorStateCache(
@@ -670,7 +695,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
+                block_size=get_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
             )
         else:
             raise ValueError(

@@ -192,7 +192,6 @@ def build_attn_metadata(
                         prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
                         decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                        block_size=attn_group.kv_cache_spec.block_size,
                     )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
@@ -329,7 +328,7 @@ def _view_dsv4_cache(
 
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
-        kv_cache_spec.block_size,
+        kv_cache_spec.storage_block_size,
         kv_cache_spec.num_kv_heads,
         kv_cache_spec.head_size,
     )
@@ -342,7 +341,7 @@ def _view_dsv4_cache(
         scale_dtype = kv_cache_spec.scale_dtype
         scale_shape = attn_backend.get_kv_cache_shape(
             num_blocks,
-            kv_cache_spec.block_size,
+            kv_cache_spec.storage_block_size,
             kv_cache_spec.num_kv_heads,
             scale_dim,
         )
@@ -351,7 +350,7 @@ def _view_dsv4_cache(
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
-                kv_cache_spec.block_size,
+                kv_cache_spec.storage_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size + scale_dim * get_dtype_size(scale_dtype),
             )
@@ -490,7 +489,7 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
-            num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+            num_blocks_per_kv_block = kv_cache_spec.storage_block_size // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,

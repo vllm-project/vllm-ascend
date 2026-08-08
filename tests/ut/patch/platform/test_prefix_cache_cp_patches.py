@@ -8,6 +8,7 @@ import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
@@ -20,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -28,6 +30,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
@@ -63,7 +66,7 @@ def _make_hybrid_kv_cache_config(
 
 def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
     c4_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=128 * 4,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
@@ -71,7 +74,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         model_version="deepseek_v4",
     )
     c128_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=128 * 128,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
@@ -105,10 +108,12 @@ def _make_vllm_config(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
+            prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
         ),
+        kv_transfer_config=None,
     )
 
 
@@ -148,6 +153,63 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
+    c128_spec = MLAAttentionSpec(
+        block_size=128 * 128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=128,
+        model_version="deepseek_v4",
+    )
+    c4_spec = MLAAttentionSpec(
+        block_size=128 * 4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=512,
+    )
+
+    grouped_specs = group_and_unify_kv_cache_specs(
+        {
+            "c128": c128_spec,
+            "swa": swa_spec,
+            "c4": c4_spec,
+        }
+    )
+
+    assert grouped_specs is not None
+    assert [group.block_size for group in grouped_specs[:2]] == [512, 16384]
+    for group in grouped_specs[:2]:
+        spec = next(iter(group.kv_cache_specs.values()))
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+
+
+def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        block_size=128,
+    )
+
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        kv_cache_config,
+        vllm_config,
+    )
+
+    assert scheduler_block_size == 16384
+    assert hash_block_size == 512
 
 
 @pytest.mark.parametrize(
