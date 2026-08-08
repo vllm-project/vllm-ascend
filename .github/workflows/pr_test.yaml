@@ -338,6 +338,7 @@ jobs:
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
       source_ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
@@ -364,6 +365,7 @@ jobs:
           - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
@@ -401,6 +403,8 @@ jobs:
     needs: select-tests
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_manual-hitest.yaml
+    with:
+      pr_key: ${{ github.event.pull_request.number }}
     secrets:
       HITEST_APIG_APPCODE: ${{ secrets.HITEST_APIG_APPCODE }}
       HITEST_KEY: ${{ secrets.HITEST_KEY }}
@@ -579,6 +583,7 @@ jobs:
     if: always()
     uses: ./.github/workflows/_analyze_failure.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       log_artifact_pattern: selected-test-logs-*
       recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
       recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}

@@ -48,6 +48,15 @@ on:
         required: false
         default: ''
         description: 'Fixed base commit to rebase onto.'
+      pr_key:
+        type: string
+        required: false
+        default: ''
+        description: 'PR identifier for concurrency group. Caller should pass github.event.pull_request.number.'
+
+concurrency:
+  group: csrc-cache-${{ inputs.pr_key || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:

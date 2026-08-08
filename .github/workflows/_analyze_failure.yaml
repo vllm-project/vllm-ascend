@@ -32,11 +32,20 @@ on:
         required: false
         default: ''
         description: 'Content of recommendations from upstream job output (priority 1)'
+      pr_key:
+        type: string
+        required: false
+        default: ''
+        description: 'PR identifier for concurrency group. Caller should pass github.event.pull_request.number.'
     secrets:
       OBS_ACCESS_KEY_FAILURE_ANALYSIS:
         required: false
       OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS:
         required: false
+
+concurrency:
+  group: analyze-${{ inputs.pr_key || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:

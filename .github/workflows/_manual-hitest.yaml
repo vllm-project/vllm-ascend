@@ -20,6 +20,12 @@ name: Hitest
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      pr_key:
+        type: string
+        required: false
+        default: ''
+        description: 'PR identifier for concurrency group. Caller should pass github.event.pull_request.number.'
     secrets:
       HITEST_APIG_APPCODE:
         required: true
@@ -31,6 +37,10 @@ on:
       hitest_paths:
         description: 'Content of recommended_pytest_paths.txt (one path per line)'
         value: ${{ jobs.run-hitest.outputs.hitest_paths }}
+
+concurrency:
+  group: hitest-${{ inputs.pr_key || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:

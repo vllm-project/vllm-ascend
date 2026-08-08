@@ -130,6 +130,7 @@ jobs:
     needs: resolve-source
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
+      pr_key: ${{ github.event.pull_request.number }}
       target_ids: '["a2-arm64-ubuntu"]'
       repository: ${{ needs.resolve-source.outputs.source_repository }}
       source_ref: ${{ needs.resolve-source.outputs.source_ref }}

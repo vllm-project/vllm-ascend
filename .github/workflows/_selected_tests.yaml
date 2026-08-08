@@ -62,11 +62,29 @@ on:
         required: false
         default: 120
         description: 'Selected tests job timeout in minutes.'
+      pr_key:
+        type: string
+        required: false
+        default: ''
+        description: 'PR identifier for concurrency group. Caller should pass github.event.pull_request.number.'
     secrets:
       OBS_ACCESS_KEY_PRECISION:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
         required: false
+
+
+# Cancel previous runs of this reusable workflow when a new run starts for the
+# same PR. The parent workflow's concurrency block alone does not reliably
+# cancel reusable workflow invocations across runs, so this guarantees the
+# e2e test matrix is cancelled on subsequent commit pushes. inputs.vllm keeps
+# the matrix entries (main_commit and release_tag) from cancelling each other.
+# The caller passes the PR number explicitly as pr_key because inherited
+# github context paths can be unreliable in workflow_call. github.run_id
+# fallback keeps non-PR callers (schedule_* workflows) in their own group.
+concurrency:
+  group: selected-${{ inputs.pr_key || github.run_id }}-${{ inputs.vllm }}
+  cancel-in-progress: true
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
