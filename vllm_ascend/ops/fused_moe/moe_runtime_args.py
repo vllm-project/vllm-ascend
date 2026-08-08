@@ -58,6 +58,7 @@ dataclass directly.
 from __future__ import annotations
 
 import torch
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
@@ -76,6 +77,7 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoEQuantParams,
     MoERoutingParams,
 )
+from vllm_ascend.ops.fused_moe.moe_utils import enable_fusion_gmmswigluquant
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -127,7 +129,6 @@ def build_fused_experts_input(
     mc2_mask: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     pertoken_scale: torch.Tensor | None = None,
-    activation: str = "silu",
     need_trans: bool = False,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
@@ -144,20 +145,8 @@ def build_fused_experts_input(
     w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
-    swiglu_limit: float | None = 0.0,
-    swiglu_alpha: float | None = 1.0,
-    swiglu_beta: float | None = 0.0,
     lora_context=None,
 ) -> MoEFusedExpertsInput:
-    if swiglu_limit is None:
-        swiglu_limit = 0.0
-    if swiglu_alpha is None:
-        swiglu_alpha = 1.0
-    if swiglu_beta is None:
-        swiglu_beta = 0.0
-    assert swiglu_limit is not None
-    assert swiglu_alpha is not None
-    assert swiglu_beta is not None
 
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -182,7 +171,6 @@ def build_fused_experts_input(
             apply_router_weight_on_input=apply_router_weight_on_input,
             pertoken_scale=pertoken_scale,
         ),
-        activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
         quant=MoEQuantParams(
@@ -198,9 +186,6 @@ def build_fused_experts_input(
             ),
             is_per_channel_weight=is_per_channel_weight,
         ),
-        swiglu_limit=swiglu_limit,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_beta=swiglu_beta,
         lora_context=lora_context,
     )
 
@@ -208,12 +193,11 @@ def build_fused_experts_input(
 def build_token_dispatch_input(
     *,
     fused_experts_input: MoEFusedExpertsInput,
-    topk_ids: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
     return MoETokenDispatchInput(
         hidden_states=fused_experts_input.hidden_states,
         topk_weights=fused_experts_input.topk_weights,
-        topk_ids=fused_experts_input.topk_ids if topk_ids is None else topk_ids,
+        topk_ids=fused_experts_input.topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
     )
@@ -223,12 +207,15 @@ def build_mlp_compute_input(
     *,
     fused_experts_input: MoEFusedExpertsInput,
     token_dispatch_output: MoETokenDispatchOutput[TMoECombineMetadata],
-    use_fusion_ops: bool,
+    moe_config: FusedMoEConfig,
 ) -> MoEMlpComputeInput:
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
     expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
+    swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
+    swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
+    swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
 
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
@@ -247,13 +234,13 @@ def build_mlp_compute_input(
             QuantType.W8A8FP,
             QuantType.W4A16MXFP,
         )
-        and use_fusion_ops,
-        activation=fused_experts_input.activation,
+        and enable_fusion_gmmswigluquant(),
+        activation=moe_config.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
-        swiglu_limit=fused_experts_input.swiglu_limit,
-        swiglu_alpha=fused_experts_input.swiglu_alpha,
-        swiglu_beta=fused_experts_input.swiglu_beta,
+        swiglu_limit=swiglu_limit,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
         lora_context=fused_experts_input.lora_context,

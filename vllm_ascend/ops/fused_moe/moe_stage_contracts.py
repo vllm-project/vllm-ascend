@@ -21,6 +21,7 @@ from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
+from vllm.model_executor.layers.fused_moe import MoEActivation
 
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutingParams
 
@@ -65,12 +66,8 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoERoutingParams
     quant: MoEQuantParams
-    activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
-    swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.0
-    swiglu_beta: float = 0.0
     # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
@@ -86,6 +83,15 @@ class MoETokenDispatchInput:
     topk_ids: torch.Tensor
     routing: MoERoutingParams
     quant: MoEQuantParams
+
+@dataclass(frozen=True, slots=True)
+class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
+    hidden_states: torch.Tensor
+    group_list: torch.Tensor
+    group_list_type: int
+    combine_metadata: TMoECombineMetadata
+    dynamic_scale: torch.Tensor | None = None
+    topk_scales: torch.Tensor | None = None
 
 
 # dispatch carry-over state consumed by combine
@@ -120,16 +126,6 @@ class MoEAllToAllCombineMetadata:
     hidden_shape_before_permute: torch.Size
 
 
-@dataclass(frozen=True, slots=True)
-class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
-    hidden_states: torch.Tensor
-    group_list: torch.Tensor
-    group_list_type: int
-    combine_metadata: TMoECombineMetadata
-    dynamic_scale: torch.Tensor | None = None
-    topk_scales: torch.Tensor | None = None
-
-
 # dispatch -> mlp -> combine
 @dataclass(frozen=True, slots=True)
 class MoEMlpComputeInput:
@@ -143,7 +139,7 @@ class MoEMlpComputeInput:
     weights: MoEWeights
     quant: MoEQuantParams
     fusion: bool
-    activation: str = "silu"
+    activation: MoEActivation = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0

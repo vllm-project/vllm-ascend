@@ -155,14 +155,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
-                activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
@@ -462,7 +458,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 if capturer is not None:
                     capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
         except Exception as e:
-            logger.warning("Failed to capture routed experts: %s", e)
+            pass
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:

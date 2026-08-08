@@ -131,7 +131,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
-                activation=layer.activation,
                 mxfp_act_quant_type=None,
                 mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,

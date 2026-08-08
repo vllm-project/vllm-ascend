@@ -34,6 +34,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     build_mlp_compute_input,
     build_token_dispatch_input,
 )
+from vllm_ascend.ops.fused_moe.moe_utils import enable_fusion_gmmswigluquant
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -65,13 +66,6 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
-def set_gmmswigluquant_method():
-    from vllm_ascend.ascend_config import get_ascend_config
-
-    ascend_config = get_ascend_config()
-    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
-
-
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor
@@ -94,7 +88,6 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
-        self.use_fusion_ops = set_gmmswigluquant_method()
         self.lora_context = None
 
     def set_lora_context(self, lora_context) -> None:
@@ -154,7 +147,6 @@ class MoECommMethod(ABC):
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
-            use_fusion_ops=self.use_fusion_ops,
         )
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
