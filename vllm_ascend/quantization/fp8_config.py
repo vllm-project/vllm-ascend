@@ -1,13 +1,12 @@
-from typing import Any, Optional, cast
+from typing import Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
-from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
+from vllm.model_executor.layers.quantization import register_quantization_config
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
 
@@ -44,11 +43,10 @@ class AscendFp8Config(Fp8Config):
 
 @register_quantization_config("deepseek_v4_fp8")
 class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
-    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.quant_description = {}
-    
+
     def get_quant_method(
         self,
         layer: torch.nn.Module,
@@ -59,6 +57,7 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
             AscendFusedMoEMethod,
             AscendLinearMethod,
         )
+
         if isinstance(layer, LinearBase):
             scheme_class = get_scheme_class(FP8_METHOD, "ds_linear")
             quant_method = AscendLinearMethod(scheme_class(self.weight_block_size))

@@ -24,7 +24,7 @@ from vllm.config import get_current_vllm_config
 from .base import QuantType, TPWeightGatherSpec
 from .registry import register_scheme
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
-from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod, AscendW8A8MXFP8DynamicFusedMoEMethod
+from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
 
 @register_scheme("fp8", "ds_linear")
