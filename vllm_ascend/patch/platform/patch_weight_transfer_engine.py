@@ -69,5 +69,23 @@ def _load_npu_ipc_engine() -> "type[WeightTransferEngine]":
     return NPUIPCWeightTransferEngine
 
 
+def _load_sparse_hccl_engine() -> "type[WeightTransferEngine]":
+    from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
+        SparseHCCLWeightTransferEngine,
+    )
+
+    return SparseHCCLWeightTransferEngine
+
+
+def _load_sparse_npu_ipc_engine() -> "type[WeightTransferEngine]":
+    from vllm_ascend.distributed.weight_transfer.sparse_npu_ipc_engine import (
+        SparseNPUIPCWeightTransferEngine,
+    )
+
+    return SparseNPUIPCWeightTransferEngine
+
+
 WeightTransferEngineFactory._registry["nccl"] = lambda: HCCLWeightTransferEngine
 WeightTransferEngineFactory._registry["ipc"] = _load_npu_ipc_engine
+WeightTransferEngineFactory._registry["sparse_nccl"] = _load_sparse_hccl_engine
+WeightTransferEngineFactory._registry["sparse_ipc"] = _load_sparse_npu_ipc_engine
