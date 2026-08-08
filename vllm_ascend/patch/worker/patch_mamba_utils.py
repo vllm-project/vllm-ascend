@@ -34,6 +34,28 @@ def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
 
+def _stage_mamba_copy_metadata(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    """Stage pointer metadata while input-preparation buffers are protected."""
+    n = copy_bufs.offset
+    if n == 0:
+        return
+    copy_bufs.src_ptrs.copy_to_gpu(n)
+    copy_bufs.dst_ptrs.copy_to_gpu(n)
+    copy_bufs.sizes.copy_to_gpu(n)
+
+
+def _do_mamba_copy_block_npu(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    """Copy state after KV load using metadata staged during preprocessing."""
+    n = copy_bufs.offset
+    if n == 0:
+        return
+    _batch_memcpy_triton(
+        copy_bufs.src_ptrs.gpu[:n],
+        copy_bufs.dst_ptrs.gpu[:n],
+        copy_bufs.sizes.gpu[:n],
+    )
+
+
 def _tensor_view_from_data_ptr(state: torch.Tensor, start_addr: int, num_elements: int) -> torch.Tensor:
     byte_offset = start_addr - state.data_ptr()
     element_size = state.element_size()
@@ -185,6 +207,7 @@ def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
+    mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
@@ -279,6 +302,12 @@ def preprocess_mamba(
             input_batch.num_accepted_tokens_cpu[i] = 1
     # do not copy here, since kv_transfer still not load
     # do_mamba_copy_block(copy_bufs)
+    if _can_launch_triton_batch_memcpy():
+        # Only stage the pointer table here. This runs inside the existing
+        # input-preparation event scope, so its pinned CPU buffers cannot be
+        # reused until the asynchronous H2D copies finish. The state copy must
+        # remain after KV transfer and is executed by do_mamba_copy_block().
+        _stage_mamba_copy_metadata(copy_bufs)
 
 
 mamba_utils.preprocess_mamba = preprocess_mamba
