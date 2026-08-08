@@ -188,7 +188,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
-      --async-scheduling \
       --safetensors-load-strategy 'prefetch' \
       --block-size 128 \
       --speculative-config '{
@@ -265,7 +264,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
-      --async-scheduling \
       --safetensors-load-strategy 'prefetch' \
       --block-size 128 \
       --headless \
@@ -336,7 +334,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --port 8900 \
       --host 0.0.0.0 \
       --block-size 128 \
-      --async-scheduling \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --tokenizer-mode deepseek_v4 \
       --tool-call-parser deepseek_v4 \
@@ -395,7 +392,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --port 8900 \
       --host 0.0.0.0 \
       --block-size 128 \
-      --async-scheduling \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --tokenizer-mode deepseek_v4 \
       --tool-call-parser deepseek_v4 \
@@ -419,7 +415,6 @@ Key Parameter Descriptions:
 - `--max-model-len` specifies the maximum context length. Adjust it according to your actual scenario.
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling with NPU computation.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
@@ -755,7 +750,6 @@ Before you start, please:
             --max-model-len 131072 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
-            --async-scheduling \
             --block-size 128 \
             --no-enable-prefix-caching \
             --tokenizer-mode deepseek_v4 \
@@ -1061,7 +1055,6 @@ Before you start, please:
             --max-model-len 133072 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
-            --async-scheduling \
             --block-size 128 \
             --no-disable-hybrid-kv-cache-manager \
             --trust-remote-code \
