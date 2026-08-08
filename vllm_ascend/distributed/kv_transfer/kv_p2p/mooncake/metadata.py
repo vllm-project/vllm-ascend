@@ -37,9 +37,6 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
-    pcp_size: int
-    dcp_size: int
-    tp_size: int
     local_ip: str = ""
     handshake_port: int = 0
 
@@ -113,9 +110,6 @@ class MooncakePPTransferMetadata:
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
-    pcp_size: int
-    dcp_size: int
-    tp_size: int
     metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata]
 
 
@@ -126,6 +120,10 @@ class MooncakeTransferMetadataGroups:
     engine_id: str
     scheduler_host: str
     scheduler_port: int
+    pp_size: int
+    pcp_size: int
+    dcp_size: int
+    tp_size: int
     metadata_by_pp_rank: dict[int, MooncakePPTransferMetadata]
 
 

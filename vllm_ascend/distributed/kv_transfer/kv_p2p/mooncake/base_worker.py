@@ -288,9 +288,6 @@ class MooncakeBaseConnectorWorker:
             block_lens=block_lens_per_layer,
             block_shapes=block_shapes_per_layer,
             block_size_scales=block_size_scales_per_layer,
-            pcp_size=self.pcp_size,
-            dcp_size=self.dcp_size,
-            tp_size=self.tp_size,
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
         )
