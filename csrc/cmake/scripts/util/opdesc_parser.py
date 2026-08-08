@@ -306,7 +306,11 @@ def _is_op_type_in_opdesc(op_descs: list, op_type: str):
 
 def _set_all_options_to_opdescs(op_descs, soc_ver_compile_options):
     for op in op_descs:
-        op.custom_all_compile_options = soc_ver_compile_options
+        for soc_ver, options in soc_ver_compile_options.items():
+            existing_options = op.custom_all_compile_options.setdefault(soc_ver, [])
+            for option in options:
+                if option not in existing_options:
+                    existing_options.append(option)
 
 
 def _set_options_to_opdesc(op_descs, op_type, soc_ver_compile_options):

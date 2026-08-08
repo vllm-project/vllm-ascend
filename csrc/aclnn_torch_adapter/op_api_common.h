@@ -67,6 +67,20 @@ typedef int (*_aclDestroyFloatArray)(const aclFloatArray *array);
 typedef int (*_aclDestroyBoolArray)(const aclBoolArray *array);
 typedef int (*_aclDestroyTensorList)(const aclTensorList *array);
 
+// Keep the explicit dtype and the original ATen view descriptor when passing
+// tensors to ACLNN.  This is the same contract used by op-plugin for PA KV
+// tensors; in particular, no contiguous conversion is made for a strided
+// first-axis view.
+typedef struct {
+  const at::Tensor &tensor_;
+  aclDataType dtype;
+} TensorWrapper;
+
+typedef struct {
+  const at::TensorList &tensor_list_;
+  aclDataType dtype;
+} TensorListWrapper;
+
 constexpr int kHashBufSize = 8192;
 constexpr int kHashBufMaxSize = kHashBufSize + 1024;
 extern thread_local char g_hashBuf[kHashBufSize];
@@ -434,6 +448,73 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
   return acl_tensor;
 }
 
+inline TensorWrapper make_wrapper(const at::Tensor &tensor) {
+  if (!tensor.defined()) {
+    return {tensor, ACL_DT_UNDEFINED};
+  }
+  return {tensor,
+          kATenScalarTypeToAclDataTypeTable[
+              static_cast<int64_t>(tensor.scalar_type())]};
+}
+
+inline aclTensor *ConvertType(const TensorWrapper &tensor_wrapper) {
+  static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
+  if (aclCreateTensor == nullptr || !tensor_wrapper.tensor_.defined()) {
+    return nullptr;
+  }
+
+  const at::Tensor &at_tensor = tensor_wrapper.tensor_;
+  const aclDataType acl_data_type = tensor_wrapper.dtype;
+  TORCH_CHECK(acl_data_type != ACL_DT_UNDEFINED,
+              "undefined ACL dtype in TensorWrapper: scalar_type=",
+              at_tensor.scalar_type(), " acl_dtype=",
+              static_cast<int64_t>(acl_data_type));
+
+  c10::SmallVector<int64_t, 5> storageDims;
+  const auto itemsize = at_tensor.itemsize();
+  TORCH_CHECK(itemsize != 0,
+              "When ConvertType, tensor item size cannot be zero.");
+
+  // Keep the same descriptor construction as op-plugin's TensorWrapper
+  // converter.  The migrated FIA inner op consumes the view shape/stride and
+  // storage shape from this ACL tensor; changing the format here changes the
+  // descriptor seen by CANN even though the ATen view is unchanged.
+  const auto dimNum = at_tensor.sizes().size();
+  aclFormat format = ACL_FORMAT_ND;
+  if (!IsOpInputBaseFormat(at_tensor)) {
+    format = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)
+                 ->npu_desc_.npu_format_;
+    if (acl_data_type != ACL_STRING) {
+      storageDims = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)
+                        ->npu_desc_.storage_sizes_;
+    }
+  } else {
+    switch (dimNum) {
+      case 3:
+        format = ACL_FORMAT_NCL;
+        break;
+      case 4:
+        format = ACL_FORMAT_NCHW;
+        break;
+      case 5:
+        format = ACL_FORMAT_NCDHW;
+        break;
+      default:
+        format = ACL_FORMAT_ND;
+    }
+    if (acl_data_type != ACL_STRING) {
+      storageDims.push_back(at_tensor.storage().nbytes() / itemsize);
+    }
+  }
+
+  auto *acl_tensor = aclCreateTensor(
+      at_tensor.sizes().data(), at_tensor.sizes().size(), acl_data_type,
+      at_tensor.strides().data(), at_tensor.storage_offset(), format,
+      storageDims.data(), storageDims.size(),
+      const_cast<void *>(at_tensor.storage().data()));
+  return acl_tensor;
+}
+
 inline aclScalar *ConvertType(const at::Scalar &at_scalar) {
   static const auto aclCreateScalar = GET_OP_API_FUNC(aclCreateScalar);
   if (aclCreateScalar == nullptr) {
@@ -518,6 +599,26 @@ inline aclTensorList *ConvertType(const at::TensorList &at_tensor_list) {
   auto acl_tensor_list =
       aclCreateTensorList(tensor_list.data(), tensor_list.size());
   return acl_tensor_list;
+}
+
+inline aclTensorList *ConvertType(
+    const TensorListWrapper &tensor_list_wrapper) {
+  if (tensor_list_wrapper.tensor_list_.size() == 0) {
+    return nullptr;
+  }
+  static const auto aclCreateTensorList =
+      GET_OP_API_FUNC(aclCreateTensorList);
+  if (aclCreateTensorList == nullptr) {
+    return nullptr;
+  }
+
+  std::vector<const aclTensor *> tensor_list(
+      tensor_list_wrapper.tensor_list_.size());
+  for (size_t i = 0; i < tensor_list.size(); ++i) {
+    tensor_list[i] = ConvertType(TensorWrapper{
+        tensor_list_wrapper.tensor_list_[i], tensor_list_wrapper.dtype});
+  }
+  return aclCreateTensorList(tensor_list.data(), tensor_list.size());
 }
 
 inline aclTensor *ConvertType(const c10::optional<at::Tensor> &opt_tensor) {
@@ -749,6 +850,74 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     if (unInitMemFunc) {                                                      \
       unInitMemFunc(nullptr, false);                                          \
     }                                                                         \
+  } while (false)
+
+// Keep the FIA adapter aligned with op-plugin's no-format-check path.  The
+// TensorWrapper overloads above provide the descriptor information; this
+// execution path avoids the legacy OpCommand custom-handler wrapper used by
+// the older adapters in this repository.
+#define EXEC_NPU_NO_FORMAT_CHECK_CMD(aclnn_api, ...)                         \
+  do {                                                                       \
+    static const auto getWorkspaceSizeFuncAddr =                             \
+        GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                     \
+    static const auto opApiFuncAddr = GetOpApiFuncAddr(#aclnn_api);           \
+    static const auto initMemAddr =                                          \
+        GetOpApiFuncAddr("InitHugeMemThreadLocal");                          \
+    static const auto unInitMemAddr =                                        \
+        GetOpApiFuncAddr("UnInitHugeMemThreadLocal");                        \
+    static const auto releaseMemAddr = GetOpApiFuncAddr("ReleaseHugeMem");   \
+    TORCH_CHECK(                                                             \
+        getWorkspaceSizeFuncAddr != nullptr && opApiFuncAddr != nullptr,      \
+        #aclnn_api, " or ", #aclnn_api "GetWorkspaceSize", " not in ",     \
+        GetOpApiLibName(), ", or ", GetOpApiLibName(), "not found.");        \
+    auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);           \
+    uint64_t workspace_size = 0;                                             \
+    uint64_t *workspace_size_addr = &workspace_size;                         \
+    aclOpExecutor *executor = nullptr;                                       \
+    aclOpExecutor **executor_addr = &executor;                                \
+        InitHugeMemThreadLocal initMemFunc =                                 \
+            reinterpret_cast<InitHugeMemThreadLocal>(initMemAddr);           \
+    UnInitHugeMemThreadLocal unInitMemFunc =                                  \
+        reinterpret_cast<UnInitHugeMemThreadLocal>(unInitMemAddr);            \
+    if (initMemFunc) {                                                        \
+      initMemFunc(nullptr, false);                                            \
+    }                                                                        \
+    auto converted_params =                                                   \
+        ConvertTypes(__VA_ARGS__, workspace_size_addr, executor_addr);        \
+    static auto getWorkspaceSizeFunc =                                        \
+        ConvertToOpApiFunc(converted_params, getWorkspaceSizeFuncAddr);       \
+    auto workspace_status = call(getWorkspaceSizeFunc, converted_params);     \
+    TORCH_CHECK(workspace_status == 0,                                        \
+                "call " #aclnn_api " failed, detail:", aclGetRecentErrMsg()); \
+    void *workspace_addr = nullptr;                                           \
+    at::Tensor workspace_tensor;                                              \
+    if (workspace_size != 0) {                                                \
+      at::TensorOptions options =                                             \
+          at::TensorOptions(torch_npu::utils::get_npu_device_type());         \
+      workspace_tensor = at::empty({workspace_size}, options.dtype(kByte));   \
+      workspace_addr = const_cast<void *>(workspace_tensor.storage().data()); \
+    }                                                                        \
+    auto acl_call = [converted_params, workspace_addr, workspace_size,         \
+                     acl_stream, executor]() -> int {                        \
+      typedef int (*OpApiFunc)(void *, uint64_t, aclOpExecutor *,              \
+                               const aclrtStream);                            \
+      OpApiFunc opApiFunc = reinterpret_cast<OpApiFunc>(opApiFuncAddr);        \
+      auto api_ret =                                                          \
+          opApiFunc(workspace_addr, workspace_size, executor, acl_stream);     \
+      TORCH_CHECK(api_ret == 0, "call " #aclnn_api " failed, detail:",        \
+                  aclGetRecentErrMsg());                                      \
+      ReleaseConvertTypes(converted_params);                                  \
+      ReleaseHugeMem releaseMemFunc =                                         \
+          reinterpret_cast<ReleaseHugeMem>(releaseMemAddr);                   \
+      if (releaseMemFunc) {                                                    \
+        releaseMemFunc(nullptr, false);                                        \
+      }                                                                        \
+      return api_ret;                                                          \
+    };                                                                         \
+    at_npu::native::OpCommand::RunOpApiV2(#aclnn_api, acl_call);               \
+    if (unInitMemFunc) {                                                       \
+      unInitMemFunc(nullptr, false);                                           \
+    }                                                                          \
   } while (false)
 
 #endif
