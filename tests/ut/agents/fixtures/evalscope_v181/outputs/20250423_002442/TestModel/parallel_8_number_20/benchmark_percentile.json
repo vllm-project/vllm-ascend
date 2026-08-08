@@ -1,0 +1,5 @@
+[
+    {"Percentiles": "50%", "TTFT (ms)": 210.0, "ITL (ms)": 12.0, "TPOT (ms)": 12.0, "Latency (s)": 6.30, "Input tokens": 1024.0, "Output tokens": 510.0, "Output (tok/s)": 642.0, "Input (tok/s)": 25.2, "Total (tok/s)": 657.2},
+    {"Percentiles": "90%", "TTFT (ms)": 300.0, "ITL (ms)": 12.4, "TPOT (ms)": 12.4, "Latency (s)": 6.44, "Input tokens": 1024.0, "Output tokens": 512.0, "Output (tok/s)": 637.5, "Input (tok/s)": 25.0, "Total (tok/s)": 652.5},
+    {"Percentiles": "99%", "TTFT (ms)": 376.0, "ITL (ms)": 12.48, "TPOT (ms)": 12.48, "Latency (s)": 6.50, "Input tokens": 1024.0, "Output tokens": 512.0, "Output (tok/s)": 634.0, "Input (tok/s)": 24.8, "Total (tok/s)": 648.8}
+]

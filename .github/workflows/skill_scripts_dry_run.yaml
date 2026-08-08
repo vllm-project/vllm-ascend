@@ -1,0 +1,60 @@
+name: Skill Scripts Dry Run
+
+on:
+  pull_request:
+    paths:
+      - '.agents/skills/ascend-vllm-serving-auto-benchmark/**'
+      - '.agents/skills/ascend-vllm-serving-tune-loop/**'
+      - 'tests/ut/agents/test_serving_skill_scripts.py'
+      - 'tools/shellcheck.sh'
+      - '.github/workflows/skill_scripts_dry_run.yaml'
+  workflow_dispatch:
+
+jobs:
+  lint-and-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install lightweight test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pyyaml
+
+      - name: Shellcheck skill scripts
+        run: |
+          bash tools/shellcheck.sh \
+            .agents/skills/ascend-vllm-serving-auto-benchmark/scripts/run_benchmark.sh \
+            .agents/skills/ascend-vllm-serving-tune-loop/scripts/auto_resume_wrapper.sh \
+            .agents/skills/ascend-vllm-serving-tune-loop/scripts/cleanup_managed_server.sh
+
+      - name: Check bash syntax
+        run: |
+          bash -n .agents/skills/ascend-vllm-serving-auto-benchmark/scripts/run_benchmark.sh
+          bash -n .agents/skills/ascend-vllm-serving-tune-loop/scripts/auto_resume_wrapper.sh
+          bash -n .agents/skills/ascend-vllm-serving-tune-loop/scripts/cleanup_managed_server.sh
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile \
+            .agents/skills/ascend-vllm-serving-auto-benchmark/scripts/generate_report.py \
+            .agents/skills/ascend-vllm-serving-auto-benchmark/scripts/validate_configs.py \
+            .agents/skills/ascend-vllm-serving-tune-loop/scripts/generate_tuning_report.py \
+            tests/ut/agents/test_serving_skill_scripts.py
+
+      - name: Run focused unit tests
+        run: |
+          pytest --noconftest -q tests/ut/agents/test_serving_skill_scripts.py
+
+      - name: Dry-run benchmark workflow
+        run: |
+          bash .agents/skills/ascend-vllm-serving-auto-benchmark/scripts/run_benchmark.sh \
+            --dry-run \
+            --config .agents/skills/ascend-vllm-serving-auto-benchmark/configs/qwen3-32b.yaml \
+            --output-dir "${RUNNER_TEMP}/skill-benchmark-dry-run"
