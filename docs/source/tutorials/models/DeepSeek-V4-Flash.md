@@ -27,7 +27,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - DeepSeek released new DeepSeek-V4-Flash-DSpark weights on July 31, 2026. Download the quantized `DeepSeek-V4-Flash-0731-w8a8` weight from [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8).
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/mnt/sfs_turbo/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
