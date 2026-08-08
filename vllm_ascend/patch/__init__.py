@@ -1259,9 +1259,12 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
 #    Why:
-#       Upstream vllm-project/vllm#50411 added FusedInputNorm with F.batch_norm
-#       eps=0.0. CUDA PyTorch >= 2.7 accepts eps=0.0, but Ascend torch_npu still
-#       validates eps > 0 and raises "batch_norm eps must be positive".
+#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
+#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
+#       which does not distinguish scenarios and requires eps > 0 in all cases.
+#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
+#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
+#       positive".
 #    How：
 #       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
 #       The patch is guarded with contextlib.suppress(ImportError) so it does
@@ -1269,6 +1272,6 @@
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50411
 #    Future Plan:
-#       Remove this patch once Ascend torch_npu accepts eps=0.0 in eval-mode
-#       F.batch_norm (matching CUDA PyTorch >= 2.7 behavior).
+#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
+#       (which, like upstream, allows eps >= 0 for inference).
 #

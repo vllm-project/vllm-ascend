@@ -16,10 +16,12 @@
 
 # Patch vllm's FusedInputNorm.forward to replace eps=0.0 with eps=1e-5.
 #
-# Upstream vllm-project/vllm#50411 added FusedInputNorm with eps=0.0 in
-# F.batch_norm. Ascend torch_npu still validates eps > 0, while CUDA
-# PyTorch >= 2.7 accepts eps=0.0. This patch replaces eps to avoid
-# "batch_norm eps must be positive" on Ascend.
+# Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training but
+# allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0, which does
+# not distinguish scenarios and requires eps > 0 in all cases. So when upstream
+# passes eps=0.0 it works fine upstream, but fails on vllm-ascend with
+# "batch_norm eps must be positive" on Ascend. This patch replaces eps to avoid
+# the error.
 
 import contextlib
 
