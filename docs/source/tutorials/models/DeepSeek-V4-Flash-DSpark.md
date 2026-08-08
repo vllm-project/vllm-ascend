@@ -49,7 +49,7 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
     --quantization ascend \
     --port 8900 \
     --block-size 32 \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{
         "ascend_compilation_config": {
@@ -227,7 +227,7 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
     --max-num-seqs 16 \
     --no-disable-hybrid-kv-cache-manager \
     --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-    --speculative-config '{"num_speculative_tokens": 7,"method": "dspark","enforce_eager": true}' \
+    --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
     --trust-remote-code \
     --block-size 32 \
     --tokenizer-mode deepseek_v4 \
@@ -291,8 +291,8 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
     --seed 1024 \
     --served-model-name dsv4 \
     --max-model-len 1048576 \
-    --max-num-batched-tokens 120 \
-    --max-num-seqs 60 \
+    --max-num-batched-tokens 256 \
+    --max-num-seqs 32 \
     --block-size 32 \
     --no-disable-hybrid-kv-cache-manager \
     --no-enable-prefix-caching \
@@ -304,7 +304,7 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
     --reasoning-parser deepseek_v4 \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
-    --speculative-config '{"num_speculative_tokens": 7,"method": "dspark","enforce_eager": true}' \
+    --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --kv-transfer-config \
     '{"kv_connector": "MooncakeHybridConnector",
