@@ -1,18 +1,5 @@
 # apply_top_k_top_p_triton
 
-## 产品支持情况
-
-> 待补充:请在实机验证后填写各产品的支持情况。
-
-|产品      | 是否支持 |
-|:----------------------------|:-----------:|
-|<term>Ascend 950PR/Ascend 950DT</term>|     待补充     |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>|     待补充     |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>|     待补充     |
-|<term>Atlas 200I/500 A2 推理产品</term>|     待补充     |
-|<term>Atlas 推理系列产品</term>|     待补充     |
-|<term>Atlas 训练系列产品</term>|     待补充     |
-
 ## 功能说明
 
 - 算子功能：`apply_top_k_top_p_triton` 基于 [Qrita](https://arxiv.org/abs/2602.01518)
@@ -104,5 +91,5 @@ out = apply_top_k_top_p_triton(logits.clone(), None, p)
 ## test ut
 
 ```bash
-pytest -sv tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_apply_top_k_top_p_triton.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_top_k_top_p_triton.py #--noconftest
 ```

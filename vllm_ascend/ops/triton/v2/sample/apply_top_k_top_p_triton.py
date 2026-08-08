@@ -561,7 +561,11 @@ def _topk_topp_kernel(
 
                             num_iters += 1
                             if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                                p_pivot = (max_range + min_range) / 2.0
+                                # Keep pivot and its boundary statistics from the
+                                # same evaluation.  Using the updated range midpoint
+                                # here while reusing stats from p_pivot_0 makes
+                                # final_pivot and duplicate_logit inconsistent.
+                                p_pivot = p_pivot_0
                                 min_larger_prob = min_larger_0
                                 num_min_larger = num_min_larger_0
                                 p_pivots_sum = p_pivots_sum_0
@@ -729,7 +733,11 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                            p_pivot = (max_range + min_range) / 2.0
+                            # Keep pivot and its boundary statistics from the
+                            # same evaluation.  Using the updated range midpoint
+                            # here while reusing stats from p_pivot_0 makes
+                            # final_pivot and duplicate_logit inconsistent.
+                            p_pivot = p_pivot_0
                             min_larger_prob = min_larger_0
                             num_min_larger = num_min_larger_0
                             p_pivots_sum = p_pivots_sum_0
@@ -795,7 +803,11 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                            p_pivot = (max_range + min_range) / 2.0
+                            # Keep pivot and its boundary statistics from the
+                            # same evaluation.  Using the updated range midpoint
+                            # here while reusing stats from p_pivot_0 makes
+                            # final_pivot and duplicate_logit inconsistent.
+                            p_pivot = p_pivot_0
                             min_larger_prob = min_larger_0
                             num_min_larger = num_min_larger_0
                             p_pivots_sum = p_pivots_sum_0
