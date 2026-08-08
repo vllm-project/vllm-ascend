@@ -17,6 +17,7 @@
 import torch
 import torch.nn.functional as F
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,  # noqa: F401
     MoERunner,
@@ -25,7 +26,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -33,9 +35,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def __init__(
         self,
         layer_name,
-        moe_config,
-        router,
-        routed_experts,
+        moe_config: FusedMoEConfig,
+        router: FusedMoERouter,
+        routed_experts: AscendRoutedExperts,
         enable_dbo=False,
         gate=None,
         shared_experts=None,
@@ -60,7 +62,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
 
-        self.quant_type = self.routed_experts.quant_type
+        self.quant_type = routed_experts.quant_type
+        self.routed_experts.router = router
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -208,24 +211,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_routed_experts = torch.npu.current_stream().record_event()
                 after_routed_experts = None
 
-            fused_moe_results = self.routed_experts.forward_impl(
+            routed_out, fused_moe_events = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
-            routed_out = fused_moe_results.routed_out
+            fused_moe_events.before_routed_experts = before_routed_experts
+            fused_moe_events.after_routed_experts = after_routed_experts
 
             shared_out = self.ascend_shared_experts.forward(
                 hidden_states,
-                FusedMoEEvents(
-                    after_routed_experts=after_routed_experts,
-                    before_routed_experts=before_routed_experts,
-                    before_dispatch=fused_moe_results.before_dispatch_evt,
-                    before_gmm2=fused_moe_results.before_gmm2_evt,
-                    before_combine=fused_moe_results.before_combine_evt,
-                    swiglu_limit=fused_moe_results.swiglu_limit,
-                    swiglu_alpha=getattr(fused_moe_results, "swiglu_alpha", 1.0),
-                    swiglu_beta=getattr(fused_moe_results, "swiglu_beta", 0.0),
-                ),
+                fused_moe_events,
             )
             return shared_out, routed_out

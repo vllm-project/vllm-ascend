@@ -226,7 +226,13 @@ def test_shared_experts_part2_310_applies_optional_gate(with_gate):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_shared_experts_caches_model_owned_310p_fallback_marker(monkeypatch, enabled):
     layer = SimpleNamespace(_ascend_use_310p_quantized_fallback=enabled)
-    moe_config = SimpleNamespace(hidden_dim=4, in_dtype=torch.float16)
+    moe_config = SimpleNamespace(
+        hidden_dim=4,
+        in_dtype=torch.float16,
+        swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
+    )
     quant_method = SimpleNamespace(process_weights_after_loading=lambda *args, **kwargs: None)
     monkeypatch.setattr(
         shared_experts_module,
@@ -264,6 +270,9 @@ def test_shared_experts_uses_310p_quantized_fallback(monkeypatch):
     shared_experts.quant_type = QuantType.W8A8
     shared_experts.multistream_overlap = False
     shared_experts.use_310p_quantized_fallback = True
+    shared_experts.swiglu_limit = 0.0
+    shared_experts.swiglu_alpha = 1.0
+    shared_experts.swiglu_beta = 0.0
 
     current_stream = MagicMock()
     quant_matmul = MagicMock(side_effect=[gate_up_output, expected_output])
@@ -315,15 +324,15 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
     ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
-    routed_result = SimpleNamespace(
-        routed_out=routed_out,
-        before_dispatch_evt=None,
-        before_gmm2_evt=None,
-        before_combine_evt=None,
-        swiglu_limit=0.0,
+    routed_events = FusedMoEEvents(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
     )
     runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=routed_result if has_shared_experts else routed_out)
+        forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
     )
     runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
