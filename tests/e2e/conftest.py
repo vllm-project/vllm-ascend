@@ -33,8 +33,9 @@ import sys
 import threading
 import time
 import traceback
+from multiprocessing.connection import Connection, wait
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import huggingface_hub
 import numpy as np
@@ -830,6 +831,8 @@ class DisaggEpdProxy(RemoteEPDServer):
 _DP_RUNNER_START_TIMEOUT_SECONDS = 900.0
 _DP_RUNNER_REQUEST_TIMEOUT_SECONDS = 900.0
 _DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_DP_RUNNER_TERMINATE_TIMEOUT_SECONDS = 5.0
+_DP_RUNNER_KILL_TIMEOUT_SECONDS = 5.0
 
 
 def _split_data_parallel_indices(num_items: int, dp_size: int) -> list[list[int]]:
@@ -885,9 +888,19 @@ def _normalize_score_inputs(text_1: str | list[str], text_2: str | list[str]) ->
     return list(text_1), list(text_2)
 
 
+def _shutdown_vllm_runner_engine(llm: LLM) -> None:
+    llm_engine = getattr(llm, "llm_engine", None)
+    engine_core = getattr(llm_engine, "engine_core", None)
+    if engine_core is not None:
+        engine_core.shutdown(timeout=_DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
+
+
 def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, dp_size: int, master_port: int) -> None:
     llm = None
     try:
+        # Isolate each outer DP worker and all vLLM subprocesses it creates so
+        # the parent can terminate the complete process tree on failure.
+        os.setsid()
         os.environ["VLLM_DP_RANK"] = str(dp_rank)
         os.environ["VLLM_DP_RANK_LOCAL"] = str(dp_rank)
         os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -955,6 +968,10 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         raise
     finally:
         if llm is not None:
+            try:
+                _shutdown_vllm_runner_engine(llm)
+            except Exception:
+                logger.exception("Failed to shut down vLLM EngineCore for data parallel worker %s", dp_rank)
             del llm
         clear_ascend_config()
         cleanup_dist_env_and_memory()
@@ -1417,7 +1434,7 @@ class DPVllmRunner(VllmRunner):
             raise ValueError("DPVllmRunner requires `data_parallel_size >= 2`")
 
         self._dp_size = data_parallel_size
-        self._dp_parent_conns: list[Any] = []
+        self._dp_parent_conns: list[Connection] = []
         self._dp_processes: list[Any] = []
         self._dp_start_timeout = float(kwargs.pop("dp_start_timeout", _DP_RUNNER_START_TIMEOUT_SECONDS))
         self._dp_request_timeout = float(kwargs.pop("dp_request_timeout", _DP_RUNNER_REQUEST_TIMEOUT_SECONDS))
@@ -1463,35 +1480,142 @@ class DPVllmRunner(VllmRunner):
                 self._dp_parent_conns.append(parent_conn)
                 self._dp_processes.append(proc)
 
-            for rank, conn in enumerate(self._dp_parent_conns):
-                if not conn.poll(self._dp_start_timeout):
-                    raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to start")
-                message = conn.recv()
-                if message["status"] != "ready":
-                    raise RuntimeError(
-                        f"Failed to start data parallel worker {rank}:\n{message.get('traceback', 'unknown error')}"
-                    )
+            self._wait_for_data_parallel_workers(
+                expected_status="ready",
+                timeout=self._dp_start_timeout,
+                operation="start",
+            )
         except Exception:
             self._stop_data_parallel_workers()
             raise
 
+    def _wait_for_data_parallel_workers(
+        self,
+        *,
+        expected_status: str,
+        timeout: float,
+        operation: str,
+    ) -> list[dict[str, Any]]:
+        pending_ranks = set(range(len(self._dp_parent_conns)))
+        conn_to_rank = {conn: rank for rank, conn in enumerate(self._dp_parent_conns)}
+        sentinel_to_rank = {proc.sentinel: rank for rank, proc in enumerate(self._dp_processes)}
+        messages: dict[int, dict[str, Any]] = {}
+        deadline = time.monotonic() + timeout
+
+        while pending_ranks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                pending = ", ".join(str(rank) for rank in sorted(pending_ranks))
+                raise TimeoutError(f"Timed out waiting for data parallel workers [{pending}] to {operation}")
+
+            waitables = [self._dp_parent_conns[rank] for rank in pending_ranks]
+            waitables.extend(self._dp_processes[rank].sentinel for rank in pending_ranks)
+            ready = wait(waitables, timeout=remaining)
+            if not ready:
+                pending = ", ".join(str(rank) for rank in sorted(pending_ranks))
+                raise TimeoutError(f"Timed out waiting for data parallel workers [{pending}] to {operation}")
+
+            # Read messages before process sentinels. A worker can report an
+            # error and then exit, making both objects ready at the same time.
+            for ready_obj in ready:
+                if ready_obj not in conn_to_rank:
+                    continue
+                conn = cast(Connection, ready_obj)
+                rank = conn_to_rank[conn]
+                if rank not in pending_ranks:
+                    continue
+                try:
+                    message = cast(dict[str, Any], conn.recv())
+                except EOFError as exc:
+                    raise RuntimeError(
+                        f"Data parallel worker {rank} exited without reporting its {operation} status"
+                    ) from exc
+                if message["status"] != expected_status:
+                    if operation == "start":
+                        raise RuntimeError(
+                            f"Failed to start data parallel worker {rank}:\n{message.get('traceback', 'unknown error')}"
+                        )
+                    raise RuntimeError(
+                        f"Data parallel worker {rank} failed during `{operation}`:\n"
+                        f"{message.get('traceback', 'unknown error')}"
+                    )
+                messages[rank] = message
+                pending_ranks.remove(rank)
+
+            for ready_obj in ready:
+                if ready_obj not in sentinel_to_rank:
+                    continue
+                sentinel = cast(int, ready_obj)
+                rank = sentinel_to_rank[sentinel]
+                if rank not in pending_ranks:
+                    continue
+                proc = self._dp_processes[rank]
+                proc.join(timeout=0)
+                raise RuntimeError(
+                    f"Data parallel worker {rank} exited unexpectedly while waiting to {operation}; "
+                    f"exit code: {proc.exitcode}"
+                )
+
+        return [messages[rank] for rank in range(len(self._dp_parent_conns))]
+
+    @staticmethod
+    def _wait_for_data_parallel_processes(processes: list[Any], timeout: float) -> None:
+        alive = [proc for proc in processes if proc.is_alive()]
+        if not alive:
+            return
+
+        ready = set(wait([proc.sentinel for proc in alive], timeout=timeout))
+        for proc in alive:
+            if proc.sentinel in ready:
+                proc.join(timeout=0)
+
+    @staticmethod
+    def _signal_data_parallel_process_group(proc: Any, sig: signal.Signals) -> None:
+        if proc.pid is None:
+            return
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            # The worker may have failed before creating its own process group.
+            if proc.is_alive():
+                if sig == signal.SIGTERM:
+                    proc.terminate()
+                else:
+                    proc.kill()
+
     def _stop_data_parallel_workers(self) -> None:
-        for conn in self._dp_parent_conns:
+        conns = self._dp_parent_conns
+        processes = self._dp_processes
+        self._dp_parent_conns = []
+        self._dp_processes = []
+
+        for conn in conns:
             with contextlib.suppress(Exception):
                 conn.send({"command": "shutdown"})
 
-        for proc in self._dp_processes:
-            proc.join(timeout=_DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
-            if proc.is_alive():
-                proc.kill()
-                proc.join(timeout=5)
+        self._wait_for_data_parallel_processes(processes, _DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
 
-        for conn in self._dp_parent_conns:
+        # Signal every process group, including groups whose outer worker has
+        # already exited but may have left vLLM descendants behind.
+        for proc in processes:
+            self._signal_data_parallel_process_group(proc, signal.SIGTERM)
+        alive = [proc for proc in processes if proc.is_alive()]
+        self._wait_for_data_parallel_processes(alive, _DP_RUNNER_TERMINATE_TIMEOUT_SECONDS)
+
+        for proc in processes:
+            self._signal_data_parallel_process_group(proc, signal.SIGKILL)
+        alive = [proc for proc in alive if proc.is_alive()]
+        self._wait_for_data_parallel_processes(alive, _DP_RUNNER_KILL_TIMEOUT_SECONDS)
+
+        for proc in processes:
+            if proc.is_alive():
+                logger.error("Data parallel worker process %s did not exit after SIGKILL", proc.pid)
+            with contextlib.suppress(Exception):
+                proc.close()
+
+        for conn in conns:
             with contextlib.suppress(Exception):
                 conn.close()
-
-        self._dp_parent_conns.clear()
-        self._dp_processes.clear()
 
     def _dispatch_prompt_command(
         self,
@@ -1509,36 +1633,32 @@ class DPVllmRunner(VllmRunner):
         shard_results: list[tuple[list[int], list[Any]]] = []
         shard_indices = _split_data_parallel_indices(len(prompts), self._dp_size)
 
-        for rank, conn in enumerate(self._dp_parent_conns):
-            indices = shard_indices[rank]
-            worker_indices = indices or [0]
-            worker_prompts = _slice_list_inputs(prompts, worker_indices)
-            conn.send(
-                {
-                    "command": command,
-                    "indices": indices,
-                    "inputs": self.get_inputs(
-                        worker_prompts,
-                        images=_slice_optional_inputs(images, worker_indices),
-                        videos=_slice_optional_inputs(videos, worker_indices),
-                        audios=_slice_optional_inputs(audios, worker_indices),
-                    ),
-                    "prompts": worker_prompts,
-                    **payload,
-                }
-            )
-
         try:
             for rank, conn in enumerate(self._dp_parent_conns):
-                if not conn.poll(self._dp_request_timeout):
-                    raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `{command}`")
-                message = conn.recv()
-                if message["status"] != "ok":
-                    raise RuntimeError(
-                        f"Data parallel worker {rank} failed during `{command}`:\n"
-                        f"{message.get('traceback', 'unknown error')}"
-                    )
-                shard_results.append((message["indices"], message["result"]))
+                indices = shard_indices[rank]
+                worker_indices = indices or [0]
+                worker_prompts = _slice_list_inputs(prompts, worker_indices)
+                conn.send(
+                    {
+                        "command": command,
+                        "indices": indices,
+                        "inputs": self.get_inputs(
+                            worker_prompts,
+                            images=_slice_optional_inputs(images, worker_indices),
+                            videos=_slice_optional_inputs(videos, worker_indices),
+                            audios=_slice_optional_inputs(audios, worker_indices),
+                        ),
+                        "prompts": worker_prompts,
+                        **payload,
+                    }
+                )
+
+            messages = self._wait_for_data_parallel_workers(
+                expected_status="ok",
+                timeout=self._dp_request_timeout,
+                operation=command,
+            )
+            shard_results.extend((message["indices"], message["result"]) for message in messages)
         except Exception:
             self._stop_data_parallel_workers()
             raise
@@ -1552,28 +1672,24 @@ class DPVllmRunner(VllmRunner):
         shard_results: list[tuple[list[int], list[Any]]] = []
         shard_indices = _split_data_parallel_indices(len(prompts), self._dp_size)
 
-        for rank, conn in enumerate(self._dp_parent_conns):
-            indices = shard_indices[rank]
-            worker_indices = indices or [0]
-            conn.send(
-                {
-                    "command": command,
-                    "indices": indices,
-                    "prompts": _slice_list_inputs(prompts, worker_indices),
-                }
-            )
-
         try:
             for rank, conn in enumerate(self._dp_parent_conns):
-                if not conn.poll(self._dp_request_timeout):
-                    raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `{command}`")
-                message = conn.recv()
-                if message["status"] != "ok":
-                    raise RuntimeError(
-                        f"Data parallel worker {rank} failed during `{command}`:\n"
-                        f"{message.get('traceback', 'unknown error')}"
-                    )
-                shard_results.append((message["indices"], message["result"]))
+                indices = shard_indices[rank]
+                worker_indices = indices or [0]
+                conn.send(
+                    {
+                        "command": command,
+                        "indices": indices,
+                        "prompts": _slice_list_inputs(prompts, worker_indices),
+                    }
+                )
+
+            messages = self._wait_for_data_parallel_workers(
+                expected_status="ok",
+                timeout=self._dp_request_timeout,
+                operation=command,
+            )
+            shard_results.extend((message["indices"], message["result"]) for message in messages)
         except Exception:
             self._stop_data_parallel_workers()
             raise
