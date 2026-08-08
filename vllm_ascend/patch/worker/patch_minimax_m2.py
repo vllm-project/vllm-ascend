@@ -166,6 +166,34 @@ MiniMaxM2Model._need_dequantize_fp8_weights = _need_dequantize_fp8_weights
 MiniMaxM2Model._dequantize_fp8_block_weight = staticmethod(_dequantize_fp8_block_weight)
 MiniMaxM2Model._fp8_dequant_weight_iter = _fp8_dequant_weight_iter
 
+
+def _filter_reduced_layer_weights(
+    self: "MiniMaxM2Model",
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Skip decoder layers that exceed the configured reduced stack.
+
+    The MiniMax-M2.7 4-card e2e case loads the full 62-layer checkpoint with
+    a 16-layer config (``num_hidden_layers=16``, ``num_hidden_layers_orig=62``).
+    Layers 16..61 have no destination module, so they must be filtered before
+    ``AutoWeightsLoader`` sees them.
+    """
+    num_layers = getattr(self.config, "num_hidden_layers", None)
+    orig_layers = getattr(self.config, "num_hidden_layers_orig", None)
+    if not isinstance(num_layers, int) or not isinstance(orig_layers, int) or orig_layers <= num_layers:
+        yield from weights
+        return
+
+    for name, loaded_weight in weights:
+        parts = name.split(".")
+        if len(parts) > 1 and parts[0] == "layers" and parts[1].isdigit():
+            if int(parts[1]) >= num_layers:
+                continue
+        yield name, loaded_weight
+
+
+MiniMaxM2Model._filter_reduced_layer_weights = _filter_reduced_layer_weights
+
 _original_load_weights = MiniMaxM2Model.load_weights
 
 
@@ -173,6 +201,7 @@ def _patched_load_weights(
     self: "MiniMaxM2Model",
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
+    weights = self._filter_reduced_layer_weights(weights)
     if self._need_dequantize_fp8_weights():
         weights = self._fp8_dequant_weight_iter(weights)
     return _original_load_weights(self, weights)
