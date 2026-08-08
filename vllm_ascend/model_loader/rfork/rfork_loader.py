@@ -38,6 +38,7 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.model_loader.rfork.rfork_worker import RForkWorker
 
 
@@ -194,7 +195,10 @@ def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
     eplb_config = additional_config.get("eplb_config", {})
     if not isinstance(eplb_config, dict):
         return False
-    return bool(eplb_config.get("dynamic_eplb") or eplb_config.get("expert_map_record_path"))
+    dynamic_eplb = validate_additional_config_bool(
+        eplb_config.get("dynamic_eplb", False), "additional_config.eplb_config.dynamic_eplb"
+    )
+    return dynamic_eplb or bool(eplb_config.get("expert_map_record_path"))
 
 
 @contextmanager

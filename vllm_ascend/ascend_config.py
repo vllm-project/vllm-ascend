@@ -20,7 +20,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.config.utils import config
 from vllm.logger import logger
@@ -28,6 +28,14 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+
+def validate_additional_config_bool(value: Any, path: str) -> bool:
+    """Apply the same pydantic bool rules to values read before config init."""
+    try:
+        return TypeAdapter(bool).validate_python(value)
+    except ValueError as exc:
+        raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
 @config
@@ -901,7 +909,7 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-    refresh = additional_config.get("refresh", False) if additional_config else False
+    refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
     if (
         _ASCEND_CONFIG is not None

@@ -33,12 +33,11 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
-from pydantic import TypeAdapter
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, validate_additional_config_bool
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -875,13 +874,19 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             vllm_config = None
 
     additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
+    refresh = (
+        validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
+        if additional_config
+        else False
+    )
 
     if _ENABLE_SP is None or refresh:
         if additional_config is not None and "enable_flashcomm1" in additional_config:
             # This path can run before the AscendConfig singleton exists. Use
             # the same pydantic bool coercion instead of bool("false") == True.
-            _ENABLE_SP = TypeAdapter(bool).validate_python(additional_config["enable_flashcomm1"])
+            _ENABLE_SP = validate_additional_config_bool(
+                additional_config["enable_flashcomm1"], "additional_config.enable_flashcomm1"
+            )
         else:
             try:
                 _ENABLE_SP = get_ascend_config().enable_flashcomm1
