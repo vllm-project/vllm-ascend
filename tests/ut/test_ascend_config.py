@@ -118,6 +118,21 @@ class TestAscendConfig(TestBase):
         self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
         self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
 
+    def test_eplb_load_collection_phase_defaults_to_all(self):
+        self.assertEqual(EplbConfig().load_collection_phase, "all")
+
+    def test_eplb_load_collection_phase_validation(self):
+        self.assertEqual(
+            EplbConfig(load_collection_phase="prefill").load_collection_phase,
+            "prefill",
+        )
+        self.assertEqual(
+            EplbConfig(load_collection_phase="decode").load_collection_phase,
+            "decode",
+        )
+        with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
+            EplbConfig(load_collection_phase="prompt")
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
