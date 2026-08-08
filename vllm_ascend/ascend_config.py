@@ -274,6 +274,12 @@ class AscendConfig:
                 kw[key] = env_value
         return ArgsKwargs(data.args, kw)
 
+    @model_validator(mode="after")
+    def _validate_user_input_ranges(self):
+        if self.weight_nz_mode not in (0, 1, 2):
+            raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        return self
+
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
@@ -580,6 +586,21 @@ class FinegrainedTPConfig:
     embedding_tensor_parallel_size: int = 0
     mlp_tensor_parallel_size: int = 0
     olora_tensor_parallel_size: int = 0
+
+    @model_validator(mode="after")
+    def _validate_sizes(self):
+        size_fields = (
+            "oproj_tensor_parallel_size",
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+            "olora_tensor_parallel_size",
+        )
+        for field_name in size_fields:
+            value = getattr(self, field_name)
+            if value < 0:
+                raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+        return self
 
     def _validate_preconditions(self, vllm_config: Any):
         vc = vllm_config
