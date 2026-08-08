@@ -154,6 +154,8 @@ class NPUModelRunner310(NPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        is_graph_capturing: bool = False,
+        actual_num_tokens: int | None = None,
     ):
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
 
@@ -190,6 +192,8 @@ class NPUModelRunner310(NPUModelRunner):
             force_has_lora=force_has_lora,
             force_num_active_loras=force_num_active_loras,
             num_encoder_reqs=num_encoder_reqs,
+            is_graph_capturing=is_graph_capturing,
+            actual_num_tokens=actual_num_tokens,
         )
 
     def _build_attention_metadata(self, *args: Any, **kwargs: Any):

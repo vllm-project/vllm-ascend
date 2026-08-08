@@ -2791,7 +2791,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
-        self._a2_megamoe_decode_graph_safe = (
+        self._a2_megamoe_decode_graph_safe = bool(
             _is_a2_megamoe_enabled(self.ascend_config)
             and uniform_decode
             and (is_graph_capturing or is_all_decode)
