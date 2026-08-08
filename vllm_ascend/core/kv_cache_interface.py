@@ -49,14 +49,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels.
-
-        DeepSeek-V4's ``compress_ratio`` controls how many scheduler tokens
-        advance one compressed-cache token. Ascend's cache manager and DSA
-        metadata already apply that mapping, so shrinking the physical page a
-        second time would under-allocate the cache.
-        """
-        return self.block_size
+        """Return the physical block size consumed by Ascend kernels."""
+        return self.block_size // self.compress_ratio
 
     @property
     def page_size_bytes(self) -> int:
@@ -79,6 +73,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dim,
                 spec.scale_dtype,
                 spec.dtype,
+                spec.compress_ratio,
             )
             for spec in specs
         }
@@ -105,6 +100,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             scale_dtype=specs[0].scale_dtype,
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
+            compress_ratio=specs[0].compress_ratio,
             cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
             store_on_host=store_on_host_set.pop(),
         )
@@ -198,7 +194,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
     @property
     def storage_block_size(self) -> int:
-        return self.block_size
+        return self.block_size // self.compress_ratio
 
     @property
     def real_page_size_bytes(self) -> int:

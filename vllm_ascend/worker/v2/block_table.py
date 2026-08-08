@@ -16,8 +16,27 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import torch
 from vllm.v1.worker.gpu.block_table import BlockTables
+
+_storage_block_sizes: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "ascend_v2_storage_block_sizes",
+    default=None,
+)
+
+
+@contextmanager
+def use_storage_block_sizes(block_sizes: list[int]) -> Iterator[None]:
+    """Use physical page sizes while ModelRunner V2 builds block tables."""
+    token = _storage_block_sizes.set(tuple(block_sizes))
+    try:
+        yield
+    finally:
+        _storage_block_sizes.reset(token)
 
 
 class AscendBlockTables(BlockTables):
@@ -37,8 +56,13 @@ class AscendBlockTables(BlockTables):
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
+        effective_block_sizes = block_sizes
+        storage_block_sizes = _storage_block_sizes.get()
+        if storage_block_sizes is not None:
+            assert len(storage_block_sizes) == len(block_sizes)
+            effective_block_sizes = list(storage_block_sizes)
         super().__init__(
-            block_sizes,
+            effective_block_sizes,
             max_num_reqs,
             max_num_batched_tokens,
             max_num_blocks_per_group,

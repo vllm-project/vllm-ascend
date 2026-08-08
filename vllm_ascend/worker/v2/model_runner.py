@@ -50,10 +50,12 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import enable_sp, set_potential_max_tokens
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.block_table import use_storage_block_sizes
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import maybe_build_ascend_pcp_manager
@@ -198,7 +200,8 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self):
+        storage_block_sizes = [get_storage_block_size(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups]
+        with graph_manager_wrapper(self), use_storage_block_sizes(storage_block_sizes):
             super().initialize_kv_cache(kv_cache_config)
 
             # GPUModelRunner constructs the community PCP manager while initializing

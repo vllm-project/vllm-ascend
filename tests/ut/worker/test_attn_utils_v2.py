@@ -101,7 +101,11 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert set(discovered_specs) == {layer_name}
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
-    assert spec.storage_block_size == spec.block_size
+    assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
+    assert spec.storage_block_size == cache_config.block_size
+    merged_spec = spec.merge([spec])
+    assert merged_spec.compress_ratio == cache_layer.compress_ratio
+    assert merged_spec.storage_block_size == cache_config.block_size
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
@@ -134,7 +138,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         attn_groups=[[attn_group]],
         device=torch.device("cpu"),
         cache_dtype=cache_config.cache_dtype,
-        kernel_block_sizes=[spec.block_size],
+        kernel_block_sizes=[spec.storage_block_size],
         vllm_config=vllm_config,
     )
 
@@ -143,7 +147,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert len(runner_kv_caches) == 1
     assert runner_kv_caches[0] is cache_components
     assert [component.shape for component in cache_components] == [
-        (num_blocks, spec.block_size, 1, dim) for dim in component_dims
+        (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
     ]
     assert [component.dtype for component in cache_components] == [
         cache_dtype,
@@ -193,13 +197,14 @@ def _make_dsa_metadata_groups():
     ]
     specs = [
         AscendMLAAttentionSpec(
-            block_size=block_size,
+            block_size=storage_block_size * compress_ratio,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
             compress_ratio=compress_ratio,
+            model_version="deepseek_v4",
         )
-        for block_size, compress_ratio in ((32, 2), (64, 4))
+        for storage_block_size, compress_ratio in ((32, 4), (64, 128))
     ]
     calls: list[dict[str, Any]] = []
     attn_groups = [
@@ -228,6 +233,41 @@ def _make_dsa_metadata_groups():
     return layer_names, specs, calls, attn_groups, kv_cache_config
 
 
+def test_prepare_kernel_block_sizes_only_uses_storage_size_for_dsv4():
+    spec = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        compress_ratio=4,
+    )
+    attn_groups = [
+        [
+            AttentionGroup(
+                backend=AscendDSABackend,
+                layer_names=["model.layers.0.self_attn"],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ]
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["model.layers.0.self_attn"],
+                kv_cache_spec=spec,
+            )
+        ],
+    )
+
+    # Even though this synthetic non-DSV4 spec has a smaller storage size,
+    # preserve upstream's logical block-size selection for non-DSV4 groups.
+    assert spec.storage_block_size == 32
+    assert attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [128]
+
+
 @pytest.mark.parametrize(
     ("caller", "cudagraph_mode", "expected_input_tokens"),
     [
@@ -242,6 +282,9 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     expected_input_tokens,
 ):
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    assert attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [
+        spec.storage_block_size for spec in specs
+    ]
     block_tables = (
         torch.zeros((4, 1), dtype=torch.int32),
         torch.zeros((4, 1), dtype=torch.int32),
@@ -291,7 +334,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
 
     assert set(metadata) == set(layer_names)
-    assert [call["block_size"] for call in calls] == [spec.block_size for spec in specs]
+    assert [call["block_size"] for call in calls] == [spec.storage_block_size for spec in specs]
     assert len(calls) == 2
     for call in calls:
         common_metadata = call["common_attn_metadata"]
