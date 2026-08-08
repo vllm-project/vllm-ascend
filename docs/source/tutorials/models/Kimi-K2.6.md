@@ -319,7 +319,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
@@ -402,7 +401,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
@@ -484,7 +482,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800
@@ -566,7 +563,6 @@ Parameter descriptions:
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=800

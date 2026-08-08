@@ -90,6 +90,8 @@ export PYTHONHASHSEED=0
 | 800 I/T A3 series | RoCE-based deployment | `export HCCL_INTRA_ROCE_ENABLE=1` | Required when the deployment uses the RoCE path. |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
+> **Note:** `ASCEND_BUFFER_POOL` has been removed. Use `ASCEND_ENABLE_USE_FABRIC_MEM=1` for A3 HCCS scenarios or `HCCL_INTRA_ROCE_ENABLE=1` for A2/A3 RoCE scenarios instead.
+
 ### Run Mooncake Master
 
 **Note:** Before proceeding, review the following Mooncake guides:
