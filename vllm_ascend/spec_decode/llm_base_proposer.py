@@ -1131,7 +1131,33 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         if get_ascend_config().enable_reduce_sample:
-            if self.method in ("eagle3", "dflash", "mtp"):
+            if self.method == "dspark":
+                # reduce_sample: compute_logits / markov_bias yield per-rank local
+                # vocab logits (AscendLogitsProcessor skips the all-gather);
+                # greedy_sample reduces the local top-1 across TP. markov_embed is
+                # unchanged (VocabParallelEmbedding already all-reduces).
+                with _disable_flash_comm_v1_context():
+                    # lm_head and markov_w2 must shard vocab identically so that
+                    # logits + logits_bias is a per-rank local add over the same
+                    # vocab segment (greedy_sample then reduces to the global top-1).
+                    assert self.model.lm_head.num_embeddings_per_partition == \
+                        self.model.model.markov_head.markov_w2.num_embeddings_per_partition, (
+                        "dspark reduce_sample requires lm_head and markov_w2 to shard "
+                        "vocab identically; otherwise logits + logits_bias is not a "
+                        "valid per-rank local add over the same vocab segment.")
+                    # Per-rank local logits, last dim = vocab/tp (no all-gather).
+                    raw_logits = self.model.compute_logits(sample_hidden_states)
+                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                    num_blk = logits.shape[0]
+                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                    for idx in range(self.num_speculative_tokens):
+                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                        # Per-rank local bias, last dim = vocab/tp, same shard as logits.
+                        logits_bias = self.model.markov_bias(markov_emb)
+                        logits[:, idx].add_(logits_bias)
+                        draft_token_ids[:, idx + 1].copy_(greedy_sample(logits[:, idx]))
+            elif self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
                     draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
