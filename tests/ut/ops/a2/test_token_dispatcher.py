@@ -733,6 +733,14 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_ep_rank_prop = patcher2.start()
         self.mock_ep_size_prop = patcher3.start()
 
+        # TokenDispatcherWithAll2AllV obtains the local rank while building
+        # the HCCL group name.  A MagicMock group alone is not sufficient on
+        # vLLM v0.26.0: torch.distributed.get_rank still attempts to resolve
+        # the uninitialized default process group first.
+        patcher_rank = patch("torch.distributed.get_rank", return_value=0)
+        self.mock_get_rank = patcher_rank.start()
+        self.addCleanup(patcher_rank.stop)
+
         # Mock torch_npu.npu_moe_token_permute
         patcher4 = patch("torch_npu.npu_moe_token_permute")
         self.mock_npu_moe_token_permute = patcher4.start()
