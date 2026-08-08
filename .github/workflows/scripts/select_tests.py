@@ -820,7 +820,6 @@ def main():
                         all_groups[key].append(f)
 
         _dedup_groups(all_groups)
-      
     if args.runner_override:
         override_key = _parse_runner_key(args.runner_override)
         overridden: dict[RunnerKey, list[str]] = {}
