@@ -286,8 +286,7 @@ class AscendConfig:
                 f"{self.mega_moe_min_tokens!r}"
             )
 
-        # Some A2 environments return corrupt CPU-group DP metadata. Allow the
-        # tested deployment to synchronize the small metadata tensor on NPU.
+        # Optionally synchronize DP metadata through the NPU group.
         self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
 
         # Enable optimized reduce sampling scheme

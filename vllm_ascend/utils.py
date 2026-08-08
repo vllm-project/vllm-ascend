@@ -1150,8 +1150,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     Returns:
         HCCL pg_options or None for mc2 group
     """
-    # Legacy MC2 uses HCCL_BUFFSIZE. A2 CANN MegaMoe mode 2 instead needs the
-    # operator-derived per-group buffer before the MC2 process group is created.
+    # CANN MegaMoe requires an operator-derived MC2 process-group buffer.
     if group_name and "mc2" in group_name:
         if get_ascend_config().enable_fused_mc2 == 2 and get_ascend_device_type() == AscendDeviceType.A2:
             return {"hccl_buffer_size": calculate_cann_megamoe_hccl_buffer_size()}

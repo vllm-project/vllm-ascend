@@ -105,21 +105,6 @@ def _a2_cann_megamoe_supported_by_config(
     )
 
 
-def _get_a2_megamoe_step_fallback_reason(
-    ascend_config: Any,
-    dp_tokens_are_uniform: bool,
-    all_dp_ranks_have_tokens: bool,
-) -> str | None:
-    if not _is_a2_megamoe_enabled(ascend_config):
-        return None
-    reasons = []
-    if not dp_tokens_are_uniform:
-        reasons.append("non-uniform-dp-tokens")
-    if not all_dp_ranks_have_tokens:
-        reasons.append("idle-dp-rank")
-    return ",".join(reasons) or None
-
-
 @contextmanager
 def override_mrv2_in_profile_run(enabled: bool):
     """Override MRv2's extra profile-run marker for one forward path.
@@ -185,7 +170,6 @@ def set_ascend_forward_context(
     has_sinks=False,
     input_ids=None,
     eplb_heat_collection_status: bool = False,
-    moe_comm_type_override: MoECommType | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -209,11 +193,7 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = (
-            moe_comm_type_override
-            if moe_comm_type_override is not None
-            else select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
-        )
+        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
