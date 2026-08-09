@@ -275,16 +275,21 @@ jobs:
 
       - name: Select tests based on changed files
         id: scope
-        if: steps.filter.outputs.src == 'true'
+        if: ${{ steps.filter.outputs.src == 'true' || contains(github.event.pull_request.labels.*.name, 'ready') }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
+          RUN_ALL_MODULES_FLAG=""
+          if [ "${{ contains(github.event.pull_request.labels.*.name, 'ready') }}" = "true" ]; then
+            RUN_ALL_MODULES_FLAG="--run-all-modules"
+          fi
           python3 .github/workflows/scripts/select_tests.py \
+            ${RUN_ALL_MODULES_FLAG} \
             --diff-base ${{ steps.source-snapshot.outputs.base_sha }}
 
       - name: Set no-tests output when source paths unchanged
         id: noop
-        if: steps.filter.outputs.src != 'true'
+        if: ${{ steps.filter.outputs.src != 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
         run: |
           {
             echo "has_tests=false"
