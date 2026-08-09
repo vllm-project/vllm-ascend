@@ -127,6 +127,9 @@ a3:
       - name: multi-node-qwenw8a8-2node-eplb
         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
         size: 2
+      - name: multi-node-GLM-5.1-W8A8C8-A3_64k_128k_90_50
+        config_file_path: GLM-5.1-W8A8C8-A3_64k_128k_90_50.yaml
+        size: 2
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
