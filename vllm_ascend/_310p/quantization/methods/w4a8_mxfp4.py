@@ -89,11 +89,3 @@ class AscendMXFP4ToW8A8DynamicFusedMoEMethod310(AscendW8A8DynamicFusedMoEMethod3
         layer.w2_weight.data = maybe_trans_nz(w2_weight)
         layer.w13_weight_scale.data = w13_scale.view(w13_scale.shape[0], -1)
         layer.w2_weight_scale.data = w2_scale.view(w2_scale.shape[0], -1)
-        logger.info_once(
-            "Converted DeepSeek V4 MXFP4 expert scales to W8A8: w13=[%.6g, %.6g], w2=[%.6g, %.6g].",
-            float(layer.w13_weight_scale.min().item()),
-            float(layer.w13_weight_scale.max().item()),
-            float(layer.w2_weight_scale.min().item()),
-            float(layer.w2_weight_scale.max().item()),
-            scope="local",
-        )

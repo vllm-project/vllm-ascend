@@ -317,6 +317,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     ```shell
     vllm serve /path/to/DeepSeek-V4-Flash-0731 \
+        --served-model-name dsv4 \
+        --port 8900 \
         --tensor-parallel-size 8 \
         --enable-expert-parallel \
         --dtype float16 \
@@ -354,7 +356,7 @@ curl http://<node0_ip>:8900/v1/chat/completions \
                 "content": "Who are you?"
             }
         ],
-        "max_tokens": 256,
+        "max_tokens": 64,
         "temperature": 0
     }'
 ```
