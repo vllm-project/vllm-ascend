@@ -86,6 +86,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
+    DraftTokenIds,
     ECConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
@@ -130,6 +131,9 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -1473,8 +1477,8 @@ class NPUModelRunner(GPUModelRunner):
             )
         elif isinstance(self.drafter, AscendSuffixDecodingProposer):
             draft_token_ids = self.drafter.propose(
-                valid_sampled_token_ids,
                 num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                sampled_token_ids=valid_sampled_token_ids,
             )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs,
@@ -1511,7 +1515,13 @@ class NPUModelRunner(GPUModelRunner):
             )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
-                valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
+                # Dynamic SD: forward the scheduled K (equals the configured
+                # maximum when the feature is disabled).
+                scheduler_output.num_spec_tokens_to_schedule,
+                valid_sampled_token_ids,
+                sampling_metadata,
+                spec_decode_metadata,
+                sample_hidden_states,
             )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
@@ -1528,7 +1538,9 @@ class NPUModelRunner(GPUModelRunner):
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
             draft_token_ids = self.drafter.propose(
-                self.speculative_config.num_speculative_tokens,
+                # Dynamic SD: honor the per-step K chosen by the scheduler
+                # (equals the configured maximum when the feature is disabled).
+                scheduler_output.num_spec_tokens_to_schedule,
                 sampled_token_ids=valid_sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
@@ -1627,7 +1639,13 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
+            # Dynamic SD: pass the scheduled per-step K explicitly, unified with
+            # the other proposers (ngram/suffix/medusa/extract) and matching
+            # vLLM's ``propose(num_speculative_tokens=...)``. ``_propose`` sets
+            # ``self.num_speculative_tokens`` from it, so the model runner no
+            # longer mutates the drafter's state here.
             draft_token_ids = self.drafter._propose(
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1696,6 +1714,13 @@ class NPUModelRunner(GPUModelRunner):
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
+        # Record the width of the drafts just produced so the next step unpacks
+        # the previous-step draft tensor with the right stride. Under dynamic SD
+        # this width can change step to step (mirrors vLLM's GPUModelRunner
+        # ``prev_num_spec_tokens`` bookkeeping). Kept before the early returns so
+        # it is updated even when the CPU copy itself is skipped.
+        if torch.is_tensor(self._draft_token_ids):  # type: ignore[has-type]
+            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]  # type: ignore[has-type]
         if not self.num_spec_tokens:
             return
         if self.use_async_scheduling and not (
@@ -1714,15 +1739,37 @@ class NPUModelRunner(GPUModelRunner):
         assert self.draft_token_ids_cpu is not None
         default_stream = torch.npu.current_stream()
         num_reqs = draft_token_ids.shape[0]
+        # Slice the pre-allocated CPU buffer (sized for the configured maximum
+        # K) to the *actual* draft width. Under dynamic SD the produced width
+        # can be < max, so an unsliced copy would shape-mismatch.
+        num_spec_tokens = draft_token_ids.shape[1]
         with torch.npu.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs].copy_(
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
                     draft_token_ids, non_blocking=True
                 )
             else:
-                self.draft_token_ids_cpu[:num_reqs] = 0
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
             self.draft_token_ids_event.record()
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        out = super().take_draft_token_ids()
+        per_req_k = getattr(self.drafter, "_dspark_num_verify_tokens", None)
+        if per_req_k is None:
+            return out
+        per_req_k = [
+            max(0, min(int(k), self.num_spec_tokens))
+            for k in per_req_k
+        ]
+        cut_tokens = DraftTokenIds(
+            req_ids=out.req_ids,
+            draft_token_ids=[
+                tokens[:k]
+                for tokens, k in zip(out.draft_token_ids, per_req_k)
+            ],
+        )
+        return cut_tokens
 
     @torch.inference_mode()
     def execute_model(
@@ -2065,7 +2112,6 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
-                input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
             self.maybe_get_kv_connector_output(
@@ -3398,7 +3444,6 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
-                input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
@@ -3622,6 +3667,7 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)

@@ -38,6 +38,15 @@ on:
         type: string
         default: ''
         description: override CONFIG_BASE_PATH used by the yaml loader (defaults to nightly path)
+      soc_version:
+        required: true
+        type: string
+        description: hardware generation used in the good-table composite key
+      test_frequency:
+        required: false
+        type: string
+        default: nightly
+        description: good-table namespace and baseline cadence (nightly or weekly)
       name:
         required: false
         type: string
@@ -277,10 +286,12 @@ jobs:
           VLLM_ASCEND_VERSION: ${{ env.VLLM_ASCEND_VERSION }}
         run: |
           python3 tests/e2e/nightly/scripts/update_good_table.py \
-            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv" \
             --test-name "$TEST_NAME" \
             --test-path "$TEST_PATH" \
             --config-base-path "$CONFIG_BASE_PATH" \
+            --scene "single_node" \
+            --soc "${{ inputs.soc_version }}" \
             --run-link  "$RUN_LINK" \
             --vllm-dir  "/vllm-workspace/vllm" \
             --vllm-ascend-dir "/vllm-workspace/vllm-ascend" \
@@ -331,7 +342,10 @@ jobs:
         run: |
           bash tests/e2e/nightly/scripts/aop_commit_age.sh \
             "${{ inputs.name || inputs.config_file_path || inputs.tests }}" \
-            "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv"
+            "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv" \
+            "${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
+            "${{ inputs.soc_version }}" \
+            "single_node"
 
       - name: Skip - old commit
         if: >-
@@ -355,7 +369,8 @@ jobs:
           steps.commit-age.outputs.is_old == 'false' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
-          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv
+          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv
+          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
         run: |
           bash tests/e2e/nightly/scripts/aop_process.sh \
             "${{ steps.classify.outputs.failure_type }}" \
@@ -369,7 +384,8 @@ jobs:
             "HEAD" \
             "" \
             "" \
-            "${{ inputs.name }}"
+            "${{ inputs.name }}" \
+            "${{ inputs.soc_version }}"
 
       - name: On success
         if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}

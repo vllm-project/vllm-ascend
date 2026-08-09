@@ -6,7 +6,6 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   OMP_NUM_THREADS: "1"
   TASK_QUEUE_ENABLE: "1"
-  TASK_QUEUE_ENABLE: "1"
   HCCL_IF_IP: "127.0.0.1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1024"
@@ -60,7 +59,7 @@ _benchmarks_acc: &benchmarks_acc
 _benchmarks_3500_50: &benchmarks_3500_50
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800-qwen3
+    dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 60
@@ -73,7 +72,7 @@ _benchmarks_3500_50: &benchmarks_3500_50
 _benchmarks_3500_20: &benchmarks_3500_20
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800-qwen3
+    dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 48

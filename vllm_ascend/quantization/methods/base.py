@@ -22,6 +22,27 @@ from typing import Any
 import torch
 
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.tp_weight_switch import (
+    TPWeightGatherPart,
+    TPWeightGatherSpec,
+    TPWeightRepeatPart,
+    TPWeightRepeatSpec,
+    TPWeightSwitchMixin,
+    TPWeightSwitchState,
+)
+
+__all__ = [
+    "AscendAttentionScheme",
+    "AscendLinearScheme",
+    "AscendMoEScheme",
+    "QuantType",
+    "TPWeightGatherPart",
+    "TPWeightGatherSpec",
+    "TPWeightRepeatPart",
+    "TPWeightRepeatSpec",
+    "TPWeightSwitchMixin",
+    "TPWeightSwitchState",
+]
 
 
 def get_moe_num_logical_experts(
@@ -38,7 +59,7 @@ def get_moe_num_logical_experts(
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
 
 
-class AscendLinearScheme(ABC):
+class AscendLinearScheme(TPWeightSwitchMixin, ABC):
     """Base class for all linear quantization schemes.
 
     Subclasses must implement get_weight() and apply() methods.
@@ -252,6 +273,10 @@ class AscendMoEScheme(ABC):
             Output tensor after MoE computation.
         """
         ...
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        """Return expert-first weight views consumed by upstream EPLB."""
+        return []
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing for MoE layer.

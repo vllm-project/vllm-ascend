@@ -99,6 +99,17 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
 
+        weight_views = self.scheme.get_eplb_weight_views(layer)
+        self.assertTrue(self.scheme.supports_eplb)
+        self.assertEqual(len(weight_views), 4)
+        for source, weight_view in zip(
+            [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale],
+            weight_views,
+        ):
+            self.assertTrue(weight_view.is_contiguous())
+            self.assertEqual(weight_view.shape[0], self.num_experts)
+            self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx, mock_npu):
@@ -112,12 +123,19 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         layer.w2_weight_scale = nn.Parameter(
             torch.randint(0, 255, (8, 128, 64, 2), dtype=torch.uint8), requires_grad=False
         )
+        layer.swiglu_limit = 0.0
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
         topk_weights = torch.randn(tokens, 2)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2))
         layer.activation = "silu"
-        layer._ascend_pertoken_scale = torch.randn(tokens)
+        layer.ascend_pertoken_scale = torch.randn(tokens)
         layer.apply_router_weight_on_input = True
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.log2phy = None
+        layer.ascend_mc2_mask = None
+        layer.swiglu_alpha = 1.0
+        layer.swiglu_beta = 0.0
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
         mock_ctx.moe_comm_method = mock_comm

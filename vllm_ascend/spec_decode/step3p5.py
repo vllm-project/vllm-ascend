@@ -323,6 +323,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         target_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
@@ -340,8 +341,19 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Dynamic SD: honor the scheduled per-step K, unified with
+        # ``AscendSpecDecodeBaseProposer._propose`` (this override does not call
+        # ``super()``, so it sets the value itself).
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD may schedule K == 0: return an empty [batch_size, 0] draft
+        # (mirrors AscendSpecDecodeBaseProposer._propose) so the downstream
+        # copy/unpack paths -- which key off ``draft_token_ids.shape[1]`` -- stay
+        # consistent. This override does not inherit the base's early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(batch_size, 0, device=target_token_ids.device, dtype=torch.int64)
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1

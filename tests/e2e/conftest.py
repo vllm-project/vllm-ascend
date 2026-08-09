@@ -1177,9 +1177,12 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
-        clear_ascend_config()
-        cleanup_dist_env_and_memory()
+        try:
+            self.model.llm_engine.engine_core.shutdown()
+        finally:
+            del self.model
+            clear_ascend_config()
+            cleanup_dist_env_and_memory()
 
 
 class ModelCache:
