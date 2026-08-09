@@ -13,29 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend MoE-LoRA wrapper (v1).
+"""Ascend MoE LoRA wrapper and routed-token mapping helpers.
 
-Design (see plan in conversation history):
+The wrapper reuses upstream weight allocation, loading, and TP/EP slicing but
+publishes the resulting LoRA context through Ascend's MoERunner pipeline rather
+than the GPU modular kernel. Unquantized LoRA keeps the existing AllGather and
+AlltoAll implementations. Quantized backends inject deltas at their floating
+point GMM boundaries; the first implementation supports W8A8_DYNAMIC with
+AllGather TP and AlltoAll EP execution.
 
-  - Inherits weight allocation / set_lora / slice helpers from upstream
-    FusedMoEWithLoRA. Only the injection mechanism differs: upstream wraps
-    Triton modular kernel internals (`TritonExperts.activation` / `moe_sum`),
-    which do not exist on Ascend. We instead wrap the per-layer
-    `quant_method.apply` and, inside it, temporarily swap the active
-    `MoECommMethod._apply_mlp` so the LoRA delta is added on permuted
-    activations between the grouped GMMs.
-
-  - Per-layer ownership is critical: `_MoECommMethods` is a module-level
-    singleton shared by all 48 MoE layers. If we wrapped `_apply_mlp` at
-    init time, layer N+1 would compose on top of layer N's wrapper and
-    every forward would stack all layers' LoRA deltas. We bracket the swap
-    inside `apply_wrapper` so only the active layer is in effect.
-
-  - v1 deliberately limits scope to: unquant + AllGather + TP-only +
-    no shared experts + no FusedMC2 + no dynamic EPLB. These are the exact
-    conditions under which `Qwen3-30B-A3B-Thinking-2507` runs cleanly with
-    TP=4 EP=1 on 4×64GB. Other paths assert early so users get a clear
-    error rather than silently wrong outputs.
+Shared experts remain ordinary dense LoRA layers. This module preserves their
+module hierarchy and selects a compatible NPU dense expand implementation when
+the MoE wrapper is mapped.
 """
 
 from __future__ import annotations
@@ -43,6 +32,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 from vllm import envs
+from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
@@ -56,6 +46,11 @@ _MOE_LORA_INDEX_FIELDS = (
     "permuted_lora_indices",
     "exchanged_lora_indices",
 )
+
+
+def has_lora(lora_context) -> bool:
+    """Return whether the current batch contains at least one LoRA token."""
+    return lora_context is not None and not lora_context.punica_wrapper.no_lora
 
 
 def reset_lora_indices(lora_context) -> None:
@@ -185,11 +180,10 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:
-        raise AssertionError(
-            "Ascend MoE LoRA does not wrap the shared_experts path "
-            "(it runs outside quant_method.apply). The target model "
-            "Qwen3-30B-A3B-Thinking-2507 has no shared experts; models "
-            "like DeepSeek-V3 are not yet supported."
+        logger.warning_once(
+            "Ascend MoE LoRA: shared_experts detected. Routed-expert LoRA "
+            "uses the MoE path; shared-expert LoRA uses dense wrappers with "
+            "the compatible NPU expand-slice implementation."
         )
 
 
@@ -338,11 +332,26 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        # _build_lora_context is inherited from vLLM, whose GPU constructor
+        # normally initializes these fields. Ascend deliberately skips it.
+        self._lora_stream = None
+        self._events = None
+        self.enable_moe_shared_loras = False
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
         self.n_slices = self.local_num_experts * (self._w13_slices + 1)
+        # Preserve the model-manager-visible module path used to discover and
+        # wrap shared_experts.{gate_up,down}_proj as ordinary dense LoRA.
+        shared_experts = getattr(base_layer, "_shared_experts", None)
+        if shared_experts is not None:
+            self._shared_experts = shared_experts
+
+    def _build_lora_context(self):
+        lora_context = super()._build_lora_context()
+        lora_context.use_ep = self.use_ep
+        return lora_context
 
     # ------------------------------------------------------------------
     # Mapping
