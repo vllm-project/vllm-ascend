@@ -176,11 +176,11 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 24
+    num_prompts: 160
     max_out_len: 1024
-    batch_size: 6
+    batch_size: 40
     request_rate: 0
-    baseline: 95.24
+    baseline: 720.1
     threshold: 0.97
   acc:
     case_type: accuracy
