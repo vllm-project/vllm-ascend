@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -73,7 +73,7 @@ class AscendSFADCPMetadataBuilder(
 ):
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,

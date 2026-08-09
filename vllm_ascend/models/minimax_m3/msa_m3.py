@@ -33,7 +33,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheSpec,
 )
 
@@ -210,7 +209,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -590,7 +589,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
