@@ -1591,18 +1591,79 @@ class AscendSFAImpl(MLAAttentionImpl):
         return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
 
     def _execute_sparse_flash_attention_process(
-        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
-    ):
-        return DeviceOperator.execute_sparse_flash_attention_process(
-            self,
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        *,
+        block_table=None,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if block_table is None:
+            block_table = attn_metadata.block_table
+        kv = kv_cache[0]
+
+        # The kv-quant sparse attention op only accepts packed quantized KV.
+        # Do not route by the feature flag alone: tests and fallback paths may
+        # pass a normal BF16/FP16 KV cache even when the mocked impl exposes a
+        # truthy attribute.
+        use_kv_quant_sparse_attention = kv.dtype in (
+            torch.int8,
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
         )
+        if use_kv_quant_sparse_attention:
+            query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+            result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=self.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=self.sfa_qsfa_tile_size,
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=self.qk_rope_head_dim,
+                return_softmax_lse=return_lse,
+            )
+        else:
+            key_rope = kv_cache[1]
+            result = torch.ops._C_ascend.npu_sparse_flash_attention(
+                query=ql_nope,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=self.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                query_rope=q_pe,
+                key_rope=key_rope,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=sparse_mode,
+                attention_mode=2,
+                return_softmax_lse=return_lse,
+            )
+        if return_lse:
+            return result
+        else:
+            return result[0]
 
     def _record_query_gather_context(
         self,

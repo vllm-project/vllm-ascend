@@ -199,6 +199,11 @@ public:
         }
     }
 
+    __aicore__ inline void SetCrossCoreID(uint32_t id0, uint32_t id1) {
+        id0_ = id0; // 正向同步：生产者通知消费者，或者消费者等待生产者
+        id1_ = id1; // 反向同步：消费者通知生产者，或者生产者等待消费者
+    }
+
     template<bool isReuse = false>
     __aicore__ inline void WaitCrossCore() {
         if constexpr (bufferType == BufferType::GM && syncType == SyncType::CROSS_CORE_SYNC_BACKWARD) {

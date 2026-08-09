@@ -4,6 +4,7 @@ from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
@@ -29,7 +30,17 @@ def test_sfa_dcp_extends_v1_backend() -> None:
     assert "dcp_context" in {field.name for field in fields(AscendSFADCPMetadata)}
 
 
-def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None:
+@pytest.mark.parametrize(
+    ("max_model_len", "expected_replicated_cols"),
+    [
+        (1024, 16),  # cdiv(max_model_len, block_size) is divisible by dcp_size
+        (1055, 20),  # padded up to the next multiple of dcp_size: 9 -> 10
+    ],
+)
+def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table(
+    max_model_len: int,
+    expected_replicated_cols: int,
+) -> None:
     def fake_base_init(self, *args, **kwargs) -> None:
         self.dcp_size = 2
         self.kernel_block_size = 128
@@ -41,7 +52,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
             max_num_seqs=4,
             max_num_batched_tokens=1024,
         ),
-        model_config=SimpleNamespace(max_model_len=1024),
+        model_config=SimpleNamespace(max_model_len=max_model_len),
     )
 
     with patch.object(DCPMetadataBuilderMixin, "__init__", new=fake_base_init):
@@ -52,8 +63,8 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
             torch.device("cpu"),
         )
 
-    assert builder.block_table_replicated_view_buf.shape == (5, 16)
-    assert builder.arange_buffer.shape == (16,)
+    assert builder.block_table_replicated_view_buf.shape == (5, expected_replicated_cols)
+    assert builder.arange_buffer.shape == (expected_replicated_cols,)
 
 
 def _make_builder(rank: int = 0) -> AscendSFADCPMetadataBuilder:

@@ -20,6 +20,7 @@ if (BUILD_OPEN_PROJECT)
                 -Wno-deprecated-declarations
                 -Werror
                 -mllvm -cce-aicore-hoist-movemask=false
+                -Wno-error=cce-compat
     )
 endif()
 

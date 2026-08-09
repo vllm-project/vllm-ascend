@@ -2995,11 +2995,21 @@ class MooncakeConnectorWorker:
             group_local_block_ids: list[list[int]] = []
             is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
             for group_idx, (group_spec, _) in kv_group_items:
+                # local/remote block ids are aligned with the KV cache manager
+                # groups (kv_cache_group_id), not the Mooncake transfer groups:
+                # a manager group may be split into multiple transfer groups
+                # (e.g. SFA MLA + indexer caches share one manager group), so
+                # index the ids by kv_cache_group_id like the transfer stage does.
+                kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
                 if group_spec["kv_cache_spec_type"] == "MambaSpec":
                     # Mamba state is not context-block sharded like attention
                     # KV. Transfer the final state from the final PCP/DCP shard.
-                    group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
-                    group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
+                    group_remote_block_ids.append(
+                        list(meta.remote_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
+                    group_local_block_ids.append(
+                        list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
                     continue
                 # Attention: expand to kernel blocks here. Remote is sliced from remote_first
                 # (skips this rank's prefix-cached blocks) then expanded; local kernels are
@@ -3008,7 +3018,7 @@ class MooncakeConnectorWorker:
                 # n == 0, so both kernel lists naturally come out empty.
                 _, remote_scale, kernel_size = group_kernel_params[group_idx]
                 remote_logical = list(
-                    meta.remote_block_ids[group_idx][remote_first : remote_first + num_blocks_to_pull]
+                    meta.remote_block_ids[kv_cache_group_id][remote_first : remote_first + num_blocks_to_pull]
                 )
                 kernel_remote = self._expand_block_ids(remote_logical, remote_scale)
                 kernel_local = self._local_kernel_ids_for_shard(
@@ -3022,7 +3032,7 @@ class MooncakeConnectorWorker:
                     remote_cp_size,
                     remote_block_size,
                     kernel_size,
-                    list(meta.local_block_ids[group_idx]),
+                    list(meta.local_block_ids[kv_cache_group_id]),
                 )
                 num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
                 group_remote_block_ids.append(kernel_remote[:num_kernel_blocks])

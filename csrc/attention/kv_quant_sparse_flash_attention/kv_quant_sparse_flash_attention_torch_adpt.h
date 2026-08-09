@@ -133,7 +133,7 @@ npu_kv_quant_sparse_flash_attention(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnKvQuantSparseFlashAttention,
+        aclnnKvQuantSparseFlashAttentionV2,
         query,
         key,
         value,
