@@ -20,6 +20,57 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu")
+    def test_postprocess_writes_accepted_counts_to_independent_snapshot(self, mock_postprocess):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.speculative_config = object()
+        runner.model_config = SimpleNamespace(is_hybrid=True)
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner.num_accepted_tokens = SimpleNamespace(
+            cpu=torch.zeros(2, dtype=torch.int32),
+            gpu=torch.zeros(2, dtype=torch.int32),
+        )
+        persistent_counts = torch.ones(2, dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu_tensor=persistent_counts)
+        runner.kv_cache_config = object()
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
+        runner.model = SimpleNamespace(get_mamba_state_copy_func=lambda: ())
+        runner.num_accepted_tokens_event = MagicMock()
+        runner._get_mamba_bufs = MagicMock()
+
+        runner._update_states_after_model_execute(
+            torch.tensor([[10, 11, -1], [20, -1, -1]]),
+            MagicMock(),
+        )
+
+        self.assertIs(
+            mock_postprocess.call_args.kwargs["num_accepted_tokens_cpu_tensor"],
+            runner.num_accepted_tokens.cpu,
+        )
+        self.assertIsNot(
+            mock_postprocess.call_args.kwargs["num_accepted_tokens_cpu_tensor"],
+            persistent_counts,
+        )
+        runner.num_accepted_tokens_event.record.assert_called_once_with()
+
+    def test_remap_uses_snapshot_after_persistent_row_is_overwritten(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        previous_counts = np.ones(16, dtype=np.int32)
+        previous_counts[4] = 3
+        previous_counts[11] = 4
+        persistent_counts = np.ones(16, dtype=np.int32)
+
+        runner.num_accepted_tokens = SimpleNamespace(np=previous_counts)
+        runner.prev_positions = SimpleNamespace(np=np.array([11, -1, 4] + [-1] * 13, dtype=np.int64))
+        runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu=persistent_counts)
+
+        runner._remap_num_accepted_tokens(num_reqs=3)
+
+        np.testing.assert_array_equal(previous_counts[:3], [4, 1, 3])
+        np.testing.assert_array_equal(persistent_counts[:3], [4, 1, 3])
+
+
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
