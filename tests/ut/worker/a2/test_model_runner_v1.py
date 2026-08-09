@@ -15,6 +15,7 @@ class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):
     @patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu")
     def test_postprocess_writes_accepted_counts_to_independent_snapshot(self, mock_postprocess):
         runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_async_scheduling = True
         runner.speculative_config = object()
         runner.model_config = SimpleNamespace(is_hybrid=True)
         runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
@@ -45,6 +46,20 @@ class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):
         )
         runner.num_accepted_tokens_event.record.assert_called_once_with()
 
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.GPUModelRunner._update_states_after_model_execute",
+        autospec=True,
+    )
+    def test_non_async_postprocess_delegates_to_upstream(self, mock_postprocess):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_async_scheduling = False
+        output_token_ids = torch.tensor([[10, -1]])
+        scheduler_output = MagicMock()
+
+        runner._update_states_after_model_execute(output_token_ids, scheduler_output)
+
+        mock_postprocess.assert_called_once_with(runner, output_token_ids, scheduler_output)
+
     def test_remap_uses_snapshot_after_persistent_row_is_overwritten(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         previous_counts = np.ones(16, dtype=np.int32)
@@ -55,11 +70,38 @@ class TestNPUModelRunnerAcceptedTokens(unittest.TestCase):
         runner.num_accepted_tokens = SimpleNamespace(np=previous_counts)
         runner.prev_positions = SimpleNamespace(np=np.array([11, -1, 4] + [-1] * 13, dtype=np.int64))
         runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu=persistent_counts)
+        runner.use_async_scheduling = True
 
-        runner._remap_num_accepted_tokens(num_reqs=3)
+        runner._sync_num_accepted_tokens(num_reqs=3, has_prev_mapping=True)
 
         np.testing.assert_array_equal(previous_counts[:3], [4, 1, 3])
         np.testing.assert_array_equal(persistent_counts[:3], [4, 1, 3])
+
+    def test_async_without_previous_mapping_initializes_current_rows(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        snapshot = np.array([0, 4, 3, 9], dtype=np.int32)
+        persistent_counts = np.array([7, 8, 6, 5], dtype=np.int32)
+        runner.num_accepted_tokens = SimpleNamespace(np=snapshot)
+        runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu=persistent_counts)
+        runner.use_async_scheduling = True
+
+        runner._sync_num_accepted_tokens(num_reqs=3, has_prev_mapping=False)
+
+        np.testing.assert_array_equal(snapshot, [1, 1, 1, 9])
+        np.testing.assert_array_equal(persistent_counts, [1, 1, 1, 5])
+
+    def test_non_async_sync_uses_condensed_input_batch_rows(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        snapshot = np.array([4, 2, 9], dtype=np.int32)
+        persistent_counts = np.array([2, 1, 7], dtype=np.int32)
+        runner.num_accepted_tokens = SimpleNamespace(np=snapshot)
+        runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu=persistent_counts)
+        runner.use_async_scheduling = False
+
+        runner._sync_num_accepted_tokens(num_reqs=2, has_prev_mapping=False)
+
+        np.testing.assert_array_equal(snapshot, [2, 1, 9])
+        np.testing.assert_array_equal(persistent_counts, [2, 1, 7])
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
