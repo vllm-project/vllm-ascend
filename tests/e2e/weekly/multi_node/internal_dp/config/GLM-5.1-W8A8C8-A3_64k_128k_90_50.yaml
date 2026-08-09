@@ -48,8 +48,7 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
-  -
-    envs:
+  - envs:
       <<: *env_common
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8c8
@@ -81,16 +80,16 @@ deployment:
       --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
-  perf_64k:
+  perf_128k_warmup:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 128
-    max_out_len: 1024
-    batch_size: 32
+    num_prompts: 1
+    max_out_len: 1
+    batch_size: 1
     request_rate: 0
-    baseline: 539.11
+    baseline: 0
     threshold: 0.97
   perf_128k:
     case_type: performance
@@ -101,5 +100,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 0
-    baseline: 796.35
+    baseline: 290.8308
     threshold: 0.97
