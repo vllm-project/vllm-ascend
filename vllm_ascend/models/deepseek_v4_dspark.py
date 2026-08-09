@@ -39,6 +39,7 @@ from vllm_ascend.models.deepseek_v4 import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.utils import is_310p
 
 
 def _apply_dsv4_rope(
@@ -54,6 +55,18 @@ def _apply_dsv4_rope(
     sin_t = sin[layer_name]
     if inverse:
         sin_t = -sin_t
+    if is_310p():
+        # ACLop npu_rotary_mul on 310P only supports the half-rotation
+        # layout, while DeepSeek V4 uses pairwise/interleaved RoPE. Reuse the
+        # exact tensor fallback already exercised by the target DSA path.
+        from vllm_ascend._310p.attention.dense_dsa import apply_interleaved_rope
+
+        return apply_interleaved_rope(
+            x,
+            cos_t,
+            sin_t,
+            x.shape[-1],
+        )
     return rotary_emb(x, cos_t, sin_t)
 
 
@@ -130,7 +143,11 @@ class DeepseekV4DSparkModel(nn.Module):
             config.hidden_size,
             bias=False,
             return_bias=False,
-            quant_config=_main_proj_qconfig,
+            # The original DeepSeek V4 checkpoint stores main_proj in
+            # block-FP8. On 310P it uses the same automatic FP8->W8A8
+            # adapter as the other draft linears; other devices keep the
+            # upstream quantization selection.
+            quant_config=vllm_config.quant_config if is_310p() else _main_proj_qconfig,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -200,6 +217,22 @@ class DeepseekV4DSparkModel(nn.Module):
             return
         while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
             swa_kv_cache = swa_kv_cache[0]
+
+        if is_310p():
+            # The generic DSpark path uses the vllm-ascend custom
+            # npu_scatter_nd_update_v2 op, which is not built in the 310P
+            # image. Reuse the graph-safe paged SWA writer exercised by the
+            # target DeepSeek V4 attention path. It accepts both flat slot
+            # ids and [block, offset] mappings.
+            from vllm_ascend._310p.attention.dense_dsa import write_paged_swa_cache
+
+            write_paged_swa_cache(
+                swa_kv_cache,
+                shared_kv,
+                slot_mapping,
+                swa_cache_layer.block_size,
+            )
+            return
 
         from vllm_ascend.device.device_op import DeviceOperator
 
@@ -281,12 +314,17 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-
         # check if quant config exist
         from vllm_ascend.patch.worker.patch_draft_quarot import get_rotation_path
 
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
 
+        # DeepSeek V4 DSpark does not carry stage-local vocabulary weights.
+        # The checkpoint exposes only the target model's standalone
+        # ``embed.weight`` and ``head.weight`` tensors, so every DSpark stage
+        # reuses the already loaded target embedding and LM head.
+        self.has_own_embed_tokens = False
+        self.has_own_lm_head = False
         self.model = DeepseekV4DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -350,6 +388,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return self.model.get_draft_kv_cache_layer_names()
 
+    def get_draft_attn_causal(self) -> list[bool]:
+        # DeepSeek V4 DSpark uses the non-causal draft mask that this backend
+        # used before the generic proposer exposed per-model causality.
+        return [False] * len(self.model.layers)
+
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(aux_hidden_states)
 
@@ -408,16 +451,30 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
 
+            # Keep E8M0 scales in their checkpoint dtype when the destination
+            # parameter is also float8_e8m0fnu. Converting the source to uint8
+            # before ``copy_`` would perform a numerical cast rather than a
+            # bit-preserving copy and corrupt the expert W8A8 scales.
             if ".experts." in name:
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
                     name_mapped = name.replace(weight_name, param_name)
                     param = params_dict[name_mapped]
+                    weight_to_load = loaded_weight
+                    if (
+                        "weight_scale" in name_mapped
+                        and loaded_weight.dtype == torch.float8_e8m0fnu
+                        and param.dtype == torch.uint8
+                    ):
+                        # Some backends intentionally register raw E8M0 scale
+                        # storage as bytes. Only those destinations need a
+                        # bit-level float8 view conversion.
+                        weight_to_load = loaded_weight.view(torch.uint8)
                     weight_loader = typing.cast(typing.Callable[..., bool], param.weight_loader)
                     success = weight_loader(
                         param,
-                        loaded_weight,
+                        weight_to_load,
                         name_mapped,
                         shard_id=shard_id,
                         expert_id=expert_id,
@@ -447,6 +504,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]
+                if (
+                    name.endswith(".weight_scale")
+                    and param.ndim == 2
+                    and loaded_weight.ndim == 2
+                    and param.shape[0] == loaded_weight.shape[0]
+                    and loaded_weight.shape[1] == param.shape[1] * tp_size
+                ):
+                    # RowParallelLinear shards the input dimension. Its FP8
+                    # block-scale Parameter does not carry ``input_dim``, so
+                    # vLLM's generic weight_loader cannot infer this split.
+                    # Shard the scale's input-block dimension explicitly.
+                    shard_width = param.shape[1]
+                    loaded_weight = loaded_weight.narrow(
+                        1,
+                        tp_rank * shard_width,
+                        shard_width,
+                    )
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)

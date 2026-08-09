@@ -27,6 +27,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - DeepSeek released new DeepSeek-V4-Flash-DSpark weights on July 31, 2026. Download the quantized `DeepSeek-V4-Flash-0731-w8a8` weight from [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8).
 
+- Atlas 300I DUO can serve the original DeepSeek-V4-Flash-0731 checkpoint directly; FP8/MXFP4 weights are converted to the 310P execution format while loading. This path was validated on 4 × Atlas 300I DUO 96GB (8 logical 310P devices in total) with TP8/EP8.
+
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
@@ -141,7 +143,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8). The original DeepSeek-V4-Flash-0731 checkpoint is also supported on Atlas 300I DUO.
 
 === "A2 series"
 
@@ -311,6 +313,25 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         }'
     ```
 
+=== "Atlas 300I DUO"
+
+    ```shell
+    vllm serve /path/to/DeepSeek-V4-Flash-0731 \
+        --served-model-name dsv4 \
+        --port 8900 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --dtype float16 \
+        --max-model-len 128 \
+        --max-num-seqs 1 \
+        --kv-cache-memory 134217728 \
+        --block-size 32 \
+        --no-enable-prefix-caching \
+        --enforce-eager
+    ```
+
+    The 310P backend is selected automatically. DSpark can be enabled with the same checkpoint using `--speculative-config '{"method":"dspark","model":"/path/to/DeepSeek-V4-Flash-0731","num_speculative_tokens":5,"enforce_eager":true}'`. The currently validated 310P configuration uses a 128-token context and one active sequence.
+
 Key Parameter Descriptions:
 
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
@@ -335,7 +356,7 @@ curl http://<node0_ip>:8900/v1/chat/completions \
                 "content": "Who are you?"
             }
         ],
-        "max_tokens": 256,
+        "max_tokens": 64,
         "temperature": 0
     }'
 ```

@@ -15,6 +15,8 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
     make_eplb_placement_config,
+    resolve_live_ep_rank,
+    sync_live_ep_rank,
     use_multistage_eplb_load,
 )
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
@@ -81,6 +83,49 @@ def test_make_eplb_placement_config_does_not_copy_source():
     assert placement_config.dynamic_eplb is True
     assert placement_config.num_redundant_experts == 8
     assert source.num_redundant_experts == 0
+
+
+def test_sync_live_ep_rank_overwrites_rfork_parent_rank():
+    moe_config = SimpleNamespace(
+        moe_parallel_config=SimpleNamespace(ep_rank=0),
+    )
+
+    sync_live_ep_rank(moe_config, 6)
+
+    assert moe_config.moe_parallel_config.ep_rank == 6
+
+
+def test_resolve_live_ep_rank_ignores_stale_coordinator_rank(monkeypatch):
+    ep_group = SimpleNamespace(
+        rank_in_group=0,
+        ranks=[0, 1, 2, 3, 4, 5, 6, 7],
+        device_group=object(),
+    )
+    monkeypatch.setattr(routed_experts_module, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 6)
+
+    assert resolve_live_ep_rank() == 6
+
+
+def test_ascend_routed_experts_ep_rank_is_310p_scoped(monkeypatch):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.moe_config = SimpleNamespace(ep_rank=2)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_ep_group",
+        lambda: SimpleNamespace(
+            rank_in_group=0,
+            ranks=[0, 1, 2, 3, 4, 5, 6, 7],
+            device_group=object(),
+        ),
+    )
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 5)
+
+    monkeypatch.setattr(routed_experts_module, "is_310p", lambda: False)
+    assert routed_experts.ep_rank == 2
+
+    monkeypatch.setattr(routed_experts_module, "is_310p", lambda: True)
+    assert routed_experts.ep_rank == 5
 
 
 def test_ascend_unquantized_skips_upstream_modular_kernel_init():

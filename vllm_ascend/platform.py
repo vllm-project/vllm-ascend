@@ -237,6 +237,24 @@ class NPUPlatform(Platform):
         }
 
         if is_310p():
+            from vllm.config import get_current_vllm_config
+
+            from vllm_ascend._310p.deepseek_v4 import get_dsv4_310p_backend
+
+            current_vllm_config = get_current_vllm_config()
+            dsv4_backend = get_dsv4_310p_backend(
+                model_config=current_vllm_config.model_config,
+                tensor_parallel_size=current_vllm_config.parallel_config.tensor_parallel_size,
+                use_mla=attn_selector_config.use_mla,
+                use_sparse=attn_selector_config.use_sparse,
+                use_compress=use_compress,
+            )
+            if dsv4_backend is not None:
+                logger.warning_once(
+                    "Using the experimental DeepSeek V4 backend for Ascend 310P: %s",
+                    dsv4_backend,
+                )
+                return dsv4_backend
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
         return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
@@ -277,6 +295,10 @@ class NPUPlatform(Platform):
             from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
+
+            # DeepSeek V4 checkpoints use the deepseek_v4_fp8 quantization
+            # name. Register the Ascend override before model construction.
+            from vllm_ascend.quantization.fp8_config import AscendFp8Config  # noqa: F401
 
         _config_deprecated_logging()
 

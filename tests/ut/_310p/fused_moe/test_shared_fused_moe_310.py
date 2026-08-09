@@ -14,8 +14,10 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -219,6 +221,99 @@ def test_shared_experts_part2_310_applies_optional_gate(with_gate):
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_shared_experts_caches_model_owned_310p_fallback_marker(monkeypatch, enabled):
+    layer = SimpleNamespace(_ascend_use_310p_quantized_fallback=enabled)
+    moe_config = SimpleNamespace(
+        hidden_dim=4,
+        in_dtype=torch.float16,
+        swiglu_limit=0.0,
+        swiglu_alpha=1.0,
+        swiglu_beta=0.0,
+    )
+    quant_method = SimpleNamespace(process_weights_after_loading=lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        shared_experts_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(multistream_overlap_shared_expert=False),
+    )
+
+    shared_experts = AscendSharedExperts(layer, moe_config, QuantType.W8A8, quant_method)
+
+    assert shared_experts.use_310p_quantized_fallback is enabled
+
+
+def test_shared_experts_uses_310p_quantized_fallback(monkeypatch):
+    hidden_states = torch.randn(2, 4, dtype=torch.float16)
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2, dtype=torch.float32)
+    gate_up_output = torch.randn(2, 6, dtype=torch.float16)
+    quantized_activation = torch.ones(2, 3, dtype=torch.int8)
+    activation_scale = torch.ones(2, dtype=torch.float32)
+    expected_output = torch.randn(2, 4, dtype=torch.float16)
+
+    gate_up_proj = SimpleNamespace(
+        weight=torch.ones(4, 6, dtype=torch.int8),
+        weight_scale=torch.ones(6, dtype=torch.float32),
+    )
+    down_proj = SimpleNamespace(
+        weight=torch.ones(3, 4, dtype=torch.int8),
+        weight_scale=torch.ones(4, dtype=torch.float32),
+    )
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
+    )
+    shared_experts.quant_type = QuantType.W8A8
+    shared_experts.multistream_overlap = False
+    shared_experts.use_310p_quantized_fallback = True
+    shared_experts.swiglu_limit = 0.0
+    shared_experts.swiglu_alpha = 1.0
+    shared_experts.swiglu_beta = 0.0
+
+    current_stream = MagicMock()
+    quant_matmul = MagicMock(side_effect=[gate_up_output, expected_output])
+    swiglu_quant = MagicMock(return_value=(quantized_activation, activation_scale))
+
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(
+        shared_experts_module.torch_npu,
+        "npu_dynamic_quant",
+        MagicMock(return_value=(quantized_input, input_scale)),
+        raising=False,
+    )
+    monkeypatch.setattr(shared_experts_module.torch_npu, "npu_quant_matmul", quant_matmul)
+    monkeypatch.setattr(
+        "vllm_ascend._310p.ops.swiglu_quant.swiglu_quant_310p",
+        swiglu_quant,
+    )
+    monkeypatch.setattr(
+        shared_experts_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+
+    output = shared_experts.forward(
+        hidden_states,
+        FusedMoEEvents(before_routed_experts=object()),
+    )
+
+    assert output is expected_output
+    first_call, second_call = quant_matmul.call_args_list
+    assert first_call.kwargs["pertoken_scale"] is input_scale
+    assert first_call.kwargs["output_dtype"] == hidden_states.dtype
+    swiglu_quant.assert_called_once_with(
+        gate_up_output,
+        clamp_limit=0.0,
+        glu_alpha=1.0,
+        glu_bias=0.0,
+    )
+    assert second_call.kwargs["pertoken_scale"] is activation_scale
+    assert second_call.kwargs["output_dtype"] == hidden_states.dtype
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])

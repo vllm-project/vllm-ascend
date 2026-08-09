@@ -149,16 +149,14 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
     ) -> torch.Tensor:
         # NOTE(310P):
         # - There is an accuracy issue currently, which is expected to be fixed in the next version.
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
-        need_unsqz = False
-        if pertoken_scale.dim() == 2:
-            need_unsqz = True
-            quantized_x = quantized_x.squeeze(dim=1)
-            pertoken_scale = pertoken_scale.squeeze(dim=1)
+        input_shape = x.shape
+        flattened_x = x if x.ndim == 2 else x.reshape(-1, input_shape[-1])
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(flattened_x)
+        pertoken_scale = pertoken_scale.reshape(-1)
 
         # NOTE(310P):
         # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        output = torch_npu.npu_quant_matmul(
+        flattened_output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight.data,
             layer.weight_scale,
@@ -166,9 +164,7 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
             bias=bias,
             output_dtype=x.dtype,
         )
-        if need_unsqz:
-            output = output.unsqueeze(dim=1)
-        return output
+        return flattened_output.reshape(*input_shape[:-1], flattened_output.shape[-1])
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # cast quantized weight tensors in NZ format for higher inference speed

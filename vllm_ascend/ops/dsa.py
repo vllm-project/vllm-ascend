@@ -185,7 +185,13 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     if forward_context.attn_metadata:
-        attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
+        if self.dsa_attn.attn_backend.get_name() == "ASCEND_DSA_310P":
+            attn_metadata = filter_exact_metadata(
+                forward_context.attn_metadata,
+                self.swa_cache_layer.prefix,
+            )
+        else:
+            attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
     else:
         attn_metadata = forward_context.attn_metadata
 
@@ -224,6 +230,26 @@ direct_register_custom_op(
 def filter_metadata(metadata, prefix):
     # filter using prefix, sort by key for deterministic order
     return [v for k, v in sorted(metadata.items()) if k.startswith(prefix)]
+
+
+def filter_exact_metadata(metadata, prefix):
+    """Return metadata belonging to one exact cache-layer namespace.
+
+    A DeepSeek V4 attention module owns several cache-backed helper layers
+    (compressed KV, compressor state, indexer state and SWA).  The 310P dense
+    fallback consumes the SWA cache only.  Filtering with the parent attention
+    prefix and then choosing the first/last entry makes the selected metadata
+    depend on lexicographic ordering and on the layer's compression ratio.
+    Select the SWA cache namespace directly instead.
+    """
+    # Sort by key for deterministic behavior while accepting nested names.
+    selected = [v for k, v in sorted(metadata.items()) if k == prefix or k.startswith(f"{prefix}.")]
+    if len(selected) != 1:
+        matching_keys = [k for k in sorted(metadata) if k == prefix or k.startswith(f"{prefix}.")]
+        raise ValueError(
+            f"Expected exactly one attention metadata entry for {prefix}, got {len(selected)}: {matching_keys}"
+        )
+    return selected
 
 
 def _build_kv_cache(self, forward_context):

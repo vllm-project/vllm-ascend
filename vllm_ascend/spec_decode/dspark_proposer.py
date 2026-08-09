@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
@@ -16,6 +17,105 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.utils import is_310p
+
+
+def _dspark_table_block_size(
+    block_table: torch.Tensor,
+    physical_block_size: int,
+    max_model_len: int,
+) -> int:
+    """Return the token span represented by one block-table entry.
+
+    Hybrid KV groups expose one physical SWA page as several logical entries.
+    Their IDs are contiguous logical sub-block IDs, so multiplying them by the
+    physical page size produces invalid cache slots.
+    """
+    from vllm_ascend._310p.attention.dense_dsa import infer_blocks_per_phys_block_from_shape
+
+    blocks_per_phys_block = infer_blocks_per_phys_block_from_shape(
+        block_table,
+        physical_block_size,
+        max_model_len,
+    )
+    return physical_block_size // blocks_per_phys_block
+
+
+def _copy_and_expand_dspark_inputs_torch(
+    *,
+    next_token_ids: torch.Tensor,
+    target_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor,
+    out_input_ids: torch.Tensor,
+    out_context_positions: torch.Tensor,
+    out_query_positions: torch.Tensor,
+    out_context_slot_mapping: torch.Tensor,
+    out_query_slot_mapping: torch.Tensor,
+    out_token_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_rejected_tokens: torch.Tensor | None,
+    parallel_drafting_token_id: int,
+    block_size: int,
+    num_query_per_req: int,
+    num_speculative_tokens: int,
+    total_input_tokens: int,
+    batch_size: int,
+    sample_from_anchor: bool,
+) -> None:
+    """Pure-device fallback for the DSpark Triton metadata expansion.
+
+    Ascend 310P images do not provide a Triton backend. The operation is only
+    integer metadata preparation, so a vectorized torch implementation avoids
+    a host round-trip while preserving the Triton kernel's layout exactly.
+    """
+    out_context_positions[:total_input_tokens].copy_(target_positions[:total_input_tokens])
+    out_context_slot_mapping[:total_input_tokens].copy_(context_slot_mapping[:total_input_tokens])
+
+    rejected = (
+        num_rejected_tokens[:batch_size] if num_rejected_tokens is not None else torch.zeros_like(seq_lens[:batch_size])
+    )
+    context_ends = query_start_loc[1 : batch_size + 1]
+    valid_context_ends = context_ends - rejected
+    last_indices = (valid_context_ends - 1).clamp_min(0).to(torch.long)
+    last_positions = target_positions.index_select(0, last_indices)
+
+    query_offsets = torch.arange(
+        num_query_per_req,
+        dtype=last_positions.dtype,
+        device=last_positions.device,
+    )
+    query_positions = last_positions[:, None] + 1 + query_offsets[None, :]
+    num_query_total = batch_size * num_query_per_req
+    out_query_positions[:num_query_total].copy_(query_positions.reshape(-1))
+
+    effective_seq_lens = seq_lens[:batch_size] - rejected
+    query_cache_positions = effective_seq_lens[:, None] + query_offsets[None, :]
+    block_numbers = query_cache_positions // int(block_size)
+    block_numbers = block_numbers.clamp(min=0, max=int(block_table.shape[1]) - 1)
+    block_ids = torch.gather(
+        block_table[:batch_size],
+        1,
+        block_numbers.to(torch.long),
+    )
+    query_slots = block_ids * int(block_size) + query_cache_positions % int(block_size)
+    out_query_slot_mapping[:num_query_total].copy_(query_slots.reshape(-1).to(torch.int32))
+
+    query_input_ids = out_input_ids[:num_query_total].view(batch_size, num_query_per_req)
+    query_input_ids.fill_(int(parallel_drafting_token_id))
+    query_input_ids[:, 0].copy_(next_token_ids[:batch_size])
+
+    request_bases = torch.arange(batch_size, dtype=torch.int32, device=next_token_ids.device) * int(num_query_per_req)
+    sample_start = 0 if sample_from_anchor else 1
+    sample_offsets = torch.arange(
+        sample_start,
+        sample_start + num_speculative_tokens,
+        dtype=torch.int32,
+        device=next_token_ids.device,
+    )
+    sample_indices = request_bases[:, None] + sample_offsets[None, :]
+    out_token_indices[: batch_size * num_speculative_tokens].copy_(sample_indices.reshape(-1))
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -39,7 +139,18 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark probabilistic draft sampling is not supported on the v1 "
                 "model runner; use greedy (the default) instead."
             )
-        self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
+        hf_config = self.draft_model_config.hf_config
+        # DeepSeek V4 DSpark is trained with its checkpoint-specific noise
+        # token in every non-anchor query slot. The generic parallel-drafting
+        # base defaults this value to token 0, which collapses acceptance.
+        self.parallel_drafting_token_id = int(
+            getattr(
+                hf_config,
+                "dspark_noise_token_id",
+                getattr(self, "parallel_drafting_token_id", 0),
+            )
+        )
+        self.sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -378,35 +489,72 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid_block_table is None:
                 continue
             kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
-                # Inputs
-                next_token_ids_ptr=next_token_ids,
-                target_positions_ptr=target_positions,
-                context_slot_mapping_ptr=self._per_group_slot_mappings[gid],
-                # Outputs
-                out_input_ids_ptr=self.input_ids,
-                out_context_positions_ptr=self._context_positions_buffer,
-                out_query_positions_ptr=self.positions,
-                out_context_slot_mapping_ptr=self._per_group_context_slot_mapping_buffers[gid],
-                out_query_slot_mapping_ptr=self._per_group_query_slot_mapping_buffers[gid],
-                out_token_indices_ptr=token_indices_to_sample,
-                # Block table
-                block_table_ptr=gid_block_table,
-                block_table_stride=gid_block_table.stride(0),
-                # Metadata
-                query_start_loc_ptr=cad.query_start_loc,
-                seq_lens_ptr=cad.seq_lens,
-                num_rejected_tokens_ptr=num_rejected_tokens_gpu,
-                # Scalars
-                parallel_drafting_token_id=self.parallel_drafting_token_id,
-                block_size=kv_block_size,
-                num_query_per_req=self.num_query_per_req,
-                num_speculative_tokens=self.num_speculative_tokens,
-                total_input_tokens=self._dflash_num_context,
-                batch_size=batch_size,
-                HAS_NUM_REJECTED=has_num_rejected,
-                SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
-            )
+            table_block_size = kv_block_size
+            if is_310p():
+                model_config = getattr(self.vllm_config, "model_config", None)
+                max_model_len = getattr(
+                    model_config,
+                    "max_model_len",
+                    int(gid_block_table.shape[1]) * kv_block_size,
+                )
+                table_block_size = _dspark_table_block_size(
+                    gid_block_table,
+                    kv_block_size,
+                    max_model_len,
+                )
+            if HAS_TRITON:
+                copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+                    # Inputs
+                    next_token_ids_ptr=next_token_ids,
+                    target_positions_ptr=target_positions,
+                    context_slot_mapping_ptr=self._per_group_slot_mappings[gid],
+                    # Outputs
+                    out_input_ids_ptr=self.input_ids,
+                    out_context_positions_ptr=self._context_positions_buffer,
+                    out_query_positions_ptr=self.positions,
+                    out_context_slot_mapping_ptr=self._per_group_context_slot_mapping_buffers[gid],
+                    out_query_slot_mapping_ptr=self._per_group_query_slot_mapping_buffers[gid],
+                    out_token_indices_ptr=token_indices_to_sample,
+                    # Block table
+                    block_table_ptr=gid_block_table,
+                    block_table_stride=gid_block_table.stride(0),
+                    # Metadata
+                    query_start_loc_ptr=cad.query_start_loc,
+                    seq_lens_ptr=cad.seq_lens,
+                    num_rejected_tokens_ptr=num_rejected_tokens_gpu,
+                    # Scalars
+                    parallel_drafting_token_id=self.parallel_drafting_token_id,
+                    block_size=table_block_size,
+                    num_query_per_req=self.num_query_per_req,
+                    num_speculative_tokens=self.num_speculative_tokens,
+                    total_input_tokens=self._dflash_num_context,
+                    batch_size=batch_size,
+                    HAS_NUM_REJECTED=has_num_rejected,
+                    SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                )
+            else:
+                _copy_and_expand_dspark_inputs_torch(
+                    next_token_ids=next_token_ids,
+                    target_positions=target_positions,
+                    context_slot_mapping=self._per_group_slot_mappings[gid],
+                    out_input_ids=self.input_ids,
+                    out_context_positions=self._context_positions_buffer,
+                    out_query_positions=self.positions,
+                    out_context_slot_mapping=self._per_group_context_slot_mapping_buffers[gid],
+                    out_query_slot_mapping=self._per_group_query_slot_mapping_buffers[gid],
+                    out_token_indices=token_indices_to_sample,
+                    block_table=gid_block_table,
+                    query_start_loc=cad.query_start_loc,
+                    seq_lens=cad.seq_lens,
+                    num_rejected_tokens=num_rejected_tokens_gpu,
+                    parallel_drafting_token_id=self.parallel_drafting_token_id,
+                    block_size=table_block_size,
+                    num_query_per_req=self.num_query_per_req,
+                    num_speculative_tokens=self.num_speculative_tokens,
+                    total_input_tokens=self._dflash_num_context,
+                    batch_size=batch_size,
+                    sample_from_anchor=self.sample_from_anchor,
+                )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx

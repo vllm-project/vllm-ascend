@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 def _prepare_inputs_source() -> str:
@@ -88,6 +89,29 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
 
     assert calls == ["update", "model"]
     torch.testing.assert_close(hidden_states, torch.ones(1))
+
+
+def test_dsv4_310p_delegates_kv_allocation_to_mla_aware_base() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.model_config = object()
+    kv_cache_config = object()
+    expected = {"model.layers.0.self_attn": torch.ones(1)}
+
+    with (
+        patch(
+            "vllm_ascend._310p.model_runner_310p.is_deepseek_v4_model",
+            return_value=True,
+        ),
+        patch.object(
+            NPUModelRunner,
+            "_allocate_kv_cache_tensors",
+            return_value=expected,
+        ) as base_allocate,
+    ):
+        result = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+    assert result is expected
+    base_allocate.assert_called_once_with(runner, kv_cache_config)
 
 
 class TestNPUModelRunner310(TestBase):

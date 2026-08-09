@@ -29,7 +29,11 @@ import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.spec_decode.dspark_proposer import (
+    AscendDSparkProposer,
+    _copy_and_expand_dspark_inputs_torch,
+    _dspark_table_block_size,
+)
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
@@ -62,7 +66,11 @@ class _DSparkProposerTestBase:
         hf_config: SimpleNamespace | None = None,
     ):
         device = torch.device("cpu")
-        vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
+        if hf_config is None:
+            hf_config = SimpleNamespace(dspark_noise_token_id=128799)
+        elif not hasattr(hf_config, "dspark_noise_token_id"):
+            hf_config.dspark_noise_token_id = 128799
+        vllm_config = cls._make_vllm_config(hf_config)
 
         def mock_parent_init(
             proposer: AscendDSparkProposer,
@@ -82,13 +90,21 @@ class _DSparkProposerTestBase:
             proposer._dflash_hidden_states = torch.empty(0)
             proposer.model = SimpleNamespace(get_draft_attn_causal=lambda: [False])
 
-        with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
+        ascend_config = SimpleNamespace(dynamic_spec_config=SimpleNamespace(method=None, method_params={}))
+        with (
+            patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init),
+            patch(
+                "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+                return_value=ascend_config,
+            ),
+        ):
             proposer = AscendDSparkProposer(vllm_config, device)
 
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
-        proposer.parallel_drafting_token_id = 0
+        # Preserve the checkpoint-specific DSpark noise token set by the
+        # constructor; individual expansion tests may override it explicitly.
         proposer.kv_cache_gid = 0
         proposer._dflash_num_context = 0
 
@@ -198,6 +214,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     @pytest.mark.parametrize("dp_padding", MULTI_DP_PADDING_SIZES)
     def test_positions_not_pre_sliced(self, monkeypatch, dp_padding):
         """``cad.positions`` must be the full buffer, not ``[:num_query_total]``."""
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.HAS_TRITON", True)
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
             MagicMock(),
@@ -218,6 +235,7 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     def test_positions_full_and_padded_for_dsa(self, monkeypatch, dp_padding):
         """After set_inputs_first_pass + _pad_draft_buffers, positions[:num_input]
         is full-length and zero-padded in the DP region."""
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.HAS_TRITON", True)
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
             MagicMock(),
@@ -320,6 +338,17 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
                 "in _propose, otherwise the attention backend reads un-zeroed "
                 "positions in the DP-padding region."
             )
+
+
+class TestDSparkNoiseToken(_DSparkProposerTestBase):
+    def test_uses_checkpoint_noise_token_for_parallel_queries(self):
+        proposer = self._make_proposer(
+            max_num_tokens=32,
+            num_reqs=2,
+            block_size=5,
+            hf_config=SimpleNamespace(dspark_noise_token_id=128799),
+        )
+        assert proposer.parallel_drafting_token_id == 128799
 
 
 class TestDSparkInitialization(_DSparkProposerTestBase):
@@ -478,6 +507,12 @@ class TestDSparkInitValidation:
             draft_sample_method="greedy",
             hidden_size=hidden,
         )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+            lambda: SimpleNamespace(
+                dynamic_spec_config=SimpleNamespace(method=None, method_params={})
+            ),
+        )
         proposer = AscendDSparkProposer(vllm_config, device)
 
         blk = 1 + num_spec
@@ -512,6 +547,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
 
     @pytest.fixture(autouse=True)
     def _mock_kernel(self, monkeypatch):
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.HAS_TRITON", True)
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer."
             "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
@@ -609,6 +645,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
     token count before adding the draft block size, and flag the kernel."""
 
     def test_seq_lens_subtracts_rejected(self, monkeypatch):
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.HAS_TRITON", True)
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer."
             "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
@@ -629,6 +666,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
 
     def test_kernel_called_with_has_num_rejected(self, monkeypatch):
         kernel = MagicMock()
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer.HAS_TRITON", True)
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer."
             "copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid",
@@ -650,6 +688,112 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         assert kwargs["HAS_NUM_REJECTED"] is True
         assert kwargs["num_rejected_tokens_ptr"] is rejected
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
+
+
+class TestDSparkTorchInputExpansion:
+    def test_anchor_first_layout_matches_triton_contract(self):
+        batch_size = 2
+        num_query_per_req = 3
+        num_speculative_tokens = 3
+        total_context = 5
+
+        next_token_ids = torch.tensor([101, 202], dtype=torch.int64)
+        target_positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
+        context_slots = torch.tensor([30, 31, 40, 41, 42], dtype=torch.int32)
+        query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+        seq_lens = torch.tensor([2, 3], dtype=torch.int32)
+        block_table = torch.tensor(
+            [[10, 11, 12], [20, 21, 22]],
+            dtype=torch.int32,
+        )
+
+        out_input_ids = torch.full((6,), -1, dtype=torch.int64)
+        out_context_positions = torch.full((5,), -1, dtype=torch.int32)
+        out_query_positions = torch.full((6,), -1, dtype=torch.int32)
+        out_context_slots = torch.full((5,), -1, dtype=torch.int32)
+        out_query_slots = torch.full((6,), -1, dtype=torch.int32)
+        out_token_indices = torch.full((6,), -1, dtype=torch.int32)
+
+        _copy_and_expand_dspark_inputs_torch(
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            context_slot_mapping=context_slots,
+            out_input_ids=out_input_ids,
+            out_context_positions=out_context_positions,
+            out_query_positions=out_query_positions,
+            out_context_slot_mapping=out_context_slots,
+            out_query_slot_mapping=out_query_slots,
+            out_token_indices=out_token_indices,
+            block_table=block_table,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            num_rejected_tokens=None,
+            parallel_drafting_token_id=999,
+            block_size=4,
+            num_query_per_req=num_query_per_req,
+            num_speculative_tokens=num_speculative_tokens,
+            total_input_tokens=total_context,
+            batch_size=batch_size,
+            sample_from_anchor=True,
+        )
+
+        assert torch.equal(out_context_positions, target_positions)
+        assert torch.equal(out_context_slots, context_slots)
+        assert torch.equal(
+            out_input_ids,
+            torch.tensor([101, 999, 999, 202, 999, 999], dtype=torch.int64),
+        )
+        assert torch.equal(
+            out_query_positions,
+            torch.tensor([2, 3, 4, 3, 4, 5], dtype=torch.int32),
+        )
+        assert torch.equal(
+            out_query_slots,
+            torch.tensor([42, 43, 44, 83, 84, 85], dtype=torch.int32),
+        )
+        assert torch.equal(out_token_indices, torch.arange(6, dtype=torch.int32))
+
+    def test_hybrid_block_table_uses_logical_subblock_span(self):
+        physical_block_size = 32
+        max_model_len = 128
+        block_table = torch.arange(160, 224, dtype=torch.int32).view(1, 64)
+        table_block_size = _dspark_table_block_size(
+            block_table,
+            physical_block_size,
+            max_model_len,
+        )
+        assert table_block_size == 2
+
+        out_query_slots = torch.full((5,), -1, dtype=torch.int32)
+        _copy_and_expand_dspark_inputs_torch(
+            next_token_ids=torch.tensor([7], dtype=torch.int64),
+            target_positions=torch.arange(14, dtype=torch.int32),
+            context_slot_mapping=torch.arange(14, dtype=torch.int32),
+            out_input_ids=torch.full((5,), -1, dtype=torch.int64),
+            out_context_positions=torch.full((14,), -1, dtype=torch.int32),
+            out_query_positions=torch.full((5,), -1, dtype=torch.int32),
+            out_context_slot_mapping=torch.full((14,), -1, dtype=torch.int32),
+            out_query_slot_mapping=out_query_slots,
+            out_token_indices=torch.full((5,), -1, dtype=torch.int32),
+            block_table=block_table,
+            query_start_loc=torch.tensor([0, 14], dtype=torch.int32),
+            seq_lens=torch.tensor([14], dtype=torch.int32),
+            num_rejected_tokens=None,
+            parallel_drafting_token_id=128799,
+            block_size=table_block_size,
+            num_query_per_req=5,
+            num_speculative_tokens=5,
+            total_input_tokens=14,
+            batch_size=1,
+            sample_from_anchor=True,
+        )
+
+        # Logical block IDs 167, 167, 168, 168, 169 map to physical slots
+        # 334..338, rather than 5134..5138 from multiplying by 32.
+        assert torch.equal(
+            out_query_slots,
+            torch.tensor([334, 335, 336, 337, 338], dtype=torch.int32),
+        )
 
 
 class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):

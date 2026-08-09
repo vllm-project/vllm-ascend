@@ -74,6 +74,7 @@ def create_ascend_fused_moe_router(
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
             eplb_state=eplb_state,
+            tid2eid=tid2eid,
         )
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         top_k=top_k,

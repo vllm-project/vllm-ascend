@@ -184,6 +184,42 @@ class TestBlockTable310(TestBase):
         np.testing.assert_array_equal(block_table.slot_mapping.np[:16], expected)
         np.testing.assert_array_equal(block_table.slot_mapping.gpu[:16].cpu().numpy(), expected)
 
+    def test_multi_group_compressed_position_crosses_raw_block_boundary(self):
+        multi_group_block_table = self._create_multi_group_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+            block_sizes=[32, 32],
+            max_num_blocks=[4, 1],
+            kernel_sizes=[[32], [2]],
+        )
+        multi_group_block_table[0].add_row([10, 11, 12, 13], 0)
+        multi_group_block_table[1].add_row([100], 0)
+
+        # Raw SWA position 32 enters block 1, while the c128 group receives
+        # compressed position 0 rather than indexing raw position 32.
+        multi_group_block_table.compute_slot_mapping(
+            np.array([0], dtype=np.int64),
+            np.array([32], dtype=np.int64),
+            positions_compressed_list=[
+                np.array([32], dtype=np.int64),
+                np.array([0], dtype=np.int64),
+            ],
+            req_indices_compressed_list=[
+                np.array([0], dtype=np.int64),
+                np.array([0], dtype=np.int64),
+            ],
+        )
+
+        np.testing.assert_array_equal(
+            multi_group_block_table[0].slot_mapping.np[:1],
+            np.array([11 * 32], dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            multi_group_block_table[1].slot_mapping.np[:1],
+            np.array([100 * 32], dtype=np.int32),
+        )
+
     def test_compute_slot_mapping_rejects_device_tensor_inputs(self):
         block_table = self._create_block_table(
             dcp_world_size=1,

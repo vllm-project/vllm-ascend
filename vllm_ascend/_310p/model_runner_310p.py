@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend._310p.deepseek_v4 import is_deepseek_v4_model
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
@@ -56,6 +57,7 @@ from vllm_ascend.spec_decode.utils import (
 )
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
+    get_compressed_pos_and_indices,
     is_rc_device,
     lmhead_tp_enable,
 )
@@ -341,9 +343,18 @@ class NPUModelRunner310(NPUModelRunner):
             out=positions_np,
         )
         block_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
+        positions_compressed_list, req_indices_compressed_list, _ = get_compressed_pos_and_indices(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs],
+            num_scheduled_tokens,
+            self.arange_np[:num_reqs],
+            self.use_compress,
+            self.kv_cache_config.kv_cache_groups,
+        )
         block_table.compute_slot_mapping(
             req_indices,
             positions_np[:total_num_scheduled_tokens],
+            positions_compressed_list=positions_compressed_list,
+            req_indices_compressed_list=req_indices_compressed_list,
         )
 
         if self.use_dcp:
@@ -702,6 +713,12 @@ class NPUModelRunner310(NPUModelRunner):
         if self.vllm_config.kv_transfer_config is not None:
             logger.error("KV cache transfer is not supported.")
             raise ValueError("KV cache transfer is not supported for 310P.")
+        if is_deepseek_v4_model(self.model_config):
+            logger.warning_once(
+                "Initializing DeepSeek V4 KV caches through the experimental 310P path. "
+                "This reuses the shared Ascend MLA/DSA cache layout."
+            )
+            return super().initialize_kv_cache_tensors(kv_cache_config)
         if self.use_sparse:
             logger.error("Deepseek Sparse Attention is not supported.")
             raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
@@ -731,6 +748,15 @@ class NPUModelRunner310(NPUModelRunner):
             dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer.
         """
+        if is_deepseek_v4_model(self.model_config):
+            # The generic Ascend allocator already understands
+            # AscendMLAAttentionSpec and splits DeepSeek MLA cache pages into
+            # the compressed latent K cache and RoPE cache.  Calling the base
+            # implementation explicitly avoids dispatching back into this
+            # 310P AttentionSpec-only allocator from
+            # NPUModelRunner.initialize_kv_cache_tensors().
+            return NPUModelRunner._allocate_kv_cache_tensors(self, kv_cache_config)
+
         # init kv cache tensors
         kv_cache: dict[str, list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]] = {}
         # get kv cache spec for each layer

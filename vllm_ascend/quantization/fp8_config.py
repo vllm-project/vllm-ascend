@@ -2,19 +2,29 @@ from typing import Any, Optional, cast
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 
-from vllm_ascend.utils import FP8_METHOD
+from vllm_ascend.utils import FP8_METHOD, is_310p
 
 from .methods import get_scheme_class
 
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
     return isinstance(layer, (MoERunner, RoutedExperts))
+
+
+def _uses_dsv4_310p_adapter() -> bool:
+    if not is_310p():
+        return False
+
+    from vllm_ascend._310p.deepseek_v4 import is_deepseek_v4_model
+
+    return is_deepseek_v4_model(get_current_vllm_config().model_config)
 
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
@@ -115,13 +125,35 @@ class AscendFp8Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = FP8_METHOD
 
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "ds_linear", self.packed_modules_mapping)
-            quant_method = AscendLinearMethod(scheme)
+            if _uses_dsv4_310p_adapter():
+                from vllm_ascend._310p.quantization.methods.fp8_to_w8a8 import (
+                    AscendFP8ToW8A8DynamicLinearMethod310,
+                )
+
+                linear_scheme = AscendFP8ToW8A8DynamicLinearMethod310(self.quant_description)
+                return AscendLinearMethod(linear_scheme)
+
+            linear_scheme = create_scheme_for_layer(
+                self.quant_description, prefix, "ds_linear", self.packed_modules_mapping
+            )
+            quant_method = AscendLinearMethod(linear_scheme)
             return quant_method
         if _is_fused_moe_layer(layer):
             layer.ascend_quant_method = FP8_METHOD
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "w4a8_moe", self.packed_modules_mapping)
-            quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
+            if _uses_dsv4_310p_adapter():
+                from vllm_ascend._310p.quantization.methods.w4a8_mxfp4 import (
+                    AscendMXFP4ToW8A8DynamicFusedMoEMethod310,
+                )
+
+                moe_scheme = AscendMXFP4ToW8A8DynamicFusedMoEMethod310(
+                    self.quant_description,
+                    tid2eid=tid2eid,
+                )
+                return AscendFusedMoEMethod(moe_scheme, layer.moe_config, tid2eid=tid2eid)
+            moe_scheme = create_scheme_for_layer(
+                self.quant_description, prefix, "w4a8_moe", self.packed_modules_mapping
+            )
+            quant_method = AscendFusedMoEMethod(moe_scheme, layer.moe_config, tid2eid=tid2eid)
             return quant_method
         return None
 
