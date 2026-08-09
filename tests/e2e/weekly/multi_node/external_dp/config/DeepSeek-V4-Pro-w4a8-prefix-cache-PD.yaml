@@ -112,7 +112,7 @@ templates:
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.95"
       - --quantization
       - "ascend"
       - --block-size
@@ -164,7 +164,7 @@ templates:
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.94"
+      - "0.95"
       - --quantization
       - "ascend"
       - --block-size
@@ -222,7 +222,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,"method": "mtp"}'
       - --gpu-memory-utilization
-      - "0.95"
+      - "0.96"
       - --quantization
       - "ascend"
       - --compilation-config
@@ -277,7 +277,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,"method": "mtp"}'
       - --gpu-memory-utilization
-      - "0.95"
+      - "0.96"
       - --quantization
       - "ascend"
       - --compilation-config
