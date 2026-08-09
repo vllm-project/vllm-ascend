@@ -835,6 +835,11 @@ class NPUModelRunner(GPUModelRunner):
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
         """Update cached hybrid-model states after model execution."""
+        if not self.use_async_scheduling:
+            return super()._update_states_after_model_execute(
+                output_token_ids, scheduler_output
+            )
+
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
@@ -877,6 +882,21 @@ class NPUModelRunner(GPUModelRunner):
         accepted[:num_reqs] = accepted[np.where(new_mask, 0, prev_idx)]
         accepted[:num_reqs][new_mask] = 1
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
+
+    def _sync_num_accepted_tokens(
+        self, num_reqs: int, has_prev_mapping: bool
+    ) -> None:
+        """Sync accepted counts while preserving their scheduling-mode owner."""
+        if self.use_async_scheduling:
+            if has_prev_mapping:
+                self._remap_num_accepted_tokens(num_reqs)
+            else:
+                self.num_accepted_tokens.np[:num_reqs].fill(1)
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs].fill(1)
+        else:
+            self.num_accepted_tokens.np[:num_reqs] = (
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            )
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1149,14 +1169,9 @@ class NPUModelRunner(GPUModelRunner):
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            # Async mode: condense() reordered indices, use prev_positions mapping
-            if self.use_async_scheduling and prev_req_id_to_index:
-                self._remap_num_accepted_tokens(num_reqs)
-            else:
-                # Non-async mode: use values directly
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                    self.num_accepted_tokens.np[:num_reqs]
-                )
+            self._sync_num_accepted_tokens(
+                num_reqs, has_prev_mapping=bool(prev_req_id_to_index)
+            )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
