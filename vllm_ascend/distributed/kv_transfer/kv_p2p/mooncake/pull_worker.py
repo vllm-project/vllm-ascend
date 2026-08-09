@@ -414,7 +414,13 @@ class MooncakePullRecvingThread(threading.Thread):
                 requests,
                 transfer_block_ids_by_spec,
             )
-            self._execute_transfer_block_buckets(remote_pp_rank, pp_metadata, transfer_block_buckets)
+            self._execute_transfer_block_buckets(
+                remote_pp_rank,
+                pp_metadata,
+                remote_metadata.tp_size,
+                remote_metadata.dcp_size,
+                transfer_block_buckets,
+            )
 
     def _build_transfer_block_buckets(
         self,
@@ -424,9 +430,23 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_dcp_size: int,
         requests: dict[str, ReqMeta],
         transfer_block_ids_by_spec: dict[str, dict[int, list[tuple[int, list[int], list[int]]]]],
-    ) -> dict[int, list[tuple[str, int, int, list[int], list[int]]]]:
-        """Bucket one PP rank's requests and layer block IDs by remote TP rank."""
-        transfer_block_buckets: dict[int, list[tuple[str, int, int, list[int], list[int]]]] = {}
+    ) -> dict[
+        int,
+        dict[
+            int,
+            dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+        ],
+    ]:
+        """Bucket one PP rank's requests by remote TP, spec index, and layer pair."""
+        # remote_tp_rank -> local_spec_index -> (local_layer_index, remote_layer_index) ->
+        # [(request_id, local_kernel_block_ids, remote_kernel_block_ids), ...]
+        transfer_block_buckets: dict[
+            int,
+            dict[
+                int,
+                dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+            ],
+        ] = {}
         for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
@@ -472,14 +492,10 @@ class MooncakePullRecvingThread(threading.Thread):
                     request_block_ids_by_spec[spec_index] = transfer_block_ids
 
                 for remote_tp_rank, local_block_ids, remote_block_ids in transfer_block_ids:
-                    transfer_block_buckets.setdefault(remote_tp_rank, []).append(
-                        (
-                            request_id,
-                            local_layer_index,
-                            remote_layer_index,
-                            local_block_ids,
-                            remote_block_ids,
-                        )
+                    transfer_entries_by_spec = transfer_block_buckets.setdefault(remote_tp_rank, {})
+                    transfer_entries_by_layer = transfer_entries_by_spec.setdefault(spec_index, {})
+                    transfer_entries_by_layer.setdefault(layer_pair, []).append(
+                        (request_id, local_block_ids, remote_block_ids)
                     )
         return transfer_block_buckets
 
@@ -600,64 +616,218 @@ class MooncakePullRecvingThread(threading.Thread):
             for candidate_tp_ranks in remote_tp_rank_groups
         ]
 
-    def _append_layer_transfer_addresses(
+    def _append_spec_transfer_addresses(
         self,
-        request_id: str,
-        local_layer_index: int,
-        remote_layer_index: int,
+        spec_index: int,
         remote_tp_rank: int,
-        spec: KVCacheSpec,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        transfer_entries_by_layer: dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
         remote_metadata: MooncakePPTransferMetadata,
         src_list: list[int],
         dst_list: list[int],
         length_list: list[int],
     ) -> None:
-        """Append one layer's addresses to one remote TP transfer bucket."""
-        raise NotImplementedError(
-            "Mooncake transfer address calculation is not implemented for "
-            f"request {request_id!r}, layer {self.layer_names[local_layer_index]!r}, "
-            f"remote PP layer index {remote_layer_index}, TP rank {remote_tp_rank}, "
-            f"spec {type(spec).__name__}"
+        """Append all layers and requests belonging to one local spec."""
+        for (local_layer_index, _), transfer_entries in transfer_entries_by_layer.items():
+            for request_id, local_block_ids, remote_block_ids in transfer_entries:
+                if len(local_block_ids) != len(remote_block_ids):
+                    raise ValueError(
+                        f"Mooncake block ID count mismatch for request {request_id!r}, "
+                        f"layer {self.layer_names[local_layer_index]!r}: "
+                        f"local={len(local_block_ids)}, remote={len(remote_block_ids)}"
+                    )
+        if not any(
+            local_block_ids
+            for transfer_entries in transfer_entries_by_layer.values()
+            for _, local_block_ids, _ in transfer_entries
+        ):
+            return
+
+        spec = self.kv_cache_specs[spec_index]
+        if isinstance(spec, MambaSpec):
+            raise NotImplementedError("Mooncake Mamba transfer address calculation is not implemented")
+        remote_tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
+        transfer_whole_block = isinstance(
+            spec,
+            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
         )
+        if transfer_whole_block:
+            for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
+                local_base_addrs = self.kv_caches_base_addr[local_layer_index]
+                remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
+                if len(local_base_addrs) != len(remote_base_addrs):
+                    raise ValueError(
+                        f"Mooncake KV tensor count mismatch for layer {self.layer_names[local_layer_index]!r}: "
+                        f"local={len(local_base_addrs)}, remote={len(remote_base_addrs)}"
+                    )
+                for cache_index, (local_base_addr, remote_base_addr) in enumerate(
+                    zip(local_base_addrs, remote_base_addrs)
+                ):
+                    local_block_stride = self.block_strides[local_layer_index][cache_index]
+                    remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
+                    local_block_len = self.block_lens[local_layer_index][cache_index]
+                    remote_block_len = remote_metadata.block_lens[remote_layer_index][cache_index]
+                    if local_block_len != remote_block_len:
+                        raise ValueError(
+                            f"Mooncake whole-block length mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
+                            f"local={local_block_len}, remote={remote_block_len}"
+                        )
+                    for _, local_block_ids, remote_block_ids in transfer_entries:
+                        for local_block_id, remote_block_id in zip(local_block_ids, remote_block_ids):
+                            src_list.append(local_base_addr + local_block_id * local_block_stride)
+                            dst_list.append(remote_base_addr + remote_block_id * remote_block_stride)
+                            length_list.append(local_block_len)
+            return
+
+        if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            raise NotImplementedError(f"Mooncake transfer address calculation does not support {type(spec).__name__}")
+
+        first_local_layer_index, first_remote_layer_index = next(iter(transfer_entries_by_layer))
+        if isinstance(spec, SlidingWindowSpec):
+            local_attention_dcp_size = remote_attention_dcp_size = 1
+        else:
+            local_attention_dcp_size = self.dcp_size
+            remote_attention_dcp_size = remote_dcp_size
+        local_num_heads = self.block_shapes[first_local_layer_index][0][0]
+        remote_num_heads = remote_metadata.block_shapes[first_remote_layer_index][0][0]
+        total_num_kv_heads = self._infer_total_num_kv_heads(
+            local_num_kv_heads=local_num_heads,
+            remote_num_kv_heads=remote_num_heads,
+            remote_tp_size=remote_tp_size,
+            local_dcp_size=local_attention_dcp_size,
+            remote_dcp_size=remote_attention_dcp_size,
+            fixed_total_num_kv_heads=None,
+        )
+        local_head_tp_size = self.tp_size // local_attention_dcp_size
+        remote_head_tp_size = remote_tp_size // remote_attention_dcp_size
+        local_head_tp_rank = self.tp_rank // local_attention_dcp_size
+        remote_head_tp_rank = remote_tp_rank // remote_attention_dcp_size
+        local_head_start, local_head_end = self._get_head_interval(
+            local_head_tp_rank, local_head_tp_size, total_num_kv_heads
+        )
+        remote_head_start, remote_head_end = self._get_head_interval(
+            remote_head_tp_rank, remote_head_tp_size, total_num_kv_heads
+        )
+        transfer_head_start = max(local_head_start, remote_head_start)
+        transfer_head_end = min(local_head_end, remote_head_end)
+        if transfer_head_start >= transfer_head_end:
+            raise ValueError(
+                f"Mooncake found no head overlap for local TP {self.tp_rank} and remote TP {remote_tp_rank}"
+            )
+        if local_head_end - local_head_start != local_num_heads:
+            raise ValueError(
+                f"Mooncake local HND head shape does not match inferred topology for spec {spec_index}: "
+                f"shape={local_num_heads}, interval={local_head_end - local_head_start}"
+            )
+        if remote_head_end - remote_head_start != remote_num_heads:
+            raise ValueError(
+                f"Mooncake remote HND head shape does not match inferred topology for spec {spec_index}: "
+                f"shape={remote_num_heads}, interval={remote_head_end - remote_head_start}"
+            )
+
+        local_head_offset = transfer_head_start - local_head_start
+        remote_head_offset = transfer_head_start - remote_head_start
+        num_transfer_heads = transfer_head_end - transfer_head_start
+        for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
+            local_base_addrs = self.kv_caches_base_addr[local_layer_index]
+            remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
+            if len(local_base_addrs) != len(remote_base_addrs):
+                raise ValueError(
+                    f"Mooncake KV tensor count mismatch for layer {self.layer_names[local_layer_index]!r}: "
+                    f"local={len(local_base_addrs)}, remote={len(remote_base_addrs)}"
+                )
+            if self.block_shapes[local_layer_index][0][0] != local_num_heads:
+                raise ValueError(f"Mooncake local head count differs within spec {spec_index}")
+            if remote_metadata.block_shapes[remote_layer_index][0][0] != remote_num_heads:
+                raise ValueError(f"Mooncake remote head count differs within local spec {spec_index}")
+
+            for cache_index, (local_base_addr, remote_base_addr) in enumerate(zip(local_base_addrs, remote_base_addrs)):
+                local_block_shape = self.block_shapes[local_layer_index][cache_index]
+                remote_block_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
+                if not local_block_shape or local_block_shape[0] != local_num_heads:
+                    raise ValueError(
+                        f"Mooncake local K/V head counts differ for layer {self.layer_names[local_layer_index]!r}"
+                    )
+                if not remote_block_shape or remote_block_shape[0] != remote_num_heads:
+                    raise ValueError(
+                        f"Mooncake remote K/V head counts differ for layer {self.layer_names[local_layer_index]!r}"
+                    )
+
+                local_block_stride = self.block_strides[local_layer_index][cache_index]
+                remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
+                local_block_len = self.block_lens[local_layer_index][cache_index]
+                remote_block_len = remote_metadata.block_lens[remote_layer_index][cache_index]
+                if local_block_len % local_num_heads or remote_block_len % remote_num_heads:
+                    raise ValueError(
+                        f"Mooncake HND block length is not divisible by head count for layer "
+                        f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                    )
+                local_head_len = local_block_len // local_num_heads
+                remote_head_len = remote_block_len // remote_num_heads
+                if local_head_len != remote_head_len:
+                    raise ValueError(
+                        f"Mooncake P/D head length mismatch for layer {self.layer_names[local_layer_index]!r}, "
+                        f"cache {cache_index}: local={local_head_len}, remote={remote_head_len}"
+                    )
+                transfer_len = num_transfer_heads * local_head_len
+                local_inner_offset = local_head_offset * local_head_len
+                remote_inner_offset = remote_head_offset * remote_head_len
+                for _, local_block_ids, remote_block_ids in transfer_entries:
+                    for local_block_id, remote_block_id in zip(local_block_ids, remote_block_ids):
+                        src_list.append(local_base_addr + local_block_id * local_block_stride + local_inner_offset)
+                        dst_list.append(remote_base_addr + remote_block_id * remote_block_stride + remote_inner_offset)
+                        length_list.append(transfer_len)
 
     def _execute_transfer_block_buckets(
         self,
         remote_pp_rank: int,
         remote_metadata: MooncakePPTransferMetadata,
-        transfer_block_buckets: dict[int, list[tuple[str, int, int, list[int], list[int]]]],
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        transfer_block_buckets: dict[
+            int,
+            dict[
+                int,
+                dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+            ],
+        ],
     ) -> None:
         """Calculate addresses and execute one PP rank's TP buckets serially."""
-        for remote_tp_rank, transfer_entries in transfer_block_buckets.items():
+        for remote_tp_rank, transfer_entries_by_spec in transfer_block_buckets.items():
             self._execute_tp_transfer_bucket(
                 remote_pp_rank,
                 remote_tp_rank,
+                remote_tp_size,
+                remote_dcp_size,
                 remote_metadata,
-                transfer_entries,
+                transfer_entries_by_spec,
             )
 
     def _execute_tp_transfer_bucket(
         self,
         remote_pp_rank: int,
         remote_tp_rank: int,
+        remote_tp_size: int,
+        remote_dcp_size: int,
         remote_metadata: MooncakePPTransferMetadata,
-        transfer_entries: list[tuple[str, int, int, list[int], list[int]]],
+        transfer_entries_by_spec: dict[
+            int,
+            dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+        ],
     ) -> None:
         """Calculate addresses and execute one remote PP/TP transfer bucket."""
         src_list: list[int] = []
         dst_list: list[int] = []
         length_list: list[int] = []
-        for request_id, local_layer_index, remote_layer_index, local_block_ids, remote_block_ids in transfer_entries:
-            spec = self.kv_cache_specs[self.spec_indices[local_layer_index]]
-            self._append_layer_transfer_addresses(
-                request_id=request_id,
-                local_layer_index=local_layer_index,
-                remote_layer_index=remote_layer_index,
+        for spec_index, transfer_entries_by_layer in transfer_entries_by_spec.items():
+            self._append_spec_transfer_addresses(
+                spec_index=spec_index,
                 remote_tp_rank=remote_tp_rank,
-                spec=spec,
-                local_block_ids=local_block_ids,
-                remote_block_ids=remote_block_ids,
+                remote_tp_size=remote_tp_size,
+                remote_dcp_size=remote_dcp_size,
+                transfer_entries_by_layer=transfer_entries_by_layer,
                 remote_metadata=remote_metadata,
                 src_list=src_list,
                 dst_list=dst_list,
