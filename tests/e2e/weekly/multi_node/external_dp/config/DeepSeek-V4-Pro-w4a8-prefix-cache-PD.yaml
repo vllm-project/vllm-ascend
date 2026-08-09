@@ -95,7 +95,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "133120"
       - --max-num-batched-tokens
       - "8192"
       - --max-num-seqs
@@ -147,7 +147,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "133120"
       - --max-num-batched-tokens
       - "8192"
       - --max-num-seqs
@@ -199,7 +199,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "133120"
       - --max-num-batched-tokens
       - "120"
       - --max-num-seqs
@@ -254,7 +254,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "133120"
       - --max-num-batched-tokens
       - "120"
       - --max-num-seqs
