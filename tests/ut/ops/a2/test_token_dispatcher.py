@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
@@ -486,6 +487,72 @@ def test_allgather_token_dispatch_mxfp4_keeps_prequantized_scale():
     assert output.dynamic_scale is returned_scale
 
 
+@pytest.mark.parametrize(
+    ("no_lora", "expected_quant_mode", "expect_dynamic_scale"),
+    [(False, -1, False), (True, 1, True)],
+)
+def test_allgather_w8a8_lora_controls_dispatch_quantization(
+    no_lora,
+    expected_quant_mode,
+    expect_dynamic_scale,
+):
+    dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
+    dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=no_lora)))
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    returned_scale = torch.randn(2)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.W8A8,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1, 1], dtype=torch.int32),
+        returned_scale,
+    )
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=init_routing_output,
+    ) as mock_init_routing:
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    assert mock_init_routing.call_args.kwargs["quant_mode"] == expected_quant_mode
+    assert (output.dynamic_scale is not None) == expect_dynamic_scale
+
+
+def test_allgather_bf16_lora_skips_quant_backend_validation():
+    dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
+    dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=False)))
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.NONE,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1, 1], dtype=torch.int32),
+        None,
+    )
+
+    with (
+        patch("vllm_ascend.ops.fused_moe.token_dispatcher.validate_quant_moe_lora_activation_input") as mock_validate,
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ),
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    mock_validate.assert_not_called()
+    assert output.dynamic_scale is None
+
+
 class TestTokenDispatcherWithAllGather(TestBase):
     def setUp(self):
         # Mock dependencies
@@ -666,6 +733,14 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_ep_rank_prop = patcher2.start()
         self.mock_ep_size_prop = patcher3.start()
 
+        # TokenDispatcherWithAll2AllV obtains the local rank while building
+        # the HCCL group name.  A MagicMock group alone is not sufficient on
+        # vLLM v0.26.0: torch.distributed.get_rank still attempts to resolve
+        # the uninitialized default process group first.
+        patcher_rank = patch("torch.distributed.get_rank", return_value=0)
+        self.mock_get_rank = patcher_rank.start()
+        self.addCleanup(patcher_rank.stop)
+
         # Mock torch_npu.npu_moe_token_permute
         patcher4 = patch("torch_npu.npu_moe_token_permute")
         self.mock_npu_moe_token_permute = patcher4.start()
@@ -679,7 +754,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
-        patcher6 = patch("vllm_ascend.ops.fused_moe.comm_utils.async_all_to_all")
+        patcher6 = patch("vllm_ascend.ops.fused_moe.token_dispatcher.async_all_to_all")
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16), MagicMock())
@@ -705,7 +780,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_current_device.return_value = "cpu"
 
         # Mock torch_npu.npu_dynamic_quant
-        patcher10 = patch("torch_npu.npu_dynamic_quant")
+        patcher10 = patch("torch_npu.npu_dynamic_quant", create=True)
         self.mock_npu_dynamic_quant = patcher10.start()
         self.addCleanup(patcher10.stop)
         self.mock_npu_dynamic_quant.return_value = (torch.randn(16, 16), torch.randn(16))
@@ -751,6 +826,36 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertIsNotNone(result.group_list)
         self.assertEqual(result.group_list_type, 1)
         self.assertIsInstance(result.combine_metadata, MoEAllToAllCombineMetadata)
+
+    def test_w8a8_lora_dispatch_preserves_float_activations(self):
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False),
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W8A8,
+        )
+
+        # This test covers dispatch-side activation quantization, not the
+        # separately tested LoRA index exchange collective.
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+            result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        self.mock_npu_dynamic_quant.assert_not_called()
+        self.assertIsNone(result.dynamic_scale)
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):

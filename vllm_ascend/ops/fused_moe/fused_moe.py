@@ -40,7 +40,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.lora.fused_moe import has_lora, sync_lora_context
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
@@ -777,11 +777,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             hidden_states = self._prepare_shared_expert_input(hidden_states)
 
             # Only used for int quantization
-            has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
-                self._shared_experts.down_proj, "weight_scale"
+            routed_experts = getattr(self, "routed_experts", None)
+            lora_context = getattr(routed_experts, "_ascend_moe_lora_context", None)
+            has_quantized_shared_without_lora = (
+                not has_lora(lora_context)
+                and hasattr(self._shared_experts.gate_up_proj, "weight_scale")
+                and hasattr(self._shared_experts.down_proj, "weight_scale")
             )
             shared_uses_situ = isinstance(self._shared_experts.act_fn, AscendSituAndMul)
-            if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -840,7 +844,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     bias=None,
                     output_dtype=original_dtype,
                 )
-            elif has_quantized_shared and self.quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
+            elif has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
