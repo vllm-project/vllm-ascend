@@ -428,23 +428,23 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 "remote_request_id",
             )
             if all(field in params for field in required_remote_fields):
-                if num_external_tokens > 0:
-                    local_block_ids = blocks.get_unhashed_block_ids_all_groups()
-                    local_full_block_ids = blocks.get_block_ids()
-                else:
-                    local_block_ids = tuple()
-                    local_full_block_ids = tuple()
-                self._reqs_need_recv[request.request_id] = (
-                    request,
-                    local_block_ids,
-                    local_full_block_ids,
-                    num_external_tokens,
-                )
-                self._reqs_recv_info[request.request_id] = (
+                remote = (
                     params["remote_host"],
                     params["remote_port"],
                     params["remote_request_id"],
                 )
+                if num_external_tokens > 0:
+                    self._reqs_need_recv[request.request_id] = (
+                        request,
+                        blocks.get_unhashed_block_ids_all_groups(),
+                        blocks.get_block_ids(),
+                        num_external_tokens,
+                    )
+                    self._reqs_recv_info[request.request_id] = remote
+                else:
+                    if self._recving_thread is None:
+                        raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
+                    self._recving_thread.add_request(*remote)
             else:
                 logger.warning("Got invalid KVTransferParams. params=%s.", params)
         else:
