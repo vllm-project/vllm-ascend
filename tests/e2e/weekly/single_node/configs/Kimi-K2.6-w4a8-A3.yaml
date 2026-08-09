@@ -269,7 +269,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 6
         request_rate: 0
-        baseline: 95.376
+        baseline: 95.3761
         threshold: 0.97
   - name: "Kimi-K2.6-W4A8-in254k-out1k"
     model: "Eco-Tech/Kimi-K2.6-w4a8"
