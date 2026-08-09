@@ -110,7 +110,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30001",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -174,7 +173,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30001",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -229,7 +227,6 @@ templates:
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
-      - --quantization ascend
       - --enable-auto-tool-choice
       - --quantization
       - "ascend"
@@ -241,7 +238,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "2",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -307,7 +303,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "3",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
