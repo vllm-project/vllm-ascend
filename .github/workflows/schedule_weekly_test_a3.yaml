@@ -29,10 +29,11 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test (main or releases/v0.18.0)'
         required: true
-        default: 'main'
+        default: 'releases/v0.23.0'
         type: choice
         options:
           - main
+          - releases/v0.23.0
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
         required: false
