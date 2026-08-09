@@ -187,6 +187,7 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1777,10 +1778,6 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if self.vllm_config.model_config.enable_return_routed_experts:
-            if self.routed_experts_initialized:
-                self.routed_experts_capturer.clear_buffer()
-
         if self.ascend_config.scheduler_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
             # This flag is set cross-process via scheduler_output because
@@ -2086,10 +2083,14 @@ class NPUModelRunner(GPUModelRunner):
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
-        if self.calculate_kv_scales:  # type: ignore[has-type]
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False  # type: ignore[has-type]
+        # main2main compat: the `--calculate-kv-scales` option (and
+        # `cache_config.calculate_kv_scales`) was removed upstream after 0.26.0,
+        # so `self.calculate_kv_scales` no longer exists on vllm main.
+        if vllm_version_is("0.26.0"):
+            if self.calculate_kv_scales:  # type: ignore[has-type]
+                cudagraph_mode = CUDAGraphMode.NONE
+                # Mark KV scales as calculated after the first forward pass
+                self.calculate_kv_scales = False  # type: ignore[has-type]
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -3710,6 +3711,17 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def init_routed_experts_capturer(self):
+        super().init_routed_experts_capturer()
+        # main2main compat: upstream main binds the routed-experts capturer via
+        # the module-level `bind_routed_experts_capturer`, which sets
+        # `set_capture_fn` on the MoE routers. Ascend's MoE path instead reads
+        # `_ascend_routed_experts_capturer` from the AscendMoERunner, so re-apply
+        # the Ascend binding on vllm main. (On 0.26.0 `super()` already calls
+        # `self._bind_routed_experts_capturer`.)
+        if not vllm_version_is("0.26.0"):
+            self._bind_routed_experts_capturer(self.routed_experts_capturer)
 
     def _bind_routed_experts_capturer(self, capturer=None) -> None:
         # test_qwen3_moe_routing_replay

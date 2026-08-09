@@ -44,7 +44,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoE, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -89,7 +88,22 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
+
+# vLLM main renamed the FusedMoE factory to FusedMoEFactory (PR #50148).
+if vllm_version_is("0.26.0"):
+    from vllm.model_executor.layers.fused_moe import (  # type: ignore[import-not-found]
+        FusedMoE as FusedMoEFactory,
+    )
+    from vllm.model_executor.layers.fused_moe import (
+        fused_moe_make_expert_params_mapping,
+    )
+else:
+    from vllm.model_executor.layers.fused_moe import (  # type: ignore[import-not-found]
+        FusedMoEFactory,
+        fused_moe_make_expert_params_mapping,
+    )
 
 
 def _get_ascend_dsa_backend():
@@ -433,7 +447,7 @@ class DeepseekV4MoE(nn.Module):
             self.gate.tid2eid = None
             self.gate.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -475,7 +489,7 @@ class DeepseekV4MoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
+            # In this case, the gate/router runs inside the MoERunner class
             fused_moe_out = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,

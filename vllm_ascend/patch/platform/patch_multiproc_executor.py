@@ -20,6 +20,8 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -37,8 +39,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             f"_parallel_size ({pcp_parallel_size}). "
         )
 
-        # Set multiprocessing envs
-        set_multiprocessing_worker_envs()
+        # Set multiprocessing envs. main2main compat: upstream
+        # set_multiprocessing_worker_envs() gained a local_world_size param in
+        # vllm main after 0.26.0 (per-worker OMP_NUM_THREADS = available CPUs //
+        # local_world_size). 0.26.0's version takes no args and caps threads at 1.
+        if vllm_version_is("0.26.0"):
+            set_multiprocessing_worker_envs()
+        else:
+            set_multiprocessing_worker_envs(self.local_world_size)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
