@@ -30,9 +30,7 @@ on:
         description: 'Branch to test (main or releases/v0.18.0)'
         required: true
         default: 'main'
-        type: choice
-        options:
-          - main
+        type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
         required: false
