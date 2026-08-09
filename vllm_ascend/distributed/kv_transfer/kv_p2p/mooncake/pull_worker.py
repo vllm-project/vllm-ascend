@@ -450,13 +450,16 @@ class MooncakePullRecvingThread(threading.Thread):
                             local_kernel_block_size,
                             remote_kernel_block_size,
                         )
-                        expanded_block_ids = self._expand_group_block_ids(
+                        expanded_block_ids = self._compute_group_block_ids(
                             spec_index,
+                            self.local_metadata.spec_block_sizes[spec_index],
+                            pp_metadata.spec_block_sizes[remote_spec_index],
                             request_metadata.local_block_ids[group_index],
                             request_metadata.local_full_block_ids[group_index],
                             request_metadata.remote_block_ids[group_index],
                             request_metadata.local_num_prompt_tokens,
                             request_metadata.remote_num_prompt_tokens,
+                            request_metadata.num_computed_tokens,
                             self.block_size_scales[local_layer_index][0],
                             pp_metadata.block_size_scales[remote_layer_index][0],
                             spec,
@@ -480,31 +483,61 @@ class MooncakePullRecvingThread(threading.Thread):
 
         return src_lists, dst_lists, length_lists
 
-    def _expand_group_block_ids(
+    @staticmethod
+    def _expand_block_ids(block_ids: list[int], scale: int) -> list[int]:
+        """Expand logical block IDs into contiguous kernel block IDs."""
+        if scale == 1:
+            return block_ids
+        return [block_id * scale + offset for block_id in block_ids for offset in range(scale)]
+
+    def _compute_group_block_ids(
         self,
         spec_index: int,
+        local_block_size: int,
+        remote_block_size: int,
         local_group_block_ids: list[int],
         local_full_group_block_ids: list[int],
         remote_group_block_ids: list[int],
         local_num_prompt_tokens: int,
         remote_num_prompt_tokens: int,
+        num_computed_tokens: int,
         local_block_size_scale: int,
         remote_block_size_scale: int,
         spec: KVCacheSpec,
     ) -> tuple[list[int], list[int]]:
         """Generate the local and remote kernel block ID sequences for one spec."""
-        if isinstance(spec, AscendSFAIndexerCacheSpec):
-            pass
-        if isinstance(spec, SlidingWindowMLASpec):
-            pass
-        if isinstance(spec, MLAAttentionSpec):
-            pass
         if isinstance(spec, SlidingWindowSpec):
-            pass
+            assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
+            local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
+            local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+            remote_kernel_block_ids = self._expand_block_ids(
+                remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
+            )
+            num_kernel_blocks = min(len(local_kernel_block_ids), len(remote_kernel_block_ids))
+            return local_kernel_block_ids[:num_kernel_blocks], remote_kernel_block_ids[:num_kernel_blocks]
         if isinstance(spec, FullAttentionSpec):
-            pass
+            if self.dcp_size > 1 and not isinstance(spec, AscendSFAIndexerCacheSpec):
+                if local_block_size != remote_block_size:
+                    raise NotImplementedError("Mooncake DCP with different P/D logical block sizes is not implemented")
+                remote_start_block_idx = num_computed_tokens // remote_block_size
+                local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+                remote_kernel_block_ids = self._expand_block_ids(
+                    remote_group_block_ids[remote_start_block_idx:], remote_block_size_scale
+                )
+                local_kernel_block_ids = local_kernel_block_ids[self.dcp_rank :: self.dcp_size]
+                remote_kernel_block_ids = remote_kernel_block_ids[self.dcp_rank :: self.dcp_size]
+            else:
+                local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+                remote_kernel_block_ids = self._expand_block_ids(remote_group_block_ids, remote_block_size_scale)
+                kernel_block_size = local_block_size // local_block_size_scale
+                remote_start_block_idx = num_computed_tokens // kernel_block_size
+                remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
+            num_kernel_blocks = min(len(local_kernel_block_ids), len(remote_kernel_block_ids))
+            return local_kernel_block_ids[:num_kernel_blocks], remote_kernel_block_ids[:num_kernel_blocks]
         if isinstance(spec, MambaSpec):
-            pass
+            local_state_block_id = local_group_block_ids[-self.num_speculative_tokens - 1]
+            remote_state_block_id = remote_group_block_ids[-1]
+            return [local_state_block_id], [remote_state_block_id]
         raise NotImplementedError(f"Mooncake block ID expansion does not support {type(spec).__name__}")
 
     def _append_layer_transfer_info(
