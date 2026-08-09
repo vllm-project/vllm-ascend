@@ -229,7 +229,6 @@ templates:
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
-      - --quantization ascend
       - --enable-auto-tool-choice
       - --quantization
       - "ascend"
