@@ -37,7 +37,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -213,7 +213,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -248,7 +248,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def get_cudagraph_support(
         cls: type["AscendAttentionMetadataBuilder"],
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.

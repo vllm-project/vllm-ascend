@@ -18,10 +18,6 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,  # noqa: F401
-    MoERunner,
-)
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -29,6 +25,18 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 from vllm_ascend.utils import vllm_version_is
+
+# vLLM main renamed the FusedMoE factory to FusedMoEFactory (PR #50148).
+if vllm_version_is("0.26.0"):
+    from vllm.model_executor.layers.fused_moe.layer import (  # type: ignore[import-not-found]
+        FusedMoE,  # noqa: F401
+        MoERunner,
+    )
+else:
+    from vllm.model_executor.layers.fused_moe.layer import (  # type: ignore[import-not-found]
+        FusedMoEFactory,  # noqa: F401
+        MoERunner,
+    )
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
