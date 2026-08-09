@@ -138,6 +138,17 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_consumer","kv_port": "30100","engine_id": "1","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2,"tp_size": 8},"decode": {"dp_size": 4,"tp_size": 4}}}'
 
 benchmarks:
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    batch_size: 8
+    baseline: 93.33
+    threshold: 10
+    temperature: 1.0
+    top_p: 1
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_kimi
