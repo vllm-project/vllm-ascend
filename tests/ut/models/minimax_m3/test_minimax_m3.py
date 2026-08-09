@@ -94,6 +94,8 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         gate = nn.Identity()
         gate.out_dtype = torch.float32
 
+        # vLLM main renamed the FusedMoE factory to FusedMoEFactory (PR #50148);
+        # the module binds `FusedMoEFactory` on both versions.
         with (
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.get_tensor_model_parallel_world_size",
@@ -108,7 +110,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
                 return_value=gate,
             ),
             patch(
-                "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoE",
+                "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoEFactory",
                 return_value=nn.Identity(),
             ) as fused_moe,
         ):

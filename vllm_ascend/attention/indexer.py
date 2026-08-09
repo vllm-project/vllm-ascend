@@ -8,7 +8,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
 class AscendSFAIndexerBackend(AttentionBackend):
@@ -61,7 +61,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -72,7 +72,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
     def get_cudagraph_support(
         cls,
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
 

@@ -108,17 +108,18 @@
 #
 # ** 6. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoE` (vLLM main: `FusedMoEFactory`)
 #    Why:
 #       vllm's FusedMoE is a factory function (not a class). deepseek_v2 and
 #       other models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
-#       and call it directly, so on Ascend we must redirect it to AscendMoERunner
-#       before any model is imported.
+#       (on vLLM main, `FusedMoEFactory` after PR #50148) and call it directly,
+#       so on Ascend we must redirect it to AscendMoERunner before any model is
+#       imported.
 #    How：
-#       Patch the FusedMoE binding in both the package `__init__` and the layer
-#       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
-#       reuses this platform patch to avoid double-wrapping the factory during
-#       worker initialization.
+#       Patch the FusedMoE / FusedMoEFactory binding in both the package `__init__`
+#       and the layer module so model imports pick up the Ascend runner.
+#       `worker/patch_fused_moe.py` reuses this platform patch to avoid
+#       double-wrapping the factory during worker initialization.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
@@ -699,7 +700,7 @@
 #
 # ** 8. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoE` (vLLM main: `FusedMoEFactory`)
 #    Why:
 #       The worker process re-imports the FusedMoE factory after the platform
 #       patch has already redirected it to AscendMoERunner. Re-applying the
