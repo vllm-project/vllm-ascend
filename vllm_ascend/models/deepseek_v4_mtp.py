@@ -130,7 +130,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         # hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
         #                              self.hc_head_scale, self.hc_head_base)
 
-        return hidden_states
+        # Reused as previous_hidden_states by the next speculative step.
+        return hidden_states.flatten(1)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype

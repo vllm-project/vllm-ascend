@@ -469,7 +469,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is None:
             return
 
-        num_reqs_padded = next(iter(attn_metadata.values())).seq_lens_cpu.shape[0]
+        attn_meta = next(iter(attn_metadata.values()))
+        seq_lens = getattr(attn_meta, "seq_lens_cpu", None)
+        if seq_lens is None:  # DSA keeps sequence lengths on device.
+            seq_lens = attn_meta.seq_lens
+        num_reqs_padded = seq_lens.shape[0]
         seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs_padded]
         if num_reqs is None:
             num_reqs = num_reqs_padded
@@ -483,7 +487,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             )  # .decode (MLA) / top-level (GQA)
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
-            metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
+            target_seq_lens = getattr(metadata, "seq_lens_cpu", None)
+            if target_seq_lens is None:
+                target_seq_lens = metadata.seq_lens
+            target_seq_lens.copy_(next_seq_lens_cpu)
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
         # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`
