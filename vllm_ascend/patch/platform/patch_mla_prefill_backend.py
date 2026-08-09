@@ -12,9 +12,16 @@
 # We register a no-op AscendMLAPrefillBackend and patch get_mla_prefill_backend
 # so that MLAAttention.__init__ completes without error.
 
+from typing import TYPE_CHECKING
+
 import torch
 import vllm.model_executor.layers.attention.mla_attention
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.attention.mla_attention import (
+        MLACommonPrefillMetadata,
+    )
 
 
 class AscendMLAPrefillBackend(MLAPrefillBackend):
@@ -37,7 +44,7 @@ class AscendMLAPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
