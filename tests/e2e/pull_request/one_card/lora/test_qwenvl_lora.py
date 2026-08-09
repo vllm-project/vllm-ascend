@@ -266,12 +266,12 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
     print("ls -lah /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct:")
     os.system("ls -lah /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct")
 
-    print("ls -lah /root/.cache/modelscope/hub/models/vllm-ascend/qwen2vl-flickr-lora-language")
-    os.system("ls -lah /root/.cache/modelscope/hub/models/vllm-ascend/qwen2vl-flickr-lora-language")
+    print("ls -lah /root/.cache/modelscope/hub/models/vllm-ascend/qwen3-4b-vl-lora-vision-connector")
+    os.system("ls -lah /root/.cache/modelscope/hub/models/vllm-ascend/qwen3-4b-vl-lora-vision-connector")
 
     roots = [
         Path("/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct"),
-        Path("/root/.cache/modelscope/hub/models/vllm-ascend/qwen2vl-flickr-lora-language"),
+        Path("/root/.cache/modelscope/hub/models/vllm-ascend/qwen3-4b-vl-lora-vision-connector"),
     ]
 
     failed = []
