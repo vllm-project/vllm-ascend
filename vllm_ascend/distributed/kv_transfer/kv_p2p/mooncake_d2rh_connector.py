@@ -8,7 +8,8 @@ import struct
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -32,7 +33,6 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from contextlib import contextmanager
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     GroupPull,
@@ -83,7 +83,7 @@ START_PULL = b"START_PULL"
 HUGEPAGE_SIZE_2M = 2 * 1024 * 1024
 
 StagingBlockKey = tuple[int, int, int]
-LegacyStagingBlockKey = tuple[int, int]
+StagingBlockMap = dict[tuple[int, ...], int]
 
 # ZMQ ports for D2RH (hop1) and scheduler ready signaling (hop1 done).
 # Layout matches side_channel_port + device_index used by KV handshake:
@@ -178,7 +178,7 @@ class HostListeningThread(threading.Thread):
         self.ready_count: dict[str, int] = defaultdict(int)
 
         self.task_tracker = KVCacheTaskTracker()
-        self.ready_request = set()
+        self.ready_request: set[str] = set()
         self.ready_lock = threading.Lock()
         self.host_ip = get_ip()
         self.encoder = msgspec.msgpack.Encoder()
@@ -491,12 +491,12 @@ def get_remote_ranks_for_req(
     ori_data = np.arange(prefill_tp_size * prefill_pp_size)
     seed = string_to_int64_hash(req_id)
     rand = random.Random(seed)
-    ori_data = ori_data.reshape(prefill_pp_size, -1)
-    num_groups = max(1, len(ori_data[0]) // num_kv_head)
+    reshaped_data = ori_data.reshape(prefill_pp_size, -1)
+    num_groups = max(1, len(reshaped_data[0]) // num_kv_head)
     rand_group_index = rand.sample(range(num_groups), max(decode_tp_size // num_kv_head, 1))
     all_results = [
         get_remote_tp_ranks(
-            ori_data[pp_index],
+            reshaped_data[pp_index],
             rand_group_index,
             num_groups,
             prefill_tp_size,
@@ -569,7 +569,7 @@ class D2RHCPUCacheManager:
         self.used_set: set[int] = set()
         self.lock = threading.Lock()
 
-    def alloc_block_map(self, remote_block_ids: BlockIds) -> dict[LegacyStagingBlockKey, int] | None:
+    def alloc_block_map(self, remote_block_ids: BlockIds) -> StagingBlockMap | None:
         with self.lock:
             # Deduplicate (group_id, remote_block_id) to avoid over-allocation
             # when compressed/shared layouts contain repeated remote block ids.
@@ -592,7 +592,7 @@ class D2RHCPUCacheManager:
                 )
                 return None
 
-            block_map: dict[LegacyStagingBlockKey, int] = {}
+            block_map: StagingBlockMap = {}
             for key in remote_keys:
                 local_block_id = self.free_queue.popleft()
                 self.used_set.add(local_block_id)
@@ -603,7 +603,7 @@ class D2RHCPUCacheManager:
         self,
         remote_block_ids: BlockIds,
         group_pulls_by_port: list[list[GroupPull | dict[str, Any]]],
-    ) -> dict[StagingBlockKey, int] | None:
+    ) -> StagingBlockMap | None:
         offsets_by_group: dict[int, set[int]] = defaultdict(set)
         for group_pulls in group_pulls_by_port:
             for group_pull in group_pulls:
@@ -633,12 +633,17 @@ class D2RHCPUCacheManager:
                 )
                 return None
 
-            block_map: dict[StagingBlockKey, int] = {}
+            block_map: StagingBlockMap = {}
             for key in remote_keys:
                 local_block_id = self.free_queue.popleft()
                 self.used_set.add(local_block_id)
                 block_map[key] = local_block_id
-            logger.info(f"[===] after_allco{self.used_set=} {self.free_queue =}{block_map=}")
+            logger.debug(
+                "CPU staging allocation complete: used=%s free=%s block_map=%s",
+                self.used_set,
+                self.free_queue,
+                block_map,
+            )
             return block_map
 
     def free_block_map(self, block_map: dict[tuple[int, ...], int]) -> None:
@@ -647,7 +652,12 @@ class D2RHCPUCacheManager:
                 if block_id in self.used_set:
                     self.used_set.remove(block_id)
                     self.free_queue.append(block_id)
-            logger.info(f"[===] free {self.used_set=} {self.free_queue =}{block_map=}")
+            logger.debug(
+                "CPU staging blocks released: used=%s free=%s block_map=%s",
+                self.used_set,
+                self.free_queue,
+                block_map,
+            )
 
 
 class D2RHThread(threading.Thread):
@@ -691,7 +701,7 @@ class D2RHThread(threading.Thread):
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)  # type: ignore[type-arg]
+        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)  # type: ignore[name-defined]
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0
         self.encoder = msgspec.msgpack.Encoder()
@@ -739,7 +749,7 @@ class D2RHThread(threading.Thread):
             finally:
                 self.request_queue.task_done()
 
-    def run_busy_loop(self, sock: zmq.Socket) -> None:  # type: ignore[type-arg]
+    def run_busy_loop(self, sock: zmq.Socket) -> None:  # type: ignore[name-defined]
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while True:
             try:
@@ -760,6 +770,7 @@ class D2RHThread(threading.Thread):
                     params: dict[str, Any] | None = None
                     try:
                         params = msg[2]
+                        assert params is not None
                         remote_block_ids: BlockIds = tuple(params.get("remote_block_ids") or ())
                         block_map = self.cpu_kvcache_manager.alloc_sharded_block_map(
                             remote_block_ids,
@@ -787,7 +798,9 @@ class D2RHThread(threading.Thread):
                     except Exception as e:
                         # Release any partially created mapping to prevent CPU
                         # staging leaks on handshake/queueing failures.
-                        remote_request_id = params.get("remote_request_id", request_id) if params is not None else request_id
+                        remote_request_id = (
+                            params.get("remote_request_id", request_id) if params is not None else request_id
+                        )
                         block_map = self.remote_local_block_map.pop(remote_request_id, None)
                         self.remote_local_block_map.pop(request_id, None)
                         if block_map:
@@ -925,10 +938,7 @@ class D2RHThread(threading.Thread):
                             block_len=inner_block_len,
                         )
                         for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
-                            src_list.append(
-                                src_layer_base_addr
-                                + local_block_id[0] * block_stride
-                            )
+                            src_list.append(src_layer_base_addr + local_block_id[0] * block_stride)
                             dst_list.append(dst_layer_base_addr + remote_block_id[0] * remote_block_stride)
                             length_list.append(inner_block_len * len(local_block_id))
 
@@ -938,9 +948,11 @@ class D2RHThread(threading.Thread):
                 ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
                 _bt_end = time.perf_counter()
                 logger.info(
-                    "[batch_transfer_sync_read] 耗时: %.6f s, src_list 长度: %d, "
-                    "总传输字节数: %d",
-                    _bt_end - _bt_start, len(src_list), sum(length_list))
+                    "[batch_transfer_sync_read] 耗时: %.6f s, src_list 长度: %d, 总传输字节数: %d",
+                    _bt_end - _bt_start,
+                    len(src_list),
+                    sum(length_list),
+                )
                 if ret < 0:
                     raise RuntimeError(f"D2RH hop1 transfer failed, ret: {ret}")
             self._send_done_recv_signal(
@@ -951,7 +963,7 @@ class D2RHThread(threading.Thread):
             )
 
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
-        sock: zmq.Socket | None = None  # type: ignore[type-arg]
+        sock: zmq.Socket | None = None  # type: ignore[name-defined]
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
@@ -973,7 +985,7 @@ class D2RHThread(threading.Thread):
         remote_handshake_port: int,
         remote_port_send_num: dict[int, Any] | None = None,
     ) -> None:
-        sock: zmq.Socket | None = None  # type: ignore[type-arg]
+        sock: zmq.Socket | None = None  # type: ignore[name-defined]
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             remote_path = f"{remote_host}:{remote_handshake_port}"
@@ -990,7 +1002,7 @@ class D2RHThread(threading.Thread):
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
 
     def send_pull_done(self, request_id: str) -> None:
-        sock: zmq.Socket | None = None  # type: ignore[type-arg]
+        sock: zmq.Socket | None = None  # type: ignore[name-defined]
         try:
             sock = self._get_remote_socket(self.host_ip, self.scheduler_ready_port)
             scheduler_path = f"{self.host_ip}:{self.scheduler_ready_port}"
@@ -1002,7 +1014,7 @@ class D2RHThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, self.host_ip, self.scheduler_ready_port)
 
-    def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore[type-arg]
+    def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore[name-defined]
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
             if self.remote_sockets[remote_path]:
@@ -1013,7 +1025,12 @@ class D2RHThread(threading.Thread):
             self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
             return sock
 
-    def _return_remote_socket(self, sock: zmq.Socket, remote_host: str, remote_handshake_port: int) -> None:  # type: ignore[type-arg]
+    def _return_remote_socket(
+        self,
+        sock: zmq.Socket,  # type: ignore[name-defined]
+        remote_host: str,
+        remote_handshake_port: int,
+    ) -> None:
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
             self.remote_sockets[remote_path].append(sock)
@@ -1057,7 +1074,9 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
 
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
         group_pulls: list[GroupPull] = req_meta.get("group_pulls", [])
-        offset_by_group: dict[int, int] = {group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls}
+        offset_by_group: dict[int, int] = {
+            group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls
+        }
         cpu_remote_block_ids_groups: list[list[int]] = []
         for group_id, group_block_ids in enumerate(remote_block_ids):
             group_remote_tp_offset = offset_by_group.get(group_id, 0)
@@ -1109,7 +1128,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
         self.use_sparse = False
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
-        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)  # type: ignore[type-arg]
+        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)  # type: ignore[name-defined]
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0
         self.remote_sockets_lock = threading.Lock()
@@ -1236,7 +1255,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
         return pull_params
 
     def _send_start_pull(self, request_id: str, params: dict[str, Any], d2rh_port: int) -> bytes:
-        sock: zmq.Socket | None = None  # type: ignore[type-arg]
+        sock: zmq.Socket | None = None  # type: ignore[name-defined]
         try:
             sock = self._get_remote_socket(self.local_host, d2rh_port)
             d2rh_path = f"{self.local_host}:{d2rh_port}"
@@ -1246,7 +1265,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             if sock is not None:
                 self._return_remote_socket(sock, self.local_host, d2rh_port)
 
-    def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore[type-arg]
+    def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore[name-defined]
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
             if self.remote_sockets[remote_path]:
@@ -1257,7 +1276,12 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
             return sock
 
-    def _return_remote_socket(self, sock: zmq.Socket, remote_host: str, remote_handshake_port: int) -> None:  # type: ignore[type-arg]
+    def _return_remote_socket(
+        self,
+        sock: zmq.Socket,  # type: ignore[name-defined]
+        remote_host: str,
+        remote_handshake_port: int,
+    ) -> None:
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
             self.remote_sockets[remote_path].append(sock)
@@ -1304,7 +1328,8 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
                 self.listeningthread.ready_request.discard(request.request_id)
                 self.listeningthread.ready_count.pop(request.request_id, None)
         super().update_state_after_alloc(request, blocks, num_external_tokens)
-        
+
+
 class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, engine_id, kv_cache_config)
@@ -1333,15 +1358,11 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
             cpu_caches[layer_name] = []
             for cache in self._as_kv_cache_tuple(kv_cache_tuple):
                 raw_size = cache.numel() * cache.element_size()
-                aligned_size = (
-                    (raw_size + HUGEPAGE_SIZE_2M - 1) // HUGEPAGE_SIZE_2M
-                ) * HUGEPAGE_SIZE_2M
+                aligned_size = ((raw_size + HUGEPAGE_SIZE_2M - 1) // HUGEPAGE_SIZE_2M) * HUGEPAGE_SIZE_2M
                 # Allocate flat pinned buffer with 2M-aligned byte size.
                 # Use the original dtype so element count = aligned_size / element_size.
                 aligned_num_elements = aligned_size // cache.element_size()
-                flat = torch.empty(
-                    aligned_num_elements, dtype=cache.dtype, device="cpu", pin_memory=True
-                )
+                flat = torch.empty(aligned_num_elements, dtype=cache.dtype, device="cpu", pin_memory=True)
                 # Create a view with the original shape (first num_blocks blocks).
                 cpu_cache = flat[: cache.numel()].view(cache.shape)
                 # Keep the flat buffer alive — it owns the 2M-aligned storage.
@@ -1356,7 +1377,7 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
         self.num_blocks = self.kv_cache_config.num_blocks
-        # Print config info for kvcaches  
+        # Print config info for kvcaches
         self.kv_caches = kv_caches
         self.kv_group2layeridx = self._build_kv_group2layeridx()
         has_mamba_group = self._has_mamba_group()
@@ -1521,6 +1542,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None
+        self._kv_transfer_config = vllm_config.kv_transfer_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
 
@@ -1587,6 +1609,14 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.xfer_handshake_metadata
 
-    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+    def set_xfer_handshake_metadata(
+        self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
+    ) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata_from_workers(metadata)
