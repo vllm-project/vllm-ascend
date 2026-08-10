@@ -159,7 +159,7 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             positions=input_batch.positions[:num_tokens],
             attn_state=input_batch.attn_state,
-            num_input_tokens=num_tokens,
+            num_padded_input_tokens=num_tokens,
         )
         slot_mappings_by_layer = {
             layer_name: slot_mappings[group_idx]
