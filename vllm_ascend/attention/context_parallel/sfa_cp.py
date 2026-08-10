@@ -19,6 +19,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     DSACPContext,
+    PreprocessType,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
@@ -445,6 +446,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         device = self.q_proj.weight.device
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
+
+    def _fused_preprocess_eligible(self, pp_type: PreprocessType) -> bool:
+        # DCP shards only the SFA KV cache. PROLOG_V3 writes the SFA KV cache
+        # at the replicated-view slot mapping (global coordinates), which does
+        # not match this rank's local DCP KV shard, so keep DCP on the native
+        # path where the DCP slot mapping is passed explicitly.
+        if pp_type is PreprocessType.PROLOG_V3:
+            return False
+        return super()._fused_preprocess_eligible(pp_type)
 
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:

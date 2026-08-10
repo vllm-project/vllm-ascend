@@ -742,21 +742,28 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
-        qt = self._quant_type
 
-        if self.is_kv_consumer and (
-            (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
-            or qt is AscendW8A8MXFP8DynamicLinearMethod
-            or qt is None
-        ):
-            if self._try_enable_type(PreprocessType.PROLOG_V3, act_dtype):
-                return PreprocessType.PROLOG_V3
-
-        if qt is AscendW8A8LinearMethod and self.enable_mlapo:
-            if self._try_enable_type(PreprocessType.MLAPO, act_dtype):
-                return PreprocessType.MLAPO
-
+        # PROLOG_V3 takes precedence over MLAPO.
+        for pp_type in (PreprocessType.PROLOG_V3, PreprocessType.MLAPO):
+            if self._fused_preprocess_eligible(pp_type) and self._try_enable_type(pp_type, act_dtype):
+                return pp_type
         return PreprocessType.NATIVE
+
+    def _fused_preprocess_eligible(self, pp_type: PreprocessType) -> bool:
+        """Whether the fused preprocess may take over the fused_qkv_a_proj /
+        q_proj weights. Also used by the init-time marking in ops/mla.py so
+        that quant methods skip their own NZ conversion for these weights."""
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
+        if pp_type is PreprocessType.PROLOG_V3:
+            return self.is_kv_consumer and (
+                (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
+                or qt is AscendW8A8MXFP8DynamicLinearMethod
+                or qt is None
+            )
+        if pp_type is PreprocessType.MLAPO:
+            return qt is AscendW8A8LinearMethod and self.enable_mlapo
+        return False
 
     def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
         reasons = self._get_fused_type_unsupported_reasons(pp_type)

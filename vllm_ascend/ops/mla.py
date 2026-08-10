@@ -128,6 +128,25 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             layer_name=f"{prefix}.attn",
         )
 
+        # If a fused preprocess (mlapo, or prolog_v3 on KV consumer workers)
+        # will further process fused_qkv_a_proj / q_proj weights (transpose,
+        # reshape, and do its own NZ conversion), mark them so that quant
+        # methods (e.g. w8a8_mxfp8) skip their own NZ conversion. The
+        # eligibility check is shared with the impl's own preprocess
+        # resolution (_fused_preprocess_eligible in sfa_v1.py). Must be set
+        # at init time, before VLLM traverses sub-modules and calls
+        # process_weights_after_loading on them.
+        from vllm_ascend.attention.sfa_v1 import PreprocessType
+
+        impl = self.mla_attn.impl
+        if getattr(impl, "_fused_preprocess_eligible", None) and (
+            impl._fused_preprocess_eligible(PreprocessType.PROLOG_V3)
+            or impl._fused_preprocess_eligible(PreprocessType.MLAPO)
+        ):
+            for _layer in (impl.fused_qkv_a_proj, impl.q_proj):
+                if _layer is not None:
+                    _layer._mlapo_managed = True
+
         original_process_weights = self.mla_attn.process_weights_after_loading
 
         def wrapped_process_weights(act_dtype: torch.dtype):
