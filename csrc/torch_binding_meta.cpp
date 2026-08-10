@@ -436,6 +436,20 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
 
+at::Tensor npu_apply_top_k_top_p_meta(
+    const at::Tensor& logits,
+    const c10::optional<at::Tensor>& k_opt,
+    const c10::optional<at::Tensor>& p_opt)
+{
+    TORCH_CHECK(
+        logits.scalar_type() == at::kFloat || logits.scalar_type() == at::kHalf ||
+            logits.scalar_type() == at::kBFloat16,
+        "float16, float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        logits.scalar_type());
+
+    return at::empty_symint(logits.sym_sizes(), logits.options());
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -1584,6 +1598,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
+    // ApplyTopKTopP (custom optimized version)
+    ops.impl("npu_apply_top_k_top_p", &vllm_ascend::meta::npu_apply_top_k_top_p_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
