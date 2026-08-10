@@ -13,7 +13,8 @@
 # This file is a part of the vllm-ascend project.
 #
 import sys
-from unittest.mock import MagicMock
+from contextlib import ExitStack, contextmanager
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -101,3 +102,116 @@ class TestAscendSFAOProjTPParams(TestBase):
         self.assertEqual(impl.o_proj.weight_scale_second.data_ptr(), original_scale_ptr)
         self.assertFalse(require_o_proj_forward)
         self.assertTrue(torch.equal(output, torch.ones(2, 4)))
+
+
+class TestAscendSFAForwardOProjTP(TestBase):
+    """_forward_o_proj_tp: static exchange buffers pin the HCCL collective
+    shapes to potential_max_tokens, so uneven num_tokens across the OTP ranks
+    cannot shape-mismatch (sync timeout), and the buffers keep a stable device
+    address for ACL graph replay."""
+
+    def _make_impl(self, tp_size, chunk, capacity):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        o_proj = torch.nn.Module()
+        o_proj.input_size_per_partition = chunk
+        o_proj.skip_bias_add = False
+        o_proj.bias = None
+        o_proj.quant_method = MagicMock()
+        o_proj.quant_method.apply = MagicMock(side_effect=lambda layer, x, bias=None: x * 2)
+        impl.o_proj = o_proj
+        return impl
+
+    @contextmanager
+    def _patch_env(self, tp_size, capacity, *extra_patches):
+        """Enter the OTP-group and potential-max-tokens patches, then any extra
+        patches, so the call site can use a plain ``with`` (mypy 1.11 rejects
+        starred ``with`` and a list has no context manager protocol)."""
+        group = MagicMock()
+        group.world_size = tp_size
+        group.rank_in_group = 0
+        group.device_group = object()
+        with ExitStack() as stack:
+            stack.enter_context(patch("vllm_ascend.attention.sfa_v1.get_otp_group", return_value=group))
+            stack.enter_context(patch("vllm_ascend.attention.sfa_v1.get_potential_max_tokens", return_value=capacity))
+            for patcher in extra_patches:
+                stack.enter_context(patcher)
+            yield
+
+    def test_exchange_shapes_and_buffers_pinned_to_capacity(self):
+        """Exchange shapes and static buffer addresses are pinned to capacity:
+        uneven num_tokens across the OTP ranks cannot shape-mismatch, and ACL
+        graph replay keeps stable addresses."""
+        tp_size, chunk, capacity = 2, 4, 8
+        impl = self._make_impl(tp_size, chunk, capacity)
+        a2a_send_shapes, rs_in_shapes = [], []
+
+        def _a2a(recv, send, group):
+            a2a_send_shapes.append(tuple(send.shape))
+            recv.copy_(send)
+
+        def _rs(out, inp, group):
+            rs_in_shapes.append(tuple(inp.shape))
+            out.copy_(inp[: out.shape[0]])
+
+        with self._patch_env(
+            tp_size,
+            capacity,
+            patch("torch.distributed.all_to_all_single", side_effect=_a2a),
+            patch("torch.distributed.reduce_scatter_tensor", side_effect=_rs),
+        ):
+            send_ptr = None
+            for num_tokens in (3, capacity):
+                attn_output = torch.randn(num_tokens, tp_size * chunk)
+                output = torch.zeros(num_tokens, chunk)
+                impl._forward_o_proj_tp(attn_output, output)
+                # With the identity-exchange mock, rank-local output rows are
+                # 2 * attn_output[:, :chunk] (this rank's own shard).
+                self.assertTrue(torch.equal(output, attn_output[:, :chunk] * 2))
+                if send_ptr is None:
+                    send_ptr = impl._o_proj_tp_send_buf.data_ptr()
+                    recv_ptr = impl._o_proj_tp_recv_buf.data_ptr()
+                    rs_ptr = impl._o_proj_tp_rs_out_buf.data_ptr()
+                    self.assertEqual(impl._o_proj_tp_send_buf.shape, (tp_size, capacity, chunk))
+                    self.assertEqual(impl._o_proj_tp_rs_out_buf.shape, (capacity, chunk))
+                else:
+                    # Buffers are allocated once and reused across calls.
+                    self.assertEqual(impl._o_proj_tp_send_buf.data_ptr(), send_ptr)
+                    self.assertEqual(impl._o_proj_tp_recv_buf.data_ptr(), recv_ptr)
+                    self.assertEqual(impl._o_proj_tp_rs_out_buf.data_ptr(), rs_ptr)
+
+            # Exchange shapes never depend on num_tokens.
+            self.assertEqual(a2a_send_shapes, [(tp_size * capacity * chunk,)] * 2)
+            self.assertEqual(rs_in_shapes, [(tp_size * capacity, chunk)] * 2)
+
+    def test_capacity_exceeded_raises(self):
+        tp_size, chunk, capacity = 2, 4, 8
+        impl = self._make_impl(tp_size, chunk, capacity)
+        with self._patch_env(tp_size, capacity), self.assertRaises(ValueError):
+            impl._forward_o_proj_tp(torch.randn(capacity + 1, tp_size * chunk), torch.zeros(capacity + 1, chunk))
+
+    def test_profiling_run_oproj_tp_collectives_dispatch(self):
+        """attn_metadata=None (profiling / dummy accompanying ranks) must still
+        run the OTP collectives on zero input when oproj_tp is on, otherwise
+        the group deadlocks when other DP ranks execute the real o_proj;
+        without oproj_tp it keeps the plain fill_(0). Mirrors dsa_v1.forward()."""
+        tp_size, chunk, capacity = 2, 4, 8
+        impl = self._make_impl(tp_size, chunk, capacity)
+        impl.o_proj.input_size = tp_size * chunk
+        group = MagicMock()
+        group.world_size = tp_size
+        group.rank_in_group = 0
+        group.device_group = object()
+        with (
+            patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=True),
+            patch("vllm_ascend.attention.sfa_v1.get_otp_group", return_value=group),
+            patch("vllm_ascend.attention.sfa_v1.get_potential_max_tokens", return_value=capacity),
+            patch("torch.distributed.all_to_all_single") as mock_a2a,
+            patch("torch.distributed.reduce_scatter_tensor") as mock_rs,
+        ):
+            mock_a2a.side_effect = lambda recv, send, group: recv.copy_(send)
+            mock_rs.side_effect = lambda out, inp, group: out.copy_(inp[: out.shape[0]])
+
+            impl.forward("layer0", torch.randn(3, 8), None, None, output=torch.zeros(3, 8))
+
+        mock_a2a.assert_called_once()
+        mock_rs.assert_called_once()
