@@ -545,7 +545,7 @@ test_cases:
       - "messages"
     mm_request:
       images:
-        - "vllm-ascend/mm_request/test_mm2.jpg"
+        - "vllm-ascend/mm_request"
       messages:
         - role: user
           content:
