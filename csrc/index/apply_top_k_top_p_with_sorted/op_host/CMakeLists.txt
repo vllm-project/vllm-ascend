@@ -14,7 +14,7 @@ add_ops_compile_options(
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE apply_top_k_top_p_with_sorted ACLNNTYPE aclnn_exclude)
+    add_modules_sources(OPTYPE apply_top_k_top_p_with_sorted ACLNNTYPE aclnn)
     target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
