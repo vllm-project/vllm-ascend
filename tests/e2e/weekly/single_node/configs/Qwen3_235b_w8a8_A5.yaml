@@ -52,7 +52,7 @@ _benchmarks_perf2: &benchmarks_perf2
 
 test_cases:
   - name: "vllm_Qwen3_235B_Accuracy_FULL_Graph_GPQA"
-    model: "/mnt/share/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
       TASK_QUEUE_ENABLE: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
