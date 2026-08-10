@@ -163,4 +163,3 @@ def enable_fusion_gmmswigluquant():
 
     ascend_config = get_ascend_config()
     return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
-

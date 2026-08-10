@@ -18,8 +18,8 @@ import unittest
 
 import torch
 
-import vllm_ascend.ops.fused_moe.moe_runtime_args as runtime_args
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+import vllm_ascend.ops.fused_moe.dataclass.token_dispatcher as runtime_args
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoETokenDispatchOutput,
     MoEWeights,
