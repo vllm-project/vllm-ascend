@@ -24,13 +24,6 @@ DEFAULT_IMAGE_REQUEST_ARGS: dict[str, Any] = {
 
 _HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
-_FILE_URL_RE = re.compile(r"^file://", re.IGNORECASE)
-
-
-def _resolve_fs_path(path: str) -> str:
-    return _FILE_URL_RE.sub("", path, count=1)
-
-
 def _load_image_data(image_path: str | None = None) -> str:
     if not image_path:
         image_path = os.environ.get("MM_IMAGE_PATH")
