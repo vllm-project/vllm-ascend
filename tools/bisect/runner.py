@@ -46,7 +46,7 @@ from tools.bisect.config import (
 )
 from tools.bisect.coordinator import Coordinator
 from tools.bisect.verdict import RunOutcome
-from tools.bisect.vllm_compat import check_compatible, check_compatible_at
+from tools.bisect.version_history import ExternalVersionManager, VersionProfile, VersionSyncError
 
 logger = logging.getLogger(__name__)
 
@@ -88,17 +88,26 @@ def kill_stray_servers() -> None:
 
 
 class BaseRunner:
-    def __init__(self, inp: BisectInput, opt: BisectOptions, builder: BuildManager):
+    def __init__(
+        self,
+        inp: BisectInput,
+        opt: BisectOptions,
+        builder: BuildManager,
+        version_manager: ExternalVersionManager | None = None,
+    ):
         self.inp = inp
         self.opt = opt
         self.builder = builder
         self.repo = opt.repo_dir
+        self.version_manager = version_manager
 
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["CONFIG_YAML_PATH"] = self.inp.config_yaml
         if self.inp.config_base_path:
             env["CONFIG_BASE_PATH"] = self.inp.config_base_path
+        if self.version_manager is not None:
+            env.update(self.version_manager.env_overrides)
         return env
 
     @staticmethod
@@ -109,18 +118,15 @@ class BaseRunner:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _vllm_skip_outcome(self, rebuilt: bool) -> RunOutcome | None:
-        """After checkout, SKIP the commit if its pinned vLLM != the installed one.
-
-        Returns a SKIP RunOutcome on a confident mismatch, else None (proceed).
-        Avoids wasting a full pytest run on a commit that can only fail to
-        collect/import against the container's vLLM.
-        """
-        compatible, reason = check_compatible(self.repo)
-        if compatible:
-            logger.info("[vllm-compat] %s", reason)
+    def _sync_versions(self, commit: str, log_path: Path) -> VersionProfile | None:
+        if self.version_manager is None:
             return None
-        logger.warning("[vllm-compat] %s -> SKIP", reason)
+        return self.version_manager.sync_for_commit(commit, log_path)
+
+    @staticmethod
+    def _version_sync_skip(exc: VersionSyncError, rebuilt: bool = False) -> RunOutcome:
+        reason = f"external version sync failed: {exc}"
+        logger.warning("[versions] %s -> SKIP", reason)
         outcome = RunOutcome(exit_code=0, infra_error=True, skip_reason=reason)
         outcome.rebuilt = rebuilt  # type: ignore[attr-defined]
         return outcome
@@ -138,13 +144,11 @@ class BaseRunner:
 class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
+        try:
+            self._sync_versions(candidate.commit, log_path)
+        except VersionSyncError as exc:
+            return self._version_sync_skip(exc)
         decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
-
-        # vLLM/vllm-ascend version skew check: a commit pinned to a different
-        # vLLM than the container's cannot be validly tested -> SKIP cleanly.
-        skip = self._vllm_skip_outcome(decision.rebuild)
-        if skip is not None:
-            return skip
 
         # Run the WHOLE yaml (all test_cases): nightly cannot select a single
         # case, so we don't pass -k. Each case writes its own benchmark JSON
@@ -182,41 +186,46 @@ class SingleNodeRunner(BaseRunner):
 class MultiNodeRunner(BaseRunner):
     """Master-side runner. Worker nodes run ``worker_agent.py`` instead."""
 
-    def __init__(self, inp, opt, builder, coordinator: Coordinator):
-        super().__init__(inp, opt, builder)
+    def __init__(
+        self,
+        inp,
+        opt,
+        builder,
+        coordinator: Coordinator,
+        version_manager: ExternalVersionManager | None = None,
+    ):
+        super().__init__(inp, opt, builder, version_manager)
         self.coord = coordinator
 
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.decide(candidate.commit)
-
-        # 1) vLLM/vllm-ascend version skew: read this commit's pinned vLLM tag
-        # *without* checking it out (same container vLLM on every node, so the
-        # decision is identical cluster-wide). On a mismatch publish a SKIP
-        # command so workers consume the round and stay in lockstep, but neither
-        # side deploys or runs.
-        compatible, reason = check_compatible_at(self.repo, candidate.commit)
-        if not compatible:
-            logger.warning("[vllm-compat] %s -> SKIP", reason)
-            self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="SKIP")
-            outcome = RunOutcome(exit_code=0, infra_error=True, skip_reason=reason)
-            outcome.rebuilt = False  # type: ignore[attr-defined]
-            return outcome
-        logger.info("[vllm-compat] %s", reason)
-
-        # 2) tell every node to deploy this commit, then deploy locally too.
-        self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="RUN")
         try:
-            self.builder.prepare(candidate.commit, log_path)
+            profile = self._sync_versions(candidate.commit, log_path)
+        except VersionSyncError as exc:
+            self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="SKIP")
+            return self._version_sync_skip(exc)
+
+        # 1) Tell every node to deploy this commit with the same external
+        # version profile, then deploy locally too.
+        self.coord.publish_command(
+            round_idx,
+            candidate.commit,
+            decision.rebuild,
+            action="RUN",
+            version_profile=profile.to_dict() if profile is not None else None,
+        )
+        try:
+            decision = self.builder.prepare(candidate.commit, log_path)
         except BuildError:
             self.coord.publish_verdict(round_idx, "SKIP")
             raise
 
-        # 3) barrier: every node deployed the same commit before any test starts
+        # 2) barrier: every node deployed the same commit before any test starts
         self.coord.signal_ready(round_idx, git_ops.current_commit(self.repo))
         self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
 
-        # 4) launch the multi-node pytest on master and read the verdict
+        # 3) launch the multi-node pytest on master and read the verdict
         job = _safe_name(self.inp.config_yaml)
         results_dir = self._reset_dir(Path("/root/.cache/benchmark_results") / job)
         rc = self._run_multi_pytest(log_path, job)
@@ -262,7 +271,12 @@ class MultiNodeRunner(BaseRunner):
                 return 124
 
 
-def build_runner(inp: BisectInput, opt: BisectOptions, builder: BuildManager):
+def build_runner(
+    inp: BisectInput,
+    opt: BisectOptions,
+    builder: BuildManager,
+    version_manager: ExternalVersionManager | None = None,
+):
     """Factory: pick the runner for the scene."""
     if inp.scene == "multi_node":
         coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
@@ -271,8 +285,8 @@ def build_runner(inp: BisectInput, opt: BisectOptions, builder: BuildManager):
             # coord dir is usually on a persistent PVC). Safe: workers only write
             # ready files after round 1 is published, which happens after this.
             coord.reset()
-        return MultiNodeRunner(inp, opt, builder, coord)
-    return SingleNodeRunner(inp, opt, builder)
+        return MultiNodeRunner(inp, opt, builder, coord, version_manager)
+    return SingleNodeRunner(inp, opt, builder, version_manager)
 
 
 # Keep MULTI_NODE_RUN_SH referenced for docs/tools that grep for the entry.

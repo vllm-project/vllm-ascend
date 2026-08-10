@@ -77,13 +77,23 @@ class Coordinator:
         return self.root / "DONE"
 
     # ------------------------------------------------------- master writes
-    def publish_command(self, rnd: int, commit: str, rebuild: bool, action: str = "RUN") -> None:
+    def publish_command(
+        self,
+        rnd: int,
+        commit: str,
+        rebuild: bool,
+        action: str = "RUN",
+        version_profile: dict[str, str] | None = None,
+    ) -> None:
         """Publish the per-round command. ``action`` is "RUN" (deploy + run the
         distributed test) or "SKIP" (this commit is pre-skipped, e.g. vLLM
         mismatch -- workers consume the command but do not deploy/run, keeping
         leader/worker rounds in lockstep)."""
         path = self._round_dir(rnd) / "command.json"
-        path.write_text(json.dumps({"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}))
+        payload = {"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}
+        if version_profile is not None:
+            payload["version_profile"] = version_profile
+        path.write_text(json.dumps(payload))
         logger.info("[coord] published command round=%d commit=%s action=%s", rnd, commit[:12], action)
 
     def publish_verdict(self, rnd: int, verdict: str) -> None:

@@ -34,6 +34,15 @@ from tools.bisect import git_ops, runner
 from tools.bisect.build_manager import BuildError, BuildManager
 from tools.bisect.config import BisectInput, BisectOptions
 from tools.bisect.coordinator import Coordinator
+from tools.bisect.version_history import (
+    ExternalVersionManager,
+    VersionHistory,
+    VersionProfile,
+    VersionSyncError,
+    infer_branch,
+    infer_branch_from_good_table,
+    infer_target,
+)
 
 logger = logging.getLogger("bisect.worker")
 
@@ -77,6 +86,17 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
 def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
     builder = BuildManager(opt)
+    version_manager = ExternalVersionManager(
+        VersionHistory(
+            opt.version_table_path,
+            opt.repo_dir,
+            opt.version_branch or infer_branch_from_good_table(opt.good_table_path) or infer_branch(opt.repo_dir),
+            opt.version_target or infer_target(inp.config_yaml),
+        ),
+        sync_enabled=opt.sync_external_versions,
+        active=True,
+        vllm_repo_dir=opt.vllm_repo_dir,
+    )
     log_dir = Path(opt.work_dir) / "worker_logs" / f"node{opt.node_index}"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,12 +122,14 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
         log_path = log_dir / f"round{rnd}_{commit[:12]}.log"
         logger.info("[worker] round %d: deploying %s", rnd, commit[:12])
         try:
+            if cmd.get("version_profile"):
+                version_manager.sync_profile(VersionProfile.from_dict(cmd["version_profile"]), log_path)
             builder.prepare(commit, log_path)
-        except BuildError as exc:
+        except (BuildError, VersionSyncError) as exc:
             # Don't block the barrier; report our (built) HEAD so the master can
             # detect inconsistency. The master will likely hit the same build
             # failure and record SKIP.
-            logger.error("[worker] build failed for %s: %s", commit[:12], exc)
+            logger.error("[worker] deploy failed for %s: %s", commit[:12], exc)
 
         coord.signal_ready(rnd, git_ops.current_commit(opt.repo_dir))
         # Launch the worker test; it returns when the master's trial completes.

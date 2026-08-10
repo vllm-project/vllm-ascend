@@ -31,9 +31,14 @@ trigger (case FAIL)
 * **Compile only on C++ changes**: by default (`--native-check per-commit`) a
   rebuild happens only when that commit's own diff touches
   `*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`, `csrc/**`, `CMakeLists.txt`, or `setup.py`.
-  Pure `.py`/yaml changes are picked up live by the editable install (vLLM is
-  never touched). `--native-check since-build` widens the check to all changes
-  since the last build (safer across bisect jumps).
+  Pure `.py`/yaml changes are picked up live by the editable install.
+  `--native-check since-build` widens the check to all changes since the last
+  build (safer across bisect jumps).
+* **External-version history**: the tool records vLLM release tag, torch-npu,
+  and CANN change points in `version_history.csv` next to the good table. When
+  the good and bad endpoints use different versions, each trial syncs those
+  external versions from the table before running so the only intended moving
+  part is `vllm-ascend`.
 * **SKIP semantics**: a flaky/unconfirmed FAIL, a build failure, or a collection
   error (pytest rc 2/3/4/5, e.g. a conftest ImportError) becomes `SKIP` instead
   of a misleading FAIL — like `git bisect skip`.
@@ -115,8 +120,10 @@ Common flags: `--good-commit` (skip the table), `--soc` (required hardware
 generation for the good-table key),
 `--config-base-path`
 (internal/external DP configs), `--native-check {per-commit,since-build}`,
-`--force-initial-build`, `--fail-confirm-retries`, `--no-verify-good`,
-`--no-verify-bad`, `--trial-timeout-s`. Full reference: see `USAGE_zh.md` §9.
+`--version-table`, `--version-target {a2,a3,310p}`, `--vllm-repo-dir`,
+`--force-initial-build`,
+`--fail-confirm-retries`, `--no-verify-good`, `--no-verify-bad`,
+`--trial-timeout-s`. Full reference: see `USAGE_zh.md` §9.
 
 ## Outputs
 

@@ -90,12 +90,24 @@ if [ -z "$NAME" ] && [ "$SCENE" = "single_node" ]; then
 fi
 
 GOOD_TABLE="${GOOD_TABLE:-}"
+VERSION_TARGET="${BISECT_VERSION_TARGET:-}"
+if [ -z "$VERSION_TARGET" ]; then
+  runner_lower="$(echo "${RUNNER}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$runner_lower" == *"310p"* ]]; then
+    VERSION_TARGET="310p"
+  elif [[ "$runner_lower" == *"a3"* ]]; then
+    VERSION_TARGET="a3"
+  else
+    VERSION_TARGET="a2"
+  fi
+fi
 
 BISECT_CMD=(
   python -m tools.bisect.auto_bisect
   --scene "${SCENE}"
   --bad-commit "${BAD_COMMIT}"
   --good-table "${GOOD_TABLE}"
+  --version-target "${VERSION_TARGET}"
 )
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")

@@ -209,6 +209,11 @@ def current_commit(repo: Path) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
+def current_branch(repo: Path) -> str | None:
+    branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+    return branch if branch and branch != "HEAD" else None
+
+
 def changed_files(repo: Path, base: str, target: str) -> list[str]:
     """Files changed between ``base`` and ``target`` (both inclusive of range)."""
     out = _git(repo, "diff", "--name-only", base, target)

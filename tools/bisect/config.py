@@ -51,6 +51,11 @@ DEFAULT_GOOD_TABLE = os.getenv(
     "/root/.cache/nightly_bisect/good_table.csv",
 )
 SAMPLE_GOOD_TABLE = str(Path(__file__).resolve().parent / "good_table.sample.csv")
+DEFAULT_VERSION_TABLE = os.getenv(
+    "BISECT_VERSION_TABLE",
+    str(Path(DEFAULT_GOOD_TABLE).with_name("version_history.csv")),
+)
+SAMPLE_VERSION_TABLE = str(Path(__file__).resolve().parent / "version_history.sample.csv")
 
 # Where per-run artifacts (logs, state, final report) are written.
 DEFAULT_WORK_DIR = os.getenv("BISECT_WORK_DIR", "/root/.cache/nightly_bisect/runs")
@@ -58,6 +63,11 @@ DEFAULT_WORK_DIR = os.getenv("BISECT_WORK_DIR", "/root/.cache/nightly_bisect/run
 # Shared directory used as the cross-node barrier in multi-node bisects. It must
 # point at the same (network) filesystem on every node.
 DEFAULT_COORD_DIR = os.getenv("BISECT_COORD_DIR", "/root/.cache/nightly_bisect/coord")
+
+# Where the editable vLLM checkout lives inside the nightly container. The
+# bisect tool can temporarily switch this repo to the tag pinned by the tested
+# vllm-ascend commit when a range crosses a vLLM version boundary.
+DEFAULT_VLLM_REPO_DIR = Path(os.getenv("BISECT_VLLM_REPO_DIR", "/vllm-workspace/vllm"))
 
 # --------------------------------------------------------------------------- #
 # Native-code detection
@@ -164,9 +174,14 @@ class BisectOptions:
     """Tunables that change how the search runs (not what it searches)."""
 
     repo_dir: Path = REPO_ROOT
+    vllm_repo_dir: Path = DEFAULT_VLLM_REPO_DIR
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
     good_table_path: str = DEFAULT_GOOD_TABLE
+    version_table_path: str = DEFAULT_VERSION_TABLE
+    version_branch: str | None = None
+    version_target: str | None = None
+    sync_external_versions: bool = True
     # Re-confirm a FAIL this many extra times before trusting it (flaky guard).
     fail_confirm_retries: int = 1
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
