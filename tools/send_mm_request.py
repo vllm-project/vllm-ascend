@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import os
 from typing import TYPE_CHECKING, Any
-
+import regex as re
 import huggingface_hub
 import requests
 from modelscope import snapshot_download  # type: ignore
@@ -23,6 +23,13 @@ DEFAULT_IMAGE_REQUEST_ARGS: dict[str, Any] = {
 }
 
 _HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
+
+_FILE_URL_RE = re.compile(r"^file://", re.IGNORECASE)
+
+
+def _resolve_fs_path(path: str) -> str:
+    return _FILE_URL_RE.sub("", path, count=1)
+
 
 def _load_image_data(image_path: str | None = None) -> str:
     if not image_path:
