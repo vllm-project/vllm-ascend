@@ -39,6 +39,7 @@ from vllm_ascend.utils import (
     olora_tp_enable,
 )
 
+# Fixed-size contract required by the underlying _C_ascend ops (must be exactly 1024).
 SAS_METADATA_SIZE = 1024
 
 
