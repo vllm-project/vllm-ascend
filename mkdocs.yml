@@ -258,6 +258,10 @@ nav:
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/kv_pool.md
+        - user_guide/feature_guide/layerwise_kv_pool.md
+        - user_guide/feature_guide/sfa_pd_rd2h_kv_transfer.md
+        - user_guide/feature_guide/layerwise_prefill_kv_offload.md
+        - user_guide/feature_guide/sparse_kv_cache_offload.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
         - user_guide/feature_guide/large_scale_ep.md
@@ -292,6 +296,7 @@ nav:
         - developer_guide/Design_Documents/cpu_binding.md
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
+        - developer_guide/Design_Documents/sfa_pd_rd2h_connector.md
         - developer_guide/Design_Documents/eplb_swift_balancer.md
         - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
