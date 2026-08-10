@@ -30,7 +30,18 @@ Usage:
 from typing import Any
 
 # Import base classes
-from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import (
+    AscendAttentionScheme,
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherPart,
+    TPWeightGatherSpec,
+    TPWeightRepeatPart,
+    TPWeightRepeatSpec,
+    TPWeightSwitchMixin,
+    TPWeightSwitchState,
+)
 
 # Import all scheme classes for external access
 from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
@@ -74,6 +85,12 @@ __all__ = [
     "AscendLinearScheme",
     "AscendMoEScheme",
     "QuantType",
+    "TPWeightGatherPart",
+    "TPWeightGatherSpec",
+    "TPWeightRepeatPart",
+    "TPWeightRepeatSpec",
+    "TPWeightSwitchMixin",
+    "TPWeightSwitchState",
     # Registry functions
     "register_scheme",
     "get_scheme_class",
