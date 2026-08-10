@@ -533,7 +533,11 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
+            mock_model_runner._dummy_run.assert_called_once_with(
+                mock_uniform_decode_query_len,
+                uniform_decode=True,
+                skip_gdn_state_update=True,
+            )
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")

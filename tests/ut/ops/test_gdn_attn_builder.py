@@ -818,6 +818,41 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(
     assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) == 0
 
 
+def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[8, 8, 8, 8],
+            query_lens=[0, 0, 0, 0],
+            name="full_graph_idle_dummy",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.block_table_tensor[:, 0] = torch.tensor(
+        [10, 11, 98, 99],
+        dtype=torch.int32,
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.spec_state_indices_tensor.fill_(77)
+    builder.spec_query_start_loc.fill_(77)
+    builder.non_spec_state_indices_tensor.fill_(77)
+    builder.non_spec_query_start_loc.fill_(77)
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert attn_metadata.num_actual_tokens == 0
+    assert attn_metadata.num_decode_tokens == 0
+    assert torch.count_nonzero(attn_metadata.non_spec_query_start_loc) == 0
+    assert torch.all(attn_metadata.non_spec_state_indices_tensor == NULL_BLOCK_ID)
+    assert torch.count_nonzero(builder.spec_query_start_loc[:5]) == 0
+    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+
+
 @pytest.mark.parametrize(
     ("num_speculative_tokens", "num_decode_draft_tokens_cpu"),
     [
