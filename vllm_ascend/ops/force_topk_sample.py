@@ -148,43 +148,26 @@ def _sample(
     return sampled
 
 @torch.compile(dynamic=True, options={"npu_backend": "ascendc"})
-def force_topk_sample(
+def _force_topk_process_logits(
     logits: torch.Tensor,
     temperature: torch.Tensor,
     top_p: torch.Tensor,
     top_k: torch.Tensor,
     min_p: torch.Tensor | None,
-    generators: dict[int, torch.Generator],
     k: int,
-    return_raw_logprobs: bool = True,
-) -> tuple[torch.Tensor, CompactDist]:
-    """Sample from logits using the force_topk compact-space path.
+    return_raw_logprobs: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compiled logits processing for force_topk (Phase 1/2/3/5).
 
-    All sampling logic (temperature, top_k, top_p, min_p, Gumbel-max) is
-    performed in the [B, k] local-rank space after a single full-vocab topk.
-    The returned CompactDist carries the vocab-id restoration mapping and
-    logprobs (raw or processed depending on return_raw_logprobs).
-
-    Args:
-        logits: [B, V] float32, post-logits-processors,
-            **pre-temperature**.
-        temperature: [B] float32, per-request temperature.
-        top_p: [B] float32, per-request (1.0 = disabled).
-        top_k: [B] int32, per-request (<=0 = disabled -> use k).
-        min_p: [B] float32 or None, per-request (None = disabled).
-        generators: per-request torch.Generator dict (may be empty).
-        k: global candidate ceiling
-            (env VLLM_ASCEND_SAMPLER_FORCE_TOPK).
-        return_raw_logprobs: if True, logprobs = topv - LSE(z_raw)
-            (full-vocab normalized, requires full-vocab logsumexp).
-            If False, logprobs = log_softmax(s_masked) (processed,
-            k-dim only, no full-vocab scan).
+    Separated from random sampling (Phase 4) to avoid graph breaks
+    caused by torch.Generator dict that cannot be traced by
+    torch.compile.
 
     Returns:
-        (sampled, cdist):
-          sampled: [B] int64, sampled vocab ids.
-          cdist: CompactDist with token_index [B, k] i32 and
-              logprobs [B, k] f32.
+        (probs_k, token_index, logprobs):
+          probs_k: [B, k] f32, renormalized probabilities.
+          token_index: [B, k] i64, vocab id mapping.
+          logprobs: [B, k] f32, raw or processed logprobs.
     """
     B, V = logits.shape
     k = min(k, V)
@@ -212,9 +195,6 @@ def force_topk_sample(
         true_p, k, logits.device,
     )
 
-    # Phase 4: random sampling
-    sampled = _sample(probs_k, generators, B, token_index)
-
     # Phase 5: select logprobs based on mode
     if return_raw_logprobs:
         logprobs = raw_logprobs  # topv - LSE(z_raw)
@@ -222,6 +202,61 @@ def force_topk_sample(
         logprobs = torch.log_softmax(
             s_masked, dim=-1
         )  # log_softmax(s_masked): processed
+
+    return probs_k, token_index, logprobs
+
+
+def force_topk_sample(
+    logits: torch.Tensor,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: torch.Tensor,
+    min_p: torch.Tensor | None,
+    generators: dict[int, torch.Generator],
+    k: int,
+    return_raw_logprobs: bool = True,
+) -> tuple[torch.Tensor, CompactDist]:
+    """Sample from logits using the force_topk compact-space path.
+
+    All sampling logic (temperature, top_k, top_p, min_p, Gumbel-max) is
+    performed in the [B, k] local-rank space after a single full-vocab topk.
+    The returned CompactDist carries the vocab-id restoration mapping and
+    logprobs (raw or processed depending on return_raw_logprobs).
+
+    Phase 1/2/3/5 (tensor ops) are compiled via _force_topk_process_logits.
+    Phase 4 (random sampling with generators) runs uncompiled to avoid
+    graph breaks from non-traceable torch.Generator objects.
+
+    Args:
+        logits: [B, V] float32, post-logits-processors,
+            **pre-temperature**.
+        temperature: [B] float32, per-request temperature.
+        top_p: [B] float32, per-request (1.0 = disabled).
+        top_k: [B] int32, per-request (<=0 = disabled -> use k).
+        min_p: [B] float32 or None, per-request (None = disabled).
+        generators: per-request torch.Generator dict (may be empty).
+        k: global candidate ceiling
+            (env VLLM_ASCEND_SAMPLER_FORCE_TOPK).
+        return_raw_logprobs: if True, logprobs = topv - LSE(z_raw)
+            (full-vocab normalized, requires full-vocab logsumexp).
+            If False, logprobs = log_softmax(s_masked) (processed,
+            k-dim only, no full-vocab scan).
+
+    Returns:
+        (sampled, cdist):
+          sampled: [B] int64, sampled vocab ids.
+          cdist: CompactDist with token_index [B, k] i32 and
+              logprobs [B, k] f32.
+    """
+    probs_k, token_index, logprobs = _force_topk_process_logits(
+        logits, temperature, top_p, top_k, min_p,
+        k, return_raw_logprobs,
+    )
+
+    # Phase 4: random sampling (uncompiled)
+    sampled = _sample(
+        probs_k, generators, logits.shape[0], token_index
+    )
 
     return sampled, CompactDist(
         token_index.to(torch.int32), logprobs
