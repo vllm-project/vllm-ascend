@@ -154,9 +154,11 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_kimi_shared_expert_selects_tp_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
+    def test_apply_kimi_shared_expert_sums_owned_tp_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
         self.method.enable_per_channel_for_kimi_shared_expert()
         layer = torch.nn.Module()
+        layer.tp_size = 4
+        layer.tp_rank = 3
         layer.weight = torch.nn.Parameter(torch.empty(1, 4, 1, dtype=torch.int32), requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(torch.ones(8, dtype=torch.int64), requires_grad=False)
         layer.scale_bias = torch.nn.Parameter(
@@ -173,7 +175,32 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.method.apply(layer, x, tp_rank=3)
 
         grouped_bias = mock_grouped_matmul.call_args.kwargs["bias"][0]
-        torch.testing.assert_close(grouped_bias, layer.scale_bias[:, 3].reshape(1, -1))
+        torch.testing.assert_close(grouped_bias, layer.scale_bias[:, 12:16].sum(dim=1).reshape(1, -1))
+
+    @patch("torch_npu.npu_grouped_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_kimi_shared_expert_tp1_sums_all_scale_bias(self, mock_dynamic_quant, mock_grouped_matmul):
+        self.method.enable_per_channel_for_kimi_shared_expert()
+        layer = torch.nn.Module()
+        layer.tp_size = 1
+        layer.tp_rank = 0
+        layer.weight = torch.nn.Parameter(torch.empty(1, 4, 1, dtype=torch.int32), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones(8, dtype=torch.int64), requires_grad=False)
+        layer.scale_bias = torch.nn.Parameter(
+            torch.arange(8 * 16, dtype=torch.float32).reshape(8, 16),
+            requires_grad=False,
+        )
+        x = torch.randn(2, 4, dtype=torch.bfloat16)
+        mock_dynamic_quant.return_value = (
+            torch.ones(2, 4, dtype=torch.int8),
+            torch.ones(2, dtype=torch.float32),
+        )
+        mock_grouped_matmul.return_value = [torch.empty(2, 8)]
+
+        self.method.apply(layer, x)
+
+        grouped_bias = mock_grouped_matmul.call_args.kwargs["bias"][0]
+        torch.testing.assert_close(grouped_bias, layer.scale_bias.sum(dim=1).reshape(1, -1))
 
     @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
@@ -321,6 +348,23 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         expected_scale_bits = layer.weight_scale_fp32.numpy().view("uint32").astype("int64")
         torch.testing.assert_close(layer.weight_scale, torch.from_numpy(expected_scale_bits))
         self.assertEqual(layer.scale_bias.shape, torch.Size([32]))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
+    def test_process_kimi_shared_expert_tp1_sums_down_scale_bias(self, _mock_maybe_trans_nz):
+        self.method.enable_per_channel_for_kimi_shared_expert()
+        self.method.new_quant_version = True
+        layer = torch.nn.Module()
+        layer.tp_size = 1
+        layer.tp_rank = 0
+        layer.weight = torch.nn.Parameter(torch.zeros((16, 8), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.float32), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.bfloat16), requires_grad=False)
+        original_bias = torch.arange(32 * 16, dtype=torch.float32).reshape(32, 16)
+        layer.scale_bias = torch.nn.Parameter(original_bias.clone(), requires_grad=False)
+
+        self.method.process_weights_after_loading(layer)
+
+        torch.testing.assert_close(layer.scale_bias, original_bias.sum(dim=1))
 
     def test_process_kimi_shared_expert_rejects_old_quant_version(self):
         self.method.enable_per_channel_for_kimi_shared_expert()

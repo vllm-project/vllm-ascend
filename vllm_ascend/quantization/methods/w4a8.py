@@ -148,6 +148,35 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         # not a reliable discriminator for every vLLM Linear wrapper.
         self._force_kimi_shared_expert_per_channel = True
 
+    def _local_scale_bias(self, layer: torch.nn.Module, tp_rank: int | None = None) -> torch.Tensor:
+        """Combine the offline scale-bias shards owned by this projection.
+
+        ModelSlim stores row-parallel ``scale_bias`` with 16 columns, one for
+        each offline input shard.  A runtime TP rank may own more than one of
+        those shards (all 16 when shared-expert DP disables TP), so selecting a
+        single column is only correct for TP16.
+        """
+        scale_bias = layer.scale_bias
+        if scale_bias.dim() != 2:
+            return scale_bias
+        if scale_bias.shape[1] == 1:
+            return scale_bias.flatten()
+
+        tp_size = getattr(layer, "tp_size", self.tp_size)
+        rank = getattr(layer, "tp_rank", tp_rank if tp_rank is not None else 0)
+        num_offline_shards = scale_bias.shape[1]
+        if tp_size <= 0 or num_offline_shards % tp_size != 0:
+            raise ValueError(
+                f"scale_bias width {num_offline_shards} must be divisible by "
+                f"the projection TP size {tp_size}"
+            )
+        if rank < 0 or rank >= tp_size:
+            raise ValueError(f"tp_rank {rank} exceeds projection TP size {tp_size}")
+
+        shards_per_rank = num_offline_shards // tp_size
+        start = rank * shards_per_rank
+        return scale_bias[:, start : start + shards_per_rank].sum(dim=1)
+
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         """Create weight parameters.
 
@@ -260,12 +289,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                     device=quantized_x.device,
                 )
 
-                scale_bias = layer.scale_bias
-                if scale_bias.dim() == 2:
-                    rank = tp_rank or 0
-                    if rank >= scale_bias.shape[1]:
-                        raise ValueError(f"tp_rank {rank} exceeds scale_bias width {scale_bias.shape[1]}")
-                    scale_bias = scale_bias[:, rank]
+                scale_bias = self._local_scale_bias(layer, tp_rank)
 
                 output = torch_npu.npu_grouped_matmul(
                     x=[quantized_x],
@@ -326,10 +350,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 
             if not hasattr(layer, "scale_bias"):
                 raise ValueError("K3 shared-expert W4A8 requires scale_bias")
-            if layer.scale_bias.data.shape[1] == 1:
-                layer.scale_bias.data = layer.scale_bias.data.flatten()
-            else:
-                layer.scale_bias.data = layer.scale_bias.data.contiguous()
+            layer.scale_bias.data = self._local_scale_bias(layer).contiguous()
 
             # Treat the shared projection as one grouped expert. Keep packed
             # int4 bytes while converting to NZ, then expose groups of four
