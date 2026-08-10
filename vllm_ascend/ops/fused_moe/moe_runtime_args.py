@@ -88,7 +88,12 @@ def _build_mxfp_params(
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
 ) -> _stage_params.MoEMxfpParams | None:
-    if quant_type not in [QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
+    if quant_type not in (
+        QuantType.W8A8MXFP,
+        QuantType.W4A4MXFP,
+        QuantType.W4A8MXFP,
+        QuantType.W4A16MXFP,
+    ):
         return None
 
     has_explicit_mxfp_args = any(
@@ -246,6 +251,7 @@ def build_mlp_compute_input(
             QuantType.W4A8MXFP,
             QuantType.W8A8FP,
             QuantType.W4A16MXFP,
+            QuantType.W8A16FP,
         )
         and use_fusion_ops,
         activation=fused_experts_input.activation,

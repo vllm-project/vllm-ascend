@@ -28,6 +28,12 @@ class QuantTypeMapping:
             "scale_dtype": torch_npu.float8_e8m0fnu,
             "per_token_scale_dtype": None,
         },
+        "W8A16_FP8": {
+            "act_quant_type": None,
+            "weight_quant_type": torch.float8_e4m3fn,
+            "scale_dtype": None,
+            "per_token_scale_dtype": None,
+        },
     }
 
     @staticmethod
