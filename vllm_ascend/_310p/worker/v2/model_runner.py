@@ -432,8 +432,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.req_states.total_len.gpu.index_add_(0, valid_indices, valid_num_sampled)
 
         if query_start_loc is not None:
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
-            computed_delta = query_lens.masked_select(nonnegative)
+            computed_delta = self._get_valid_query_lens(idx_mapping, query_start_loc)
             self.req_states.num_computed_tokens.gpu.index_add_(
                 0,
                 valid_indices,
@@ -442,6 +441,20 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         self.model_state.postprocess_state(idx_mapping, num_sampled)
         self._copy_num_computed_tokens_to_cpu()
+
+    @staticmethod
+    def _get_valid_query_lens(
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return query lengths for real requests, excluding graph padding."""
+        # A FULL graph may pad idx_mapping to its capture bucket while
+        # query_start_loc still contains boundaries for real requests only.
+        # Padding entries are trailing -1 sentinels and must not participate in
+        # the num_computed_tokens update.
+        num_query_lens = min(idx_mapping.shape[0], query_start_loc.shape[0] - 1)
+        query_lens = query_start_loc[1 : num_query_lens + 1] - query_start_loc[:num_query_lens]
+        return query_lens.masked_select(idx_mapping[:num_query_lens] >= 0)
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
         query_lens = input_batch.query_start_loc[1:] - input_batch.query_start_loc[:-1]

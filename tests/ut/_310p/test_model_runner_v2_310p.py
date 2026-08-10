@@ -150,6 +150,27 @@ def test_uniform_decode_query_len_falls_back_to_decode_query_len() -> None:
     assert runner._get_uniform_decode_query_len() == 2
 
 
+def test_postprocess_query_lens_ignore_full_graph_request_padding() -> None:
+    # Fifteen real decode requests replay a graph captured for a 16-request
+    # bucket. query_start_loc has real request boundaries only, while the graph
+    # idx_mapping carries one trailing -1 sentinel.
+    idx_mapping = torch.tensor([*range(15), -1], dtype=torch.int32)
+    query_start_loc = torch.arange(16, dtype=torch.int32)
+
+    query_lens = NPUModelRunner310V2._get_valid_query_lens(idx_mapping, query_start_loc)
+
+    torch.testing.assert_close(query_lens, torch.ones(15, dtype=torch.int32))
+
+
+def test_postprocess_query_lens_keep_exact_graph_bucket() -> None:
+    idx_mapping = torch.arange(4, dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 1, 3, 4, 7], dtype=torch.int32)
+
+    query_lens = NPUModelRunner310V2._get_valid_query_lens(idx_mapping, query_start_loc)
+
+    torch.testing.assert_close(query_lens, torch.tensor([1, 2, 1, 3], dtype=torch.int32))
+
+
 def test_310p_model_state_refreshes_all_full_graph_seq_lens_buffers() -> None:
     model_state = object.__new__(Ascend310PModelState)
     model_state._capture_seq_lens_by_ptr = {}

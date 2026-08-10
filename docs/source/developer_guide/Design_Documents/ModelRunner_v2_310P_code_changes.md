@@ -646,3 +646,49 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
   `git diff --check`。本次重构后的新增 UT 仍需重新在服务器环境执行。
 - 并发请求在 310P V2 `postprocess_sampled()` 中可能存在 `idx_mapping` 与
   `query_start_loc` 长度不一致问题；该问题与本次 attention 首次偏差独立，暂未修改。
+
+## 19. FULL graph 多并发采样后处理 padding 对齐
+
+问题现象：
+
+- Qwen3-8B eager 多并发正常。
+- `FULL_DECODE_ONLY` 单请求能够运行；多并发进入 `num_tokens=16` 的图后，
+  `postprocess_sampled()` 报 `tensor a (15) must match tensor b (16)`。
+
+根因：
+
+- FULL graph 按固定 capture bucket 重放。15 个真实 decode 请求进入 16-request bucket 时，
+  `idx_mapping` 被补齐到 16，尾部使用 `-1` sentinel。
+- `query_start_loc` 仍只保存真实请求边界，长度为 16，因此差分后的 `query_lens` 长度为 15。
+- 原实现直接使用长度为 16 的 `idx_mapping >= 0` mask 筛选长度为 15 的 `query_lens`，
+  导致维度不匹配。eager 不做 bucket padding，所以不会进入该故障路径。
+
+### `vllm_ascend/_310p/worker/v2/model_runner.py`
+
+改动内容：
+
+- 新增 `_get_valid_query_lens()`，在 `idx_mapping` 与 `query_start_loc` 共同描述的请求区间内
+  计算 query length。
+- 只使用共同区间内的 `idx_mapping` mask；FULL graph 尾部 `-1` padding 不参与
+  `num_computed_tokens` 更新。
+- 正好命中 capture bucket 时保持原有行为不变。
+
+改动原因：
+
+- `query_start_loc` 描述真实调度请求，`idx_mapping` 在图模式还承担固定 bucket padding，
+  两者不能无条件假设长度相同。
+- 修复放在 310P MRV2 专用后处理内，不修改上游 `post_update()` 和公共 MRV2 路径，
+  因而不影响 310P MRV1及其他机型。
+
+### `tests/ut/_310p/test_model_runner_v2_310p.py`
+
+改动内容：
+
+- 增加 15 个真实请求进入 16-request graph bucket 的回归测试，验证尾部 `-1` 被忽略。
+- 增加请求数正好命中 capture bucket 的测试，验证所有 query length 均被保留。
+
+验证状态：
+
+- `py_compile`、`ruff check` 和 `git diff --check` 已通过。
+- 当前 Windows Python 环境未安装 `pytest`，目标 UT 尚未在本机执行，需在服务器开发环境补跑。
+- 真实 310P TP2 eager、单请求 graph 和 15→16 bucket 多并发仍需在服务器环境验证。
