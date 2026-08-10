@@ -9,7 +9,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AlltoAllCommImpl,
     MC2CommImpl,
 )
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoEFusedExpertsInput,
     MoEPrepareOutput,
