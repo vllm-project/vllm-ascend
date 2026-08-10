@@ -48,6 +48,7 @@
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "attention/prepare_next_token_ids_padded/prepare_next_token_ids_padded_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2749,5 +2750,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+
+    ops.def(
+    "prepare_next_token_ids_padded("
+    "Tensor sampled_token_ids, "
+    "Tensor discard_request_mask, "
+    "Tensor backup_next_token_ids, "
+    "int vocab_size"
+    ") -> (Tensor next_token_ids, "
+    "Tensor valid_sampled_tokens_count)"
+    );
+
+    ops.impl(
+    "prepare_next_token_ids_padded",
+    torch::kPrivateUse1,
+    &vllm_ascend::prepare_next_token_ids_padded
+    );
 }
 #endif

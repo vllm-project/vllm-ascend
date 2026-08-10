@@ -1420,6 +1420,25 @@ void npu_scatter_nd_update_v2_meta(
     return;
 }
 
+std::tuple<at::Tensor, at::Tensor>
+prepare_next_token_ids_padded_meta(
+    const at::Tensor& sampled_token_ids,
+    const at::Tensor& discard_request_mask,
+    const at::Tensor& backup_next_token_ids,
+    int64_t vocab_size)
+{
+    const auto batch_size = sampled_token_ids.sym_size(0);
+
+    auto next_token_ids = at::empty_symint(
+        {batch_size},
+        sampled_token_ids.options().dtype(at::kInt));
+
+    auto valid_sampled_tokens_count = at::empty_symint(
+        {batch_size},
+        sampled_token_ids.options().dtype(at::kInt));
+
+    return {next_token_ids, valid_sampled_tokens_count};
+}
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
     const at::Tensor & k,
@@ -1629,6 +1648,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+
+    //prepare_next_token_ids_padded
+    ops.impl("prepare_next_token_ids_padded", &vllm_ascend::meta::prepare_next_token_ids_padded_meta);
 }
 }
 #endif

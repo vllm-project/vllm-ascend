@@ -60,7 +60,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled,enable_custom_op
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -1759,7 +1759,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         This function must use device functions to operate on the inputs, and
         should not introduce any blocking CPU-GPU synchronization.
         """
-        # TODO(Ben): Combine this into a custom fused kernel
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
@@ -1769,19 +1768,52 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
-        # Mask out the sampled tokens indices that should not be sampled.
-        discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
+        sampled_token_ids = sampled_token_ids[:num_reqs]
+        backup_next_token_ids = (
+        self.backup_next_token_ids.gpu[:num_reqs]
+    )
 
-        valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        valid_sampled_token_ids_gpu = DeviceOperator.index_fill(
-            valid_sampled_token_ids_gpu,
-            0,
-            discard_sampled_tokens_req_indices,
+        
+        discard_request_mask = torch.zeros(
+            num_reqs,
+            dtype=torch.bool,
+            device=sampled_token_ids.device,
+        )
+
+        if num_discarded_requests > 0:
+            discard_sampled_tokens_req_indices = (
+                discard_request_indices[:num_discarded_requests]
+            )
+
+            discard_request_mask.index_fill_(
+                0,
+                discard_sampled_tokens_req_indices,
+                True,
+            )
+
+        use_fused_op = hasattr(
+                torch.ops._C_ascend,
+                "prepare_next_token_ids_padded",
+            )
+
+        if enable_custom_op() and use_fused_op:
+            return torch.ops._C_ascend.prepare_next_token_ids_padded(
+                sampled_token_ids,
+                discard_request_mask,
+                backup_next_token_ids,
+                gpu_input_batch.vocab_size,
+            )
+
+
+        #fallback
+        valid_sampled_token_ids = sampled_token_ids.masked_fill(
+            discard_request_mask.unsqueeze(1),
             -1,
         )
 
+
         # Generate a mask for all valid tokens within those requests
-        valid_mask = (valid_sampled_token_ids_gpu != -1) & (valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size)
+        valid_mask = (valid_sampled_token_ids != -1) & (valid_sampled_token_ids < gpu_input_batch.vocab_size)
 
         # Count the number of valid tokens in each request
         valid_sampled_tokens_count = valid_mask.sum(dim=1)
@@ -1792,14 +1824,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Get last valid token from each row
         # (assume undefined state where there is no valid token)
-        selected_tokens = torch.gather(valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)).squeeze(1)
+        selected_tokens = torch.gather(valid_sampled_token_ids, 1, last_valid_indices_safe.unsqueeze(1)).squeeze(1)
 
         # Use last token if valid, pre-computed backup if not
-        batch_size = valid_sampled_token_ids_gpu.shape[0]
         next_token_ids = torch.where(
             last_valid_indices != -1,
             selected_tokens,
-            self.backup_next_token_ids.gpu[:batch_size],
+            self.backup_next_token_ids
         )
 
         return next_token_ids, valid_sampled_tokens_count
