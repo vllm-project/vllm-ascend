@@ -163,6 +163,10 @@ def test_route_helpers():
     select_tests._load_runner_mapping(
         {
             "runner_mapping": {
+                (
+                    "tests/e2e/pull_request/four_card/"
+                    r"test_qwen3_30b_a3b_a2_performance\.py$"
+                ): {"default": "a2_x4"},
                 "tests/ut/.+/a2_2": {"default": "a2_x2"},
                 "tests/ut/.+/a2": {"default": "a2_x1"},
                 "tests/ut/.+/a3_8": {"default": "a3_x8"},
@@ -201,6 +205,17 @@ def test_route_helpers():
     )
     assert select_tests._route_e2e_file("tests/e2e/pull_request/two_card/test_x.py::test_case") == (
         2,
+        select_tests.NpuType.A3,
+    )
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/test_qwen3_30b_a3b_a2_performance.py") == (
+        4,
+        select_tests.NpuType.A2,
+    )
+    assert select_tests._route_e2e_file(
+        "tests/e2e/pull_request/four_card/test_qwen3_30b_a3b_a2_performance.py::test_qwen3_30b_a3b_bf16_performance"
+    ) == (4, select_tests.NpuType.A2)
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/test_graph_mode.py") == (
+        4,
         select_tests.NpuType.A3,
     )
     assert select_tests._route_e2e_file("tests/e2e/pull_request/eight_card/test_x.py::test_case") == (

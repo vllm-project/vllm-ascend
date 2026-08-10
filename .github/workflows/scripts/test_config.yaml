@@ -611,6 +611,7 @@
     - tests/e2e/pull_request/two_card/test_qwen3_performance.py
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
+    - tests/e2e/pull_request/four_card/test_qwen3_30b_a3b_a2_performance.py
     - tests/e2e/pull_request/four_card/test_qwen3_5.py
     - tests/e2e/pull_request/four_card/test_graph_mode.py
 
@@ -849,6 +850,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 1020
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 520
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 260
+  tests/e2e/pull_request/four_card/test_qwen3_30b_a3b_a2_performance.py: 1570
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 640
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1540
   tests/e2e/pull_request/four_card/test_graph_mode.py: 510
@@ -899,6 +901,8 @@ estimated_times:
 # for files whose name contains ``_310p``.
 # Patterns are evaluated longest first (most specific wins).
 runner_mapping:
+  tests/e2e/pull_request/four_card/test_qwen3_30b_a3b_a2_performance\.py$:
+    default: a2_x4
   tests/e2e/pull_request/one_card:
     default: a2_x1
     310p: 310p_x1
