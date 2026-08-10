@@ -801,6 +801,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 500
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
+  tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 600
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 740
   tests/e2e/pull_request/two_card/test_data_parallel.py: 570
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 150

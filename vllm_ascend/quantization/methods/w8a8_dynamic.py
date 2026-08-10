@@ -230,6 +230,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        lora_context = getattr(layer, "_ascend_moe_lora_context", None)
         assert topk_ids is not None
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
@@ -279,7 +280,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                log2phy=layer.log2phy,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=activation,
                 w1_scale=w1_scale,
@@ -289,6 +289,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
                 swiglu_alpha=layer.swiglu_alpha,
                 swiglu_beta=layer.swiglu_beta,
+                lora_context=lora_context,
             )
         )
         return final_hidden_states

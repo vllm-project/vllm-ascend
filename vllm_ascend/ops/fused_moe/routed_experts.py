@@ -16,7 +16,6 @@
 #
 from collections.abc import Iterable
 from copy import copy
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
@@ -25,7 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import RoutedExperts, SharedExperts
+from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts, SharedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
@@ -38,20 +37,10 @@ from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
+from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
-
-
-@dataclass
-class FusedMoEResult:
-    routed_out: torch.Tensor
-    before_dispatch_evt: torch.npu.Event | None = None
-    before_gmm2_evt: torch.npu.Event | None = None
-    before_combine_evt: torch.npu.Event | None = None
-    swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.0
-    swiglu_beta: float = 0.0
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -165,7 +154,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                log2phy=layer.log2phy,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=activation,
                 w1_scale=w1_scale,
@@ -222,7 +210,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def __init__(
         self,
         *args,
-        router=None,
         tid2eid=None,
         n_shared_experts: int = 0,
         **kwargs,
@@ -238,7 +225,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     tid2eid=self.tid2eid,
                 )
             )
-        self.router = router
+        self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
         self.n_shared_experts = n_shared_experts
@@ -259,7 +246,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
-        self.n_shared_experts = n_shared_experts
 
         if (
             self.custom_routing_function is None
@@ -456,15 +442,16 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-
         topk_weights, topk_ids = self.router._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             input_ids=input_ids,
         )
+        if self.log2phy is not None:
+            topk_ids = self.log2phy[topk_ids]
 
         try:
             _vllm_config = get_current_vllm_config()
@@ -486,24 +473,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             global_redundant_expert_num=self.global_redundant_expert_num,
             num_shared_experts=num_shared_experts,
         )
-
-        zero_expert_result = None
-        zero_expert_num = getattr(self, "zero_expert_num", 0)
-        zero_expert_type = getattr(self, "zero_expert_type", None)
-        if zero_expert_num == 0 or zero_expert_type is None:
-            assert router_logits.shape[1] == num_logical_experts, (
-                "Number of global experts mismatch (excluding redundancy): "
-                f"router_logits.shape[1]={router_logits.shape[1]}, "
-                f"num_logical_experts={num_logical_experts}"
-            )
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=num_logical_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=hidden_states,
-            )
 
         if getattr(self, "mix_placement", False):
             batch_size = topk_ids.shape[0]
@@ -534,7 +503,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        return topk_weights, topk_ids, zero_expert_result
+        return topk_weights, topk_ids
 
     def forward_impl(
         self,
@@ -569,8 +538,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         mc2_mask = prepare_output.mc2_mask
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
-
-        topk_weights, topk_ids, zero_expert_result = self._select_experts(
+        if self.router is None:
+            raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
@@ -590,8 +560,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
-        if zero_expert_result is not None:
-            fused_experts_results.routed_out += zero_expert_result
 
         if self._use_v2_model_runner and self.router.eplb_state is not None:
             expert_tokens = fused_experts_results.expert_tokens
@@ -641,14 +609,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, None)
 
         if self.return_with_event:
-            return FusedMoEResult(
-                routed_out=routed_out,
-                before_dispatch_evt=fused_experts_results.before_dispatch_evt,
-                before_gmm2_evt=fused_experts_results.before_gmm2_evt,
-                before_combine_evt=fused_experts_results.before_combine_evt,
-                swiglu_limit=fused_experts_results.swiglu_limit,
-                swiglu_alpha=getattr(fused_experts_results, "swiglu_alpha", 1.0),
-                swiglu_beta=getattr(fused_experts_results, "swiglu_beta", 0.0),
+            return routed_out, FusedMoEEvents(
+                before_routed_experts=None,
+                after_routed_experts=None,
+                before_dispatch=fused_experts_results.before_dispatch_evt,
+                before_gmm2=fused_experts_results.before_gmm2_evt,
+                before_combine=fused_experts_results.before_combine_evt,
             )
 
         # The vLLM FusedMoE forward_impl does not return events.

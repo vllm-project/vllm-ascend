@@ -120,9 +120,8 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
             return
 
         if not confidence_weights:
-            raise RuntimeError(
-                "The DSpark confidence head is enabled, but no confidence_head tensors were found in the checkpoint."
-            )
+            self.enable_confidence_head = False
+            return
 
         confidence_weights.sort(key=lambda item: item[0])
         loaded_parameters = AutoWeightsLoader(self.model.confidence_head).load_weights(confidence_weights)
