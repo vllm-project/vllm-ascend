@@ -19,7 +19,7 @@ from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
-from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel_main
 from vllm_ascend.utils import is_310p
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
@@ -255,7 +255,7 @@ if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu
-    mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
+    mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel_main
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch

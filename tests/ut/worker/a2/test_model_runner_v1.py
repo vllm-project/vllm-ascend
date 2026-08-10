@@ -235,6 +235,47 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
+    def test_partial_hit_copy_respects_mamba_state_major_layout(self):
+        runner = self._build_runner()
+        runner.kv_cache_config = SimpleNamespace(num_blocks=3)
+        shared_storage = torch.arange(30, dtype=torch.float32)
+        attention_cache = shared_storage[:12].view(6, 2)
+        conv_state = shared_storage[12:24].view(3, 4)
+        recurrent_state = shared_storage[24:].view(3, 2)
+        mamba_cache = [conv_state, recurrent_state]
+        runner.kv_caches = [
+            attention_cache,
+            mamba_cache,
+        ]
+        runner._kv_cache_block_copy_scales = {
+            id(attention_cache): 2,
+            id(mamba_cache): 1,
+        }
+        expected_conv_state = conv_state.clone()
+        expected_recurrent_state = recurrent_state.clone()
+        expected_attention_cache = attention_cache.clone()
+
+        runner._copy_kv_cache_blocks_for_partial_hits([(0, 1), (1, 2)])
+
+        torch.testing.assert_close(conv_state[1], expected_conv_state[0])
+        torch.testing.assert_close(conv_state[2], expected_conv_state[1])
+        torch.testing.assert_close(
+            recurrent_state[1],
+            expected_recurrent_state[0],
+        )
+        torch.testing.assert_close(
+            recurrent_state[2],
+            expected_recurrent_state[1],
+        )
+        torch.testing.assert_close(
+            attention_cache[2:4],
+            expected_attention_cache[0:2],
+        )
+        torch.testing.assert_close(
+            attention_cache[4:6],
+            expected_attention_cache[2:4],
+        )
+
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
