@@ -149,13 +149,7 @@ M = TypeVar("M", bound=AscendDSAMetadata)
 
 
 class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     hadamard = None
-    start_pos_prefill: torch.Tensor
-    req_sas_metadata: torch.Tensor
-    req_qli_metadata: torch.Tensor
-    block_size: int = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -186,6 +180,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.slot_mapping: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.seq_lens_cpu: torch.Tensor = None
+        self.block_size: int = 128
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
