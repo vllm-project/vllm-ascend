@@ -21,7 +21,6 @@ from dataclasses import dataclass
 import torch
 import torch_npu
 
-import vllm_ascend.ops.fused_moe.dataclass.moe_quant as _stage_params
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -109,7 +108,7 @@ def _build_mxfp_params(
     mxfp_scale_dtype: torch.dtype | None = None,
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
-) -> _stage_params.MoEMxfpParams | None:
+) -> MoEMxfpParams | None:
     if quant_type not in [QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
         return None
 
