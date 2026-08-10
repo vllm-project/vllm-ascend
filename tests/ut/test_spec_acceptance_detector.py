@@ -44,10 +44,7 @@ def _make_detector(
             num_draft_tokens_per_req=None,
         ),
         requests={
-            rid: SimpleNamespace(
-                prev_num_draft_len=0, prompt_token_ids=[], output_token_ids=[]
-            )
-            for rid in req_ids
+            rid: SimpleNamespace(prev_num_draft_len=0, prompt_token_ids=[], output_token_ids=[]) for rid in req_ids
         },
     )
     det._dfx_config = None

@@ -36,28 +36,39 @@ class MsprobeBridgeMixin:
     """Mixin: PrecisionDebugger / AclGraphDumper lifecycle and dump_enable I/O."""
 
     def _init_debugger(self, cudagraph_mode: CUDAGraphMode):
+        """Best-effort msprobe debugger init. Never raises — dump stays optional.
+
+        Missing ``dump_config_path`` or msprobe import/construct failure leaves
+        ``_debugger=None``. Callers that want dump must then force
+        ``dump.enabled=false`` (see ``Dumper._enforce_dump_requires_debugger``).
+        """
         dump_cfg = self.runner.ascend_config.dump_config_path
         if dump_cfg is None:
             self._debugger = None
             self._uses_aclgraph_dumper = False
             return None
-        if cudagraph_mode == CUDAGraphMode.NONE:
-            from msprobe.pytorch import PrecisionDebugger
-
-            self._debugger = PrecisionDebugger(dump_cfg)
-            self._uses_aclgraph_dumper = False
-            return self._debugger
-
         try:
+            if cudagraph_mode == CUDAGraphMode.NONE:
+                from msprobe.pytorch import PrecisionDebugger
+
+                self._debugger = PrecisionDebugger(dump_cfg)
+                self._uses_aclgraph_dumper = False
+                return self._debugger
+
             from msprobe.pytorch import AclGraphDumper
+
+            self._debugger = AclGraphDumper(dump_cfg)
+            self._uses_aclgraph_dumper = True
+            return self._debugger
         except Exception as exc:
-            raise RuntimeError(
-                "Failed to import AclGraphDumper from msprobe. "
-                "Please install/rebuild msprobe with aclgraph_dump enabled."
-            ) from exc
-        self._debugger = AclGraphDumper(dump_cfg)
-        self._uses_aclgraph_dumper = True
-        return self._debugger
+            logger.error(
+                "[Anomaly msprobe] debugger init failed (dump will stay off until "
+                "msprobe is available and dump.enabled is re-enabled): %s",
+                exc,
+            )
+            self._debugger = None
+            self._uses_aclgraph_dumper = False
+            return None
 
     def _is_aclgraph_dumper(self) -> bool:
         return bool(getattr(self, "_uses_aclgraph_dumper", False))

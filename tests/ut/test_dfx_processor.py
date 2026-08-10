@@ -28,6 +28,7 @@ def test_dfx_processor_check_after_spec_writes_report_on_arm():
     proc.dfx_config.report_print_sampling_meta.return_value = True
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.can_run_anomaly_detection.return_value = True
     proc.dumper.handle_anomaly_alert.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
@@ -44,6 +45,7 @@ def test_dfx_processor_check_after_spec_writes_report_on_arm():
     proc.save_sample_param.assert_called_once_with("r1")
     proc.report_writer.write.assert_called_once()
     assert proc.report_writer.write.call_args.kwargs["req_id"] == "r1"
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
 
 
 def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
@@ -59,6 +61,7 @@ def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
     proc.dfx_config.report_print_sampling_meta.return_value = True
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.handle_manual_trigger.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
@@ -83,6 +86,7 @@ def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
         assert proc.refresh_config() is True
 
     proc.dumper.apply_dfx_config.assert_called_once()
+    proc.detectors.apply_dfx_config.assert_called_once()
     proc.dumper.handle_manual_trigger.assert_called_once_with(trigger)
     assert proc.save_sample_param.call_count == 2
     proc.save_sample_param.assert_any_call("r1")
@@ -91,6 +95,10 @@ def test_dfx_processor_refresh_runs_manual_dump_with_batch_report():
     detail = proc.report_writer.write.call_args.kwargs["detail"]
     assert detail["num_requests"] == 2
     assert [r["req_id"] for r in detail["requests"]] == ["r1", "r2"]
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_armed"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_count"] == 0
+    assert proc.report_writer.write.call_args.kwargs["dump_max_times"] == 3
 
 
 def test_dfx_processor_refresh_no_change_skips_apply():
@@ -100,6 +108,7 @@ def test_dfx_processor_refresh_no_change_skips_apply():
     proc.dfx_config.manual_trigger.return_value = False
     proc.dfx_config.print_input_token_ids_once.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.detectors = MagicMock()
     proc.manual_triggers = MagicMock()
     proc.manual_triggers.consume_once.return_value = None
@@ -124,6 +133,7 @@ def test_dfx_processor_refresh_drains_manual_trigger_even_when_unchanged():
     proc.dfx_config.report_print_sampling_meta.return_value = False
     proc.dfx_config.report_decode_token_ids.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.handle_manual_trigger.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
@@ -150,6 +160,50 @@ def test_dfx_processor_refresh_drains_manual_trigger_even_when_unchanged():
     proc.manual_triggers.consume_once.assert_called_once()
     proc.dumper.handle_manual_trigger.assert_called_once_with(trigger)
     proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["req_id"] == "__manual_trigger__"
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_armed"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_count"] == 0
+    assert proc.report_writer.write.call_args.kwargs["dump_max_times"] == 3
+
+
+def test_handle_manual_trigger_still_writes_report_when_arm_fails():
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = MagicMock(tp_rank=0)
+    proc.runner.input_batch = MagicMock(req_ids=["r1"])
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_print_sampling_meta.return_value = False
+    proc.dfx_config.report_save_sensitive_info.return_value = False
+    proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (2, 5)
+    proc.dumper.handle_manual_trigger.return_value = False
+    proc.dumper.dump_rank_tag.return_value = "tp0"
+    proc.report_writer = MagicMock()
+    proc._get_report_tokenizer = MagicMock(return_value=None)
+
+    trigger = TriggerEvent(
+        trigger_type="manual_trigger",
+        req_id="__manual_trigger__",
+        consume_quota=False,
+        detail={"source": "dump.manual_trigger"},
+    )
+
+    with patch("vllm_ascend.dfx.processor.RequestIoSnapshotManager") as mgr_cls:
+        mgr = MagicMock()
+        mgr_cls.get.return_value = mgr
+        snap = MagicMock()
+        snap.as_detail_fields.return_value = {"prompt_token_count": 1, "output_token_count": 0}
+        mgr.snapshot.return_value = snap
+
+        proc._handle_manual_trigger(trigger, write_report=True)
+
+    proc.dumper.handle_manual_trigger.assert_called_once_with(trigger)
+    proc.dumper.dump_count_snapshot.assert_called_once_with(dump_armed=False)
+    proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_armed"] is False
+    assert proc.report_writer.write.call_args.kwargs["dump_count"] == 2
+    assert proc.report_writer.write.call_args.kwargs["dump_max_times"] == 5
 
 
 def test_handle_alert_calls_save_sample_param_when_print_sampling_meta():
@@ -160,6 +214,7 @@ def test_handle_alert_calls_save_sample_param_when_print_sampling_meta():
     proc.dfx_config.report_print_sampling_meta.return_value = True
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.handle_anomaly_alert.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
@@ -171,6 +226,8 @@ def test_handle_alert_calls_save_sample_param_when_print_sampling_meta():
     assert proc._handle_alert(alert, write_report=True) is None
     proc.save_sample_param.assert_called_once_with("r2")
     proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["req_id"] == "r2"
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
 
 
 def test_handle_alert_skips_save_sample_param_when_print_sampling_meta_off():
@@ -181,6 +238,7 @@ def test_handle_alert_skips_save_sample_param_when_print_sampling_meta_off():
     proc.dfx_config.report_print_sampling_meta.return_value = False
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.handle_anomaly_alert.return_value = True
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
@@ -189,6 +247,8 @@ def test_handle_alert_skips_save_sample_param_when_print_sampling_meta_off():
     assert proc._handle_alert(alert, write_report=True) is None
     proc.save_sample_param.assert_not_called()
     proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["req_id"] == "r2"
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
 
 
 def test_handle_alert_detect_only_writes_report_without_dump():
@@ -199,6 +259,7 @@ def test_handle_alert_detect_only_writes_report_without_dump():
     proc.dfx_config.report_print_sampling_meta.return_value = False
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
     detector = MagicMock()
@@ -207,6 +268,8 @@ def test_handle_alert_detect_only_writes_report_without_dump():
     proc.dumper.handle_anomaly_alert.assert_not_called()
     detector.on_alert_armed.assert_called_once_with(alert)
     proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is False
+    assert proc.report_writer.write.call_args.kwargs["dump_armed"] is False
 
 
 def test_handle_alert_dump_on_still_writes_report_when_dump_fails():
@@ -218,6 +281,7 @@ def test_handle_alert_dump_on_still_writes_report_when_dump_fails():
     proc.dfx_config.report_print_sampling_meta.return_value = False
     proc.dfx_config.report_save_sensitive_info.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.dumper.handle_anomaly_alert.return_value = False
     proc.dumper.dump_rank_tag.return_value = "tp0"
     proc.report_writer = MagicMock()
@@ -225,6 +289,35 @@ def test_handle_alert_dump_on_still_writes_report_when_dump_fails():
     alert = AnomalyAlert(anomaly_type="spec_acceptance", req_id="r4")
     assert proc._handle_alert(alert, write_report=True) is None
     proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_armed"] is False
+
+
+def test_handle_alert_passes_dump_armed_true_when_arm_succeeds():
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = MagicMock(tp_rank=0)
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.dump_enabled.return_value = True
+    proc.dfx_config.report_print_sampling_meta.return_value = False
+    proc.dfx_config.report_save_sensitive_info.return_value = False
+    proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
+    proc.dumper.handle_anomaly_alert.return_value = True
+    proc.dumper.dump_rank_tag.return_value = "tp0"
+    proc.report_writer = MagicMock()
+    alert = AnomalyAlert(anomaly_type="spec_acceptance", req_id="r5")
+    with patch("vllm_ascend.dfx.processor.RequestIoSnapshotManager") as mgr_cls:
+        mgr = MagicMock()
+        mgr_cls.get.return_value = mgr
+        snap = MagicMock()
+        mgr.snapshot.return_value = snap
+        mgr.merge_into_detail.side_effect = lambda detail, _snap: detail
+        proc._handle_alert(alert, write_report=True)
+    proc.report_writer.write.assert_called_once()
+    assert proc.report_writer.write.call_args.kwargs["dump_attempted"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_armed"] is True
+    assert proc.report_writer.write.call_args.kwargs["dump_count"] == 0
+    assert proc.report_writer.write.call_args.kwargs["dump_max_times"] == 3
 
 
 def test_save_sample_param_skips_non_tp0():
@@ -240,6 +333,7 @@ def test_ensure_logprobs_for_detection_bumps_v1_num_logprobs():
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.dfx_config = MagicMock()
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.detectors = MagicMock()
     proc.detectors.token_logprob_topk_if_enabled.return_value = 20
 
@@ -264,6 +358,7 @@ def test_ensure_logprobs_noop_when_disabled():
     proc.detectors.token_logprob_topk_if_enabled.return_value = None
     proc.runner = MagicMock()
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
 
     proc.ensure_logprobs_for_detection()
 
@@ -292,6 +387,7 @@ def test_refresh_config_skips_manual_trigger_arm_when_not_allow_arm():
     proc.dfx_config.manual_trigger.return_value = True
     proc.dfx_config.print_input_token_ids_once.return_value = False
     proc.dumper = MagicMock()
+    proc.dumper.dump_count_snapshot.return_value = (0, 3)
     proc.report_writer = MagicMock()
     proc.detectors = MagicMock()
     proc.manual_triggers = MagicMock()

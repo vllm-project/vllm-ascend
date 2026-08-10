@@ -27,8 +27,9 @@ Detect 输入过滤见 [dfx_design.md](./dfx_design.md) §2.6 / [dfx_ops.md](./d
    - `apply_dfx_config()`：同步 `dump.max_times` / cooldown、调用 `apply_ascend_log_level`（`InputFilterManager` 由 `DfxProcessor` 刷新）
 
 2. **debugger 生命周期**
-   - `_init_debugger()`：按 `CUDAGraphMode` 选择 `PrecisionDebugger` 或 `AclGraphDumper`
-   - `start_dump_data()` / `finalize_dump_data()`
+   - `_init_debugger()`：按 `CUDAGraphMode` 选择 `PrecisionDebugger` 或 `AclGraphDumper`；**软失败**（缺 msprobe / 构造失败 → `_debugger=None`，不杀进程）
+   - `_enforce_dump_requires_debugger()`：`dump.enabled=true` 但 debugger 不可用时 ERROR 并强制 `dump.enabled=false`（可热更重试：reload 时 lazy 再 `_init_debugger`；ACLGraph 下启动后 lazy 成功会 WARNING，图已 capture 时建议重启）
+   - `start_dump_data()` / `finalize_dump_data()`：按 `dump_enable` 门控的 start→forward→step
 
 3. **接 `AnomalyAlert`**
    - `handle_anomaly_alert()`：arm / activate dump；**不**写 report
@@ -112,7 +113,7 @@ start → forward → finalize → disable（需 _dump_forward_seen）
 
 1. msprobe 配置：`runner.ascend_config.dump_config_path` / `dump_config`
 2. DFX 运行时配置：`dfx_config_path`（默认 `<cwd>/dfx/config/dfx_config.json`）
-3. 异常短报告：`<dfx_root>/report/anomaly_YYYYMMDD_HHMMSS_mmm_pidXXXXX.log`
+3. 异常短报告：`<dfx_root>/report/anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pidXXXXX.log`（由 `DfxProcessor` 始终写 report；仅当本次事件成功 arm dump 时带 `_dump`；JSON 含 `dump_armed` / `dump_attempted` / `dump_capture_timing` / `dump_count` / `dump_max_times`；`dump_capture_timing=upcoming_forward_window` 表示后续 dump-forward，pending-OR 下相对 detect 可能是下下个窗口）
 4. `set_msprobe_dump_state`：msprobe JSON 旁 `.lock` 持锁写 `dump_enable`
 5. `save_sample_param`：在 ``DfxProcessor``（``report.print_sampling_meta=true`` 且 TP0 && last PP）
 

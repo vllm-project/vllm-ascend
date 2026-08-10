@@ -162,3 +162,45 @@ def test_detector_registry_refresh_and_clear():
     registry.clear_finished("req-x")
     a.clear_finished.assert_called_once_with("req-x")
     b.clear_finished.assert_called_once_with("req-x")
+
+
+def test_refresh_forces_token_logprob_off_when_msprobe_missing(tmp_path):
+    from unittest.mock import patch
+
+    from tests.ut.dfx_test_utils import make_dfx_config
+
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["detector"]["token_logprob"]["enabled"] = True
+    with patch.object(TokenLogprobDetector, "_get_ill_detector", return_value=None):
+        det = TokenLogprobDetector(dfx_config=cfg, runner=SimpleNamespace(tp_rank=0))
+    assert det.enabled is False
+    assert cfg.detector_get("token_logprob", "enabled") is False
+
+
+def test_refresh_retries_ill_detector_after_prior_failure(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    from tests.ut.dfx_test_utils import make_dfx_config
+
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["detector"]["token_logprob"]["enabled"] = True
+    det = TokenLogprobDetector.__new__(TokenLogprobDetector)
+    det._dfx_config = cfg
+    det._runner = SimpleNamespace(tp_rank=0)
+    det._enabled = False
+    det._window = 64
+    det._stride = 32
+    det._topk = 20
+    det._ill_window_thresh = {1: 1, 2: 1, 3: 2, 4: 1}
+    det._buf = {}
+    det._since_check = defaultdict(int)
+    det._checked = set()
+    det._ill_window_hits = defaultdict(lambda: defaultdict(int))
+    det._ill_detector = None
+    det._ill_detector_init_failed = True
+
+    fake = MagicMock()
+    with patch.object(TokenLogprobDetector, "_get_ill_detector", return_value=fake):
+        det.refresh_from_config()
+    assert det.enabled is True
+    assert det._ill_detector_init_failed is False

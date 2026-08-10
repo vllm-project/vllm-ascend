@@ -64,7 +64,7 @@ detector.check_all(...) → list[AnomalyAlert]
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `detector.token_logprob.enabled` | `false` | token/logprob 检测（开启后 worker 自动补齐 top-k logprobs，请求侧可不设 `logprobs`） |
+| `detector.token_logprob.enabled` | `false` | token/logprob 检测（开启后 worker 自动补齐 top-k logprobs，请求侧可不设 `logprobs`）。**依赖 msprobe**；未安装时 ERROR 并强制改回 `false`；装包后改回 `true` 热更可 lazy 重试 ILLDetector |
 | `detector.token_logprob.window` | `64` | 每请求缓冲长度 = 送检窗长 |
 | `detector.token_logprob.stride` | `32` | 满窗后每新增 N token 再检 |
 | `detector.token_logprob.topk` | `20` | 每位置最多保留 top20 |

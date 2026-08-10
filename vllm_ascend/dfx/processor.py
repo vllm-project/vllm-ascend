@@ -99,6 +99,9 @@ class DfxProcessor:
         InputFilterManager.get().apply_from_config(self.dfx_config)
         if changed:
             self.dumper.apply_dfx_config()
+            # All ranks (incl. early-PP JSON writers) must run detector dep
+            # checks so force-disable can persist when msprobe is missing.
+            self.detectors.apply_dfx_config()
             self.report_writer.save_sensitive_info = self.dfx_config.report_save_sensitive_info()
             self.report_writer.max_prompt_token_ids = self.dfx_config.report_max_prompt_token_ids()
             self.report_writer.max_output_token_ids = self.dfx_config.report_max_output_token_ids()
@@ -311,15 +314,16 @@ class DfxProcessor:
         detector: AnomalyDetector | None = None,
         write_report: bool = True,
     ) -> None:
-        """Arm dump (optional) and/or write report for an anomaly alert.
+        """Arm dump (optional) and write report immediately.
 
-        - ``dump.enabled=false`` (detect-only): no dump arm; write report on detect.
-        - ``dump.enabled=true``: arm dump. If arm fails (e.g. quota exhausted),
-          still write report — detection evidence should not be lost.
+        - ``dump.enabled=false`` (detect-only): no dump arm; write report now.
+        - ``dump.enabled=true``: try arm dump; write report now with dump
+          relation fields so ops can correlate it with the later dump window.
         """
-        dump_on = self.dfx_config.dump_enabled()
-        if dump_on:
-            self.dumper.handle_anomaly_alert(alert, detector=detector)
+        dump_attempted = bool(self.dfx_config.dump_enabled())
+        dump_armed = False
+        if dump_attempted:
+            dump_armed = bool(self.dumper.handle_anomaly_alert(alert, detector=detector))
         else:
             if detector is not None:
                 detector.on_alert_armed(alert)
@@ -341,12 +345,17 @@ class DfxProcessor:
         )
         detail = io_mgr.merge_into_detail(detail, snap)
 
+        dump_count, dump_max_times = self.dumper.dump_count_snapshot(dump_armed=dump_armed)
         self.report_writer.write(
             anomaly_type=alert.anomaly_type,
             req_id=alert.req_id,
             detail=detail,
             rank_tag=self.dumper.dump_rank_tag(),
             tokenizer=self._get_report_tokenizer(),
+            dump_attempted=dump_attempted,
+            dump_armed=dump_armed,
+            dump_count=dump_count,
+            dump_max_times=dump_max_times,
         )
 
     def _handle_manual_trigger(
@@ -356,7 +365,8 @@ class DfxProcessor:
         write_report: bool = True,
     ) -> None:
         """Arm dump (optional) and write report for control-plane manual trigger."""
-        self.dumper.handle_manual_trigger(trigger)
+        dump_attempted = True
+        dump_armed = bool(self.dumper.handle_manual_trigger(trigger))
         if not write_report:
             return
 
@@ -382,12 +392,18 @@ class DfxProcessor:
         detail = trigger.to_report_detail()
         detail["num_requests"] = len(requests_detail)
         detail["requests"] = requests_detail
+
+        dump_count, dump_max_times = self.dumper.dump_count_snapshot(dump_armed=dump_armed)
         self.report_writer.write(
             anomaly_type=trigger.trigger_type,
             req_id=trigger.req_id,
             detail=detail,
             rank_tag=self.dumper.dump_rank_tag(),
             tokenizer=self._get_report_tokenizer(),
+            dump_attempted=dump_attempted,
+            dump_armed=dump_armed,
+            dump_count=dump_count,
+            dump_max_times=dump_max_times,
         )
 
     def _batch_request_io_rows(self) -> list[tuple[str, int]]:

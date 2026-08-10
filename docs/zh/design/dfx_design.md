@@ -9,7 +9,7 @@
 |------|------|------|
 | 1. Runtime Config | `runtime_config.py`（`DfxRuntimeConfig`） | 一份 JSON；可选热更新（启动项控制周期） |
 | 2. Detector | `detector/` | 异常检测，只产出 `AnomalyAlert` |
-| 3. Dump / 观测开关 | `dumper/`（`Dumper` + mixins） | msprobe dump 生命周期；`ascend_log` 开关 |
+| 3. Dump / 观测开关 | `dumper/`（`Dumper` + mixins） | msprobe dump 生命周期（**可选依赖**：缺包则软失败并强制 `dump.enabled=false`）；`ascend_log` 开关 |
 | 4. Report | `report.py`（`DfxReportWriter`） | 异常短日志落盘到 `dfx/report/` |
 | 5. Processor | `processor.py`（`DfxProcessor`） | runner 侧编排（构造 / refresh / check / report）；刷新 `InputFilterManager` |
 | 6. Input filter | `input_filters.py`（`InputFilterManager`） | detect 前输入过滤（单例；`manual_trigger` 不走） |
@@ -36,6 +36,13 @@ Worker: runner.dfx = DfxProcessor(runner)
 
 > 注意：检测由 **processor → DetectorManager** 调具体 detector，再用 alert 调 dumper；runner **不**看见具体 detector；detector **不**直接 `enable_dump`。  
 > Config / Report 也不应塞进 dumper 的 dump OR 路径，否则有人「优化跳过 early PP 的 config sync」会让**同步组内** collective 卡死。
+
+### Report / Dump 关系补充
+
+- `Dumper` 只负责 arm / activate dump，不负责决定是否写 report。
+- `DfxProcessor` 在异常检测命中或 `manual_trigger` 命中后，都会尝试调用 dumper；**无论 dump 是否成功 arm，都会写 report**，避免 dump 配额耗尽、冷却中或相关性校验失败时丢失异常证据。
+- report JSON 含 `dump_armed` / `dump_attempted` / `dump_capture_timing` / `dump_count` / `dump_max_times`；成功 arm 时文件名带 `_dump`。`dump_capture_timing=upcoming_forward_window` 表示 activate 之后的某次 dump-forward 采集（pending-OR 下相对 detect 常是下下个窗口）。
+- `report.print_sampling_meta` 仍只控制采样参数日志打印，不会把 sampling meta 额外写入 report 内容。
 
 ## 2. Runtime Config
 
@@ -295,10 +302,10 @@ Dumper **不**调用 config reload，也 **不**写 report，也 **不**刷新 `
 
 - 类：`DfxReportWriter`
 - 目录：默认 `<dfx_root>/report/`
-- 文件：`anomaly_YYYYMMDD_HHMMSS_mmm_pid<pid>.log`（毫秒 + pid；**格式化 JSON**，每文件一条）
+- 文件：`anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pid<pid>.log`（毫秒 + pid；成功 arm dump 时带 `_dump`；**格式化 JSON**，每文件一条；含 `dump_armed` / `dump_attempted` / `dump_capture_timing` / `dump_count` / `dump_max_times`）
 - 何时写：
-  - `dump.enabled=false`（detect-only）：检测到异常即写 report
-  - `dump.enabled=true`：尝试 arm dump；**无论 arm 成功与否都写 report**（arm 失败——如配额耗尽——不吞掉检测证据）
+  - `dump.enabled=false`（detect-only）：检测到异常即写 report（无 `_dump`）
+  - `dump.enabled=true`：尝试 arm dump；**无论 arm 成功与否都写 report**（arm 失败——如配额耗尽——不吞掉检测证据；仅成功时文件名带 `_dump`）
 - 默认：`report.save_sensitive_info=false` 时只保留 `prompt_token_count` / `output_token_count`（及非 token 字段），**不**写 `*_token_ids`；`true` 时明文保存（可截断）prompt / 累计 output / window ids，并可 `decode_token_ids` 写出对应 `*_text` / 逐步 `*_texts`
 - `max_prompt_token_ids` / `max_output_token_ids`（默认 1000，`0`=不截断）：只限制**落盘**的 id 列表长度（从**头部**截断）；`*_token_count` 仍是完整长度。截断时 detail 会带 `*_token_ids_truncated=true` 与 `*_token_ids_max`
 - **易踩坑**：检测 / 命中匹配用的是完整累计 output；report 里的 `output_token_ids` 可能被截断。若 `matched_token_ids` 在完整序列中、却在截断窗口之外，JSON 里会看不到该 id——查全量请设 `max_*=0`，或对照 `*_token_count` 与 `*_truncated`
@@ -357,7 +364,7 @@ vllm serve <model> --additional-config '{
 
 ```text
 ./dfx/config/dfx_config.json
-./dfx/report/anomaly_YYYYMMDD_HHMMSS_mmm_pidXXXX.log
+./dfx/report/anomaly_YYYYMMDD_HHMMSS_mmm[_dump]_pidXXXX.log
 ```
 
 显式配置 `dfx_config_reload_interval > 0` 后，在线改 `dump.max_times` / detector 阈值约 N 秒内各 worker 生效（broadcast）。

@@ -63,8 +63,7 @@ class ManualTriggerManager:
             return None
         if not allow_arm:
             logger.debug(
-                "[DFX manual_trigger] dump.manual_trigger deferred (allow_arm=False); "
-                "await execute_model wave"
+                "[DFX manual_trigger] dump.manual_trigger deferred (allow_arm=False); await execute_model wave"
             )
             return None
         if not self._dfx_config.dump_enabled():

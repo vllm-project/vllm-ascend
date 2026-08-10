@@ -114,6 +114,15 @@ class DetectorManager:
         topk = int(self._token_det.topk)
         return topk if topk > 0 else None
 
+    def apply_dfx_config(self) -> None:
+        """All-rank hook after DFX JSON sync — refresh deps that may force flags off.
+
+        ``token_logprob`` needs msprobe; if missing, force ``enabled=false`` and
+        persist on the JSON writer. Must run on every rank (including early PP
+        writers that never sample), not only on the detect / sample path.
+        """
+        self._token_det.refresh_from_config()
+
     # ---- detection gating -------------------------------------------------
 
     def _gated(self, stage: str) -> bool:

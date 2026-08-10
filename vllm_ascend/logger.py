@@ -184,13 +184,9 @@ def apply_ascend_log_level(
         # logger/handler in this process has gone silent for some other
         # reason (stuck ``logging.disable``, broken handler, closed stream).
         try:
-            ascend_handlers = [
-                (h.__class__.__name__, logging.getLevelName(h.level))
-                for h in ascend.handlers
-            ]
+            ascend_handlers = [(h.__class__.__name__, logging.getLevelName(h.level)) for h in ascend.handlers]
             vllm_handlers = [
-                (h.__class__.__name__, logging.getLevelName(h.level))
-                for h in logging.getLogger("vllm").handlers
+                (h.__class__.__name__, logging.getLevelName(h.level)) for h in logging.getLogger("vllm").handlers
             ]
             sys.__stderr__.write(
                 f"[ascend_log][diag] level={level_key} "

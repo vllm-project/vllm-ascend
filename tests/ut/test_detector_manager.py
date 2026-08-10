@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.ut.dfx_test_utils import make_dfx_config
 from vllm_ascend.dfx.detector.alert import AnomalyAlert
@@ -60,7 +60,8 @@ def test_detector_manager_token_logprob_topk_if_enabled(tmp_path):
 
     cfg._data["detector"]["token_logprob"]["enabled"] = True
     cfg._data["detector"]["token_logprob"]["topk"] = 17
-    assert mgr.token_logprob_topk_if_enabled() == 17
+    with patch.object(mgr._token_det, "_get_ill_detector", return_value=object()):
+        assert mgr.token_logprob_topk_if_enabled() == 17
 
 
 class _FakeTok:
@@ -196,3 +197,12 @@ def test_check_after_sample_stop_after_alert_skips_by_req_id(tmp_path):
     assert RequestIoSnapshotManager.get().cumulative_output_count("r1") == 2  # [1] then [3]
     assert RequestIoSnapshotManager.get().cumulative_output_count("r2") == 2  # [2] then [4]
     assert RequestIoSnapshotManager.get().cumulative_output_count("r3") == 1  # [5]
+
+
+def test_detector_manager_apply_dfx_config_refreshes_token_logprob(tmp_path):
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["detector"]["token_logprob"]["enabled"] = True
+    mgr = DetectorManager(dfx_config=cfg, runner=SimpleNamespace(tp_rank=0))
+    with patch.object(mgr._token_det, "refresh_from_config") as refresh:
+        mgr.apply_dfx_config()
+    refresh.assert_called_once()

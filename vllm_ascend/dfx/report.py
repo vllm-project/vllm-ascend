@@ -253,12 +253,28 @@ class DfxReportWriter:
         detail: dict[str, Any] | None = None,
         rank_tag: str | None = None,
         tokenizer: Any | None = None,
+        dump_attempted: bool = False,
+        dump_armed: bool = False,
+        dump_count: int | None = None,
+        dump_max_times: int | None = None,
     ) -> Path | None:
-        """Write one pretty-printed anomaly JSON file. Returns path or None on failure."""
+        """Write one pretty-printed anomaly JSON file. Returns path or None on failure.
+
+        ``dump_armed=True`` (msprobe dump successfully armed for this event)
+        adds a ``_dump`` marker in the filename so ops can grep dump-linked
+        reports without opening each file. The report itself is still written
+        immediately at detect / trigger time.
+
+        ``dump_capture_timing`` is ``upcoming_forward_window`` when armed: capture
+        happens on a later model forward after activate. With pending-OR that is
+        often the window after the *next* ``execute_model`` entry (activate then
+        forward) — i.e. relative to detect it can be the next-next forward.
+        """
         try:
             self.report_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-            report_path = self.report_dir / f"anomaly_{stamp}_pid{os.getpid()}.log"
+            dump_tag = "_dump" if dump_armed else ""
+            report_path = self.report_dir / f"anomaly_{stamp}{dump_tag}_pid{os.getpid()}.log"
             safe_detail = sanitize_report_detail(
                 detail,
                 save_sensitive_info=self.save_sensitive_info,
@@ -267,12 +283,21 @@ class DfxReportWriter:
                 decode_token_ids=self.decode_token_ids,
                 tokenizer=tokenizer if self.decode_token_ids else None,
             )
+            attempted = bool(dump_attempted or dump_armed)
+            armed = bool(dump_armed)
             record = {
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
                 "unix_ts": round(time.time(), 3),
                 "anomaly_type": anomaly_type,
                 "req_id": req_id,
                 "rank": rank_tag,
+                "dump_attempted": attempted,
+                "dump_armed": armed,
+                # Not "next" only: pending-OR activates on a later execute_model
+                # entry, then needs a dump-forward — often next-next vs detect.
+                "dump_capture_timing": "upcoming_forward_window" if armed else "none",
+                "dump_count": int(dump_count) if dump_count is not None else None,
+                "dump_max_times": int(dump_max_times) if dump_max_times is not None else None,
                 "detail": safe_detail,
                 "save_sensitive_info": self.save_sensitive_info,
                 "decode_token_ids": self.decode_token_ids and self.save_sensitive_info,
@@ -283,11 +308,16 @@ class DfxReportWriter:
             with report_path.open("w", encoding="utf-8") as f:
                 f.write(text + "\n")
             logger.info(
-                "[DFX report] anomaly_type=%s req_id=%s path=%s save_sensitive_info=%s "
-                "decode_token_ids=%s max_prompt=%d max_output=%d",
+                "[DFX report] anomaly_type=%s req_id=%s path=%s dump_attempted=%s dump_armed=%s "
+                "dump_count=%s/%s save_sensitive_info=%s decode_token_ids=%s "
+                "max_prompt=%d max_output=%d",
                 anomaly_type,
                 req_id,
                 report_path,
+                attempted,
+                armed,
+                record["dump_count"],
+                record["dump_max_times"],
                 self.save_sensitive_info,
                 self.decode_token_ids and self.save_sensitive_info,
                 self.max_prompt_token_ids,
