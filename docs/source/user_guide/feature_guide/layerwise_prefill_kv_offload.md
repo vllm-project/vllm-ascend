@@ -103,10 +103,12 @@ When Decode uses Sparse KV Cache Offload, Prefill must both save KV through
 }
 ```
 
-Do not enable `sparse_kv_offload_config` on Prefill. The Prefill `kv_port` may
-use the Decode base value for consistency, but only Decode binds the RD2H
-control sockets. For Decode configuration, TP constraints, and proxy setup,
-see [SFA PD RD2H KV Transfer](sfa_pd_rd2h_kv_transfer.md).
+Do not enable `sparse_kv_offload_config` on Prefill. `kv_port` defines the
+Decode-side control-port base. Prefill does not bind these ports; its control
+target is provided by Decode through request metadata. The Prefill
+configuration may use the same value for consistency. For Decode
+configuration, TP constraints, and proxy setup, see
+[SFA PD RD2H KV Transfer](sfa_pd_rd2h_kv_transfer.md).
 
 ### Core parameters
 
@@ -253,7 +255,10 @@ If the first message is absent, check that:
 ## Limitations
 
 - Only the Memcache backend supports this shared-buffer layerwise path.
-- TP-size mismatch is not supported with layerwise KV transfer.
+- TP-size mismatch is not supported when `AscendStoreConnector` itself performs
+  layerwise P/D KV transfer. This limitation does not apply when
+  `SFAPDRD2HConnector` performs the P/D transfer and `AscendStoreConnector` is
+  used only for Prefill-side layerwise offload.
 - Context-parallel configurations have not been validated with shared-buffer
   layerwise offload.
 - Multiple non-packed attention KV cache groups are supported. State-cache

@@ -28,7 +28,9 @@ Offload is optional on Prefill:
   Prefill-side NPU memory usage by reusing layer-wise KV buffers. Without this
   optional feature, configure `SFAPDRD2HConnector` directly on Prefill. When it
   is enabled, compose `AscendStoreConnector` and `SFAPDRD2HConnector` through
-  `MultiConnector` on Prefill.
+  `MultiConnector` on Prefill. In this composition, `SFAPDRD2HConnector`
+  performs the P/D transfer, while `AscendStoreConnector` is used only for
+  Prefill-side layerwise offload.
 
 ## Deployment Notes
 
@@ -37,9 +39,11 @@ Offload is optional on Prefill:
 - Use the layerwise proxy described in the
   [Layerwise KV Pool guide](layerwise_kv_pool.md) for request routing and
   metaserver rendezvous.
-- Only Decode binds connector control sockets. Reserve
-  `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
-  starting at `kv_port`; Prefill may use the same base value for consistency.
+- `kv_port` defines the Decode-side control-port base. Only Decode binds these
+  sockets; reserve `decode_data_parallel_size * decode_tensor_parallel_size`
+  consecutive ports starting at `kv_port`. Prefill receives its control target
+  from Decode through request metadata and may use the same configured value
+  for consistency.
 
 For the connector architecture, control protocol, tensor-parallel ownership,
 and completion semantics, see the

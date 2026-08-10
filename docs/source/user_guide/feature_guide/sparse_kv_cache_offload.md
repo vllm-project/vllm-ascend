@@ -105,7 +105,7 @@ vllm serve zai-org/GLM-5.2 \
     }"
 ```
 
-On Prefill, set the RD2H connector's `kv_role` to `kv_producer` and `transfer_backend` to `memfabric`. Do not enable `sparse_kv_offload_config` on Prefill. Only Decode binds the connector control sockets; Prefill may use the same `kv_port` base value for consistency. See [SFA PD RD2H KV Transfer](sfa_pd_rd2h_kv_transfer.md) for the deployment constraints and the optional `MultiConnector` composition.
+On Prefill, set the RD2H connector's `kv_role` to `kv_producer` and `transfer_backend` to `memfabric`. Do not enable `sparse_kv_offload_config` on Prefill. `kv_port` defines the Decode-side control-port base; Prefill does not bind these ports, because its control target is provided by Decode through request metadata. The Prefill configuration may use the same value for consistency. See [SFA PD RD2H KV Transfer](sfa_pd_rd2h_kv_transfer.md) for the deployment constraints and the optional `MultiConnector` composition.
 
 `sparse_kv_offload_config` parameters meaning and usage:
 
