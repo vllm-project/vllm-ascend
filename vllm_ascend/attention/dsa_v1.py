@@ -207,6 +207,9 @@ class AscendDSAPrefillMetadata:
 class AscendDSADecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    max_seqlen_q: int
+    seq_lens_list: list[int]
+    max_seq_lens: int
     slot_mapping: torch.Tensor | None
     block_size: int
 
