@@ -151,17 +151,13 @@ def postprocess_mamba_fused_kernel(
         # (conv_width - accept_token_bias) * inner_size
         if CONV_STATE_DIM_FIRST:
             # DS conv layout: state[block, dim, state_len]. state_len is the
-            # slide axis, so copy per dim row: dim_row_count rows, each of
-            # (conv_width - accept_token_bias) * elem_size bytes, advancing both
-            # src and dst by dim_row_stride per row.
-            dim_row_count = tl.load(state_dim_row_count_ptr + state_idx)
-            dim_row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
+            # slide axis, so copy per dim row (dim_row_count rows of
+            # (conv_width - accept_token_bias) * elem_size bytes each, advancing
+            # by dim_row_stride per row).
             copy_size = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
-            num_loops = dim_row_count
         else:
             num_elems_to_copy = (conv_width - accept_token_bias).to(tl.int64) * state_inner_size
             copy_size = num_elems_to_copy * state_elem_size
-            num_loops = 1
     else:
         # Temporal state: copy
         #   state[block_table[req_idx, src_block_idx + accept_token_bias]]
@@ -175,7 +171,6 @@ def postprocess_mamba_fused_kernel(
         # state_block_stride which is the page stride and can exceed the
         # actual data when the state tensor uses as_strided page padding.
         copy_size = state_inner_size * state_elem_size
-        num_loops = 1
 
     # Mirror postprocess_mamba's trailing
     #     if src_block_idx == dest_block_idx: num_accepted_tokens_cpu[i] = 1
@@ -207,8 +202,11 @@ def postprocess_mamba_fused_kernel(
         # DS conv layout: state[block, dim, state_len]. state_len is the slide
         # axis, so copy per dim row: dim_row_count rows, each of
         # (conv_width - accept_token_bias) * elem_size bytes, advancing both
-        # src and dst by dim_row_stride per row.
-        for row in range(num_loops):
+        # src and dst by dim_row_stride per row. Load the row metadata here
+        # (not earlier) so it stays in the same scope as the copy loop.
+        dim_row_count = tl.load(state_dim_row_count_ptr + state_idx)
+        dim_row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
+        for row in range(dim_row_count):
             row_src = (src_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
             row_dst = (dst_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
             for i in range(0, copy_size, COPY_BLOCK_SIZE):
