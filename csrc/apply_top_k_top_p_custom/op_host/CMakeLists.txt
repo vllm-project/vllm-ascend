@@ -8,7 +8,7 @@ target_sources(op_host_aclnnExc PRIVATE
     apply_top_k_top_p_custom_def.cpp
 )
 
-target_sources(opapi PRIVATE
+target_sources(cust_opapi PRIVATE
     apply_top_k_top_p_custom.cpp
     aclnn_apply_top_k_top_p_custom.cpp
 )
@@ -25,11 +25,11 @@ if (NOT BUILD_OPEN_PROJECT)
     )
 endif ()
 
-target_sources(optiling PRIVATE
+target_sources(cust_opmaster PRIVATE
     apply_top_k_top_p_custom_tiling.cpp
 )
 
-target_include_directories(optiling PRIVATE
+target_include_directories(cust_opmaster PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

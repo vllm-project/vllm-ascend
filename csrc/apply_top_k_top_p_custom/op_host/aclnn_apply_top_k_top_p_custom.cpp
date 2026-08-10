@@ -141,7 +141,7 @@ aclnnStatus aclnnApplyTopKTopPCustomGetWorkspaceSize(const aclTensor* logits, co
                                                aclTensor* out, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     OP_CHECK_COMM_INPUT(workspaceSize, executor);
-    L2_DFX_PHASE_1(aclnnApplyTopKTopPCustom, DFX_IN(logits, p, k), DFX_OUT(out));
+    L2_DFX_PHASE_1_WITHOUT_CACHE(aclnnApplyTopKTopPCustom, DFX_IN(logits, p, k), DFX_OUT(out));
     // 固定写法，创建OpExecutor
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
