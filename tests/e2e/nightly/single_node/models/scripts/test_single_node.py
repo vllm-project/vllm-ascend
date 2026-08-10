@@ -83,12 +83,12 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
             request_body["stream"] = True
 
         if stream:
-            with (requests.post(
+            with requests.post(
                 f"{url}/v1/messages",
                 headers={"Content-Type": "application/json"},
                 json=request_body,
                 stream=True,
-            ) as response):
+            ) as response:
                 assert response.status_code == 200, f"Streaming request failed for prompt '{prompt}': {response.text}"
                 events = [line.decode("utf-8") for line in response.iter_lines() if line]
                 assert len(events) > 0, f"No SSE events received for prompt '{prompt}'"
@@ -98,11 +98,11 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
                 assert any("message_stop" in e for e in events), f"Missing 'message_stop' event for prompt '{prompt}'"
                 print(f"Messages API streaming test passed for prompt '{prompt}' (events={len(events)})")
         else:
-            with (requests.post(
+            with requests.post(
                 f"{url}/v1/messages",
                 headers={"Content-Type": "application/json"},
                 json=request_body,
-            ) as response):
+            ) as response:
                 assert response.status_code == 200, f"Request failed for prompt '{prompt}': {response.text}"
                 data = response.json()
                 assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
