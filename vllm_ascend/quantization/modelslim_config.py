@@ -716,7 +716,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         elif _is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
-                from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+                from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)

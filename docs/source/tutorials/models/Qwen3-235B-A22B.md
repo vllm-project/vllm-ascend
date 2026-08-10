@@ -24,13 +24,13 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
+| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
 
 **Quantized Version (Pre-converted):**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8)| [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
+| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -82,7 +82,7 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 **Docker Run:**
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 === "A3 series"
 
@@ -192,7 +192,7 @@ Expected result: The version information is displayed, confirming a successful i
 
     If deploying a multi-node environment, set up the environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -732,7 +732,7 @@ After several minutes, you will get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | MTP Speculation Num | FUSED_MC2 | EP Switch | Async Scheduling |
+| Scenario | Configuration | NPUs | TP | DP | MTP Speculation Num | FUSED_MC2 | EP Switch | Async Scheduling |
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |

@@ -25,6 +25,10 @@ on:
         description: 'Target vLLM commit hash (default: latest vLLM main HEAD)'
         required: false
         default: ''
+      model:
+        description: 'opencode model name (default: deepseek/deepseek-v4-flash)'
+        required: false
+        default: 'deepseek/deepseek-v4-flash'
 
 permissions:
   contents: write
@@ -38,7 +42,7 @@ defaults:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  MAIN2MAIN_MODEL: deepseek/deepseek-v4-pro
+  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-v4-flash' }}
   
 
 jobs:

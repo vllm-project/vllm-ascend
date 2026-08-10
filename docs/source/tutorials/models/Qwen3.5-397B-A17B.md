@@ -87,7 +87,7 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -312,8 +312,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 export VLLM_ENGINE_READY_TIMEOUT_S=30000
 export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
@@ -388,8 +388,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 # The value of node0_ip must be consistent with local_ip on the first decode node.
 node0_ip="xxxx"
@@ -470,8 +470,8 @@ unset http_proxy
 
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
-nic_name="xxx"
-local_ip="xxx"
+nic_name="xxxx"
+local_ip="xxxx"
 
 # The value of node0_ip must be consistent with local_ip on the first decode node.
 node0_ip="xxxx"

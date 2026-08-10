@@ -23,30 +23,50 @@
 
 ---
 
-## 三、Good 表(只读,由 nightly 流水线产出)
+## 三、Good 表(只读,由 nightly/weekly 流水线产出)
 
-Good 表就是 nightly 的状态表(CSV),**工具只读不写**。列结构:
+nightly 与 weekly 使用独立的 Good 表:
+
+```text
+/root/.cache/vllm-ascend/<branch>/nightly/good_table.csv
+/root/.cache/vllm-ascend/<branch>/weekly/good_table.csv
+```
+
+工具读取当前流水线对应的表。列结构:
 
 ```csv
-name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,time
+name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,soc,scene,time
 ```
 
 示例:
 
 ```csv
-name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,time
-DeepSeek-R1-0528-W8A8,tests/e2e/nightly/single_node/models/configs/DeepSeek-R1-0528-W8A8.yaml,https://github.com/.../job/80000000001,success,ad7125a431e1...,46356897b4d8...,2026-06-15 03:40:00 +08:00
-DeepSeek-R1-0528-W8A8,tests/e2e/nightly/single_node/models/configs/DeepSeek-R1-0528-W8A8.yaml,https://github.com/.../job/81510428999,failure,ad7125a431e1...,b545857e2983...,2026-06-16 03:46:00 +08:00
+name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,soc,scene,time
+DeepSeek-R1-0528-W8A8,tests/e2e/nightly/single_node/models/configs/DeepSeek-R1-0528-W8A8.yaml,https://github.com/.../job/80000000001,success,ad7125a431e1...,46356897b4d8...,a2,single_node,2026-06-15 03:40:00 +08:00
 ```
 
 工具的查找逻辑:
 
-- 按 `--name`(匹配 `name` 列)或 `--config-yaml`(匹配 `yaml/path` 列,支持文件名或目录后缀)定位行;
+- 对传入的 `--name`、`--config-yaml`、`--soc` 和 `--scene` 逐项匹配;
 - 在所有 `status=success` 的行里取 **`time` 最新**的一条;
-- 用它的 **`vLLM-Ascend Git information`** 作为 good 端点(更新的 failure 行不会干扰)。
+- 用它的 **`vLLM-Ascend Git information`** 作为 good 端点。
 
 用 `--good-table` 指定表路径(或环境变量 `BISECT_GOOD_TABLE`,默认 `/root/.cache/nightly_bisect/good_table.csv`)。
 如果不想依赖表,可用 `--good-commit <sha>` 直接指定 good。
+
+PR 上传后,有权限的用户可在 PR 评论:
+
+```text
+/nightly all --aop_enabled
+/weekly all --aop_enabled
+/weekly <case-name> --aop_enabled
+```
+
+评论命令由默认分支上的 workflow 解析,再把 PR SHA 交给 nightly/weekly workflow
+测试。因此 workflow 自身的改动需合入默认分支后才会生效。
+
+weekly 定时任务在每周日北京时间 10:00 自动触发,无需评论命令;它默认选择
+`all`、测试 `main`,并为支持二分的单机/多机任务启用 AOP。
 
 ---
 
@@ -59,6 +79,7 @@ python -m tools.bisect.auto_bisect \
     --scene single_node \
     --config-yaml DeepSeek-R1-0528-W8A8.yaml \
     --name DeepSeek-R1-0528-W8A8 \
+    --soc a2 \
     --bad-commit HEAD \
     --good-table /path/to/nightly_status.csv
 ```
@@ -78,6 +99,7 @@ python -m tools.bisect.auto_bisect \
 python -m tools.bisect.auto_bisect \
     --scene multi_node \
     --config-yaml Qwen3-235B-W8A8.yaml \
+    --soc a3 \
     --bad-commit "$VLLM_ASCEND_REF" \
     --num-nodes 2 \
     --coord-dir /shared/nightly_bisect/coord
@@ -200,9 +222,9 @@ python -m tools.bisect.auto_bisect \
 
 #### `--good-table`
 
-- **作用**:nightly 状态表 CSV 的路径,工具**只读**它来确定 good 端点。
+- **作用**:当前 nightly/weekly 流水线状态表 CSV 的路径,工具**只读**它来确定 good 端点。
 - **默认**:环境变量 `BISECT_GOOD_TABLE`,再没有则 `/root/.cache/nightly_bisect/good_table.csv`。
-- **逻辑**:按 `--name` 或 `--config-yaml` 定位行 → 在所有 `status=success` 的行里取 `time` 最新的一条 → 用它的 `vLLM-Ascend Git information` 当 good。
+- **逻辑**:匹配所有已传入的用例维度 → 在所有 `status=success` 的行里取 `time` 最新的一条 → 用它的 `vLLM-Ascend Git information` 当 good。
 - **注意**:表里该用例必须**至少有一条 success 行**,否则需改用 `--good-commit`。
 
 #### `--name`
@@ -210,6 +232,11 @@ python -m tools.bisect.auto_bisect \
 - **作用**:用来匹配 Good 表的 `name` 列(比 `yaml/path` 更精确)。
 - **默认**:`None`(不传)→ 退回用 `--config-yaml` 匹配 `yaml/path`。
 - **何时用**:一个 YAML 对应多种 nightly job 名、或 `name` 与文件名不一致时,用它锁定正确的行。
+
+#### `--soc`
+
+- **作用**:按硬件代际过滤 Good 表,避免 A2/A3/310P 的同名用例互相命中。
+- **默认**:`None`;CI workflow 会自动传入。
 
 ### 9.4 编译控制(决定何时 `pip install -e .`)
 

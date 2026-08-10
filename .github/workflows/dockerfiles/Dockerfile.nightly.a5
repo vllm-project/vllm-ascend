@@ -17,8 +17,9 @@
 
 ARG VLLM_ASCEND_BRANCH=""
 ARG BASE_IMAGE="quay.io/ascend/vllm-ascend"
+ARG OS_MARK=""
 ARG TAG_SUFFIX=""
-FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a5${TAG_SUFFIX}
+FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a5${OS_MARK}${TAG_SUFFIX}
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG AIS_BENCH_TAG="v3.1-20260609-master"

@@ -30,6 +30,8 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.26.0rc
+          - releases/v0.25.1rc
           - releases/v0.24.0rc
           - releases/v0.23.0
           - releases/v0.22.1rc
@@ -45,7 +47,7 @@ on:
       cann_version:
         description: 'CANN version for base image tag'
         required: false
-        default: '2026.07.29'
+        default: '2026.08.03'
         type: string
 
 jobs:

@@ -10,7 +10,19 @@ DSA-CP is a separate sparse-attention optimization controlled by `additional_con
 
 ## Supported Scenarios
 
-DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The SFA attention backend supports speculative decoding. In the MLA and GQA attention backend, speculative decoding is supported in the P/D disaggregation deployment scenario and not supported in the mixed deployment scenario.
+DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
+
+| Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | MLAPO + DCP | Speculative Decoding + DCP |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Ascend A2/A3 | MLA/GQA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported (MLA)<br>— Not applicable (GQA) | 🟢 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend A2/A3 | SFA | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported | 🟢 Supported |
+| Ascend 950 | MLA/GQA | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental | 🔵 Experimental (MLA)<br>— Not applicable (GQA) | 🔵 P/D disaggregation<br>🔴 PD-mixed deployment |
+| Ascend 950 | SFA | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported | 🔴 Not supported |
+
+- 🟢 **Supported**: Combining the feature with DCP is supported.
+- 🔵 **Experimental**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.
+- 🔴 **Not supported**: Combining the feature with DCP is not supported.
+- **Not applicable**: The feature does not apply to this attention backend.
 
 ## Usage
 

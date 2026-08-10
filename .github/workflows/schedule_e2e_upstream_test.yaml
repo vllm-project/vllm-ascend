@@ -117,6 +117,7 @@ jobs:
               pip install -e tests/plugins/bge_m3_sparse_plugin
               pip install -e tests/plugins/prithvi_io_processor_plugin
               pip install -e tests/plugins/colbert_query_plugin
+              pip install -e tests/plugins/vllm_add_dummy_endpoint_plugin
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash

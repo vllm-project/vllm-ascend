@@ -171,7 +171,7 @@ def extract_cached_tokens(response_json: dict) -> int | None:
     usage = response_json.get("usage") or {}
     prompt_tokens_details = usage.get("prompt_tokens_details") or {}
     cached_tokens = prompt_tokens_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else None
+    return cached_tokens if isinstance(cached_tokens, int) else 0
 
 
 def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
@@ -1060,11 +1060,12 @@ async def handle_completions_impl(api: str, request: Request):
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
-                        if not choices:
+                        if not choices or not stream_flag:
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                 chunk = encode_response_chunk(chunk_json, is_sse)
-                            yield chunk
-                            continue
+                                if not choices:
+                                    yield chunk
+                                    continue
 
                         choice = choices[0]
                         delta = choice.get("delta") or {}

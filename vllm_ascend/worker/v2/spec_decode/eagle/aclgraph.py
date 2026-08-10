@@ -102,16 +102,28 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
                     if self.dp_size > 1
                     else None
                 )
-                prepare_inputs_to_capture(
-                    num_reqs,
-                    num_tokens,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
-                )
+                if vllm_version_is("0.26.0"):
+                    prepare_inputs_to_capture(
+                        num_reqs,
+                        num_tokens,
+                        model_state,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        skip_attn=(desc.cg_mode != CUDAGraphMode.PIECEWISE),
+                    )
+                else:
+                    prepare_inputs_to_capture(
+                        num_reqs,
+                        num_tokens,
+                        model_state,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
+                    )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 if vllm_version_is("0.26.0"):
                     return lambda cg_mode: forward_fn(
@@ -140,7 +152,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
-
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
@@ -165,7 +177,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
-                self.speculator.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,

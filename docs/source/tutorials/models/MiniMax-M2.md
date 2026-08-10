@@ -22,11 +22,11 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 
 | Model | Description | Recommended Hardware | Source |
 |-------|-------------|---------------------|--------|
-| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
-| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |
+| `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
+| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |
 | `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
-| `Eagle3` (M2.7) | M2.7 speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
-| `Eagle3` (M2.5) | M2.5 speculative decoding head model | Matches the base model node count | [MiniMax-M2.5-eagle-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-model-0318) |
+| `EAGLE3` (M2.7) | M2.7 speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
+| `EAGLE3` (M2.5) | M2.5 speculative decoding head model | Matches the base model node count | [MiniMax-M2.5-eagle-model](https://www.modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-model-0318) |
 
 It is recommended to download the model weights to a shared directory, such as `/root/.cache/`.
 
@@ -146,7 +146,7 @@ To verify the source installation:
 python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 !!! note
 
@@ -266,45 +266,7 @@ PD (Prefill-Decode) separation splits the Prefill and Decode phases across diffe
 
 First, prepare `launch_online_dp.py` on each node:
 
-```python
-import argparse
-import multiprocessing
-import os
-import subprocess
-import sys
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dp-size", type=int, required=True)
-    parser.add_argument("--tp-size", type=int, default=1)
-    parser.add_argument("--dp-size-local", type=int, default=-1)
-    parser.add_argument("--dp-rank-start", type=int, default=0)
-    parser.add_argument("--dp-address", type=str, required=True)
-    parser.add_argument("--dp-rpc-port", type=str, default=12345)
-    parser.add_argument("--vllm-start-port", type=int, default=9000)
-    return parser.parse_args()
-
-args = parse_args()
-dp_size, tp_size = args.dp_size, args.tp_size
-dp_size_local = args.dp_size_local if args.dp_size_local != -1 else dp_size
-
-def run_command(visible_devices, dp_rank, vllm_engine_port):
-    subprocess.run([
-        "bash", "./run_dp_template.sh",
-        visible_devices, str(vllm_engine_port),
-        str(dp_size), str(dp_rank), args.dp_address,
-        args.dp_rpc_port, str(tp_size),
-    ], check=True)
-
-if __name__ == "__main__":
-    for i in range(dp_size_local):
-        dp_rank = args.dp_rank_start + i
-        vllm_port = args.vllm_start_port + i
-        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
-        p = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_port))
-        p.start()
-        p.join()
-```
+[launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 Then prepare `run_dp_template.sh` on each node.
 
@@ -660,9 +622,9 @@ For common environment, installation, and general parameter issues, please refer
 
   A: For tool calling tasks, it is recommended to use `--reasoning-parser minimax_m2_append_think`.
 
-- **Q: Why is the `reasoning` field often empty after using `minimax_m2_append_think`?**
+- **Q: Why is the `reasoning` field often empty when using `minimax_m2_append_think`, and how should I choose the right `--reasoning-parser`?**
 
-  A: This is expected. The parser keeps `<think>...</think>` inside `content`. If you mainly rely on the reasoning semantics of `/v1/responses`, use `--reasoning-parser minimax_m2` instead.
+  A: This is expected behavior. The `minimax_m2_append_think` parser retains `<think>...</think>` blocks directly inside the `content` field instead of separating them. If your downstream application relies on the standard reasoning semantics of `/v1/responses` (where the thinking process and final answer are separated), you should use `--reasoning-parser minimax_m2` to ensure the dedicated `reasoning` field is properly populated.
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
@@ -671,10 +633,6 @@ For common environment, installation, and general parameter issues, please refer
 - **Q: How to handle OOM or unstable startup?**
 
   A: Refer to the upstream vLLM guide on [out-of-memory troubleshooting](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory). In short: reduce `--max-num-seqs` and `--max-num-batched-tokens` first, lower `--gpu-memory-utilization` (e.g., from 0.9 to 0.85), or decrease the number of concurrent requests.
-
-- **Q: How should I choose `--reasoning-parser`?**
-
-  A: This guide uses `minimax_m2_append_think` so that `<think>...</think>` is kept in `content`. If you mainly rely on the reasoning semantics of `/v1/responses`, consider using `--reasoning-parser minimax_m2`.
 
 - **Q: Which ports must be accessible?**
 

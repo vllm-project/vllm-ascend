@@ -176,7 +176,7 @@ Expected result: The version information for both packages is displayed, confirm
 
 For more details, please refer to the [Installation Guide](../../installation.md).
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -209,7 +209,7 @@ vllm serve your_model_path \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
-    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
+    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
 !!! note

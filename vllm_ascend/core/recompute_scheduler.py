@@ -95,9 +95,43 @@ class RecomputeSchedulerOutput(SchedulerOutput):
 class RecomputeScheduler(Scheduler):
     running: list[Request]
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
+    def _get_computed_blocks_for_connector(self, request: Request) -> tuple[KVCacheBlocks, int, int, bool]:
+        kv_cache_manager = self.kv_cache_manager
+        coordinator = kv_cache_manager.coordinator
+        if (
+            request.kv_transfer_params
+            and request.kv_transfer_params.get("do_remote_prefill")
+            and isinstance(coordinator, HybridKVCacheCoordinator)
+            and getattr(coordinator, "full_attention_group_id", None) is not None
+        ):
+            prefix_cache_lookup_enabled = kv_cache_manager.enable_caching and not request.skip_reading_prefix_cache
+            if not prefix_cache_lookup_enabled:
+                return kv_cache_manager.empty_kv_cache_blocks, 0, 0, False
+
+            fa_group_id = coordinator.full_attention_group_id
+            assert fa_group_id is not None
+            computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+                request.block_hashes,
+                request.num_tokens - 1,
+            )
+            if not any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
+                num_local = per_group_hits[fa_group_id]
+                hit_diverged = min(per_group_hits) < num_local
+                if hit_diverged:
+                    blocks = kv_cache_manager.create_kv_cache_blocks(computed)
+                    logger.info(
+                        "[RecomputeScheduler] Partial-group cache candidate "
+                        "request_id=%s per_group_hits=%s full_attention_group_id=%d "
+                        "selected_local_tokens=%d",
+                        request.request_id,
+                        per_group_hits,
+                        fa_group_id,
+                        num_local,
+                    )
+                    return blocks, num_local, 0, True
+
+        blocks, num_local, shared_prefix_boundary = kv_cache_manager.get_computed_blocks(request)
+        return blocks, num_local, shared_prefix_boundary, False
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
@@ -112,6 +146,8 @@ class RecomputeScheduler(Scheduler):
         if request.request_id in self.failed_recving_kv_req_ids:
             if request.num_computed_tokens:
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+                if self.needs_kv_cache_zeroing:
+                    self.kv_cache_manager.record_blocks_for_zeroing(request.request_id, request.num_computed_tokens)
             else:
                 self.kv_cache_manager.free(request)
             self.failed_recving_kv_req_ids.remove(request.request_id)
@@ -480,44 +516,22 @@ class RecomputeScheduler(Scheduler):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
-                num_uncached_common_prefix_tokens = 0
+                hit_diverged = False
+                partial_group_hit_selected = False
+                did_prefix_cache_lookup = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    did_prefix_cache_lookup = True
                     # Get locally-cached tokens.
-                    if (
-                        self.connector is not None
-                        and not self.is_kv_producer
-                        and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
-                        )
-                    ):
-                        computed_blocks, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
-                            )
-                        )
-                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
+                    if self.connector is not None:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                            hit_diverged,
+                        ) = self._get_computed_blocks_for_connector(request)
+                        partial_group_hit_selected = hit_diverged
                     else:
                         computed_result = self.kv_cache_manager.get_computed_blocks(request)
                         (
@@ -525,15 +539,6 @@ class RecomputeScheduler(Scheduler):
                             num_new_local_computed_tokens,
                             request.shared_prefix_boundary,
                         ) = cast(tuple[KVCacheBlocks, int, int], computed_result)
-
-                    # In case of hybrid models, obtain a hint for the
-                    # Marconi-style APC admission logic.
-                    if self.has_mamba_layers:
-                        num_uncached_common_prefix_tokens = getattr(
-                            self.kv_cache_manager.coordinator,
-                            "num_uncached_common_prefix_tokens",
-                            0,
-                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -549,6 +554,25 @@ class RecomputeScheduler(Scheduler):
                             step_skipped_waiting.prepend_request(request)
                             continue
                         num_external_computed_tokens = ext_tokens
+                        selected_local_computed_tokens = num_new_local_computed_tokens
+                        if hit_diverged and num_external_computed_tokens == 0:
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            partial_group_hit_selected = False
+                        if hit_diverged:
+                            logger.info(
+                                "[RecomputeScheduler] Partial-group cache decision "
+                                "request_id=%s selected_local_tokens=%d "
+                                "external_tokens=%d final_local_tokens=%d fallback=%s",
+                                request_id,
+                                selected_local_computed_tokens,
+                                num_external_computed_tokens,
+                                num_new_local_computed_tokens,
+                                num_external_computed_tokens == 0,
+                            )
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
 
@@ -654,7 +678,6 @@ class RecomputeScheduler(Scheduler):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
@@ -718,6 +741,20 @@ class RecomputeScheduler(Scheduler):
                             preempted=request.num_preemptions > 0,
                         )
 
+                record_prefix_cache_stats = getattr(self.kv_cache_manager, "record_prefix_cache_stats", None)
+                if did_prefix_cache_lookup and record_prefix_cache_stats is not None:
+                    record_prefix_cache_stats(
+                        request,
+                        num_new_local_computed_tokens,
+                    )
+                elif partial_group_hit_selected and self.kv_cache_manager.log_stats:
+                    assert self.kv_cache_manager.prefix_cache_stats is not None
+                    self.kv_cache_manager.prefix_cache_stats.record(
+                        num_tokens=request.num_tokens,
+                        num_hits=num_new_local_computed_tokens,
+                        preempted=request.num_preemptions > 0,
+                    )
+
                 request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
@@ -739,6 +776,14 @@ class RecomputeScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
+                    if self.needs_kv_cache_zeroing:
+                        self._skip_zero_block_ids.update(
+                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
+                                request.request_id,
+                                num_new_local_computed_tokens,
+                                num_computed_tokens,
+                            )
+                        )
                     continue
 
                 self.running.append(request)
@@ -839,10 +884,10 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # Drain new attention block ids every step so the manager-side list
-        # does not grow unbounded; only kv-cache zeroing consumes them.
-        new_attn_block_ids = self.kv_cache_manager.take_new_block_ids()
-        new_block_ids_to_zero = (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
+        kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+        if kv_cache_block_copies:
+            self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+        pending_kv_cache_block_copies = kv_cache_block_copies or None
 
         # Dynamic speculative decoding: compute optimal K.
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -864,7 +909,8 @@ class RecomputeScheduler(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            new_block_ids_to_zero=new_block_ids_to_zero,
+            new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
@@ -1044,6 +1090,7 @@ class RecomputeScheduler(Scheduler):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+            ec_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1112,7 +1159,10 @@ class RecomputeScheduler(Scheduler):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    kv_transfer_params = self._free_request(request)
+                    (
+                        kv_transfer_params,
+                        ec_transfer_params,
+                    ) = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1142,6 +1192,7 @@ class RecomputeScheduler(Scheduler):
                         events=request.take_events(),
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
+                        ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,

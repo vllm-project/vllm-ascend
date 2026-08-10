@@ -21,7 +21,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `Qwen2.5-Math-RM-72B` (BF16 version):
     - With CPU offloading: requires at least 1 Atlas 910B4 (32GB × 1) card or higher
     - Without CPU offloading: requires at least 4 Atlas 910B4 (32GB × 4) cards or higher
-  [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)
+  [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-Math-RM-72B/`) for quick access during deployment.
 

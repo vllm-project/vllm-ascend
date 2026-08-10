@@ -42,11 +42,13 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    prepare_sparse_kv_offload_mtp_dummy_metadata,
+)
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
@@ -161,7 +163,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self.enable_shared_expert_dp = shared_expert_dp_enabled()
 
@@ -505,7 +506,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.use_eagle,
                 self.enable_enpu,
             )
-            self.update_stream = torch.npu.Stream()
+            self.update_stream = None
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
                 self.vllm_config,
@@ -589,6 +590,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
+                req_ids_tensor, token_to_req = prepare_sparse_kv_offload_mtp_dummy_metadata(
+                    num_tokens,
+                    num_reqs,
+                    self.query_start_loc.cpu,
+                    self.runner._offload_req_ids_tensor,
+                    self.runner._offload_token_to_req,
+                )
 
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
@@ -617,6 +625,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_len=self.runner.group_len.gpu[:num_reqs],
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                    req_ids_tensor=req_ids_tensor,
+                    token_to_req=token_to_req,
                 )
                 if dcp_manager is not None:
                     # update long_seq related params and flatten block_table
@@ -733,6 +743,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -755,6 +766,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD: take the scheduled per-step K as an explicit argument and
+        # set it here -- mirroring vLLM's ``propose(num_speculative_tokens=...)``
+        # (which sets ``self.num_speculative_tokens`` on entry) and unified with
+        # the other proposers (ngram/suffix/medusa/extract) that also receive the
+        # scheduled K through their propose call. The value never exceeds the
+        # configured maximum, so pre-allocated buffers stay valid; K == 0 is
+        # handled just below.
+        self.num_speculative_tokens = num_speculative_tokens
+
+        # Dynamic SD may schedule K == 0 draft tokens for the current batch
+        # size. Return an empty [batch_size, 0] draft so downstream copy/unpack
+        # paths (which key off ``draft_token_ids.shape[1]``) stay consistent.
+        # Mirrors vLLM's llm_base_proposer._propose empty-draft early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=target_token_ids.device,
+                dtype=torch.int64,
+            )
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
@@ -1150,6 +1182,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
                         draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+
+                    # Dynamic verify-length path, implemented in AscendDSparkProposer.
+                    # Only the dspark method is handled here since it relies on
+                    # the DSpark confidence head.
+                    if get_ascend_config().dynamic_spec_config.method == "dspark":
+                        self.update_num_verify_tokens(last_hidden_states, draft_token_ids, num_blk)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1548,6 +1586,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.graph_pad_size = -1
             common_attn_metadata.num_input_tokens = input_batch_size
 
+            if getattr(self.runner, "sparse_kv_offload_enabled", False):
+                # Draft steps run exactly one token per request, while the
+                # inherited token_to_req still describes the verify-step
+                # layout (num_spec + 1 tokens per request). Rebuild it to the
+                # one-token-per-request layout so the Sparse KV offload path
+                # routes every decode row to its own request's CPU-pool
+                # blocks/seq_len; otherwise rows of requests >= 1 are mapped
+                # onto request 0 and attend another request's KV.
+                num_draft_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+                common_attn_metadata.token_to_req = self.arange[:num_draft_reqs]
+
         # The loop part
         used_update_positions += 1
 
@@ -1851,6 +1900,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.slot_mapping[token_indices]
         )
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
+        token_to_req = (
+            common_attn_metadata.token_to_req[token_indices] if common_attn_metadata.token_to_req is not None else None
+        )
 
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
@@ -1885,6 +1937,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=token_to_req,
         )
         return spec_common_attn_metadata, token_indices
 
@@ -1980,6 +2034,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_ids_tensor=common_attn_metadata.req_ids_tensor,
+            token_to_req=common_attn_metadata.token_to_req,
         )
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu

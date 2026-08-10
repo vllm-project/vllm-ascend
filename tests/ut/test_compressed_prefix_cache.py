@@ -180,6 +180,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=block_size,
+        scheduler_block_size=logical_block_size,
         max_num_batched_tokens=logical_block_size,
     )
 
