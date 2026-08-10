@@ -67,7 +67,7 @@ jobs:
           python3 .github/workflows/scripts/run_hitest.py
 
       - name: Upload recommended pytest paths artifact
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: recommended-pytest-paths
@@ -77,7 +77,7 @@ jobs:
 
       - name: Export hitest_paths output
         id: export-paths
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           FILE=".github/workflows/scripts/recommended_pytest_paths.txt"
           if [ -f "$FILE" ]; then
