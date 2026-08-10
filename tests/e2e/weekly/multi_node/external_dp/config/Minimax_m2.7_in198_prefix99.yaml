@@ -200,7 +200,6 @@ templates:
       - --trust-remote-code
       - --gpu-memory-utilization
       - "0.8"
-      - --no-enable-prefix-caching
       - --quantization
       - "ascend"
       - --speculative-config
