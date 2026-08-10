@@ -347,14 +347,21 @@ def _all_gather_then_unquantized_matmul(
     return torch.ops.vllm.unquantized_gemm(gathered, weight, bias)
 
 
+def _is_tp_all_gather_enabled() -> bool:
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return False
+
+    return bool(getattr(forward_context, "flash_comm_v1_enabled", False))
+
+
 def _all_gather_dynamic_quant_matmul_impl(
     input_: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> torch.Tensor:
-    try:
-        get_forward_context()
-    except AssertionError:
+    if not _is_tp_all_gather_enabled():
         return _dynamic_quant_matmul(input_, weight, weight_scale)
 
     if input_.dim() != 2:
@@ -398,9 +405,7 @@ def _all_gather_unquantized_matmul_impl(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    try:
-        get_forward_context()
-    except AssertionError:
+    if not _is_tp_all_gather_enabled():
         return torch.ops.vllm.unquantized_gemm(input_, weight, bias)
 
     if input_.dim() != 2:
@@ -447,11 +452,15 @@ def _all_gather_dynamic_quant_matmul_fake(
         world_size = 1
         pad_size = 0
 
+    if not _is_tp_all_gather_enabled():
+        world_size = 1
+        pad_size = 0
+
     output_tokens = input_.shape[0] * world_size
     if pad_size > 0:
         output_tokens -= pad_size
     return torch.empty(
-        (*input_.shape[:-2], output_tokens, weight.shape[-1]),
+        (output_tokens, *input_.shape[1:-1], weight.shape[-1]),
         device=input_.device,
         dtype=input_.dtype,
     )
@@ -469,11 +478,15 @@ def _all_gather_unquantized_matmul_fake(
         world_size = 1
         pad_size = 0
 
+    if not _is_tp_all_gather_enabled():
+        world_size = 1
+        pad_size = 0
+
     output_tokens = input_.shape[0] * world_size
     if pad_size > 0:
         output_tokens -= pad_size
     return torch.empty(
-        (*input_.shape[:-2], output_tokens, weight.shape[0]),
+        (output_tokens, *input_.shape[1:-1], weight.shape[0]),
         device=input_.device,
         dtype=input_.dtype,
     )
