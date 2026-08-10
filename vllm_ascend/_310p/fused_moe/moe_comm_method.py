@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 
