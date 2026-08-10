@@ -546,24 +546,26 @@ class MooncakePullRecvingThread(threading.Thread):
             )
         elif isinstance(spec, FullAttentionSpec):
             if is_dcp_transfer:
-                if local_block_size != remote_block_size:
-                    local_kernel_block_size = local_block_size // local_block_size_scale
-                    remote_kernel_block_size = remote_block_size // remote_block_size_scale
-                    if local_kernel_block_size != remote_kernel_block_size:
-                        raise ValueError(
-                            "Mooncake DCP requires the same P/D kernel block size: "
-                            f"local={local_kernel_block_size}, remote={remote_kernel_block_size}"
-                        )
+                local_kernel_block_size = local_block_size // local_block_size_scale
+                remote_kernel_block_size = remote_block_size // remote_block_size_scale
+                if local_kernel_block_size != remote_kernel_block_size:
+                    raise ValueError(
+                        "Mooncake DCP requires the same P/D kernel block size: "
+                        f"local={local_kernel_block_size}, remote={remote_kernel_block_size}"
+                    )
 
+                local_virtual_block_size = local_block_size * self.dcp_size
+                remote_virtual_block_size = remote_block_size * remote_dcp_size
+                local_start_block_idx = num_computed_tokens // local_virtual_block_size
+                transfer_block_ids: list[tuple[int, list[int], list[int]]] = []
+
+                if local_block_size != remote_block_size:
                     kernel_block_size = local_kernel_block_size
-                    local_virtual_block_size = local_block_size * self.dcp_size
-                    remote_virtual_block_size = remote_block_size * remote_dcp_size
                     transfer_start_token = num_computed_tokens
                     transfer_end_token = min(local_num_prompt_tokens - 1, remote_num_prompt_tokens)
                     if transfer_end_token <= transfer_start_token:
                         return []
 
-                    local_start_block_idx = num_computed_tokens // local_virtual_block_size
                     local_virtual_kernel_blocks: list[tuple[int, int]] = []
                     for local_block_offset, local_block_id in enumerate(local_group_block_ids):
                         local_block_idx = local_start_block_idx + local_block_offset
@@ -580,24 +582,24 @@ class MooncakePullRecvingThread(threading.Thread):
                             virtual_kernel_block_idx = token_start // kernel_block_size
                             local_virtual_kernel_blocks.append((local_kernel_block_id, virtual_kernel_block_idx))
 
-                    transfer_block_ids: list[tuple[int, list[int], list[int]]] = []
-                    for candidate_tp_ranks in remote_tp_rank_groups:
-                        if remote_dcp_size == 1:
-                            remote_tp_rank = (
-                                candidate_tp_ranks[0]
-                                if len(candidate_tp_ranks) == 1
-                                else self._select_remote_tp_rank(candidate_tp_ranks, selection_index)
+                for candidate_tp_ranks in remote_tp_rank_groups:
+                    if remote_dcp_size == 1:
+                        remote_tp_rank = (
+                            candidate_tp_ranks[0]
+                            if len(candidate_tp_ranks) == 1
+                            else self._select_remote_tp_rank(candidate_tp_ranks, selection_index)
+                        )
+                        remote_tp_ranks = [remote_tp_rank]
+                    else:
+                        if len(candidate_tp_ranks) != remote_dcp_size:
+                            raise ValueError(
+                                "Mooncake DCP candidate rank count must equal remote DCP size: "
+                                f"ranks={candidate_tp_ranks}, remote_dcp={remote_dcp_size}"
                             )
-                            remote_tp_ranks = [remote_tp_rank]
-                        else:
-                            if len(candidate_tp_ranks) != remote_dcp_size:
-                                raise ValueError(
-                                    "Mooncake DCP candidate rank count must equal remote DCP size: "
-                                    f"ranks={candidate_tp_ranks}, remote_dcp={remote_dcp_size}"
-                                )
-                            remote_tp_ranks = candidate_tp_ranks
+                        remote_tp_ranks = candidate_tp_ranks
 
-                        block_ids_by_remote_tp_rank: dict[int, tuple[list[int], list[int]]] = {}
+                    block_ids_by_remote_tp_rank: dict[int, tuple[list[int], list[int]]] = {}
+                    if local_block_size != remote_block_size:
                         for local_kernel_block_id, virtual_kernel_block_idx in local_virtual_kernel_blocks:
                             token_start = virtual_kernel_block_idx * kernel_block_size
                             remote_block_idx = token_start // remote_virtual_block_size
@@ -617,49 +619,28 @@ class MooncakePullRecvingThread(threading.Thread):
                                 remote_group_block_ids[remote_block_idx] * remote_block_size_scale
                                 + remote_kernel_offset
                             )
-                        transfer_block_ids.extend(
-                            (remote_tp_rank, local_kernel_block_ids, remote_kernel_block_ids)
-                            for remote_tp_rank, (
-                                local_kernel_block_ids,
-                                remote_kernel_block_ids,
-                            ) in block_ids_by_remote_tp_rank.items()
-                        )
-                    return transfer_block_ids
-
-                local_virtual_block_size = local_block_size * self.dcp_size
-                local_start_block_idx = num_computed_tokens // local_virtual_block_size
-                transfer_block_ids: list[tuple[int, list[int], list[int]]] = []
-                for candidate_tp_ranks in remote_tp_rank_groups:
-                    if remote_dcp_size == 1:
-                        remote_tp_rank = (
-                            candidate_tp_ranks[0]
-                            if len(candidate_tp_ranks) == 1
-                            else self._select_remote_tp_rank(candidate_tp_ranks, selection_index)
-                        )
-                        remote_tp_ranks = [remote_tp_rank]
                     else:
-                        remote_tp_ranks = candidate_tp_ranks
+                        for local_block_offset, local_block_id in enumerate(local_group_block_ids):
+                            local_block_idx = local_start_block_idx + local_block_offset
+                            global_block_idx = local_block_idx * self.dcp_size + self.dcp_rank
+                            remote_block_idx = global_block_idx // remote_dcp_size
+                            if remote_block_idx >= len(remote_group_block_ids):
+                                break
+                            remote_dcp_rank = global_block_idx % remote_dcp_size
+                            remote_tp_rank = remote_tp_ranks[remote_dcp_rank]
+                            local_kernel_block_ids, remote_kernel_block_ids = block_ids_by_remote_tp_rank.setdefault(
+                                remote_tp_rank, ([], [])
+                            )
+                            local_kernel_block_ids.extend(
+                                local_block_id * local_block_size_scale + offset
+                                for offset in range(local_block_size_scale)
+                            )
+                            remote_block_id = remote_group_block_ids[remote_block_idx]
+                            remote_kernel_block_ids.extend(
+                                remote_block_id * remote_block_size_scale + offset
+                                for offset in range(remote_block_size_scale)
+                            )
 
-                    block_ids_by_remote_tp_rank: dict[int, tuple[list[int], list[int]]] = {}
-                    for local_block_offset, local_block_id in enumerate(local_group_block_ids):
-                        local_block_idx = local_start_block_idx + local_block_offset
-                        global_block_idx = local_block_idx * self.dcp_size + self.dcp_rank
-                        remote_block_idx = global_block_idx // remote_dcp_size
-                        if remote_block_idx >= len(remote_group_block_ids):
-                            break
-                        remote_dcp_rank = global_block_idx % remote_dcp_size
-                        remote_tp_rank = remote_tp_ranks[remote_dcp_rank]
-                        local_kernel_block_ids, remote_kernel_block_ids = block_ids_by_remote_tp_rank.setdefault(
-                            remote_tp_rank, ([], [])
-                        )
-                        local_kernel_block_ids.extend(
-                            local_block_id * local_block_size_scale + offset for offset in range(local_block_size_scale)
-                        )
-                        remote_block_id = remote_group_block_ids[remote_block_idx]
-                        remote_kernel_block_ids.extend(
-                            remote_block_id * remote_block_size_scale + offset
-                            for offset in range(remote_block_size_scale)
-                        )
                     transfer_block_ids.extend(
                         (remote_tp_rank, local_kernel_block_ids, remote_kernel_block_ids)
                         for remote_tp_rank, (
@@ -668,7 +649,6 @@ class MooncakePullRecvingThread(threading.Thread):
                         ) in block_ids_by_remote_tp_rank.items()
                     )
                 return transfer_block_ids
-
             local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
             remote_kernel_block_ids = self._expand_block_ids(remote_group_block_ids, remote_block_size_scale)
             kernel_block_size = local_block_size // local_block_size_scale
