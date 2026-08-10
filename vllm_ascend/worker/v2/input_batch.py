@@ -64,6 +64,14 @@ class AscendInputBuffers(InputBuffers):
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
 
+@dataclass(frozen=True)
+class PCPGlobalAttentionInputs:
+    """Global attention inputs retained until PCP sampling is restored."""
+
+    block_tables: tuple[torch.Tensor, ...]
+    slot_mappings: torch.Tensor
+
+
 @dataclass
 class AscendInputBatch(InputBatch):
     """Input batch for Ascend NPUs."""
@@ -73,6 +81,8 @@ class AscendInputBatch(InputBatch):
     seq_lens_np: np.ndarray
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
+    # The unpartitioned attention view consumed by a replicated draft model.
+    pcp_global_attn_inputs: PCPGlobalAttentionInputs | None = None
 
     @classmethod
     def make_dummy(

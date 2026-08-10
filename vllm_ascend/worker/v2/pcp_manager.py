@@ -33,7 +33,10 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.input_batch import (
+    AscendInputBatch,
+    PCPGlobalAttentionInputs,
+)
 
 
 class AscendPCPManager(PCPManager):
@@ -268,6 +271,32 @@ class AscendPCPManager(PCPManager):
             cu_num_logits=local_cu_num_logits,
             cu_num_logits_np=local_cu_num_logits_np,
         )
+
+    def prepare_attn(
+        self, input_batch: AscendInputBatch
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        speculative_config = self.vllm_config.speculative_config
+        if speculative_config is None or speculative_config.method != "mtp":
+            return super().prepare_attn(input_batch)
+
+        assert self._global_batch is not None
+        assert isinstance(self._global_batch, AscendInputBatch)
+        assert self._block_tables is not None
+        global_batch = self._global_batch
+        global_block_tables = self._block_tables.gather_block_tables(
+            global_batch.idx_mapping,
+            global_batch.num_reqs,
+        )
+
+        local_attn_inputs = super().prepare_attn(input_batch)
+        assert self._global_batch_slot_mappings is not None
+        global_batch.pcp_global_attn_inputs = PCPGlobalAttentionInputs(
+            block_tables=global_block_tables,
+            slot_mappings=self._global_batch_slot_mappings[
+                :, : global_batch.num_tokens
+            ],
+        )
+        return local_attn_inputs
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         slot_mappings = super().prepare_slot_mappings()
