@@ -40,9 +40,15 @@ decoding step. The resulting layerwise transfer and synchronization overhead
 causes severe Decode performance degradation. Deploy this feature on a
 dedicated Prefill node with `kv_role: "kv_producer"`.
 
+When this feature is combined with
+[Sparse KV Cache Offload](sparse_kv_cache_offload.md), compose
+`AscendStoreConnector` and `SFAPDRD2HConnector` through `MultiConnector` on the
+Prefill node. The RD2H connector's per-layer completion signal prevents a
+shared Prefill buffer from being reused before Decode has finished reading it.
+
 ## Configuration
 
-Configure the dedicated Prefill node as follows:
+To configure only the layerwise Prefill offload connector:
 
 ```json
 {
@@ -61,6 +67,46 @@ The example keeps the first transformer layer independent and assigns all
 other layers to three reusable buffers. The values are examples rather than
 universal recommendations; choose them according to available NPU memory and
 transfer bandwidth.
+
+### Use with SFA PD RD2H
+
+When Decode uses Sparse KV Cache Offload, Prefill must both save KV through
+`AscendStoreConnector` and expose the same layer buffers through
+`SFAPDRD2HConnector`. Compose them with `MultiConnector` on Prefill:
+
+```json
+{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+        "connectors": [
+            {
+                "kv_connector": "SFAPDRD2HConnector",
+                "kv_role": "kv_producer",
+                "kv_port": 20050,
+                "kv_connector_extra_config": {
+                    "transfer_backend": "memfabric"
+                }
+            },
+            {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                    "backend": "memcache",
+                    "use_layerwise": true,
+                    "layerwise_num_shared_buffers": 3,
+                    "layerwise_independent_layers": [0]
+                }
+            }
+        ]
+    }
+}
+```
+
+Do not enable `sparse_kv_offload_config` on Prefill. The Prefill `kv_port` may
+use the Decode base value for consistency, but only Decode binds the RD2H
+control sockets. For Decode configuration, TP constraints, and proxy setup,
+see [SFA PD RD2H KV Transfer](sfa_pd_rd2h_kv_transfer.md).
 
 ### Core parameters
 

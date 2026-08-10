@@ -77,7 +77,7 @@ Since some third party dependencies needed by sparse KV Cache offload are not in
 
 ### Configuration
 
-You can enable Sparse KV Cache Offload by setting `sparse_kv_offload_config` in `additional-config`. You also need to specify `SFAPDCpuOffloadConnector` in `kv-transfer-config` for PD KV transfer. Refer to the following example:
+You can enable Sparse KV Cache Offload by setting `sparse_kv_offload_config` in `additional-config`. To use the MemFabric RD2H transfer path, configure `SFAPDRD2HConnector` on Decode. On Prefill, use the connector directly, or include it as a child of `MultiConnector` when [Layerwise Prefill KV Cache Offload](layerwise_prefill_kv_offload.md) is enabled. Refer to the following D-node example:
 
 ```bash
 vllm serve zai-org/GLM-5.2 \
@@ -95,19 +95,21 @@ vllm serve zai-org/GLM-5.2 \
     --no-enable-prefix-caching \
     --additional-config '{"sparse_kv_offload_config": {"enabled": true, "topk_buffer_size": 4096, "dram_size_per_dp_GB": 128}}' \
     --kv-transfer-config "{
-        \"kv_connector\": \"SFAPDCpuOffloadConnector\",
-        \"kv_buffer_device\": \"npu\",
+        \"kv_connector\": \"SFAPDRD2HConnector\",
         \"kv_role\": \"kv_consumer\",
-        \"kv_parallel_size\": 1,
         \"kv_port\": 20050,
-        \"kv_rank\": 1,
-        \"kv_connector_extra_config\": {\"use_layerwise\": true}
+        \"kv_connector_extra_config\": {
+            \"transfer_backend\": \"memfabric\",
+            \"use_layerwise\": true
+        }
     }"
 ```
+
+On Prefill, set the RD2H connector's `kv_role` to `kv_producer` and `transfer_backend` to `memfabric`. Do not enable `sparse_kv_offload_config` on Prefill. Only Decode binds the connector control sockets; Prefill may use the same `kv_port` base value for consistency. See [SFA PD RD2H KV Transfer](sfa_pd_rd2h_kv_transfer.md) for the deployment constraints and the optional `MultiConnector` composition.
 
 `sparse_kv_offload_config` parameters meaning and usage:
 
 - `enabled` (bool, default: `False`): Whether to enable sparse KV Cache offload.
-- `topk_buffer_size` (int, default: `4096`): Size of the device hot KV buffer, should be greater than the model's `index_topk`. Increase this size will increase topk KV hit rate thus reduce tpot, but will bring higher device memory usage. Normally we set it to 2 * `index_topk` to achieve a balance between topk KV hit rate and device memory usage.
-- `dram_size_per_dp_GB` (bool, default: `128`): Reserved host memory size in Gigabyte per DP group. An error will be raised if this reserved size is not enough to contain the whole host KV cache buffer. All ranks in one TP group will share one host KV cache buffer, so the total host memory usage will be `dram_size_per_dp_GB` * `data_parallel_size`.
+- `topk_buffer_size` (int, default: `4096`): Size of the device hot KV buffer. It must be greater than or equal to the model's `index_topk` and divisible by `block_size`. Increasing this size improves the top-k KV hit rate and reduces TPOT, but consumes more device memory. Normally, set it to 2 * `index_topk` to balance the hit rate and device memory usage.
+- `dram_size_per_dp_GB` (int, default: `128`): Reserved host memory size in GiB per DP rank. An error will be raised if this reserved size is not enough to contain the whole host KV cache buffer. All ranks in one TP group share one host KV cache buffer, so the total host memory usage is `dram_size_per_dp_GB` * `data_parallel_size`.
 - `keep_device_kv_cache` (bool, optional, default: `False`): Whether to allocate the device KV Cache buffer. If enabled, we will still allocate device KV Cache, thus we can't save KV cache device memory usage, and can not improve sequence length or batch_size. Only reserved for PD-colocate debugging, you **SHOULD NOT** enable it in actual production environment.
