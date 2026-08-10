@@ -99,8 +99,6 @@ test_cases:
       - "--tensor-parallel-size"
       - "4"
       - "--data-parallel-size"
-      - "1"
-      - "--prefill_context_parallel-size"
       - "2"
       - "--decode_context_parallel-size"
       - "1"
