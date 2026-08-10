@@ -60,6 +60,21 @@ class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
 
 
 class AscendDeepSeekMTP(DeepSeekMTP):
+    def load_weights(self, weights):
+        loaded_weights = super().load_weights(weights)
+        if self.config.model_type != "glm_moe_dsa":
+            return loaded_weights
+
+        for module_name, module in self.named_modules():
+            bias = getattr(module, "bias", None)
+            if (
+                bias is not None
+                and hasattr(module, "bias_loaded")
+                and not module.bias_loaded
+            ):
+                loaded_weights.add(f"{module_name}.bias")
+        return loaded_weights
+
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         if name != MTP_ROT_WEIGHT_NAME:
             return super()._rewrite_spec_layer_name(spec_layer, name)
