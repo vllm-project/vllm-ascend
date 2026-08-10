@@ -2443,9 +2443,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         block_size = quant_key.shape[2]
         block_table = attn_metadata.block_tables[num_decodes:]
         prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
-        actual_seq_lengths_kv = torch.tensor(
-            prefill_sl, dtype=torch.int32, device=quant_query.device
-        ).cumsum(dim=0)
+        # actual_seq_lengths_kv = torch.tensor(
+        #     prefill_sl, dtype=torch.int32, device=quant_query.device
+        # ).cumsum(dim=0)
+        actual_seq_lengths_kv = prefill_sl
 
         return self._run_mxfp8_fia_v2(
             quant_query,
