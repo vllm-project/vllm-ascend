@@ -114,7 +114,7 @@ class GlobalMemfabricTE:
             )
         except ImportError as exc:
             raise ImportError(
-                "Please install memfabric_hybrid (memfabric-hybrid) to use the SFA PD RD2H connector."
+                "Please install memfabric_hybrid (memfabric-hybrid) to use SfaRemoteD2HConnector."
             ) from exc
 
         # Match the MemFabric initialization sequence used by its examples.

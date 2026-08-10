@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
 
 
-class SFAPDRD2HConnector(KVConnectorBase_V1, SupportsHMA):
+class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     """Decode-offload Remote D2H connector branching on role and KV role.
 
     * SCHEDULER + producer : P-side metadata for memfabric pull notifications.
@@ -76,11 +76,11 @@ class SFAPDRD2HConnector(KVConnectorBase_V1, SupportsHMA):
         decode_offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
         if self.is_producer:
             assert not decode_offload_enabled, (
-                "SFAPDRD2HConnector producer (P) must run with sparse_kv_offload_config.enabled=false."
+                "SfaRemoteD2HConnector producer (P) must run with sparse_kv_offload_config.enabled=false."
             )
         if self.is_consumer:
             assert decode_offload_enabled, (
-                "SFAPDRD2HConnector consumer (D) must run with sparse_kv_offload_config.enabled=true."
+                "SfaRemoteD2HConnector consumer (D) must run with sparse_kv_offload_config.enabled=true."
             )
 
         if role == KVConnectorRole.SCHEDULER:

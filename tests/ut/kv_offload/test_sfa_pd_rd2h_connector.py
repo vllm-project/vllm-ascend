@@ -24,7 +24,7 @@ from examples.disaggregated_prefill_v1.load_balance_proxy_layerwise_server_examp
 )
 from vllm_ascend.distributed.kv_transfer import register_connector  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import (  # noqa: E402
-    SFAPDRD2HConnector,
+    SfaRemoteD2HConnector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  # noqa: E402
     BATCH_KV_TRANSFER_PARAMS,
@@ -55,7 +55,7 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 )
 
 
-def test_sfa_pd_rd2h_connector_is_registered():
+def test_sfa_remote_d2h_connector_is_registered():
     with (
         patch.object(KVConnectorFactory, "_registry", {}),
         patch.object(KVConnectorFactory, "register_connector") as mock_register,
@@ -63,9 +63,9 @@ def test_sfa_pd_rd2h_connector_is_registered():
         register_connector()
 
     mock_register.assert_any_call(
-        "SFAPDRD2HConnector",
+        "SfaRemoteD2HConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
-        "SFAPDRD2HConnector",
+        "SfaRemoteD2HConnector",
     )
 
 
@@ -1167,7 +1167,7 @@ def test_scheduler_shutdown_cancels_rendezvous_and_executor():
 
 
 def test_connector_shutdown_delegates_to_active_components():
-    connector = SFAPDRD2HConnector.__new__(SFAPDRD2HConnector)
+    connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
     connector.connector_worker = MagicMock()
     connector.connector_scheduler = MagicMock()
 
