@@ -33,7 +33,7 @@ All tests require:
 
 import requests
 
-from tests.e2e.pull_request.one_card.rlhf.conftest import (
+from tests.e2e.pull_request.quarter_card.rlhf.conftest import (
     gen,
     health,
     npu_free_bytes,

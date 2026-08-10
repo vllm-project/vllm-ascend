@@ -199,7 +199,7 @@
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
-    - tests/e2e/pull_request/half_card/test_batch_job_aware_scheduler_e2e.py
+    - tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py
 
 # Device
 - name: device
@@ -217,8 +217,8 @@
     - vllm_ascend/patch/platform/patch_camem_allocator.py
   tests:
     - tests/ut/device_allocator
-    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py
-    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
+    - tests/e2e/pull_request/quarter_card/rlhf/state_transitions/test_pause_resume.py
+    - tests/e2e/pull_request/quarter_card/rlhf/state_transitions/test_sleep_wake.py
 
 # Distributed
 - name: distributed
@@ -564,7 +564,7 @@
     - vllm_ascend/spec_decode/utils.py
     - vllm_ascend/models/qwen3_dspark.py
   tests:
-    - tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py
+    - tests/e2e/pull_request/half_card/spec_decode/test_dynamic.py
 
 - name: spec_decode_extract_hidden_states
   optional: false
@@ -609,8 +609,8 @@
     - tests/e2e/pull_request/quarter_card/test_multi_instance.py
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/half_card/model_runner_v2
-    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py
-    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
+    - tests/e2e/pull_request/quarter_card/rlhf/state_transitions/test_pause_resume.py
+    - tests/e2e/pull_request/quarter_card/rlhf/state_transitions/test_sleep_wake.py
     - tests/e2e/pull_request/two_card/test_prefix_caching.py
     - tests/e2e/pull_request/two_card/test_qwen3_performance.py
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
@@ -885,7 +885,6 @@ estimated_times:
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
   tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 40
   tests/ut/quantization/methods/a2/test_w4a4_laos_dynamic.py: 40
-  tests/ut/quantization/methods/a2/test_w4a8.py: 40
   tests/ut/quantization/methods/a2/test_w8a16.py: 40
   tests/ut/quantization/methods/a2/test_w8a8_dynamic.py: 40
   tests/ut/quantization/methods/a2/test_w8a8_static.py: 40

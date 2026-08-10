@@ -6,6 +6,12 @@
 [Actions run 30783037208](https://github.com/vllm-project/vllm-ascend/actions/runs/30783037208?pr=12171)
 的 main 矩阵结果修正分组。
 
+[Actions run 30800319394](https://github.com/vllm-project/vllm-ascend/actions/runs/30800319394?pr=12171)
+进一步确认 reranker LoRA 与 BatchJobAwareScheduler 在 1/2 卡仍会因 ACL Graph
+capture 的 SQ/CQ 资源申请失败，因此整文件退回物理整卡。随后 rebase 到最新
+`upstream/main`，同步上游新增、删除的测试文件；新增文件按源码静态预测分组，
+实测结果保持为空。
+
 ## 约束与判断口径
 
 - A2B3 整卡按 64 GiB 计算，1/4 卡和 1/2 卡的名义显存分别为 16 GiB、
@@ -22,7 +28,7 @@
 - 表格的“本轮实测结果”只记录本轮 run；“通过（main）”表示该文件在 vLLM main
   矩阵通过。失败项同时核对 v0.26.0 矩阵，确认可复现后再迁移。
 
-## 1/4 卡 E2E（24 个文件）
+## 1/4 卡 E2E（25 个文件）
 
 | 测试文件 | 主要内容 | 静态预测依据 | 本轮实测结果 |
 | --- | --- | --- | --- |
@@ -37,7 +43,8 @@
 | `quarter_card/pooling/test_embedding.py` | Qwen3-0.6B/E5/BGE embedding | 小模型逐个顺序运行，对照模型不并发常驻 | 通过（main） |
 | `quarter_card/pooling/test_scoring.py` | MiniLM/BGE scoring | 小型 FP16 pooling/cross-encoder | 通过（main） |
 | `quarter_card/test_attention_fa3.py` | Qwen3-0.6B FA3/FIA 对比 | 0.6B、短输入、小 capture size | 通过（main） |
-| `quarter_card/test_camem.py` | sleep/wake 显存管理 | Qwen3-0.6B 单实例 | 通过（main） |
+| `quarter_card/rlhf/state_transitions/test_pause_resume.py` | RLHF pause/resume 状态机 | Qwen3-0.6B BF16、eager、2048 上下文、显存比例 0.75 |  |
+| `quarter_card/rlhf/state_transitions/test_sleep_wake.py` | RLHF sleep/wake 显存与输出恢复 | Qwen3-0.6B BF16、eager；替代上游已删除的 `test_camem.py` |  |
 | `quarter_card/test_completion_with_prompt_embeds.py` | prompt embeddings | Qwen3-0.6B，embedding 对照与推理阶段不形成双模型 NPU 峰值 | 通过（main） |
 | `quarter_card/test_cpu_offloading.py` | CPU KV offload connector | 文件当前整体 skip；若启用，0.6B 且 NPU 显存比例 0.5 | 通过（main） |
 | `quarter_card/test_cpu_weight_offload.py` | 权重预取/卸载 | Qwen3-0.6B、512 上下文，部分权重驻 CPU | 通过（main） |
@@ -51,28 +58,27 @@
 | `quarter_card/test_simple_cpu_offload.py` | simple CPU offload | Qwen3-0.6B、eager、显存比例 0.5 | 通过（main） |
 | `quarter_card/test_xlite.py` | XLite eager/graph | Qwen3-0.6B、1024 上下文 | 通过（main） |
 
-## 1/2 卡 E2E（14 个文件）
+## 1/2 卡 E2E（13 个文件）
 
 | 测试文件 | 主要内容 | 静态预测依据 | 本轮实测结果 |
 | --- | --- | --- | --- |
-| `half_card/lora/test_qwen3_reranker_lora.py` | Qwen3-Reranker-0.6B pooling + LoRA | 初始预测忽略了 pooling + LoRA 的 ACL Graph capture 额外峰值 | 1/4 卡资源申请失败（main、v0.26.0），迁入 1/2 卡 |
 | `half_card/spec_decode/test_dflash.py` | Qwen3-8B DFlash | 约 16 GiB 主权重，加 DFlash、4096 KV、batch 256 和图捕获 | 通过（main） |
 | `half_card/spec_decode/test_draft_parallel.py` | Llama-3.1-8B + PARD-1B | 主模型约 16 GiB、草稿约 2 GiB，加 KV/PIECEWISE Graph | 通过（main） |
 | `half_card/spec_decode/test_dspark.py` | Qwen3-8B DSpark | 8B BF16 主模型、草稿、4096 KV、batch 256 | 通过（main） |
+| `half_card/spec_decode/test_dynamic.py` | Qwen3-8B Dynamic DSpark | 8B BF16 主模型与 DSpark、4096 上下文、batch 256、FULL Graph |  |
 | `half_card/spec_decode/test_eagle.py` | Qwen3/Qwen3-VL-8B Eagle3 | 文件含 8B 文本和视觉主模型，单次还加载 Eagle3 草稿 | 通过（main） |
 | `half_card/spec_decode/test_mtp_eagle_correctness.py` | DeepSeek MTP smoke | BF16 MoE checkpoint、batch 256、图 capture 20，静态上不适合 16 GiB | 通过（main） |
 | `half_card/spec_decode/test_ngram.py` | Llama-3.1-8B n-gram | 8B BF16 主权重约占满 1/4 卡名义容量 | 通过（main） |
 | `half_card/spec_decode/test_ngram_npu.py` | Llama-3.1-8B NPU n-gram | 8B BF16、batch 256、2048 上下文、PIECEWISE Graph | 通过（main） |
 | `half_card/spec_decode/test_suffix.py` | Llama-3.1-8B suffix decode | 8B BF16 加 suffix cache、KV 和运行时 | 通过（main） |
 | `half_card/test_batch_invariant.py` | batch invariant/logprobs | 0.6B 权重虽小，但 batch 最高 144、8192 上下文、显存比例 0.95 | 通过（main） |
-| `half_card/test_batch_job_aware_scheduler_e2e.py` | BatchJobAwareScheduler | 多次 engine 初始化的 ACL Graph capture 峰值超过初始静态估计 | 1/4 卡资源申请失败（main、v0.26.0），迁入 1/2 卡 |
 | `half_card/test_minicpm.py` | MiniCPM 0.5B/2B | 最大 case 的图捕获峰值超过仅按权重估算的 1/4 卡预算 | 1/4 卡资源申请失败（main、v0.26.0），迁入 1/2 卡 |
 | `half_card/test_qwen3_8b_w8a8.py` | Qwen3-8B W8A8 + Eagle3 | 约 8 GiB 主权重，加草稿、4096 KV 与 FULL Graph，1/4 卡余量不足 | 通过（main） |
 | `half_card/test_vlm.py` | 7B/8B 视觉、音频、Whisper | 文件由 7B/8B BF16 多模态模型决定，需为编码器、KV 和图保留空间 | 通过（main） |
 
-## A2 UT（35 个文件）
+## A2 UT（34 个文件）
 
-A2 UT 仍以文件为单位。33 个文件放 1/4 卡；`test_mla_precision.py` 因生产级
+A2 UT 仍以文件为单位。32 个文件放 1/4 卡；`test_mla_precision.py` 因生产级
 MLA 投影矩阵及初始化临时副本放入 1/2 卡，`test_attention_v1_precision.py`
 则根据本轮明确的 15 GiB OOM 迁入 1/2 卡。
 
@@ -101,7 +107,6 @@ MLA 投影矩阵及初始化临时副本放入 1/2 卡，`test_attention_v1_prec
 | `tests/ut/quantization/methods/a2/test_w4a16.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
 | `tests/ut/quantization/methods/a2/test_w4a4_flatquant.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
 | `tests/ut/quantization/methods/a2/test_w4a4_laos_dynamic.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
-| `tests/ut/quantization/methods/a2/test_w4a8.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
 | `tests/ut/quantization/methods/a2/test_w8a16.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
 | `tests/ut/quantization/methods/a2/test_w8a8_dynamic.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
 | `tests/ut/quantization/methods/a2/test_w8a8_static.py` | 1/4 卡 | 算子级量化矩阵 | 通过（main） |
@@ -124,6 +129,8 @@ MLA 投影矩阵及初始化临时副本放入 1/2 卡，`test_attention_v1_prec
 | `one_card/model_runner_v2/test_basic.py` | 原子文件内不同 case 同时出现 ACL Graph 资源申请失败和 HCCL error code 19（main、v0.26.0），恢复到物理整卡。 |
 | `one_card/spec_decode/test_extract_hidden_states.py` | 8B 默认 40960 上下文需要 6.56 GiB KV cache，但半卡仅余 3.37 GiB（main、v0.26.0），恢复到物理整卡。 |
 | `one_card/test_multistream_overlap_shared_expert.py` | 半卡并非 OOM，而是 HCCL `hcclGetRootInfo` error code 19（main、v0.26.0）；该用例需要物理设备的 HCCL 语义。 |
+| `one_card/lora/test_qwen3_reranker_lora.py` | 1/2 卡复测仍在 ACL Graph capture 报 `Alloc sq cq fail`；这是 vNPU SQ/CQ 资源限制，不是增加显存即可解决，退回物理整卡。 |
+| `one_card/test_batch_job_aware_scheduler_e2e.py` | 1/2 卡中 4 个参数有 3 个在 ACL Graph capture 报 `Alloc sq cq fail`；按整文件迁移规则退回物理整卡。 |
 
 310P 专用、A3、多卡 HCCL 测试保持原 runner，不参与本次 A2B3 vNPU 容量采样。
 
