@@ -144,6 +144,10 @@ class NPUModelRunner(GPUModelRunner):
             load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
         )
 
+        self.update_stream = None
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.req_states
@@ -156,6 +160,9 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+            # Shared update_stream: main model (ModelAclGraphManager) and draft
+            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.

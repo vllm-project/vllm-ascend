@@ -28,7 +28,12 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+)
 from .registry import register_scheme
 
 
@@ -42,6 +47,15 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -185,7 +199,6 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                log2phy=layer.log2phy,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
                 mxfp_act_quant_type=torch_npu.float4_e2m1fn_x2,

@@ -34,9 +34,11 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
+    has_lora,
     postprocess_lora_indices,
     preprocess_lora_indices,
 )
+from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
@@ -373,6 +375,13 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
         with_quant = with_quant and not unquantized_mxfp4_dispatch
+        if has_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
+            validate_quant_moe_lora_activation_input(
+                quant_type=quant_type,
+                hidden_states=token_dispatch_input.hidden_states,
+                dynamic_scale=dynamic_scale,
+            )
+            with_quant = False
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -491,6 +500,16 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
     ):
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
+        if has_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
+            validate_quant_moe_lora_activation_input(
+                quant_type=token_dispatch_input.quant.quant_type,
+                hidden_states=token_dispatch_input.hidden_states,
+                dynamic_scale=token_dispatch_input.routing.pertoken_scale,
+            )
+            # LoRA A requires the original BF16/FP16 activations. The W8A8
+            # LoRA backend performs dynamic quantization immediately before
+            # each local expert GMM, after the AlltoAll exchange.
+            with_quant = False
         dst_type = token_dispatch_input.quant.get_dst_type
         scale_type = token_dispatch_input.quant.get_scale_type
         hidden_states = token_dispatch_input.hidden_states
