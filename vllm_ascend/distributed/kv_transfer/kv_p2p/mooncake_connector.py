@@ -3495,8 +3495,8 @@ class MooncakeConnectorWorker:
 
         for req_id, meta in metadata.requests.items():
             if meta.do_virtual:
-                assert self.kv_recv_thread is not None
-                self.kv_recv_thread.task_tracker.add_not_transfer_request(req_id)
+                if self.kv_recv_thread is not None:
+                    self.kv_recv_thread.task_tracker.add_not_transfer_request(req_id)
                 continue
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
