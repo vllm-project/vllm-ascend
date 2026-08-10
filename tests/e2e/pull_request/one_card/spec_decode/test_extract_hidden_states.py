@@ -135,8 +135,7 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
             "HiddenStateCacheSpec)."
         )
         assert not torch.isinf(hidden_states).any(), (
-            "hidden_states contains Inf — likely regression of PR #13498 "
-            "(KV cache buffer corruption)."
+            "hidden_states contains Inf — likely regression of PR #13498 (KV cache buffer corruption)."
         )
 
         if verify_token_ids:
