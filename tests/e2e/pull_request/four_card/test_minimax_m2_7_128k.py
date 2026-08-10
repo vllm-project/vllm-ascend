@@ -27,9 +27,9 @@ from tests.e2e.pull_request.four_card.minimax_m2_7_common import (
     _benchmark_pair,
 )
 
-# Each V1/V2 side runs 3 rounds; the first round is discarded and the
-# assertion compares the mean of the remaining 2 rounds.
-NUM_BENCH_REPEATS = 3
+# Each V1/V2 side runs 5 rounds; the first round is discarded and the
+# assertion compares the mean of the remaining 4 rounds.
+NUM_BENCH_REPEATS = 5
 
 
 @pytest.mark.e2e_model(MINIMAX_M2_7_MODEL)
