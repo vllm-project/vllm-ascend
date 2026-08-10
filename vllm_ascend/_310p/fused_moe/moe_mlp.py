@@ -18,7 +18,7 @@
 import torch
 import torch_npu
 
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEMlpComputeInput
 
 
 def quant_apply_mlp(

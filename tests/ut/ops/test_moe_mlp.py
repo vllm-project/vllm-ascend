@@ -11,18 +11,18 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
+    MoEMlpComputeInput,
+    MoEQuantParams,
+    MoEWeights,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import (
     cumsum_group_list,
     quant_apply_mlp,
     unified_apply_mlp,
     unquant_apply_mlp,
 )
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEMlpComputeInput,
-    MoEQuantParams,
-    MoEWeights,
-)
-from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"

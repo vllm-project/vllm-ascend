@@ -34,9 +34,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
@@ -111,10 +111,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        activation = getattr(layer, "activation", "silu")
-        if getattr(layer, "swigluoai_uninterleave", False):
-            activation = "swigluoai_uninterleave"
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
@@ -155,14 +151,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 mc2_mask=layer.ascend_mc2_mask,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
-                activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             )
         )
@@ -461,8 +453,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 capturer = getattr(self, "_ascend_routed_experts_capturer", None)
                 if capturer is not None:
                     capturer.capture(layer_id=self.layer_id, topk_ids=topk_ids)
-        except Exception as e:
-            logger.warning("Failed to capture routed experts: %s", e)
+        except Exception:
+            pass
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:

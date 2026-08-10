@@ -26,14 +26,13 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
-from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEFusedExpertsInput,
-    MoEMlpComputeInput,
-    MoEPrepareOutput,
-    build_mlp_compute_input,
     build_token_dispatch_input,
 )
+from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -65,13 +64,6 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
-def set_gmmswigluquant_method():
-    from vllm_ascend.ascend_config import get_ascend_config
-
-    ascend_config = get_ascend_config()
-    return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
-
-
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor
@@ -94,7 +86,6 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
-        self.use_fusion_ops = set_gmmswigluquant_method()
         self.lora_context = None
 
     def set_lora_context(self, lora_context) -> None:
@@ -154,7 +145,7 @@ class MoECommMethod(ABC):
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
-            use_fusion_ops=self.use_fusion_ops,
+            moe_config=self.moe_config,
         )
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
