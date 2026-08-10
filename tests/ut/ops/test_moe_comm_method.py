@@ -4,20 +4,16 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
-    MoEAllGatherCombineMetadata,
-    MoEFusedExpertsInput,
-    MoEPrepareOutput,
-    MoEQuantParams,
-    MoERoutingParams,
-    MoEWeights,
-)
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
+from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEAllGatherCombineMetadata, MoETokenDispatchOutput
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
     MC2CommImpl,
 )
-from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -238,7 +234,7 @@ class TestMoECommMethod(TestBase):
                     w1=[w1],
                     w2=[w2],
                 ),
-                routing=MoERoutingParams(
+                routing=MoeRouterInput(
                     expert_map=None,
                     global_redundant_expert_num=0,
                     mc2_mask=None,
