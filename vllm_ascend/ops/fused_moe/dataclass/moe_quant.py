@@ -25,26 +25,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 @dataclass(frozen=True, slots=True)
-class MoERoutingParams:
-    """Routing and dispatch side inputs for one MoE invocation.
-
-    `pertoken_scale` is intentionally kept here even though it is not a pure
-    routing concept. It is used by pre-quantized activation flows, currently
-    the AllGather + EP W8A8 prepare path, where prepare emits per-token
-    activation scales and dispatch needs to carry them forward so the MLP
-    quant path can reuse those scales instead of requantizing activations.
-    """
-
-    expert_map: torch.Tensor | None
-    global_redundant_expert_num: int
-    mc2_mask: torch.Tensor | None
-    apply_router_weight_on_input: bool
-    log2phy: torch.Tensor | None = None
-    # Precomputed activation scales from prepare stage for quantized dispatch.
-    pertoken_scale: torch.Tensor | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class MoEMxfpParams:
     """Internal MXFP-only precision settings used by fused_moe runtime."""
 
@@ -120,8 +100,60 @@ class MoEQuantParams:
             return None
 
 
-__all__ = [
-    "MoERoutingParams",
-    "MoEMxfpParams",
-    "MoEQuantParams",
-]
+def _build_mxfp_params(
+    *,
+    quant_type: QuantType,
+    mxfp_act_quant_type: torch.dtype | None = None,
+    mxfp_weight_quant_type: torch.dtype | None = None,
+    mxfp_scale_dtype: torch.dtype | None = None,
+    mxfp_per_token_scale_dtype: torch.dtype | None = None,
+    mxfp_use_bf16: bool | None = None,
+) -> MoEMxfpParams | None:
+    if quant_type not in [QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
+        return None
+
+    has_explicit_mxfp_args = any(
+        value is not None
+        for value in (
+            mxfp_act_quant_type,
+            mxfp_weight_quant_type,
+            mxfp_scale_dtype,
+            mxfp_per_token_scale_dtype,
+            mxfp_use_bf16,
+        )
+    )
+    if not has_explicit_mxfp_args:
+        raise ValueError("primitive MXFP params are required when quant_type is an MXFP quant type.")
+
+    return MoEMxfpParams(
+        act_quant_type=mxfp_act_quant_type,
+        weight_quant_type=mxfp_weight_quant_type,
+        scale_dtype=mxfp_scale_dtype,
+        per_token_scale_dtype=mxfp_per_token_scale_dtype,
+        use_bf16=True if mxfp_use_bf16 is None else mxfp_use_bf16,
+    )
+
+
+def build_quant_params(
+    quant_type,
+    comm_quant_mode,
+    mxfp_act_quant_type,
+    mxfp_weight_quant_type,
+    mxfp_scale_dtype,
+    mxfp_per_token_scale_dtype,
+    mxfp_use_bf16,
+    is_per_channel_weight,
+):
+    return MoEQuantParams(
+        quant_type=quant_type,
+        comm_quant_mode=comm_quant_mode,
+        mxfp=_build_mxfp_params(
+            quant_type=quant_type,
+            mxfp_act_quant_type=mxfp_act_quant_type,
+            mxfp_weight_quant_type=mxfp_weight_quant_type,
+            mxfp_scale_dtype=mxfp_scale_dtype,
+            mxfp_per_token_scale_dtype=mxfp_per_token_scale_dtype,
+            mxfp_use_bf16=mxfp_use_bf16,
+        ),
+        is_per_channel_weight=is_per_channel_weight,
+    )

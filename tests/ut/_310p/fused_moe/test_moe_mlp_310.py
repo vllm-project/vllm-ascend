@@ -20,7 +20,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.moe_comm_method import AllGatherCommImpl310
 from vllm_ascend._310p.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEMlpComputeInput,
     MoEQuantParams,
     MoEWeights,
