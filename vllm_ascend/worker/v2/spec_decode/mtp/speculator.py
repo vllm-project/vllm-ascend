@@ -28,9 +28,9 @@ import torch.nn as nn
 import vllm.v1.worker.gpu.spec_decode.speculator as _upstream_speculator
 from vllm.config import VllmConfig, replace
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
-from vllm_ascend.attention.sfa_v1 import force_non_pcp_sfa
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
@@ -100,20 +100,7 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         target_model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> nn.Module:
-        if self.vllm_config.parallel_config.prefill_context_parallel_size <= 1:
-            return super().load_draft_model(
-                target_model,
-                target_attn_layer_names,
-            )
-        with force_non_pcp_sfa():
-            return super().load_draft_model(target_model, target_attn_layer_names)
-
-    def set_attn(self, *args, **kwargs) -> None:
-        if self.vllm_config.parallel_config.prefill_context_parallel_size <= 1:
-            super().set_attn(*args, **kwargs)
-            return
-        with force_non_pcp_sfa():
-            super().set_attn(*args, **kwargs)
+        return load_eagle_model(target_model, self._draft_attn_vllm_config)
 
     def propose(
         self,

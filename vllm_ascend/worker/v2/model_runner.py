@@ -49,10 +49,6 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import (
-    AscendPCPManager,
-    maybe_build_ascend_pcp_manager,
-)
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -128,24 +124,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
-            original_validate_config = vllm_model_runner.pcp.PCPManager.validate_config
-            vllm_model_runner.pcp.PCPManager.validate_config = staticmethod(
-                AscendPCPManager.validate_config
-            )
-            try:
-                super().initialize_kv_cache(kv_cache_config)
-            finally:
-                vllm_model_runner.pcp.PCPManager.validate_config = original_validate_config
-
-            # GPUModelRunner constructs the community PCP manager while initializing
-            # the KV cache. Replace it with the Ascend subclass.
-            self.pcp_manager = maybe_build_ascend_pcp_manager(
-                self.vllm_config,
-                self.device,
-                self.supports_mm_inputs,
-                self.req_states,
-                self.block_tables,
-            )
+            super().initialize_kv_cache(kv_cache_config)
 
     @torch.inference_mode()
     def profile_run(self) -> None:

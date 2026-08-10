@@ -19,7 +19,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
-    PreprocessType,
     DSACPContext,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
@@ -95,7 +94,6 @@ class AscendSFACPImpl(AscendSFAImpl):
             kv_sharing_target_layer_name,
             **kwargs,
         )
-        self.preprocess_type = PreprocessType.NATIVE
         self.enable_sp = False
 
     def exec_kv(
@@ -250,7 +248,7 @@ class AscendSFADCPMetadataBuilder(
         )
         self.arange_buffer: torch.Tensor = torch.arange(
             max_replicated_block_table_cols,
-            dtype=torch.int64,
+            dtype=torch.int32,
             device=device,
         )
         self.slot_mapping_replicated_view_buf: torch.Tensor = torch.empty(
@@ -351,7 +349,7 @@ class AscendSFADCPMetadataBuilder(
             common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
         )
         req_indices = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int64, device=self.device),
+            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
             query_lens.to(device=self.device),
             output_size=num_input_tokens,
         )[:num_actual_tokens]
@@ -362,7 +360,7 @@ class AscendSFADCPMetadataBuilder(
         req_indices = req_indices[:num_actual_tokens]
         positions = common_attn_metadata.positions[:num_actual_tokens].to(
             device=self.device,
-            dtype=torch.int64,
+            dtype=torch.int32,
         )
         logical_block_idx = positions // self.replicated_view_block_size
         block_offsets = positions % self.replicated_view_block_size
