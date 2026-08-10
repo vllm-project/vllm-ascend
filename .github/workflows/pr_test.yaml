@@ -199,7 +199,7 @@ jobs:
         always() &&
         needs.pre-commit.result == 'success' &&
         (
-          contains(github.event.pull_request.labels.*.name, 'run_full_tests') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all') ||
           needs.recommend-tests-from-coverage.result != 'success' ||
           needs.route-recommended-tests.result != 'success'
         )
@@ -352,16 +352,16 @@ jobs:
         (
           contains(github.event.pull_request.labels.*.name, 'ready') ||
           contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
-          contains(github.event.pull_request.labels.*.name, 'run_full_tests')
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
         ) &&
         (needs.select-tests.result == 'success' || needs.route-recommended-tests.result == 'success')
       }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
-      target_ids: ${{ (contains(github.event.pull_request.labels.*.name, 'run_full_tests') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.csrc_cache_target_ids || needs.route-recommended-tests.outputs.csrc_cache_target_ids }}
+      target_ids: ${{ (contains(github.event.pull_request.labels.*.name, 'ready-all') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.csrc_cache_target_ids || needs.route-recommended-tests.outputs.csrc_cache_target_ids }}
       source_ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      base_sha: ${{ (contains(github.event.pull_request.labels.*.name, 'run_full_tests') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.base_sha || needs.route-recommended-tests.outputs.base_sha }}
+      base_sha: ${{ (contains(github.event.pull_request.labels.*.name, 'ready-all') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.base_sha || needs.route-recommended-tests.outputs.base_sha }}
 
   run-selected-tests:
     needs:
@@ -375,7 +375,7 @@ jobs:
         needs.ensure-csrc-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'ready') ||
-          contains(github.event.pull_request.labels.*.name, 'run_full_tests')
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
         ) &&
         (
           needs.select-tests.outputs.has_tests == 'true' ||
@@ -393,8 +393,8 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      base_sha: ${{ (contains(github.event.pull_request.labels.*.name, 'run_full_tests') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.base_sha || needs.route-recommended-tests.outputs.base_sha }}
-      test_groups: ${{ (contains(github.event.pull_request.labels.*.name, 'run_full_tests') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.test_groups || needs.route-recommended-tests.outputs.test_groups }}
+      base_sha: ${{ (contains(github.event.pull_request.labels.*.name, 'ready-all') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.base_sha || needs.route-recommended-tests.outputs.base_sha }}
+      test_groups: ${{ (contains(github.event.pull_request.labels.*.name, 'ready-all') || needs.route-recommended-tests.result != 'success') && needs.select-tests.outputs.test_groups || needs.route-recommended-tests.outputs.test_groups }}
 
   run-selected-tests-upstream:
     needs:
