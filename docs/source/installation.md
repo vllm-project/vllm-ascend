@@ -204,7 +204,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
         To install `triton-ascend`, run:
 
-        pip install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+        pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
         If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
 
@@ -266,7 +266,7 @@ python -m pip install \
     torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    torch-npu==2.10.0.post4 triton-ascend==3.2.2
+    torch-npu==2.10.0.post4 triton-ascend==3.2.1
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     -r requirements.txt
