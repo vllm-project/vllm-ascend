@@ -88,8 +88,8 @@ print_test_info() {
 print_summary() {
   echo -e "\033[1;34m=== TEST SUMMARY ===\033[0m"
   for result in "${test_results[@]}"; do
-    IFS='|' read -r target result_status log_file <<< "${result}"
-    echo -e "  ${result_status}: ${target}"
+    IFS='|' read -r target status log_file <<< "${result}"
+    echo -e "  ${status}: ${target}"
     echo -e "    log: ${log_file}"
   done
   if [ "${#failed_logs[@]}" -gt 0 ]; then
