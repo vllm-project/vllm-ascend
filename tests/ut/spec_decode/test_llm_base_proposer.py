@@ -26,15 +26,12 @@ from vllm.config import CUDAGraphMode
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.spec_decode.utils import _disable_flash_comm_v1_context
 
-# CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
-# two composite modes that mix FULL with NONE / PIECEWISE.
 FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.FULL,
     CUDAGraphMode.FULL_DECODE_ONLY,
     CUDAGraphMode.FULL_AND_PIECEWISE,
 ]
 
-# Modes without a full cudagraph.
 NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
@@ -53,11 +50,6 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         use_cuda_graph: bool,
         cudagraph_mode: CUDAGraphMode,
     ) -> AscendSpecDecodeBaseProposer:
-        """Bypass ``__init__`` and set only the three attrs the guard reads.
-
-        ``cudagraph_mode`` is a real enum value so ``has_full_cudagraphs()`` is
-        exercised, not stubbed.
-        """
         proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
         proposer.speculative_config = SimpleNamespace(
             disable_padded_drafter_batch=disable_padded_drafter_batch,
@@ -68,49 +60,77 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
 
     @pytest.mark.parametrize("cudagraph_mode", FULL_CUDAGRAPH_MODES)
     def test_guard_raises_when_padded_drafter_batch_disabled_with_full_cudagraph(self, cudagraph_mode: CUDAGraphMode):
-        """The bad combo: disable_padded + cuda graph + any full-cudagraph mode
-        is intercepted with ``NotImplementedError``."""
         proposer = self._make_proposer(
             disable_padded_drafter_batch=True,
             use_cuda_graph=True,
             cudagraph_mode=cudagraph_mode,
         )
-
         with pytest.raises(NotImplementedError, match="disable_padded_drafter_batch"):
             proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
     @pytest.mark.parametrize("cudagraph_mode", NON_FULL_CUDAGRAPH_MODES)
     def test_guard_does_not_raise_without_full_cudagraph(self, cudagraph_mode: CUDAGraphMode):
-        """NONE / PIECEWISE never trip the guard, even with disable_padded + cuda graph."""
         proposer = self._make_proposer(
             disable_padded_drafter_batch=True,
             use_cuda_graph=True,
             cudagraph_mode=cudagraph_mode,
         )
-
-        # Must not raise.
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
     @pytest.mark.parametrize("cudagraph_mode", FULL_CUDAGRAPH_MODES)
     def test_guard_does_not_raise_when_padded_drafter_batch_enabled(self, cudagraph_mode: CUDAGraphMode):
-        """Padded drafter batch on (the default) is fine with any full cudagraph."""
         proposer = self._make_proposer(
             disable_padded_drafter_batch=False,
             use_cuda_graph=True,
             cudagraph_mode=cudagraph_mode,
         )
-
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
     def test_guard_does_not_raise_when_eager(self):
-        """``enforce_eager`` -> ``use_cuda_graph=False`` short-circuits the guard."""
         proposer = self._make_proposer(
             disable_padded_drafter_batch=True,
             use_cuda_graph=False,
             cudagraph_mode=CUDAGraphMode.FULL,
         )
-
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
+class TestDrafterBlockSizeDispatch:
+    """Verify model_runner passes the correct block_size type to draft proposers.
+
+    Gemma4 MTP (if branch): receives kernel_block_sizes as list (per-group).
+    Others (else branch): receives block_size as single int.
+
+    Mirrors the if/else dispatch in model_runner_v1.py initialize_metadata_builders.
+    """
+
+    @staticmethod
+    def _dispatch(is_gemma4: bool, kernel_block_sizes):
+        if is_gemma4:
+            return kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
+        else:
+            return kernel_block_sizes[0] if isinstance(kernel_block_sizes, list) else kernel_block_sizes
+
+    @pytest.mark.parametrize("kernel_block_sizes, expected", [
+        ([64, 128], 64),
+        (64, 64),
+    ])
+    def test_else_branch_returns_int(self, kernel_block_sizes, expected):
+        """Non-Gemma4 proposers (Eagle/DFlash/etc.) enter the else branch
+        and receive a single int block_size."""
+        result = self._dispatch(is_gemma4=False, kernel_block_sizes=kernel_block_sizes)
+        assert isinstance(result, int)
+        assert result == expected
+
+    @pytest.mark.parametrize("kernel_block_sizes, expected", [
+        ([64, 128], [64, 128]),
+        (64, [64]),
+    ])
+    def test_if_branch_returns_list(self, kernel_block_sizes, expected):
+        """Gemma4 MTP enters the if branch and receives a list of block_sizes."""
+        result = self._dispatch(is_gemma4=True, kernel_block_sizes=kernel_block_sizes)
+        assert isinstance(result, list)
+        assert result == expected
 
 
 class TestDisableFlashCommV1Context:

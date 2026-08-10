@@ -345,6 +345,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
             elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
                 self.model.config.image_token_index = model.config.media_placeholder_token_id
+            elif self.get_model_name(model) == "Gemma4ForConditionalGeneration":
+                # Gemma4 target has image_token_id but no image_token_index;
+                # the draft (Gemma4MTP) receives hidden states from the target
+                # and does not handle multimodal inputs directly, so skip.
+                pass
             else:
                 self.model.config.image_token_index = model.config.image_token_index
             target_language_model = model.get_language_model()
@@ -712,6 +717,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            # Gemma4 MTP: the draft reads the target's KV cache, so it must wait
+            # for the target's async KV write to finish. _sync_wait_target_events
+            # is defined only on AscendGemma4Proposer; _is_gemma4_mtp gates the call.
+            if self._is_gemma4_mtp:
+                self._sync_wait_target_events()
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -734,6 +744,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+
+    @property
+    def _is_gemma4_mtp(self) -> bool:
+        """True only for Gemma4 MTP. Gates Gemma4-only hooks (defined on
+        AscendGemma4Proposer) in the shared base so other draft proposers
+        hit no extra work on the hot path."""
+        return (
+            self.speculative_config is not None and getattr(self.speculative_config, "use_gemma4_mtp", lambda: False)()
+        )
+
+    def _reuse_step0_metadata(self) -> bool:
+        """Hook: if True, all draft steps reuse step-0's attention metadata."""
+        return False
+
+    def _next_draft_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Hook: compute positions for the next draft step."""
+        return positions + 1
 
     def _propose(
         self,
@@ -935,6 +962,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
+        # MTP draft runs in decode-like mode (1 token per request per step)
+        # regardless of the target's attention state. Without this override
+        # the draft inherits ChunkedPrefill from the target during chunked
+        # prefill, causing incorrect attention routing.
+        if self.method == "mtp":
+            for _md in multi_steps_attn_metadata[0].values():
+                _md.attn_state = AscendAttentionState.SpecDecoding
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -958,13 +992,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
         is_prefill_batch = num_prefill_reqs > 0 or metadata_has_prefill
         dcp_mtp_inputs = None
-        draft_cp_kwargs = {
+        draft_cp_kwargs: dict[str, Any] = {
             "ori_seq_len": None,
             "ori_seq_len_cpu": None,
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if self._reuse_step0_metadata():
+            step0_meta = multi_steps_attn_metadata[0]
+            for _ in range(1, self.num_speculative_tokens):
+                multi_steps_attn_metadata.append(step0_meta)
+        elif dcp_manager is not None:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -981,8 +1019,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     slot_indices=dcp_mtp_inputs.slot_indices,
                     mtp_slot_mapping=dcp_mtp_inputs.slot_mapping,
                 )
+                )
 
-        should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
+        should_update_next_steps = (
+            not self._reuse_step0_metadata()
+            and not self.parallel_drafting
+            and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
+        )
         if should_update_next_steps:
             # Copy the old attn_metadata and update
             for draft_index in range(1, self.num_speculative_tokens):
@@ -1238,7 +1281,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_tensor[draft_index]
-            positions += 1
+            positions = self._next_draft_positions(positions)
 
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
