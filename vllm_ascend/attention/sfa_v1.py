@@ -341,16 +341,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_input_tokens = common_attn_metadata.num_input_tokens
         attn_state = common_attn_metadata.attn_state
 
-        if attn_state == AscendAttentionState.DecodeOnly:
-            num_decodes = num_reqs
-            num_decode_tokens = num_input_tokens
-            num_prefills = 0
-        else:
-            num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=common_attn_metadata.context_parallel_metadata is None,
-            )
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=common_attn_metadata.context_parallel_metadata is None,
+        )
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]

@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -54,7 +55,13 @@ def _prepare_pcp_inputs_to_capture(
     input_batch = cudagraph_utils.InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers
     )
+    is_speculative_decode = pcp_manager.vllm_config.num_speculative_tokens > 0
+    if not is_speculative_decode:
+        assert num_tokens == num_reqs
+        input_batch.num_computed_tokens_np.fill(1)
     input_batch = pcp_manager.partition_batch(input_batch)
+    if not is_speculative_decode:
+        assert input_batch.attn_state == AscendAttentionState.DecodeOnly
     input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
