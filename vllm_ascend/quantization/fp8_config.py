@@ -9,7 +9,6 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
-
 from vllm_ascend.utils import FP8_METHOD
 
 from .methods import get_scheme_class
