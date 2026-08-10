@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""MiniMax-M2.7 4-card e2e: 16-layer reduced model, TP2+DP2+EP, V1 vs V2.
+"""Shared helpers for the MiniMax-M2.7 4-card V1 vs V2 benchmark E2E cases.
 
 The scenario is validated on the internal 90-net A3 machine (2026-08-06):
 
@@ -29,9 +29,9 @@ surplus ``layers.{16..61}`` weights during loading.
 
 Both scenarios run ModelRunner V1 and V2 on the same machine and assert
 that V2 mean output throughput is not worse than V1 by more than 3%
-(``V2 >= V1 * 0.97``). Each side runs ``NUM_BENCH_REPEATS`` rounds and
-the first round is discarded; the assertion compares the mean of the
-remaining rounds to reduce single-run throughput noise.
+(``V2 >= V1 * 0.97``). Each side runs several benchmark rounds and the
+first round is discarded; the assertion compares the mean of the remaining
+rounds to reduce single-run throughput noise.
 
 Benchmarks use vLLM's built-in ``vllm bench serve`` CLI with its synthetic
 datasets (``random`` for 16k1k, ``prefix_repetition`` for 128k1k), so no
@@ -41,6 +41,9 @@ itself is discarded, mirroring the internal methodology of discarding the
 first complete round. (Nightly single-node cases use aisbench instead;
 this PR E2E case follows the PR E2E toolchain, whose only performance
 precedent is ``tools/vllm_bench.py``.)
+
+The 16k1k and 128k1k cases live in separate test files so each runs as its
+own CI job; the 16k case runs 5 rounds per side and the 128k case 3 rounds.
 """
 
 from __future__ import annotations
@@ -52,14 +55,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import pytest
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import (
-    RemotePDServer,
-    wait_npu_memory_free,
-    wait_until_npu_memory_free,
-)
+from tests.e2e.conftest import RemotePDServer, wait_npu_memory_free
 
 # ModelScope repo published by the model owner; override locally with
 # MINIMAX_M2_7_MODEL_PATH for private/internal weight paths.
@@ -75,10 +73,6 @@ HF_OVERRIDES = {
 
 # V2 is considered not slower than V1 when V2 >= V1 * THROUGHPUT_THRESHOLD.
 THROUGHPUT_THRESHOLD = 0.97
-
-# Each side runs this many benchmark rounds on one server. The first round
-# is discarded and the assertion uses the mean of the remaining rounds.
-NUM_BENCH_REPEATS = 5
 
 SERVER_ENV = {
     "HCCL_OP_EXPANSION_MODE": "AIV",
@@ -209,11 +203,12 @@ def _run_bench(port: int, bench_args: list[str]) -> dict[str, Any]:
             return json.load(f)
 
 
-def _run_server_and_bench(use_v2: bool, bench_args: list[str]) -> list[dict[str, Any]]:
-    """Start one server and run the benchmark repeatedly on it.
-
-    Returns one result dict per round (``NUM_BENCH_REPEATS`` rounds).
-    """
+def _run_server_and_bench(
+    use_v2: bool,
+    bench_args: list[str],
+    num_repeats: int,
+) -> list[dict[str, Any]]:
+    """Start one server and run the benchmark *num_repeats* times on it."""
     port = get_open_port()
     env_dict = {
         **SERVER_ENV,
@@ -222,8 +217,8 @@ def _run_server_and_bench(use_v2: bool, bench_args: list[str]) -> list[dict[str,
     runner = "V2" if use_v2 else "V1"
     results: list[dict[str, Any]] = []
     with RemotePDServer(_server_args(port), env_dict=env_dict, max_wait_seconds=1800) as server:
-        for round_index in range(1, NUM_BENCH_REPEATS + 1):
-            print(f"[{runner}] bench round {round_index}/{NUM_BENCH_REPEATS}")
+        for round_index in range(1, num_repeats + 1):
+            print(f"[{runner}] bench round {round_index}/{num_repeats}")
             results.append(_run_bench(server.port, bench_args))
     return results
 
@@ -257,46 +252,26 @@ def _assert_v2_not_slower(
     )
 
 
-def _benchmark_pair(bench_args: list[str], case: str) -> dict[str, Any]:
+def _benchmark_pair(
+    bench_args: list[str],
+    case: str,
+    num_repeats: int,
+) -> dict[str, Any]:
     """Run the same scenario on V1 then V2 and assert V2 >= V1 * 0.97.
 
-    Each side runs ``NUM_BENCH_REPEATS`` rounds on a single server; the
-    first round is discarded and the assertion compares mean throughput.
+    Each side runs *num_repeats* rounds on a single server; the first round
+    is discarded and the assertion compares mean throughput.
     """
-    v1_results = _run_server_and_bench(use_v2=False, bench_args=bench_args)
+    v1_results = _run_server_and_bench(
+        use_v2=False,
+        bench_args=bench_args,
+        num_repeats=num_repeats,
+    )
     wait_npu_memory_free(max_wait_seconds=120)
-    v2_results = _run_server_and_bench(use_v2=True, bench_args=bench_args)
+    v2_results = _run_server_and_bench(
+        use_v2=True,
+        bench_args=bench_args,
+        num_repeats=num_repeats,
+    )
     _assert_v2_not_slower(v1_results, v2_results, case)
     return v2_results[-1]
-
-
-@pytest.mark.e2e_model(MINIMAX_M2_7_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="long_sequence",
-    parallel="TP,EP,DP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W8A8",
-    graph_mode="eager",
-)
-@wait_until_npu_memory_free()
-def test_minimax_m2_7_16k1k_v2_vs_v1() -> None:
-    """16k1k: 80 requests, 20 concurrent, 0% prefix hit, V2 >= V1 * 0.97."""
-    _benchmark_pair(bench_args=BENCH_16K_ARGS, case="16k1k")
-
-
-@pytest.mark.e2e_model(MINIMAX_M2_7_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="long_sequence,prefix_caching",
-    parallel="TP,EP,DP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W8A8",
-    graph_mode="eager",
-)
-@wait_until_npu_memory_free()
-def test_minimax_m2_7_128k1k_v2_vs_v1() -> None:
-    """128k1k: 32 requests, 8 concurrent, ~90% shared prefix, V2 >= V1 * 0.97."""
-    _benchmark_pair(bench_args=BENCH_128K_ARGS, case="128k1k")
