@@ -24,6 +24,12 @@ from torch import nn
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
+from vllm_ascend.model_loader.rfork.aligned_memory import (
+    AlignedStorage,
+    AlignedStorageError,
+    materialize_aligned_storage,
+)
+
 MAX_TRANSFER_CHUNK_BYTES = 1024**3
 MAX_TRANSFER_CHUNK_WEIGHTS = 512
 
@@ -296,34 +302,45 @@ class RForkTransferBackend:
         self.rfork_transfer_engine_weights_shape_dict = None
         self.registered_weight_blocks = []
         self._registered_transferable_tensors: list[tuple[str, torch.Tensor]] | None = None
+        self._aligned_storage: AlignedStorage | None = None
+        self._memory_registration_type: Any | None = None
+        self._route_policy = "auto"
         self._is_initialized = False
         self.init_transfer_engine()
 
     def init_transfer_engine(self):
         try:
-            from yr.datasystem import TransferEngine  # type: ignore[import-not-found]
+            import yr.datasystem as yr_datasystem  # type: ignore[import-not-found]
         except ImportError as e:
             err_msg = (
                 "Failed to import TransferEngine from yr.datasystem. "
-                "Please install @yuanrong-datasystem/transfer_engine."
+                "Please install the openyuanrong-datasystem package."
             )
             logger.error(err_msg)
             raise ImportError(err_msg) from e
 
-        transfer_engine = TransferEngine()
+        transfer_engine = yr_datasystem.TransferEngine()
+        self._memory_registration_type = getattr(yr_datasystem, "MemoryRegistration", None)
         local_hostname = join_host_port(get_ip(), get_open_port())
-        ret = transfer_engine.initialize(local_hostname, "ascend", f"npu:{torch.npu.current_device()}")
+        device_name = f"npu:{torch.npu.current_device()}"
+        try:
+            ret = transfer_engine.initialize(local_hostname, "P2PHANDSHAKE", "ascend", device_name)
+        except TypeError:
+            ret = transfer_engine.initialize(local_hostname, "ascend", device_name)
         if ret.is_error():
             err_msg = (
                 f"TransferEngine initialization failed: "
-                f"initialize({local_hostname}, 'ascend', "
-                f"'npu:{int(torch.npu.current_device())}') -> {ret.to_string()}"
+                f"initialize({local_hostname}, 'P2PHANDSHAKE', 'ascend', "
+                f"'{device_name}') -> {ret.to_string()}"
             )
             logger.error(err_msg)
             raise RuntimeError(err_msg)
 
         self.rfork_transfer_engine = transfer_engine
         self.rfork_transfer_engine_session_id = local_hostname
+        get_route_policy = getattr(transfer_engine, "get_route_policy", None)
+        if callable(get_route_policy):
+            self._route_policy = get_route_policy() or "auto"
         self._is_initialized = True
 
     def is_initialized(self) -> bool:
@@ -334,15 +351,51 @@ class RForkTransferBackend:
             raise RuntimeError("TransferEngine is not initialized.")
         return self.rfork_transfer_engine
 
-    def register_memory_region(self, model, processed_layout: bool):
+    def register_memory_region(self, model, processed_layout: bool, *, copy_values: bool = False):
         transfer_engine = self._get_transfer_engine()
         start_reg_mr_time = time.perf_counter()
         self._registered_transferable_tensors = None
 
         weight_mr_dict = {}
         weight_shape_dict = {}
-        weight_addr_set = set()
         transferable_tensors = list(_iter_transferable_tensors(model, processed_layout))
+        requires_aligned_registration = self._route_policy != "roce"
+        if requires_aligned_registration:
+            if processed_layout:
+                logger.error(
+                    "RFork aligned storage does not yet support processed/quantized NPU layouts; "
+                    "falling back to the default loader."
+                )
+                return False
+            if self._memory_registration_type is None or not hasattr(transfer_engine, "batch_register_memory_ex"):
+                logger.error(
+                    "The installed openyuanrong-datasystem package lacks "
+                    "backing-aware registration required by this route."
+                )
+                return False
+            try:
+                # TODO: Add a staging-pool fallback for RFork buffers that cannot meet HCCS 2 MiB alignment.
+                if transferable_tensors and transferable_tensors[0][1].device.type == "npu":
+                    torch.npu.synchronize()
+                self._aligned_storage = materialize_aligned_storage(
+                    model,
+                    transferable_tensors,
+                    copy_values=copy_values,
+                )
+                if copy_values and transferable_tensors[0][1].device.type == "npu":
+                    torch.npu.synchronize()
+                logger.info(
+                    "Prepared RFork aligned backing: address=0x%x, bytes=%d, logical_ranges=%d, copied=%s",
+                    self._aligned_storage.backing_view.data_ptr(),
+                    self._aligned_storage.backing_view.numel(),
+                    len(self._aligned_storage.registrations),
+                    copy_values,
+                )
+            except (AlignedStorageError, RuntimeError) as error:
+                logger.error("Failed to prepare RFork aligned storage: %s", error)
+                return False
+
+        weight_addr_set = set()
         for name, weight in transferable_tensors:
             weight_mr_dict[name] = (
                 weight.data_ptr(),
@@ -352,35 +405,51 @@ class RForkTransferBackend:
             weight_shape_dict[name] = tuple(weight.shape)
             weight_addr_set.add(weight.data_ptr())
 
-        sorted_weight_ptrs = sorted(weight_addr_set)
+        if requires_aligned_registration:
+            assert self._aligned_storage is not None
+            registration_type = self._memory_registration_type
+            registrations = [
+                registration_type(
+                    registration.logical_addr,
+                    registration.logical_length,
+                    registration.backing_addr,
+                    registration.backing_length,
+                )
+                for registration in self._aligned_storage.registrations
+            ]
+            weight_blocks_for_reg_mr = [
+                (registration.logical_addr, registration.logical_length)
+                for registration in self._aligned_storage.registrations
+            ]
+            ret = transfer_engine.batch_register_memory_ex(registrations, "*")
+        else:
+            sorted_weight_ptrs = sorted(weight_addr_set)
+            memory_snapshot = torch.npu.memory.memory_snapshot()
+            weight_blocks_for_reg_mr = []
+            for segment in memory_snapshot:
+                current_weight_block = None
+                for block in segment.get("blocks", []):
+                    address = block.get("address", -1)
+                    size = block.get("size", -1)
+                    state = block.get("state", "")
+                    if address < 0 or size < 0 or state == "":
+                        continue
+                    if state == "active_allocated" and _block_contains_weight_ptr(address, size, sorted_weight_ptrs):
+                        if current_weight_block is None:
+                            current_weight_block = (address, size)
+                        elif current_weight_block[0] + current_weight_block[1] == address:
+                            current_weight_block = (
+                                current_weight_block[0],
+                                current_weight_block[1] + size,
+                            )
+                        else:
+                            weight_blocks_for_reg_mr.append(current_weight_block)
+                            current_weight_block = (address, size)
+                if current_weight_block is not None:
+                    weight_blocks_for_reg_mr.append(current_weight_block)
 
-        memory_snapshot = torch.npu.memory.memory_snapshot()
-
-        weight_blocks_for_reg_mr = []
-        for segment in memory_snapshot:
-            current_weight_block = None
-            for block in segment.get("blocks", []):
-                address = block.get("address", -1)
-                size = block.get("size", -1)
-                state = block.get("state", "")
-                if address < 0 or size < 0 or state == "":
-                    continue
-                if state == "active_allocated" and _block_contains_weight_ptr(address, size, sorted_weight_ptrs):
-                    if current_weight_block is None:
-                        current_weight_block = (address, size)
-                    elif current_weight_block[0] + current_weight_block[1] == address:
-                        current_weight_block = (
-                            current_weight_block[0],
-                            current_weight_block[1] + size,
-                        )
-                    else:
-                        weight_blocks_for_reg_mr.append(current_weight_block)
-                        current_weight_block = (address, size)
-            if current_weight_block is not None:
-                weight_blocks_for_reg_mr.append(current_weight_block)
-
-        addresses, sizes = zip(*weight_blocks_for_reg_mr) if weight_blocks_for_reg_mr else ((), ())
-        ret = transfer_engine.batch_register_memory(addresses, sizes)
+            addresses, sizes = zip(*weight_blocks_for_reg_mr) if weight_blocks_for_reg_mr else ((), ())
+            ret = transfer_engine.batch_register_memory(addresses, sizes, "*")
         if ret.is_error():
             self._registered_transferable_tensors = None
             logger.error(
@@ -408,6 +477,7 @@ class RForkTransferBackend:
             self.rfork_transfer_engine_weights_info_dict = None
             self.rfork_transfer_engine_weights_shape_dict = None
             self._registered_transferable_tensors = None
+            self._aligned_storage = None
             logger.debug("unregister_memory_region skipped because no blocks are registered.")
             return True
 
@@ -423,6 +493,7 @@ class RForkTransferBackend:
         self.rfork_transfer_engine_weights_shape_dict = None
         self.registered_weight_blocks = []
         self._registered_transferable_tensors = None
+        self._aligned_storage = None
         logger.info(
             "unregister_memory_region time: %.4fs",
             time.perf_counter() - start_unreg_mr_time,
@@ -544,6 +615,7 @@ class RForkTransferBackend:
                 chunk_client_ptrs,
                 chunk_seed_ptrs,
                 chunk_lengths,
+                "",
             )
             if ret.is_error():
                 logger.error(
