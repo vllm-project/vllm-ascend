@@ -32,6 +32,8 @@ from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiGatedDeltaNetAttention,
     _load_a_log,
+    _resolve_kda_qkv_input,
+    _start_kda_qkv_concat,
     _zero_padded_spec_output,
 )
 
@@ -135,6 +137,88 @@ def test_load_a_log_rejects_unsupported_layout():
         _load_a_log(torch.empty(1, 1, 2, 1), torch.empty(2, 2), num_heads=4)
 
 
+def test_start_kda_qkv_concat_cpu_packs_without_streams():
+    q = torch.randn(4, 2)
+    k = torch.randn(4, 3)
+    v = torch.randn(4, 5)
+
+    mixed_qkv, main_stream, concat_stream = _start_kda_qkv_concat(q, k, v)
+
+    torch.testing.assert_close(mixed_qkv, torch.cat((q, k, v), dim=-1))
+    assert main_stream is None
+    assert concat_stream is None
+
+
+def test_resolve_kda_qkv_input_supports_packed_and_legacy_inputs():
+    q = torch.randn(4, 2)
+    k = torch.randn(4, 3)
+    v = torch.randn(4, 5)
+    packed = torch.cat((q, k, v), dim=-1)
+    sentinel = packed[:, :0]
+
+    resolved_packed = _resolve_kda_qkv_input(packed, sentinel, sentinel, 3)
+    resolved_legacy = _resolve_kda_qkv_input(q, k, v, 3)
+
+    torch.testing.assert_close(resolved_packed, packed[:3])
+    torch.testing.assert_close(resolved_legacy, packed[:3])
+
+
+def test_forward_passes_packed_qkv_sentinels_to_custom_op(monkeypatch):
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.is_vl_first_layer = False
+    attention.use_full_rank_gate = True
+    attention.local_num_heads = 1
+    attention.head_dim = 2
+    attention.prefix = "model.layers.0.self_attn"
+
+    q = torch.randn(4, 2)
+    k = torch.randn(4, 2)
+    v = torch.randn(4, 2)
+
+    def fake_projection(result):
+        def project(_hidden_states):
+            return (result,)
+
+        return project
+
+    attention.q_proj = fake_projection(q)
+    attention.k_proj = fake_projection(k)
+    attention.v_proj = fake_projection(v)
+    attention.b_proj = fake_projection(torch.randn(4, 1))
+    attention.f_a_proj = fake_projection(torch.randn(4, 2))
+    attention.f_b_proj = fake_projection(torch.randn(4, 2))
+    attention.g_proj = fake_projection(torch.randn(4, 2))
+    attention.o_proj = fake_projection(q)
+
+    def fake_output_norm_gate(core_attn_out, output_gate):
+        del output_gate
+        return core_attn_out
+
+    attention._apply_output_norm_gate = fake_output_norm_gate
+
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "maybe_all_gather_and_maybe_unpad",
+        lambda hidden_states, enabled: hidden_states,
+    )
+
+    def fake_kda_attention(packed_qkv, k_sentinel, v_sentinel, raw_gate, beta, core_attn_out, prefix):
+        del raw_gate, beta
+        assert prefix == attention.prefix
+        assert packed_qkv.shape == (4, 6)
+        assert k_sentinel.shape == (4, 0)
+        assert v_sentinel.shape == (4, 0)
+        core_attn_out.copy_(packed_qkv[:, :2].reshape(1, 4, 1, 2))
+
+    monkeypatch.setattr(torch.ops.vllm, "kda_attention", fake_kda_attention)
+
+    output = torch.empty_like(q)
+    attention.forward(torch.randn(4, 8), torch.empty(0), output)
+
+    torch.testing.assert_close(output, q)
+
+
 def test_zero_padded_spec_output_clears_uninitialized_tail():
     output = torch.arange(16 * 2 * 3, dtype=torch.float32).reshape(1, 16, 2, 3)
     output[:, 8:] = torch.nan
@@ -169,6 +253,32 @@ def test_zero_padded_spec_output_supports_multiple_real_and_dummy_rows():
     assert masked.shape == output.shape
     assert masked.dtype == output.dtype
     assert masked.device == output.device
+
+
+def test_output_norm_gate_uses_kda_fused_triton_kernel():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.o_norm = SimpleNamespace(
+        weight=nn.Parameter(torch.randn(3)),
+        eps=1e-6,
+    )
+    core_attn_out = torch.randn(1, 4, 2, 3)
+    output_gate = torch.randn(4, 2, 3)
+    expected = torch.randn_like(core_attn_out)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.apply_kda_rms_norm_sigmoid_gate",
+        return_value=expected,
+    ) as fused_norm_gate:
+        actual = attention._apply_output_norm_gate(core_attn_out, output_gate)
+
+    assert actual is expected
+    fused_norm_gate.assert_called_once_with(
+        core_attn_out,
+        output_gate,
+        attention.o_norm.weight,
+        attention.o_norm.eps,
+    )
 
 
 def test_conv_post_load_processing_packs_kernel_layout_in_place():

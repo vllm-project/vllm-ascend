@@ -307,7 +307,13 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+    def mla_preprocess_only_decode(
+        atten_obj,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        use_mla_rope: bool = True,
+    ):
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
@@ -318,6 +324,9 @@ class BaseDeviceAdaptor:
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         dequant_scale_q_nope = None
         if atten_obj.fa_quant_layer:
+            # TODO: npu_mla_prolog_v2 does not yet support disabling RoPE.
+            # Keep its existing tensor inputs for FA-quant layers. No-RoPE
+            # support is currently limited to _C_ascend.mla_preprocess below.
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
                 quantized_x,
@@ -340,6 +349,9 @@ class BaseDeviceAdaptor:
                 cache_mode="PA_NZ",
             )
         else:
+            if not use_mla_rope:
+                cos = None
+                sin = None
             decode_q_nope = torch.empty(
                 (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_nope.shape[-1]),
                 dtype=hidden_states.dtype,
@@ -375,7 +387,7 @@ class BaseDeviceAdaptor:
                 ctkv_scale=atten_obj.ctkv_scale,
                 q_nope_scale=atten_obj.q_nope_scale,
                 cache_mode="nzcache" if atten_obj.enable_kv_nz else "krope_ctkv",
-                quant_mode="per_tensor_quant_asymm",
+                quant_mode=atten_obj.mlapo_quant_mode,
                 q_out0=decode_q_nope,
                 kv_cache_out0=decode_k_nope,
                 q_out1=decode_q_pe,
@@ -1397,7 +1409,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+    def mla_preprocess_only_decode(
+        atten_obj,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        use_mla_rope: bool = True,
+    ):
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz].unsqueeze(1)
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)

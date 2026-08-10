@@ -225,6 +225,55 @@ def _build_attn_metadata(
     return builder, common_attn_metadata, attn_metadata
 
 
+def test_stateful_single_token_prefill_is_treated_as_decode():
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[17, 1, 6],
+            query_lens=[1, 1, 2],
+            name="stateful_single_token_prefill",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.is_prefilling = torch.tensor([True, True, True])
+
+    transformed = ascend_gdn_attn_builder._treat_single_token_prefills_with_state_as_decodes(common_attn_metadata)
+
+    assert torch.equal(transformed.is_prefilling, torch.tensor([False, True, True]))
+    assert torch.equal(common_attn_metadata.is_prefilling, torch.tensor([True, True, True]))
+
+
+def test_stateful_spec_sized_prefill_is_folded_into_spec_metadata():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[12, 4, 13],
+            query_lens=[4, 4, 4],
+            name="stateful_spec_sized_prefill",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.is_prefilling = torch.tensor([True, True, False])
+    spec_sequence_masks = torch.tensor([False, False, True])
+    num_accepted_tokens = torch.tensor([1, 1, 2], dtype=torch.int32)
+
+    folded_masks, folded_accepted = builder._fold_spec_sized_prefill_chunks_into_spec(
+        common_attn_metadata,
+        spec_sequence_masks,
+        num_accepted_tokens,
+    )
+
+    assert torch.equal(folded_masks, torch.tensor([True, False, True]))
+    assert torch.equal(folded_accepted, torch.tensor([4, 1, 2], dtype=torch.int32))
+    assert torch.equal(spec_sequence_masks, torch.tensor([False, False, True]))
+    assert torch.equal(num_accepted_tokens, torch.tensor([1, 1, 2], dtype=torch.int32))
+
+
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
     if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):

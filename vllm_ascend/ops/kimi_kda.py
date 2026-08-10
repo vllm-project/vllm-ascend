@@ -47,11 +47,54 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.kda.fused_norm_gate import apply_kda_rms_norm_sigmoid_gate
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 _KDA_CHUNK_SIZE = 64
+_KDA_QKV_CONCAT_STREAM: torch.npu.Stream | None = None
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
+
+
+def _kda_qkv_concat_stream() -> torch.npu.Stream:
+    """Return the process-local stream used to overlap KDA QKV packing."""
+    global _KDA_QKV_CONCAT_STREAM
+    if _KDA_QKV_CONCAT_STREAM is None:
+        _KDA_QKV_CONCAT_STREAM = torch.npu.Stream()
+    return _KDA_QKV_CONCAT_STREAM
+
+
+def _start_kda_qkv_concat(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> tuple[torch.Tensor, torch.npu.Stream | None, torch.npu.Stream | None]:
+    """Pack QKV while independent gate projections run on the main stream."""
+    if q.device.type != "npu":
+        return torch.cat((q, k, v), dim=-1), None, None
+
+    main_stream = torch.npu.current_stream()
+    concat_stream = _kda_qkv_concat_stream()
+    q.record_stream(concat_stream)
+    k.record_stream(concat_stream)
+    v.record_stream(concat_stream)
+    concat_stream.wait_stream(main_stream)
+    with torch.npu.stream(concat_stream):
+        mixed_qkv = torch.cat((q, k, v), dim=-1)
+    return mixed_qkv, main_stream, concat_stream
+
+
+def _resolve_kda_qkv_input(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    num_actual_tokens: int,
+) -> torch.Tensor:
+    """Accept either legacy Q/K/V inputs or an already packed QKV tensor."""
+    q = q[:num_actual_tokens]
+    if k.numel() == 0 and v.numel() == 0:
+        return q
+    return torch.cat((q, k[:num_actual_tokens], v[:num_actual_tokens]), dim=-1)
 
 
 def _zero_padded_spec_output(
@@ -233,6 +276,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         q = self.q_proj(hidden_states)[0]
         k = self.k_proj(hidden_states)[0]
         v = self.v_proj(hidden_states)[0]
+        mixed_qkv, main_stream, qkv_concat_stream = _start_kda_qkv_concat(q, k, v)
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
         raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
@@ -249,18 +293,37 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
+        if qkv_concat_stream is not None:
+            assert main_stream is not None
+            main_stream.wait_stream(qkv_concat_stream)
+
+        # Keep the opaque custom-op boundary while avoiding a second concat in
+        # _forward. Empty K/V views mark the first argument as packed [Q|K|V].
+        packed_qkv_sentinel = mixed_qkv[:, :0]
         torch.ops.vllm.kda_attention(
-            q,
-            k,
-            v,
+            mixed_qkv,
+            packed_qkv_sentinel,
+            packed_qkv_sentinel,
             raw_gate,
             beta,
             core_attn_out,
             self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, output_gate)
+        core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _apply_output_norm_gate(
+        self,
+        core_attn_out: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return apply_kda_rms_norm_sigmoid_gate(
+            core_attn_out,
+            output_gate,
+            self.o_norm.weight,
+            self.o_norm.eps,
+        )
 
     @staticmethod
     def _run_causal_conv1d(
@@ -492,14 +555,16 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        q_proj_states = q_proj_states[:num_actual_tokens]
-        k_proj_states = k_proj_states[:num_actual_tokens]
-        v_proj_states = v_proj_states[:num_actual_tokens]
+        mixed_qkv = _resolve_kda_qkv_input(
+            q_proj_states,
+            k_proj_states,
+            v_proj_states,
+            num_actual_tokens,
+        )
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
         conv_state, recurrent_state = self.kv_cache
-        mixed_qkv = torch.cat((q_proj_states, k_proj_states, v_proj_states), dim=-1)
         conv_weights_t = self._conv_weights_t()
 
         spec_masks = attn_metadata.spec_sequence_masks
