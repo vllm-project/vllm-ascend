@@ -31,12 +31,50 @@ jobs:
     - name: Print
       run: |
         lscpu
+    - name: Resolve Quay image
+      id: quay
+      env:
+        FORK_QUAY_NAMESPACE: ${{ vars.QUAY_NAMESPACE || secrets.QUAY_NAMESPACE }}
+        FORK_QUAY_USERNAME: ${{ vars.QUAY_USERNAME || secrets.QUAY_USERNAME }}
+      run: |
+        if [ "${GITHUB_REPOSITORY}" = "vllm-project/vllm-ascend" ]; then
+          echo "image=quay.io/ascend-ci/vllm-ascend" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        quay_namespace="${FORK_QUAY_NAMESPACE:-$FORK_QUAY_USERNAME}"
+        if [ -z "$quay_namespace" ]; then
+          echo "::error::Set QUAY_NAMESPACE or QUAY_USERNAME as a repository variable or secret for fork image pushes."
+          exit 1
+        fi
+
+        if ! echo "$quay_namespace" | grep -qE '^[a-z0-9._-]+$'; then
+          echo "::error::Quay namespace must be lowercase and contain only letters, digits, '.', '_' or '-'."
+          exit 1
+        fi
+
+        echo "image=quay.io/${quay_namespace}/vllm-ascend" >> "$GITHUB_OUTPUT"
+
+    - name: Validate Quay credentials
+      env:
+        QUAY_USERNAME: ${{ github.repository == 'vllm-project/vllm-ascend' && vars.QUAY_CI_USERNAME || vars.QUAY_USERNAME || secrets.QUAY_USERNAME }}
+        QUAY_PASSWORD: ${{ github.repository == 'vllm-project/vllm-ascend' && secrets.QUAY_CI_PASSWORD || secrets.QUAY_PASSWORD }}
+      run: |
+        if [ -z "$QUAY_USERNAME" ]; then
+          echo "::error::Quay username is not configured."
+          exit 1
+        fi
+        if [ -z "$QUAY_PASSWORD" ]; then
+          echo "::error::Quay password is not configured."
+          exit 1
+        fi
+
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v6
       with:
         images: |
-          quay.io/ascend-ci/vllm-ascend
+          ${{ steps.quay.outputs.image }}
         tags: lint
         flavor:
           latest=false
@@ -55,12 +93,11 @@ jobs:
       uses: docker/setup-buildx-action@v4
 
     - name: Publish - Login to Quay Container Registry
-      if: ${{ github.repository_owner == 'vllm-project' }}
       uses: docker/login-action@v4
       with:
         registry: quay.io
-        username: ${{ vars.QUAY_CI_USERNAME }}
-        password: ${{ secrets.QUAY_CI_PASSWORD }}
+        username: ${{ github.repository == 'vllm-project/vllm-ascend' && vars.QUAY_CI_USERNAME || vars.QUAY_USERNAME || secrets.QUAY_USERNAME }}
+        password: ${{ github.repository == 'vllm-project/vllm-ascend' && secrets.QUAY_CI_PASSWORD || secrets.QUAY_PASSWORD }}
 
     - name: Build and push
       if: ${{ github.event_name != 'workflow_dispatch' }}

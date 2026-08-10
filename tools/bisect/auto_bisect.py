@@ -37,6 +37,7 @@ from tools.bisect.build_manager import BuildError, BuildManager
 from tools.bisect.config import (
     DEFAULT_COORD_DIR,
     DEFAULT_GOOD_TABLE,
+    DEFAULT_VERSION_TABLE,
     DEFAULT_WORK_DIR,
     REPO_ROOT,
     SCENE_MULTI,
@@ -50,6 +51,13 @@ from tools.bisect.config import (
 from tools.bisect.good_table import GoodTable, valid_soc
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
+from tools.bisect.version_history import (
+    ExternalVersionManager,
+    VersionHistory,
+    infer_branch,
+    infer_branch_from_good_table,
+    infer_target,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("auto_bisect")
@@ -61,9 +69,19 @@ class Bisector:
         self.opt = opt
         self.repo = opt.repo_dir
         self.builder = BuildManager(opt)
+        self.version_manager = ExternalVersionManager(
+            VersionHistory(
+                opt.version_table_path,
+                self.repo,
+                opt.version_branch or infer_branch_from_good_table(opt.good_table_path) or infer_branch(self.repo),
+                opt.version_target or infer_target(inp.config_yaml),
+            ),
+            sync_enabled=opt.sync_external_versions,
+            vllm_repo_dir=opt.vllm_repo_dir,
+        )
         from tools.bisect.runner import build_runner
 
-        self.runner = build_runner(inp, opt, self.builder)
+        self.runner = build_runner(inp, opt, self.builder, self.version_manager)
         self.trials: list[TrialResult] = []
         # Monotonic deploy counter. Each actual deploy (endpoint check, bisect
         # step, or flaky-confirm retry) consumes exactly one round so that
@@ -152,8 +170,8 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Bad commit could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). Fix the environment "
-                    "before bisecting; aborting."
+                    "e.g. external version sync failure). Fix the environment before "
+                    "bisecting; aborting."
                 )
                 return False
             if v != "FAIL":
@@ -168,9 +186,9 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Good baseline could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). The whole range is "
-                    "likely unrunnable against the installed vllm; fix the "
-                    "environment before bisecting; aborting."
+                    "e.g. external version sync failure). The whole range is likely "
+                    "unrunnable in this container; fix the environment before "
+                    "bisecting; aborting."
                 )
                 return False
             if v != "PASS":
@@ -219,10 +237,12 @@ class Bisector:
         bad = git_ops.describe(self.repo, self.inp.bad_commit)
         good_sha = self._resolve_good()
         good = git_ops.describe(self.repo, good_sha)
+        self.inp.good_commit = good.commit
         logger.info("Bisecting %s: good=%s bad=%s", self.inp.case_key, good.short, bad.short)
 
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
+        self.version_manager.prepare_range(good.commit, candidates)
 
         state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(
             good=good.commit, bad=bad.commit, hi=len(candidates) - 1
@@ -309,8 +329,33 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
     p.add_argument("--config-base-path", default=os.getenv("CONFIG_BASE_PATH"))
     p.add_argument("--good-table", default=DEFAULT_GOOD_TABLE)
+    p.add_argument(
+        "--version-table",
+        default=None,
+        help="CSV with branch/target external-version history; defaults to version_history.csv next to --good-table",
+    )
+    p.add_argument(
+        "--version-branch",
+        default=None,
+        help=(
+            "vllm-ascend branch key in the version table; defaults to "
+            "$BISECT_VERSION_BRANCH/$VLLM_ASCEND_BRANCH/current branch"
+        ),
+    )
+    p.add_argument(
+        "--version-target",
+        choices=["a2", "a3", "310p"],
+        default=None,
+        help="hardware/image target for CANN history; defaults from $BISECT_VERSION_TARGET/SOC_VERSION/config name",
+    )
+    p.add_argument(
+        "--no-sync-external-versions",
+        action="store_true",
+        help="record/check version history but do not install/switch vLLM or torch-npu",
+    )
     p.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     p.add_argument("--repo-dir", default=str(REPO_ROOT))
+    p.add_argument("--vllm-repo-dir", default=os.getenv("BISECT_VLLM_REPO_DIR", "/vllm-workspace/vllm"))
     p.add_argument(
         "--num-nodes",
         type=int,
@@ -407,9 +452,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     opt = BisectOptions(
         repo_dir=repo_dir,
+        vllm_repo_dir=Path(args.vllm_repo_dir),
         work_dir=args.work_dir,
         coord_dir=args.coord_dir,
         good_table_path=args.good_table,
+        version_table_path=args.version_table
+        or str(Path(args.good_table or DEFAULT_VERSION_TABLE).with_name("version_history.csv")),
+        version_branch=args.version_branch,
+        version_target=args.version_target or infer_target(args.config_yaml),
+        sync_external_versions=not args.no_sync_external_versions,
         fail_confirm_retries=args.fail_confirm_retries,
         verify_good=not args.no_verify_good,
         verify_bad=not args.no_verify_bad,
