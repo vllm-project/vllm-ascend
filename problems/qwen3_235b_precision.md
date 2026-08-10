@@ -1,3 +1,11 @@
+# 环境信息
+
+42 环境上：
+| 容器 | vllm 版本 | vllm-ascend commitid | 精度结果 |
+| ------ | -------- | -------------------- | ----- |
+| zty_b060 | releases/v0.21.0 | 971d50b3f | 正确 |
+| zty_b060_erfen | releases/v0.22.1 | 43c7c9a48 | 错误（存在截断） |
+
 # 版本信息
 
 | 版本号 | vllm 版本 | vllm-ascend commitid |
