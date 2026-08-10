@@ -104,6 +104,9 @@ a3:
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
         size: 4
+      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        size: 4
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         size: 2
