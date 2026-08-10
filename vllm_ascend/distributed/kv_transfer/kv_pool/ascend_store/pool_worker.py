@@ -870,6 +870,14 @@ class KVPoolWorker:
         if self.use_layerwise:
             self.next_layer_to_submit = 0
             reset_attention_compute_start_gate()
+            # Drain any save-finished events left set by a previous step that ran
+            # fewer than num_layers hooks (e.g. MTP with num_speculative_tokens <
+            # num draft layers), so its end-of-step clear in save_kv_layer never
+            # ran. Stale set events would make this step's save waits return early.
+            if self.layer_save_finished_events is not None:
+                for event in self.layer_save_finished_events:
+                    if event.is_set():
+                        event.clear()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return

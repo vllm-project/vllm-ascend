@@ -96,6 +96,36 @@ class TestKVPoolScheduler(unittest.TestCase):
         return config
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layerwise_mtp_hit_preserves_replay_boundary(self, mock_client_cls):
+        # Under layerwise + eagle (MTP), the scheduler trims the declared hit
+        # back by one lcm_block_size (trailing block is dirty draft data) but
+        # keeps store_skip_tokens = raw hit so the layerwise load still fires.
+        config = self._make_config(block_size=16)
+        config.speculative_config.use_eagle.return_value = True
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        scheduler.use_layerwise = True
+        scheduler.use_gva_layerwise = True
+        scheduler._get_layerwise_gva_hit_tokens = MagicMock(return_value=64)
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(80))
+        request.num_tokens = 80
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 5
+
+        need, is_async = scheduler.get_num_new_matched_tokens(request, 48)
+
+        self.assertEqual(need, 0)
+        self.assertFalse(is_async)
+        load_spec = scheduler.load_specs["r1"]
+        self.assertEqual(load_spec.kvpool_cached_tokens, 48)
+        self.assertEqual(load_spec.kvpool_store_skip_tokens, 64)
+        self.assertTrue(load_spec.can_load)
+
+        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        self.assertTrue(load_spec.can_load)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_consumer_no_load(self, mock_client_cls):
         config = self._make_config(kv_role="kv_consumer")
         scheduler = KVPoolScheduler(config, use_layerwise=False)

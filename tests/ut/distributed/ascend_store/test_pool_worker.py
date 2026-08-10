@@ -90,6 +90,32 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
         self.assertEqual(result, [48])
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate")
+    def test_start_load_kv_drains_stale_save_events(self, _mock_reset_gate):
+        # A step that fires fewer than num_layers hooks (MTP with
+        # num_speculative_tokens < num draft layers) never reaches the
+        # end-of-step clear in save_kv_layer, leaving set events behind.
+        # start_load_kv must drain them so the next step's save waits are safe.
+        import threading
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.use_layerwise = True
+        worker.layer_save_finished_events = [threading.Event() for _ in range(3)]
+        worker.layer_save_finished_events[1].set()  # stale leftover
+        worker.layer_save_finished_events[2].set()  # stale leftover
+        worker.layerwise_retrievers = []
+        # Empty metadata -> start_load_kv returns right after the drain.
+        metadata = MagicMock()
+        metadata.requests = []
+
+        worker.start_load_kv(metadata)
+
+        self.assertFalse(any(e.is_set() for e in worker.layer_save_finished_events))
+        self.assertEqual(worker.current_layer, 0)
+        self.assertEqual(worker.next_layer_to_submit, 0)
+
+
     def test_partial_prefill_block_index_boundaries(self):
         cls = self._make_worker_class()
 
