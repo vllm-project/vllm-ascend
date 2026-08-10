@@ -40,7 +40,7 @@ a3:
         config_file_path: DeepSeek-V4-flash-w8a8-PD-no-prefix.yaml
         size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
-        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-weekly.yaml
         size: 2
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
@@ -236,7 +236,7 @@ a3:
         config_file_path: Qwen3.6-35B-A3B-w4a8-A3.yaml
       - name: Kimi-K2.6-w4a8-A3
         os: linux-aarch64-a3-16
-        config_file_path: Kimi-K2.6-w4a8-A3.yaml
+        config_file_path: Kimi-K2.6-w4a8-A3-weekly.yaml
       - name: Kimi-K2.7-w4a8-A3
         os: linux-aarch64-a3-16
         config_file_path: Kimi-K2.7-w4a8-A3.yaml
