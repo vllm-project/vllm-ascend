@@ -1,8 +1,8 @@
 {
-  "op_type": "ApplyTopKTopPWithSorted",
+  "op_type": "ApplyTopKTopPCustom",
   "op_list": [
     {
-      "bin_filename": "ApplyTopKTopPWithSorted_fp32",
+      "bin_filename": "ApplyTopKTopPCustom_fp32",
       "inputs": [
         {
           "name": "sorted_value",
@@ -69,7 +69,7 @@
       ]
     },
     {
-      "bin_filename": "ApplyTopKTopPWithSorted_fp16",
+      "bin_filename": "ApplyTopKTopPCustom_fp16",
       "inputs": [
         {
           "name": "sorted_value",
@@ -127,6 +127,73 @@
           "name": "out",
           "index": 0,
           "dtype": "float16",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ]
+        }
+      ]
+    },
+    {
+      "bin_filename": "ApplyTopKTopPCustom_bf16",
+      "inputs": [
+        {
+          "name": "sorted_value",
+          "index": 0,
+          "dtype": "bfloat16",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ]
+        },
+        {
+          "name": "sorted_indices",
+          "index": 1,
+          "dtype": "int32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ]
+        },
+        {
+          "name": "p",
+          "index": 2,
+          "dtype": "bfloat16",
+          "format": "ND",
+          "paramType": "optional",
+          "shape": [
+            -2
+          ]
+        },
+        {
+          "name": "k",
+          "index": 3,
+          "dtype": "int32",
+          "format": "ND",
+          "paramType": "optional",
+          "shape": [
+            -2
+          ]
+        },
+        {
+          "name": "logits",
+          "index": 4,
+          "dtype": "bfloat16",
+          "format": "ND",
+          "paramType": "optional",
+          "shape": [
+            -2
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "index": 0,
+          "dtype": "bfloat16",
           "format": "ND",
           "paramType": "required",
           "shape": [

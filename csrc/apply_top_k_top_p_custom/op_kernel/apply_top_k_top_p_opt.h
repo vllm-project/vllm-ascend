@@ -30,7 +30,7 @@ template <typename inputT, typename calT, typename outputT>
 class ApplyTopKTopPOpt {
 public:
     __aicore__ inline ApplyTopKTopPOpt(){};
-    __aicore__ inline void InitTilingData(const ApplyTopKTopPWithSortedTilingData& __restrict tilingData,
+    __aicore__ inline void InitTilingData(const ApplyTopKTopPCustomTilingData& __restrict tilingData,
                                           GM_ADDR sorted_value, GM_ADDR sorted_indices, GM_ADDR p, GM_ADDR k,
                                           GM_ADDR logits, GM_ADDR out, GM_ADDR workspace);
     __aicore__ inline void InitBuffer(TPipe* inputPipe);
@@ -162,7 +162,7 @@ private:
 // --- InitTilingData ---
 template <typename inputT, typename calT, typename outputT>
 __aicore__ inline void ApplyTopKTopPOpt<inputT, calT, outputT>::InitTilingData(
-    const ApplyTopKTopPWithSortedTilingData& __restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices,
+    const ApplyTopKTopPCustomTilingData& __restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices,
     GM_ADDR p, GM_ADDR k, GM_ADDR logits, GM_ADDR out, GM_ADDR workspace)
 {
     batchSize_ = tilingData.batchSize;

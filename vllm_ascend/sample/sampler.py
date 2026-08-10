@@ -256,12 +256,12 @@ def _apply_top_k_top_p_torch_npu(
         gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
 
         if not (p is None and k is None):
-            gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k, p)
+            gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, p=p, k=k)
         return gathered_vals, gathered_idx
 
     if p is None and k is None:
         return logits
-    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k, p)
+    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, p=p, k=k)
 
 
 apply_top_k_top_p = (

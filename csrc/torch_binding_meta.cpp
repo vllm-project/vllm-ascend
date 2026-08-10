@@ -438,8 +438,8 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
 
 at::Tensor npu_apply_top_k_top_p_meta(
     const at::Tensor& logits,
-    const c10::optional<at::Tensor>& k_opt,
-    const c10::optional<at::Tensor>& p_opt)
+    const c10::optional<at::Tensor>& p_opt,
+    const c10::optional<at::Tensor>& k_opt)
 {
     TORCH_CHECK(
         logits.scalar_type() == at::kFloat || logits.scalar_type() == at::kHalf ||

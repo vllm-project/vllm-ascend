@@ -42,7 +42,7 @@ resolve_op_dir() {
         "${ROOT_DIR}/csrc/mc2/${op_name}" \
         "${ROOT_DIR}/csrc/ffn/${op_name}" \
         "${ROOT_DIR}/csrc/posembedding/${op_name}" \
-        "${ROOT_DIR}/csrc/index/${op_name}"; do
+        "${ROOT_DIR}/csrc/${op_name}"; do
         if [[ -d "${candidate_dir}" ]]; then
             echo "${candidate_dir}"
             return 0
@@ -131,7 +131,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "store_kv_block"
         "store_kv_block_metadata"
         "sparse_attention_score"
-        "apply_top_k_top_p_with_sorted"
+        "apply_top_k_top_p_custom"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -180,7 +180,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "store_kv_block"
         "store_kv_block_metadata"
         "sparse_attention_score"
-        "apply_top_k_top_p_with_sorted"
+        "apply_top_k_top_p_custom"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"

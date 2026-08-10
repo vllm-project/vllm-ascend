@@ -39,7 +39,6 @@
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
-#include "index/apply_top_k_top_p_with_sorted/apply_top_k_top_p_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
@@ -686,6 +685,26 @@ std::vector<at::Tensor> moe_grouped_matmul(
                 x_list, weight_list, group_list, transpose_weight, result);
 
     return y;
+}
+
+at::Tensor npu_apply_top_k_top_p(
+    const at::Tensor& logits,
+    const c10::optional<at::Tensor>& p,
+    const c10::optional<at::Tensor>& k)
+{
+    TORCH_CHECK(p.has_value() || k.has_value(),
+                "apply_top_k_top_p: p and k cannot be None at the same time.");
+
+    at::Tensor out = at::empty_like(logits);
+
+    EXEC_NPU_CMD(
+        aclnnApplyTopKTopPCustom,
+        logits,
+        p,
+        k,
+        out);
+
+    return out;
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
@@ -2290,9 +2309,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         );
     ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
 
-    ops.def(
-        "npu_apply_top_k_top_p(Tensor logits, Tensor? k=None, Tensor? p=None) -> Tensor"
-        );
+    ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
     ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
 
     ops.def(

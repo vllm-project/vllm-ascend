@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted.h
+ * \file apply_top_k_top_p_custom.h
  * \brief
  */
 #ifndef APPLY_TOP_K_TOP_P_WITH_SORTED_H_KERNEL
@@ -18,7 +18,7 @@
 #include "kernel_operator.h"
 
 using namespace AscendC;
-namespace ApplyTopKTopPWithSortedOp {
+namespace ApplyTopKTopPCustomOp {
 constexpr uint32_t BUFFER_NUM = 1;
 constexpr uint16_t FLOAT16_NEG_INF = 0xFC00;    // -inf 64512
 constexpr uint16_t BF16_NEG_INF = 0xFF80;       // -inf 65408
@@ -33,10 +33,10 @@ constexpr uint32_t RESERVE_CAL_BUFFER_SIZE = 1024;
 constexpr CumSumConfig CUMSUM_CONFIG{true, true, false};
 
 template <typename inputT, typename calT, typename outputT>
-class ApplyTopKTopPWithSorted {
+class ApplyTopKTopPCustom {
 public:
-    __aicore__ inline ApplyTopKTopPWithSorted(){};
-    __aicore__ inline void InitTilingData(const ApplyTopKTopPWithSortedTilingData& __restrict tilingData,
+    __aicore__ inline ApplyTopKTopPCustom(){};
+    __aicore__ inline void InitTilingData(const ApplyTopKTopPCustomTilingData& __restrict tilingData,
                                           GM_ADDR sorted_value, GM_ADDR sorted_indices, GM_ADDR p, GM_ADDR k,
                                           GM_ADDR out, GM_ADDR workSpace);
     __aicore__ inline void InitBuffer(TPipe* inputPipe);
@@ -210,8 +210,8 @@ private:
 };
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitTilingData(
-    const ApplyTopKTopPWithSortedTilingData& __restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::InitTilingData(
+    const ApplyTopKTopPCustomTilingData& __restrict tilingData, GM_ADDR sorted_value, GM_ADDR sorted_indices,
     GM_ADDR p, GM_ADDR k, GM_ADDR out, GM_ADDR workSpace)
 {
     batchSize_ = tilingData.batchSize;
@@ -247,7 +247,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitTilin
 
 // init used buffer
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitBuffer(TPipe* inputPipe)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::InitBuffer(TPipe* inputPipe)
 {
     pipe_ = inputPipe;
     pipe_->InitBuffer(sortedValueInQueue_, BUFFER_NUM, sizeof(inputT) * (ubFactorElementAligned_ + K_MAX));
@@ -289,7 +289,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitBuffe
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::Process()
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::Process()
 {
     kLocal = kInQueue_.AllocTensor<int32_t>();
     pLocal = pInQueue_.AllocTensor<inputT>();
@@ -330,7 +330,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::Process()
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessScatter()
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessScatter()
 {
     constexpr uint32_t DATA_PER_BLOCK = BLOCK_BYTES / sizeof(inputT);
     constexpr uint32_t BRCB_ELEM_PER_REP = 8;
@@ -390,7 +390,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessSc
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessResScatter()
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessResScatter()
 {
     constexpr uint32_t DATA_PER_BLOCK = BLOCK_BYTES / sizeof(inputT);
     constexpr uint32_t BRCB_ELEM_PER_REP = 8;
@@ -460,7 +460,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessRe
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitCopyIn(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::InitCopyIn(uint32_t loopBatch,
                                                                                   int64_t currentGmIdx)
 {
     scatterIdxTensor.SetValue(0, static_cast<int32_t>(vocabSize_));
@@ -486,7 +486,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitCopyI
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::GetKthResult(uint32_t loopBatch, uint32_t offset,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::GetKthResult(uint32_t loopBatch, uint32_t offset,
                                                                                     uint8_t repeatTimes)
 {
     Compare(tmpLocal.template ReinterpretCast<uint8_t>(), kthValueLocal, calLocalFp32[offset], CMPMODE::GT, MASK_64,
@@ -497,7 +497,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::GetKthRes
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ReduceSumWithAddsAndExpImpl(uint32_t offset,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ReduceSumWithAddsAndExpImpl(uint32_t offset,
                                                                                                    uint32_t loopDataNum)
 {
     Adds(softMaxRes, calLocalFp32[offset], maxValue, loopDataNum);
@@ -508,7 +508,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ReduceSum
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitProcess(uint32_t loopBatch)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::InitProcess(uint32_t loopBatch)
 {
     int64_t initGmIdx = baseGmIdx_ + vocabSize_ - dataNumInit_;
     InitCopyIn(loopBatch, initGmIdx);
@@ -543,7 +543,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitProce
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessKLtKMax(uint32_t loopBatch)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessKLtKMax(uint32_t loopBatch)
 {
     DataCopyExtParams copyParams{1, (uint32_t)(ubFactorElementAligned_ * sizeof(outputT)), 0, 0, 0};
     for (int32_t loopInner = 0; loopInner < loopInner_; loopInner++) {
@@ -583,7 +583,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessKL
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterCumtomImpl(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ScatterCumtomImpl(uint32_t loopBatch,
                                                                                          uint32_t loopProbNum,
                                                                                          uint32_t offset)
 {
@@ -602,7 +602,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterCu
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::GetFirstKLoop(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::GetFirstKLoop(uint32_t loopBatch,
                                                                                      int32_t& firstKLoop)
 {
     uint8_t repeatTimes = (dataNumInit_ + DATA_PER_REPEAT_B32 - 1) / DATA_PER_REPEAT_B32;
@@ -640,7 +640,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::GetFirstK
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::CumSumWithAddsAndExpImpl(uint32_t offset,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::CumSumWithAddsAndExpImpl(uint32_t offset,
                                                                                                 uint32_t loopDataNum,
                                                                                                 uint32_t cumsumInner,
                                                                                                 float cumsumData)
@@ -658,7 +658,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::CumSumWit
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessRemain(uint32_t loopBatch)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessRemain(uint32_t loopBatch)
 {
     int32_t firstKLoop = 0;
     GetFirstKLoop(loopBatch, firstKLoop);
@@ -680,7 +680,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessRe
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterFromFirstKLoop(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ScatterFromFirstKLoop(uint32_t loopBatch,
                                                                                              int32_t firstKLoop,
                                                                                              float& cumsumData)
 {
@@ -729,7 +729,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterFr
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::SetCumsumGTIndex(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::SetCumsumGTIndex(uint32_t loopBatch,
                                                                                         int32_t index)
 {
     scatterIdxTensor.SetValue(0, index);
@@ -740,7 +740,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::SetCumsum
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessTopK()
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessTopK()
 {
     kLocal = kInQueue_.AllocTensor<int32_t>();
     outTensor = outQueue_.AllocTensor<outputT>();
@@ -781,7 +781,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessTo
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessRemainTopK(uint32_t loopBatch)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessRemainTopK(uint32_t loopBatch)
 {
     int32_t firstKLoop = 0;
     GetFirstKLoopTopK(loopBatch, firstKLoop);
@@ -802,7 +802,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessRe
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::GetFirstKLoopTopK(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::GetFirstKLoopTopK(uint32_t loopBatch,
                                                                                          int32_t& firstKLoop)
 {
     uint8_t repeatTimes = (dataNumInit_ + DATA_PER_REPEAT_B32 - 1) / DATA_PER_REPEAT_B32;
@@ -837,7 +837,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::GetFirstK
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterFromFirstKLoopTopK(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ScatterFromFirstKLoopTopK(uint32_t loopBatch,
                                                                                                  int32_t firstKLoop)
 {
     uint32_t loopDataNum = ubFactorElementAligned_;
@@ -869,7 +869,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterFr
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterCumtomImplTopK(uint32_t loopBatch,
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ScatterCumtomImplTopK(uint32_t loopBatch,
                                                                                              uint32_t loopProbNum,
                                                                                              uint32_t offset)
 {
@@ -889,7 +889,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ScatterCu
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitProcessTopK(uint32_t loopBatch)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::InitProcessTopK(uint32_t loopBatch)
 {
     scatterIdxTensor.SetValue(0, static_cast<int32_t>(vocabSize_));
     SToMTE3Sync();
@@ -922,7 +922,7 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::InitProce
 }
 
 template <typename inputT, typename calT, typename outputT>
-__aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessKLtKMaxTopK(uint32_t loopBatch)
+__aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessKLtKMaxTopK(uint32_t loopBatch)
 {
     DataCopyExtParams copyParams{1, (uint32_t)(ubFactorElementAligned_ * sizeof(outputT)), 0, 0, 0};
     // Move out -infinity to fill GM
@@ -958,6 +958,6 @@ __aicore__ inline void ApplyTopKTopPWithSorted<inputT, calT, outputT>::ProcessKL
     }
 }
 
-} // namespace ApplyTopKTopPWithSortedOp
+} // namespace ApplyTopKTopPCustomOp
 
 #endif // APPLY_TOP_K_TOP_P_WITH_SORTED_H_KERNEL

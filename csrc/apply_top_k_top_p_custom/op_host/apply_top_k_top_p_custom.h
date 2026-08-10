@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted.h
+ * \file apply_top_k_top_p_custom.h
  * \brief
  */
 #ifndef OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_OP_H_
@@ -18,7 +18,7 @@
 #include "opdev/op_executor.h"
 
 namespace l0op {
-const aclTensor* ApplyTopKTopPWithSorted(const aclTensor* sortedValue, const aclTensor* sortedIndices,
+const aclTensor* ApplyTopKTopPCustom(const aclTensor* sortedValue, const aclTensor* sortedIndices,
                                          const aclTensor* p, const aclTensor* k, const aclTensor* logits,
                                          aclOpExecutor* executor);
 }

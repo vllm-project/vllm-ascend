@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted_tiling.h
+ * \file apply_top_k_top_p_custom_tiling.h
  * \brief
  * ATTENTION: MAKE SURE 'BEGIN_TILING_DATA_DEF' STAY IN THE SAME LINE (28) USING BLANK LINES.
  *
@@ -25,7 +25,7 @@
 
 namespace optiling {
 
-BEGIN_TILING_DATA_DEF(ApplyTopKTopPWithSortedTilingData)
+BEGIN_TILING_DATA_DEF(ApplyTopKTopPCustomTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, batchSize);
 TILING_DATA_FIELD_DEF(uint32_t, vocabSize);
 TILING_DATA_FIELD_DEF(uint32_t, batchPerCore);
@@ -40,9 +40,9 @@ TILING_DATA_FIELD_DEF(uint32_t, tailUbFactorElementAligned);
 TILING_DATA_FIELD_DEF(uint32_t, calUbSize);
 TILING_DATA_FIELD_DEF(uint32_t, iterateTimes);
 END_TILING_DATA_DEF;
-REGISTER_TILING_DATA_CLASS(ApplyTopKTopPWithSorted, ApplyTopKTopPWithSortedTilingData)
+REGISTER_TILING_DATA_CLASS(ApplyTopKTopPCustom, ApplyTopKTopPCustomTilingData)
 
-struct TilingForApplyTopKTopPWithSortedCompileInfo {
+struct TilingForApplyTopKTopPCustomCompileInfo {
     uint32_t totalCoreNum = 0;
     uint64_t ubSizePlatForm = 0;
 };
