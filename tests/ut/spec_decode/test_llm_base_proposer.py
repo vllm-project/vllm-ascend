@@ -183,6 +183,21 @@ class TestQuaRotDraftBoundaries:
         torch.testing.assert_close(fc.weight, expected)
         torch.testing.assert_close(proposer._quarot_rotation, rotation)
 
+    def test_anti_rotates_k3_mla_context_projection(self, monkeypatch):
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        context_proj = nn.Linear(10, 2, bias=False)
+        initial_weight = torch.arange(1.0, 21.0).reshape(2, 10)
+        context_proj.weight.data.copy_(initial_weight)
+        proposer.model = SimpleNamespace(model=SimpleNamespace(context_proj=context_proj))
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: rotation)
+
+        proposer._maybe_anti_rotate_fc()
+
+        expected = torch.matmul(initial_weight.reshape(2, 5, 2), rotation).reshape(2, 10)
+        torch.testing.assert_close(context_proj.weight, expected)
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
     def test_copies_unrotated_shared_weight_without_mutating_target(self):
         proposer = self._make_proposer()
         proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])

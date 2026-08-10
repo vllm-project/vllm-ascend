@@ -261,7 +261,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
     def _maybe_anti_rotate_fc(self) -> None:
-        """Align the draft FC input basis with a QuaRot target."""
+        """Align the draft hidden-state projection with a QuaRot target."""
         if self.method not in ("dflash", "dspark"):
             return
         target_model_path = self.vllm_config.model_config.model
@@ -275,28 +275,43 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         rotation = rotation.to(self.device, dtype=torch.float32)
         self._quarot_rotation = rotation
         draft_model = getattr(self.model, "model", None)
-        fc = getattr(draft_model, "fc", None) if draft_model is not None else None
-        if fc is None:
+        projection_name = "fc"
+        projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
+        if projection is None:
+            # K3 MLA DSpark names the projection used by
+            # combine_hidden_states() context_proj instead of fc. Its input is
+            # the same concatenation of target auxiliary hidden states, so
+            # each target-width block needs the same QuaRot basis alignment.
+            projection_name = "context_proj"
+            projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
+        if projection is None:
             return
 
-        fc_weight = fc.weight
-        out_features, in_features = fc_weight.shape
+        projection_weight = projection.weight
+        out_features, in_features = projection_weight.shape
         hidden_size = rotation.shape[0]
         if in_features % hidden_size != 0:
             logger.warning(
-                "[spec_decode/quarot] fc in_features=%d is not divisible by rotation dim=%d; skipping FC alignment.",
+                "[spec_decode/quarot] %s in_features=%d is not divisible by rotation dim=%d; "
+                "skipping hidden-state projection alignment.",
+                projection_name,
                 in_features,
                 hidden_size,
             )
             return
         num_features = in_features // hidden_size
-        fc_blocks = fc_weight.data.to(torch.float32).reshape(out_features, num_features, hidden_size)
-        aligned = torch.matmul(fc_blocks, rotation)
-        fc_weight.data.copy_(aligned.reshape(out_features, in_features).to(fc_weight.dtype))
-        logger.info(
-            "[spec_decode/quarot] Aligned draft fc.weight with target rotation (num_features=%d, fc=%s).",
+        projection_blocks = projection_weight.data.to(torch.float32).reshape(
+            out_features,
             num_features,
-            tuple(fc_weight.shape),
+            hidden_size,
+        )
+        aligned = torch.matmul(projection_blocks, rotation)
+        projection_weight.data.copy_(aligned.reshape(out_features, in_features).to(projection_weight.dtype))
+        logger.info(
+            "[spec_decode/quarot] Aligned draft %s.weight with target rotation (num_features=%d, projection=%s).",
+            projection_name,
+            num_features,
+            tuple(projection_weight.shape),
         )
 
     def _copy_unrotated_shared_weight(
