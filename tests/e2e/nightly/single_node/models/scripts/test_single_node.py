@@ -53,6 +53,7 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
         request_args=config.api_keyword_args,
     )
 
+
 async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     import requests
 
@@ -121,6 +122,7 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
                 assert actual_text and actual_text.strip(), f"Empty text response for prompt '{prompt}'"
 
             print(f"Messages API test passed for prompt '{prompt}': {data}")
+
 
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
     """General assertion engine for aisbench outcomes mapped directly from YAML."""

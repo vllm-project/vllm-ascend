@@ -3,8 +3,9 @@ from __future__ import annotations
 import base64
 import os
 from typing import TYPE_CHECKING, Any
-import regex as re
+
 import huggingface_hub
+import regex as re
 import requests
 from modelscope import snapshot_download  # type: ignore
 
@@ -154,5 +155,4 @@ def send_image_request(config: SingleNodeConfig, server) -> dict[str, Any]:
     print("Response:", response_json)
 
     _assert_response(response.status_code, response_json, config.expected_response or {})
-
     return response_json
