@@ -74,10 +74,16 @@ def register():
 def register_connector():
     _ensure_global_patch()
 
-    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.ec_transfer import (
+        register_connector as register_ec_connector,
+    )
+    from vllm_ascend.distributed.kv_transfer import (
+        register_connector as register_kv_connector,
+    )
     from vllm_ascend.distributed.weight_transfer import register_engine
 
-    register_connector()
+    register_kv_connector()
+    register_ec_connector()
     register_engine()
 
 
