@@ -190,9 +190,19 @@ def scatter_mxfp_k_scale_cache(
     slots = slot_mapping.to(torch.long)
     if slots.numel() == 0:
         return
-    block_ids = slots // block_size
-    block_offsets = slots % block_size
-    key_scale_cache[block_ids, :, block_offsets, :, :] = key_scale
+
+    # FULL graph replay keeps the captured token shape and marks padded rows
+    # with slot -1. Advanced indexing would interpret -1 as the last cache
+    # entry and silently corrupt its scale. Remap padding to slot 0 and write
+    # back the existing value so the fixed-shape graph performs a no-op.
+    valid_slots = slots >= 0
+    safe_slots = torch.where(valid_slots, slots, torch.zeros_like(slots))
+    block_ids = safe_slots // block_size
+    block_offsets = safe_slots % block_size
+    cached_scale = key_scale_cache[block_ids, :, block_offsets, :, :]
+    scale_mask = valid_slots.view(-1, 1, 1, 1)
+    scale_updates = torch.where(scale_mask, key_scale, cached_scale)
+    key_scale_cache[block_ids, :, block_offsets, :, :] = scale_updates
 
 
 def scatter_mxfp_v_cache(

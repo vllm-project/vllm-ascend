@@ -301,7 +301,7 @@ class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
+    attn_params: dict[int, list[Any]]
 
 
 _graph_params: GraphParams | None = None
