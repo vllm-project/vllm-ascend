@@ -70,7 +70,7 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    python3 -m pip install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
