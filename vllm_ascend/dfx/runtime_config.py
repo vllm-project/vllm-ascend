@@ -778,14 +778,86 @@ class DfxRuntimeConfig:
                 )
             else:
                 logger.warning(
-                    "[DFX runtime_config] manual_trigger cleared in-memory but failed to "
-                    "persist path=%s %s",
+                    "[DFX runtime_config] manual_trigger cleared in-memory but failed to persist path=%s %s",
                     self.config_path,
                     _process_role_tag(),
                 )
         else:
             logger.info(
                 "[DFX runtime_config] manual_trigger cleared in-memory (non-writer) %s",
+                _process_role_tag(),
+            )
+        return True
+
+    def disable_dump_unavailable(self, *, reason: str) -> bool:
+        """Force ``dump.enabled=false`` when msprobe dump cannot run.
+
+        Used at startup / reload when debugger init fails. Returns True if
+        the in-memory flag was changed.
+        """
+        if not self.dump_enabled():
+            return False
+        self.dump["enabled"] = False
+        logger.error(
+            "[DFX runtime_config] dump.enabled forced false: %s %s",
+            reason,
+            _process_role_tag(),
+        )
+        if _is_json_writer():
+            if self.save({"dump": {"enabled": False}}):
+                logger.info(
+                    "[DFX runtime_config] dump.enabled=false persisted path=%s %s",
+                    self.config_path,
+                    _process_role_tag(),
+                )
+            else:
+                logger.warning(
+                    "[DFX runtime_config] dump.enabled cleared in-memory but failed to persist path=%s %s",
+                    self.config_path,
+                    _process_role_tag(),
+                )
+        else:
+            logger.info(
+                "[DFX runtime_config] dump.enabled cleared in-memory (non-writer) %s",
+                _process_role_tag(),
+            )
+        return True
+
+    def disable_detector_unavailable(self, section: str, *, reason: str) -> bool:
+        """Force ``detector.<section>.enabled=false`` when a hard dependency is missing.
+
+        Used for ``token_logprob`` when msprobe ILLDetector cannot be imported.
+        Returns True if the in-memory flag was changed.
+        """
+        sec = self.detector_section(section)
+        if not bool(sec.get("enabled", False)):
+            return False
+        sec["enabled"] = False
+        logger.error(
+            "[DFX runtime_config] detector.%s.enabled forced false: %s %s",
+            section,
+            reason,
+            _process_role_tag(),
+        )
+        if _is_json_writer():
+            if self.save({"detector": {section: {"enabled": False}}}):
+                logger.info(
+                    "[DFX runtime_config] detector.%s.enabled=false persisted path=%s %s",
+                    section,
+                    self.config_path,
+                    _process_role_tag(),
+                )
+            else:
+                logger.warning(
+                    "[DFX runtime_config] detector.%s.enabled cleared in-memory but failed to persist path=%s %s",
+                    section,
+                    self.config_path,
+                    _process_role_tag(),
+                )
+        else:
+            logger.info(
+                "[DFX runtime_config] detector.%s.enabled cleared in-memory (non-writer) %s",
+                section,
                 _process_role_tag(),
             )
         return True
@@ -1233,10 +1305,7 @@ class DfxRuntimeConfig:
             raise ValueError("dump.enabled must be bool")
         unknown_dump = sorted(set(data["dump"]) - DfxRuntimeConfig.DUMP_KEYS)
         if unknown_dump:
-            raise ValueError(
-                f"dump has unknown key(s) {unknown_dump}; "
-                f"allowed={sorted(DfxRuntimeConfig.DUMP_KEYS)}"
-            )
+            raise ValueError(f"dump has unknown key(s) {unknown_dump}; allowed={sorted(DfxRuntimeConfig.DUMP_KEYS)}")
         manual_trigger = data["dump"].get("manual_trigger")
         if manual_trigger is not None and not isinstance(manual_trigger, bool):
             # Accept 0/1 from hand-edited JSON; reject other types.

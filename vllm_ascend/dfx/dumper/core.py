@@ -86,6 +86,10 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
         # Manual trigger: activate without consuming max_times / cooldown.
         self._pending_dump_skip_quota = False
 
+        # True after construction-time debugger probe finishes. Late success
+        # under ACLGraph may miss already-captured graphs.
+        self._startup_debugger_done = False
+
         self._apply_observability_switches()
 
         logger.info_once(
@@ -106,8 +110,44 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             self.dfx_config.report_save_sensitive_info(),
         )
 
-        # Keep debugger lifecycle fully encapsulated in Dumper.
+        # Keep debugger lifecycle fully encapsulated in Dumper. Soft-fail when
+        # msprobe / dump_config is missing; force dump.enabled=false if still on.
+        self._try_init_debugger()
+        self._enforce_dump_requires_debugger()
+        self._startup_debugger_done = True
+
+    def _try_init_debugger(self) -> None:
+        """Init debugger once when absent (startup or lazy reload retry)."""
+        if self._debugger is not None:
+            return
         self._init_debugger(self.runner.compilation_config.cudagraph_mode)
+
+    def _enforce_dump_requires_debugger(self) -> None:
+        """If dump is enabled but debugger is unavailable, force dump off.
+
+        On hot-reload with ``dump.enabled=true`` and ``_debugger is None``,
+        retries ``_init_debugger`` first (covers install-msprobe-then-enable).
+        """
+        if not self.dfx_config.dump_enabled():
+            return
+        was_missing = self._debugger is None
+        if was_missing:
+            self._try_init_debugger()
+        if self._debugger is not None:
+            if was_missing and bool(getattr(self, "_startup_debugger_done", False)) and self._is_aclgraph_dumper():
+                logger.warning(
+                    "[Anomaly msprobe] debugger lazy-initialized after startup under "
+                    "ACLGraph; hooks may miss already-captured graphs — restart the "
+                    "worker if dump output is empty %s",
+                    self.dump_rank_tag(),
+                )
+            return
+        dump_cfg = getattr(getattr(self.runner, "ascend_config", None), "dump_config_path", None)
+        if dump_cfg is None:
+            reason = "dump_config_path/dump_config not set (cannot init msprobe debugger)"
+        else:
+            reason = "msprobe debugger unavailable (install msprobe, then set dump.enabled=true again)"
+        self.dfx_config.disable_dump_unavailable(reason=reason)
 
     @property
     def dump_phase(self) -> DumpPhase:
@@ -134,6 +174,24 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             pp = "?"
         return f"dp={dp} tp={tp} pp={pp}"
 
+    def dump_count_snapshot(self, *, dump_armed: bool = False) -> tuple[int, int]:
+        """``(dump_count, dump_max_times)`` for report JSON.
+
+        ``dump_count`` is activated dumps so far. When this event just armed
+        ``pending_dump`` with quota consumption, activate has not bumped the
+        counter yet — report the next activation count (same as msprobe logs).
+        Manual trigger (``skip_quota``) does not reserve a slot.
+        """
+        count = int(getattr(self, "_msprobe_dump_total_count", 0) or 0)
+        max_times = int(getattr(self, "_dump_max_times", 0) or 0)
+        if (
+            dump_armed
+            and bool(getattr(self, "_pending_dump", False))
+            and not bool(getattr(self, "_pending_dump_skip_quota", False))
+        ):
+            count += 1
+        return count, max_times
+
     def _apply_observability_switches(self) -> None:
         """Apply ``ascend_log`` from live config."""
         self.dfx_config.apply_ascend_log_level()
@@ -143,6 +201,9 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
 
         Runner owns :meth:`~DfxRuntimeConfig.sync_dfx_config`; call this only
         after a successful reload so Dumper never drives config I/O.
+
+        Also lazy-retries msprobe debugger init when ``dump.enabled`` was
+        flipped on after install, and forces it back off if still unavailable.
         """
         prev_max = self._dump_max_times
         prev_cd = self._dump_cooldown_seconds
@@ -163,6 +224,7 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
                 "[DFX dumper] config applied (limits unchanged) %s",
                 self.dump_rank_tag(),
             )
+        self._enforce_dump_requires_debugger()
 
     def handle_anomaly_alert(
         self,

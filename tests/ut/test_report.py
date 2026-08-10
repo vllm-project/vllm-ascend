@@ -37,6 +37,7 @@ def test_dfx_report_writer_writes_pretty_json(tmp_path: Path):
     assert path is not None
     assert path.exists()
     assert path.name.startswith("anomaly_")
+    assert "_dump_" not in path.name
     assert "_pid" in path.stem
     text = path.read_text(encoding="utf-8")
     assert "\n" in text  # pretty-printed
@@ -44,12 +45,38 @@ def test_dfx_report_writer_writes_pretty_json(tmp_path: Path):
     assert record["anomaly_type"] == "spec_acceptance"
     assert record["req_id"] == "req-1"
     assert record["rank"] == "tp0"
+    assert record["dump_attempted"] is False
+    assert record["dump_armed"] is False
+    assert record["dump_capture_timing"] == "none"
+    assert record["dump_count"] is None
+    assert record["dump_max_times"] is None
     assert record["detail"]["acceptance_rate"] == 0.1
     assert "window_token_ids" not in record["detail"]
     assert "output_token_ids" not in record["detail"]
     assert record["detail"]["window_token_count"] == 3
     assert record["detail"]["output_token_count"] == 4
     assert record["save_sensitive_info"] is False
+
+
+def test_dfx_report_writer_marks_dump_armed_in_filename(tmp_path: Path):
+    writer = DfxReportWriter(tmp_path / "report")
+    path = writer.write(
+        anomaly_type="spec_acceptance",
+        req_id="req-dump",
+        detail={"acceptance_rate": 0.2},
+        dump_attempted=True,
+        dump_armed=True,
+        dump_count=2,
+        dump_max_times=5,
+    )
+    assert path is not None
+    assert "_dump_pid" in path.name
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["dump_attempted"] is True
+    assert record["dump_armed"] is True
+    assert record["dump_capture_timing"] == "upcoming_forward_window"
+    assert record["dump_count"] == 2
+    assert record["dump_max_times"] == 5
 
 
 def test_dfx_report_writer_can_save_sensitive_info(tmp_path: Path):

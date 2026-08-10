@@ -59,7 +59,6 @@ def test_finalize_dump_data_does_not_consume_dummy_forward():
     dumper.disable_msprobe_dump_if_needed.assert_not_called()
 
 
-
 def test_handle_anomaly_alert_calls_on_alert_armed():
     from vllm_ascend.dfx.detector.alert import AnomalyAlert
 
@@ -229,8 +228,8 @@ def test_async_pending_does_not_consume_quota_before_activation():
 
 
 def test_manual_trigger_skips_quota():
-    from vllm_ascend.dfx.manual_trigger import MANUAL_TRIGGER_REQ_ID, TriggerEvent
     from vllm_ascend.dfx.input_filters import InputFilterManager
+    from vllm_ascend.dfx.manual_trigger import MANUAL_TRIGGER_REQ_ID, TriggerEvent
 
     InputFilterManager.reset_for_tests()
     # Active filters must not block manual_trigger (manual trigger skips related-check).
@@ -302,7 +301,6 @@ def test_dump_phase_idle_pending_active():
     assert dumper.dump_phase == DumpPhase.PENDING
     dumper._msprobe_dump_active = True
     assert dumper.dump_phase == DumpPhase.ACTIVE
-
 
 
 def test_sync_dump_pending_or_skips_or_with_real_dfx_config(tmp_path):
@@ -548,3 +546,106 @@ def test_finalize_dump_data_swallows_step_errors():
     dumper.disable_msprobe_dump_if_needed.assert_called_once_with()
 
 
+def test_dump_count_snapshot_pending_reserves_next_slot():
+    dumper = _make_dumper()
+    dumper._msprobe_dump_total_count = 1
+    dumper._dump_max_times = 5
+    dumper._pending_dump = True
+    dumper._pending_dump_skip_quota = False
+    assert dumper.dump_count_snapshot(dump_armed=True) == (2, 5)
+    assert dumper.dump_count_snapshot(dump_armed=False) == (1, 5)
+
+    dumper._pending_dump_skip_quota = True
+    assert dumper.dump_count_snapshot(dump_armed=True) == (1, 5)
+
+    dumper._pending_dump = False
+    dumper._msprobe_dump_total_count = 2
+    assert dumper.dump_count_snapshot(dump_armed=True) == (2, 5)
+
+
+def test_init_debugger_soft_fails_and_forces_dump_off(tmp_path):
+    from vllm.config.compilation import CUDAGraphMode
+
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["dump"]["enabled"] = True
+    runner = SimpleNamespace(
+        ascend_config=SimpleNamespace(dump_config_path="/tmp/msprobe.json"),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        tp_rank=0,
+        dp_rank=0,
+        model=None,
+        input_batch=None,
+        requests=None,
+        req_states=None,
+        discard_request_mask=None,
+        use_async_scheduling=False,
+    )
+
+    def _soft_fail(self, mode):
+        self._debugger = None
+        self._uses_aclgraph_dumper = False
+        return None
+
+    with patch.object(Dumper, "_init_debugger", _soft_fail):
+        dumper = Dumper(runner, dfx_config=cfg)
+    assert dumper._debugger is None
+    assert cfg.dump_enabled() is False
+
+
+def test_apply_dfx_config_lazy_retries_debugger(tmp_path):
+    from vllm.config.compilation import CUDAGraphMode
+
+    cfg = make_dfx_config(tmp_path)
+    runner = SimpleNamespace(
+        ascend_config=SimpleNamespace(dump_config_path="/tmp/msprobe.json"),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        tp_rank=0,
+        dp_rank=0,
+        model=None,
+        input_batch=None,
+        requests=None,
+        req_states=None,
+        discard_request_mask=None,
+        use_async_scheduling=False,
+    )
+    with patch.object(Dumper, "_init_debugger", return_value=None):
+        dumper = Dumper(runner, dfx_config=cfg)
+    assert dumper._debugger is None
+
+    fake_dbg = MagicMock()
+    cfg._data["dump"]["enabled"] = True
+
+    def _init_ok(self, mode):
+        self._debugger = fake_dbg
+        self._uses_aclgraph_dumper = False
+        return fake_dbg
+
+    with patch.object(Dumper, "_init_debugger", _init_ok):
+        dumper.apply_dfx_config()
+    assert dumper._debugger is fake_dbg
+    assert cfg.dump_enabled() is True
+
+
+def test_init_debugger_real_import_error_soft_fails():
+    """``_init_debugger`` itself must not raise when msprobe import fails."""
+    from vllm.config.compilation import CUDAGraphMode
+
+    dumper = _make_dumper()
+    dumper.runner = SimpleNamespace(
+        ascend_config=SimpleNamespace(dump_config_path="/tmp/msprobe.json"),
+    )
+    with patch.dict("sys.modules", {"msprobe": None, "msprobe.pytorch": None}):
+        # Ensure import of msprobe.pytorch raises.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _import(name, *args, **kwargs):
+            if name == "msprobe.pytorch" or name.startswith("msprobe."):
+                raise ImportError("No module named msprobe")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_import):
+            out = dumper._init_debugger(CUDAGraphMode.NONE)
+    assert out is None
+    assert dumper._debugger is None

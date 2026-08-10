@@ -154,11 +154,7 @@ class PendingDumpMixin:
         # TPs (assumes a consistent startup config per EngineCore). Returns
         # exactly what the OR would (False) — no behavioral change.
         dfx_cfg = getattr(self, "dfx_config", None)
-        if (
-            dfx_cfg is not None
-            and not dfx_cfg.hot_reload_enabled
-            and not dfx_cfg.dump_enabled()
-        ):
+        if dfx_cfg is not None and not dfx_cfg.hot_reload_enabled and not dfx_cfg.dump_enabled():
             return False
 
         tag = self.dump_rank_tag()

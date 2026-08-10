@@ -69,6 +69,32 @@ class TokenLogprobDetector(ConfigBackedDetector):
             4: int(getter("ill_nan_window_thresh", self._ill_window_thresh[4])),
         }
 
+    def refresh_from_config(self) -> None:
+        """Pull knobs; if enabled, ensure ILLDetector or force the detector off.
+
+        Clears a prior ``_ill_detector_init_failed`` so a later msprobe install
+        + ``enabled=true`` hot-reload can re-init without restarting the worker.
+        """
+        super().refresh_from_config()
+        if not self._enabled:
+            return
+        if self._ill_detector is not None:
+            return
+        # Allow retry after a previous ImportError / init failure.
+        self._ill_detector_init_failed = False
+        if self._get_ill_detector() is not None:
+            return
+        self._enabled = False
+        cfg = self._dfx_config
+        if cfg is not None:
+            cfg.disable_detector_unavailable(
+                "token_logprob",
+                reason=(
+                    "msprobe response_anomaly / ILLDetector unavailable "
+                    "(install msprobe, then set detector.token_logprob.enabled=true again)"
+                ),
+            )
+
     @property
     def topk(self) -> int:
         return self._topk

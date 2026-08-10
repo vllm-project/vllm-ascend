@@ -13,10 +13,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import fcntl
 import json
 import os
-import fcntl
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any
@@ -494,9 +494,7 @@ class AscendConfig:
         tp_rank = _first_env_int("VLLM_TP_RANK", "TP_RANK")
         if pp_rank is not None and pp_rank != 0:
             return False
-        if tp_rank is not None and tp_rank != 0:
-            return False
-        return True
+        return tp_rank is None or tp_rank == 0
 
     @classmethod
     def _wait_for_file(cls, path: Path) -> bool:
@@ -563,10 +561,8 @@ class AscendConfig:
                 os.replace(tmp_file_path, isolated_file_path)
             finally:
                 if tmp_file_path.exists():
-                    try:
+                    with suppress(OSError):
                         tmp_file_path.unlink()
-                    except OSError:
-                        pass
 
         logger.info(
             "Materialized DP-isolated %s: src=%s dst=%s dp_rank=%s",
@@ -626,10 +622,8 @@ class AscendConfig:
                 os.replace(tmp_file_path, isolated_file_path)
             finally:
                 if tmp_file_path.exists():
-                    try:
+                    with suppress(OSError):
                         tmp_file_path.unlink()
-                    except OSError:
-                        pass
 
         logger.info(
             "Materialized DP-isolated inline msprobe config: dst=%s dp_rank=%s",
