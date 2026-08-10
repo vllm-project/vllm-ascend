@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm_ascend.distributed.weight_transfer.sparse_common import (
+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
     SparseWeightPatch,
     apply_sparse_patch,
 )

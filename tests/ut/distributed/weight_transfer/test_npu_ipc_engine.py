@@ -98,7 +98,11 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
 
     captured = {}
 
-    with patch(f"{_MODULE}.reduce_tensor", fake_reduce):
+    with (
+        patch(f"{_MODULE}.reduce_tensor", fake_reduce),
+        patch(f"{_MODULE}.all_gather_and_merge_handles", side_effect=lambda x, **_: x),
+        patch(f"{_MODULE}.post_send_sync"),
+    ):
         if IS_VLLM_026:
 
             def send_mode(update_info):
@@ -124,9 +128,6 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
             engine.is_sender = True
             engine.npu_uuid = "node-0"
             engine._do_send = lambda **kw: captured.update(kw)
-            engine._all_gather_and_merge_handles = lambda x: x
-            engine._post_send_sync = MagicMock()
-
             source = iter([("model.weight", torch.zeros(3))])
             engine._send_unpacked(source)
 

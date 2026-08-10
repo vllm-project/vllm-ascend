@@ -22,7 +22,7 @@ from vllm_ascend.distributed.weight_transfer.hccl_common import (
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerSendWeightsArgs,
 )
-from vllm_ascend.distributed.weight_transfer.sparse_common import (
+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
     SparseWeightPatch,
     apply_sparse_patch,
 )

@@ -117,7 +117,7 @@ def _generate(client):
 
 
 def _build_sparse_patch(model, tokenizer):
-    from vllm_ascend.distributed.weight_transfer.sparse_common import (
+    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
         SparseWeightPatch,
     )
 

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.distributed.weight_transfer.sparse_common import SparseWeightPatch
+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import SparseWeightPatch
 from vllm_ascend.distributed.weight_transfer.sparse_npu_ipc_engine import (
     SparseNPUIPCWeightTransferEngine,
     SparseNPUIPCWeightTransferUpdateInfo,
@@ -148,14 +148,14 @@ def test_trainer_send_creates_paired_args_only_handles():
             wraps=SparseNPUIPCWeightTransferEngine._do_send,
         ),
         patch(
-            f"{_MODULE}.NPUIPCWeightTransferEngine._all_gather_and_merge_handles",
+            f"{_MODULE}.all_gather_and_merge_handles",
             side_effect=lambda handles: handles,
         ),
         patch(
-            f"{_MODULE}.NPUIPCWeightTransferEngine._is_rank_zero",
+            f"{_MODULE}.is_rank_zero",
             return_value=True,
         ),
-        patch(f"{_MODULE}.NPUIPCWeightTransferEngine._post_send_sync"),
+        patch(f"{_MODULE}.post_send_sync"),
     ):
         SparseNPUIPCWeightTransferEngine.trainer_send_weights(
             iter([patch_value]), args

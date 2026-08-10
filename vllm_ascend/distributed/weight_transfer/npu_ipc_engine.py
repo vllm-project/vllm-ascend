@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU IPC-based weight transfer engine using Ascend IPC for communication."""
 
-import os
-import socket
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -23,6 +20,12 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
+)
+from vllm_ascend.distributed.weight_transfer.npu_ipc_common import (
+    all_gather_and_merge_handles,
+    is_rank_zero,
+    npu_generate_uuid,
+    post_send_sync,
 )
 from vllm_ascend.utils import vllm_version_is
 
@@ -41,49 +44,6 @@ class NPUIPCWeightTransferInitInfo(WeightTransferInitInfo):
     """
 
     packed: bool = False
-
-
-@lru_cache(maxsize=1)
-def get_ip() -> str:
-    try:
-        # try to get ip from network interface
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception:  # noqa: BLE001
-        # fallback to get ip from hostname
-        return socket.gethostbyname(socket.gethostname())
-
-
-@lru_cache(maxsize=1)
-def npu_generate_uuid(logical_device: int | None = None) -> str:
-    """Generate a unique identifier for the current process's physical NPU chip.
-
-    Returns ``{host_ip}-{physical_chip_id}`` where ``host_ip`` is the local
-    machine's IP address and ``physical_chip_id`` is derived from the current
-    logical device index mapped through ``ASCEND_RT_VISIBLE_DEVICES``. The
-    logical index is read from the current device when it is not provided.
-
-    On Ascend NPU, ``torch.accelerator.current_device_index()`` returns the
-    *logical* device index. When ``ASCEND_RT_VISIBLE_DEVICES`` is set, it
-    maps logical indices to physical chip IDs (e.g., ``ASCEND_RT_VISIBLE_DEVICES=2,3``
-    means logical device 0 → physical chip 2, logical device 1 → physical chip 3).
-    If the env var is not set, the logical index is used directly as the
-    physical chip ID (identity mapping).
-
-    The result is cached because it is constant for the lifetime of the
-    process. Both the trainer and inference worker processes co-located
-    on the same physical NPU chip will produce the same UUID, which is
-    required for NPU IPC handle matching.
-    """
-    if logical_device is None:
-        logical_device = torch.accelerator.current_device_index()
-    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", None)
-    if visible_devices:
-        physical_device = int(visible_devices.split(",")[logical_device].strip())
-    else:
-        physical_device = logical_device
-    return f"{get_ip()}-{physical_device}"
 
 
 if vllm_version_is("0.26.0"):
@@ -277,50 +237,6 @@ if vllm_version_is("0.26.0"):
                 NPUIPCWeightTransferEngine._send_unpacked(iterator, args, npu_uuid)
 
         @staticmethod
-        def _is_rank_zero() -> bool:
-            """Return True if this is rank 0 or no distributed group exists."""
-            if not torch.distributed.is_initialized():
-                return True
-            return torch.distributed.get_rank() == 0
-
-        @staticmethod
-        def _all_gather_and_merge_handles(
-            handles: list[dict[str, tuple]],
-        ) -> list[dict[str, tuple]]:
-            """All-gather and merge IPC handle dicts across ranks.
-
-            Each rank contributes a list of ``{npu_uuid: ipc_args}`` dicts.
-            Rank 0 collects and merges per-index; other ranks receive a list
-            of empty dicts. No-op when no distributed group exists.
-            """
-            if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-                return handles
-
-            world_size = torch.distributed.get_world_size()
-            gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
-            torch.distributed.all_gather_object(gathered, handles)
-            torch.distributed.barrier()
-            torch.npu.synchronize()
-
-            if torch.distributed.get_rank() == 0:
-                merged: list[dict[str, tuple]] = []
-                for param_idx in range(len(handles)):
-                    m: dict[str, tuple] = {}
-                    for rank_handles in gathered:
-                        if rank_handles is not None:
-                            m.update(rank_handles[param_idx])
-                    merged.append(m)
-                return merged
-            return [{} for _ in handles]
-
-        @staticmethod
-        def _post_send_sync() -> None:
-            """Barrier + synchronize after a send; no-op if single-NPU."""
-            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-                torch.distributed.barrier()
-            torch.npu.synchronize()
-
-        @staticmethod
         def _send_unpacked(
             iterator: Iterator[tuple[str, torch.Tensor]],
             args: NPUIPCTrainerSendWeightsArgs,
@@ -349,9 +265,9 @@ if vllm_version_is("0.26.0"):
                 _, ipc_args = reduce_tensor(weight)
                 ipc_handles.append({npu_uuid: ipc_args})
 
-            ipc_handles = NPUIPCWeightTransferEngine._all_gather_and_merge_handles(ipc_handles)
+            ipc_handles = all_gather_and_merge_handles(ipc_handles)
 
-            if NPUIPCWeightTransferEngine._is_rank_zero():
+            if is_rank_zero():
                 NPUIPCWeightTransferEngine._do_send(
                     args=args,
                     names=names,
@@ -360,7 +276,7 @@ if vllm_version_is("0.26.0"):
                     ipc_handles=ipc_handles,
                 )
 
-            NPUIPCWeightTransferEngine._post_send_sync()
+            post_send_sync()
 
         @staticmethod
         def _send_packed(
@@ -377,9 +293,9 @@ if vllm_version_is("0.26.0"):
                 post_iter_func=post_iter_func,
                 buffer_size_bytes=args.packed_buffer_size_bytes,
             ):
-                ipc_handle = NPUIPCWeightTransferEngine._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
+                ipc_handle = all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
 
-                if NPUIPCWeightTransferEngine._is_rank_zero():
+                if is_rank_zero():
                     NPUIPCWeightTransferEngine._do_send(
                         args=args,
                         names=chunk["names"],
@@ -390,7 +306,7 @@ if vllm_version_is("0.26.0"):
                         packed=True,
                     )
 
-                NPUIPCWeightTransferEngine._post_send_sync()
+                post_send_sync()
 
         @staticmethod
         def _do_send(
@@ -637,7 +553,7 @@ else:
             weight_refs = self._send(source)
             if self.is_sender:
                 self.client.finish_weight_update()
-            self._post_send_sync()
+            post_send_sync()
             del weight_refs
 
         def _send(self, source: "WeightSource") -> list[torch.Tensor] | None:
@@ -645,45 +561,6 @@ else:
                 self._send_packed(source)
                 return None
             return self._send_unpacked(source)
-
-        def _all_gather_and_merge_handles(
-            self,
-            handles: list[dict[str, tuple]],
-        ) -> list[dict[str, tuple]]:
-            """All-gather and merge IPC handle dicts across ranks in one call.
-
-            Each rank contributes a list of ``{npu_uuid: ipc_args}`` dicts.
-            A single all_gather_object collects every rank's full list, then
-            the sender merges per-index so each dict maps every NPU UUID to
-            its args. No-op (returns handles unchanged) when no distributed
-            group exists.
-            """
-            if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-                return handles
-
-            world_size = torch.distributed.get_world_size()
-            gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
-            torch.distributed.all_gather_object(gathered, handles)
-            torch.distributed.barrier()
-            torch.npu.synchronize()
-
-            if self.is_sender:
-                merged: list[dict[str, tuple]] = []
-                for param_idx in range(len(handles)):
-                    m: dict[str, tuple] = {}
-                    for rank_handles in gathered:
-                        if rank_handles is not None:
-                            m.update(rank_handles[param_idx])
-                    merged.append(m)
-                return merged
-            return [{} for _ in handles]
-
-        @staticmethod
-        def _post_send_sync() -> None:
-            """Barrier + synchronize after a send; no-op if single-NPU."""
-            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-                torch.distributed.barrier()
-            torch.npu.synchronize()
 
         def _send_unpacked(self, source: "WeightSource") -> list[torch.Tensor]:
             """Iterate the source, build one IPC handle per param, all-gather
@@ -714,7 +591,9 @@ else:
                 _, ipc_args = reduce_tensor(weight)
                 ipc_handles.append({self.npu_uuid: ipc_args})
 
-            ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
+            ipc_handles = all_gather_and_merge_handles(
+                ipc_handles, is_sender=self.is_sender
+            )
             self._do_send(
                 names=names,
                 dtype_names=dtype_names,
@@ -733,7 +612,9 @@ else:
                 post_iter_func=post_iter_func,
                 buffer_size_bytes=self.packed_buffer_size_bytes,
             ):
-                ipc_handle = self._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
+                ipc_handle = all_gather_and_merge_handles(
+                    [chunk["ipc_handle"]], is_sender=self.is_sender
+                )[0]
                 self._do_send(
                     names=chunk["names"],
                     dtype_names=chunk["dtype_names"],
@@ -746,7 +627,7 @@ else:
                 # ranks race ahead and overwrite their buffer while their
                 # colocated worker is still reading the current chunk, silently
                 # corrupting the transfer.
-                self._post_send_sync()
+                post_send_sync()
 
         def _do_send(
             self,

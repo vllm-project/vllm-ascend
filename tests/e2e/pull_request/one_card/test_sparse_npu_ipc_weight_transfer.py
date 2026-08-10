@@ -114,7 +114,7 @@ def test_sparse_npu_ipc_updates_runtime_parameter_and_resumes_generation():
         columns = torch.arange(hidden_size, device=parameter.device)
         indices = (rows.unsqueeze(1) * hidden_size + columns).reshape(-1)
 
-        from vllm_ascend.distributed.weight_transfer.sparse_common import (
+        from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
             SparseWeightPatch,
         )
         from vllm_ascend.distributed.weight_transfer.sparse_npu_ipc_engine import (

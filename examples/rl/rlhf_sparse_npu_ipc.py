@@ -33,7 +33,7 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerSendWeightsArgs,
     NPUIPCWeightTransferEngine,
 )
-from vllm_ascend.distributed.weight_transfer.sparse_common import SparseWeightPatch
+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import SparseWeightPatch
 from vllm_ascend.distributed.weight_transfer.sparse_npu_ipc_engine import (
     SparseNPUIPCTrainerSendWeightsArgs,
     SparseNPUIPCWeightTransferEngine,

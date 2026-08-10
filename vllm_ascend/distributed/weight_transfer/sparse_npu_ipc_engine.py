@@ -22,10 +22,14 @@ from vllm.distributed.weight_transfer.base import (
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerSendWeightsArgs,
     NPUIPCWeightTransferInitInfo,
-    NPUIPCWeightTransferEngine,
-    npu_generate_uuid,
 )
-from vllm_ascend.distributed.weight_transfer.sparse_common import (
+from vllm_ascend.distributed.weight_transfer.npu_ipc_common import (
+    all_gather_and_merge_handles,
+    is_rank_zero,
+    npu_generate_uuid,
+    post_send_sync,
+)
+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
     SparseWeightPatch,
     apply_sparse_patch,
 )
@@ -258,13 +262,9 @@ class SparseNPUIPCWeightTransferEngine(
             index_handles.append({npu_uuid: index_args})
             value_handles.append({npu_uuid: value_args})
 
-        index_handles = NPUIPCWeightTransferEngine._all_gather_and_merge_handles(
-            index_handles
-        )
-        value_handles = NPUIPCWeightTransferEngine._all_gather_and_merge_handles(
-            value_handles
-        )
-        if NPUIPCWeightTransferEngine._is_rank_zero():
+        index_handles = all_gather_and_merge_handles(index_handles)
+        value_handles = all_gather_and_merge_handles(value_handles)
+        if is_rank_zero():
             SparseNPUIPCWeightTransferEngine._do_send(
                 args,
                 names,
@@ -274,7 +274,7 @@ class SparseNPUIPCWeightTransferEngine(
                 index_handles,
                 value_handles,
             )
-        NPUIPCWeightTransferEngine._post_send_sync()
+        post_send_sync()
         del tensor_refs
 
     @staticmethod
