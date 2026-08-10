@@ -1,3 +1,14 @@
+# 版本信息
+
+| 版本号 | vllm 版本 | vllm-ascend commitid |
+| ------ | -------- | -------------------- |
+| B060 | releases/v0.21.0 | 971d50b3f |
+| B070 | releases/v0.22.1 | 350d1f0ff |
+
+# 权重下载链接
+
+https://www.modelscope.cn/models/Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot
+
 # 权重 sha256sum
 
 ```shell
