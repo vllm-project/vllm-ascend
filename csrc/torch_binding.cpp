@@ -62,6 +62,7 @@
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
 #include <array>
+#include <cstdint>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -90,6 +91,18 @@ std::mutex& get_device_print_mutex()
 {
     static std::mutex device_print_mutex;
     return device_print_mutex;
+}
+
+std::mutex& get_pinned_host_mmap_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<void*, uint64_t>& get_pinned_host_mmaps()
+{
+    static std::unordered_map<void*, uint64_t> regions;
+    return regions;
 }
 
 void device_print_callback(void* args)
@@ -195,7 +208,10 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
         // aclrtMemcpyBatchAttr uses srcLoc/dstLoc (aclrtMemLocation)
         // to specify memory locations, not aclrtMemcpyKind.
         int32_t device_id = 0;
-        aclrtGetDevice(&device_id);
+        const aclError get_device_result = aclrtGetDevice(&device_id);
+        TORCH_CHECK(get_device_result == ACL_SUCCESS,
+                    "aclrtGetDevice failed with error code ",
+                    get_device_result);
 
         aclrtMemLocation host_loc = {};
         host_loc.type = ACL_MEM_LOCATION_TYPE_HOST;
@@ -253,6 +269,85 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                     ", dst=", dst_data[i],
                     ", size=", size_data[i]);
     }
+}
+
+bool supports_eccpu_offload()
+{
+#if defined(CANN_MEMCPY_BATCH_ASYNC) && defined(CANN_HOST_REGISTER_V2_PINNED)
+    return true;
+#else
+    return false;
+#endif
+}
+
+void register_pinned_host_mmap(const torch::Tensor& host_tensor)
+{
+    // mmap is pageable by default; request page locking explicitly.
+    TORCH_CHECK(host_tensor.device().is_cpu(),
+                "register_pinned_host_mmap expects a CPU tensor");
+    TORCH_CHECK(host_tensor.is_contiguous(),
+                "register_pinned_host_mmap expects a contiguous tensor");
+
+    void* ptr = host_tensor.data_ptr();
+    const uint64_t size = static_cast<uint64_t>(
+        host_tensor.numel() * host_tensor.element_size());
+    TORCH_CHECK(size > 0, "register_pinned_host_mmap expects a non-empty tensor");
+    TORCH_CHECK(reinterpret_cast<std::uintptr_t>(ptr) % 4096 == 0,
+                "register_pinned_host_mmap requires a 4 KiB-aligned mmap address, got ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+
+#if defined(CANN_HOST_REGISTER_V2_PINNED)
+    std::lock_guard<std::mutex> lock(get_pinned_host_mmap_mutex());
+    auto& regions = get_pinned_host_mmaps();
+    // Track the address and size to reject duplicate or mismatched operations.
+    TORCH_CHECK(regions.find(ptr) == regions.end(),
+                "Host mmap address is already registered as pinned memory: ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+
+    const aclError ret = aclrtHostRegisterV2(ptr, size, ACL_HOST_REG_PINNED);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "aclrtHostRegisterV2(ACL_HOST_REG_PINNED) failed with error code ",
+                ret, ", address=", reinterpret_cast<std::uintptr_t>(ptr),
+                ", size=", size);
+    regions.emplace(ptr, size);
+#else
+    TORCH_CHECK(false,
+                "Pinned shared mmap requires aclrtHostRegisterV2 with "
+                "ACL_HOST_REG_PINNED in the CANN headers/runtime");
+#endif
+}
+
+void unregister_pinned_host_mmap(const torch::Tensor& host_tensor)
+{
+    TORCH_CHECK(host_tensor.device().is_cpu(),
+                "unregister_pinned_host_mmap expects a CPU tensor");
+    TORCH_CHECK(host_tensor.is_contiguous(),
+                "unregister_pinned_host_mmap expects a contiguous tensor");
+
+#if defined(CANN_HOST_REGISTER_V2_PINNED)
+    void* ptr = host_tensor.data_ptr();
+    std::lock_guard<std::mutex> lock(get_pinned_host_mmap_mutex());
+    auto& regions = get_pinned_host_mmaps();
+    const auto it = regions.find(ptr);
+    TORCH_CHECK(it != regions.end(),
+                "Host mmap address is not registered as pinned memory: ",
+                reinterpret_cast<std::uintptr_t>(ptr));
+    const uint64_t size = static_cast<uint64_t>(
+        host_tensor.numel() * host_tensor.element_size());
+    TORCH_CHECK(it->second == size,
+                "Pinned host mmap size changed before unregister: registered=",
+                it->second, ", current=", size);
+
+    const aclError ret = aclrtHostUnregister(ptr);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "aclrtHostUnregister failed with error code ", ret,
+                ", address=", reinterpret_cast<std::uintptr_t>(ptr));
+    regions.erase(it);
+#else
+    TORCH_CHECK(false,
+                "Pinned shared mmap unregister is unavailable because this "
+                "extension was built without aclrtHostRegisterV2 support");
+#endif
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -2135,6 +2230,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // internally submits async memcpy on the current NPU stream.
     ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
+    ops.def("supports_eccpu_offload() -> bool");
+    ops.impl("supports_eccpu_offload", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::supports_eccpu_offload);
+    ops.def("register_pinned_host_mmap(Tensor x) -> ()");
+    ops.impl("register_pinned_host_mmap", torch::kCPU,
+             &vllm_ascend::register_pinned_host_mmap);
+    ops.def("unregister_pinned_host_mmap(Tensor x) -> ()");
+    ops.impl("unregister_pinned_host_mmap", torch::kCPU,
+             &vllm_ascend::unregister_pinned_host_mmap);
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));

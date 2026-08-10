@@ -27,7 +27,36 @@ from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _is_ec_producer_only
+
+
+class TestECConnectorRoleRouting(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
+    def test_producer_only_uses_encoder_only_path(self, _mock_has_ec_transfer, mock_get_ec_transfer):
+        mock_get_ec_transfer.return_value = SimpleNamespace(is_producer=True, is_consumer=False)
+
+        self.assertTrue(_is_ec_producer_only())
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
+    def test_consumer_does_not_use_encoder_only_path(self, _mock_has_ec_transfer, mock_get_ec_transfer):
+        mock_get_ec_transfer.return_value = SimpleNamespace(is_producer=False, is_consumer=True)
+
+        self.assertFalse(_is_ec_producer_only())
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
+    def test_both_does_not_use_encoder_only_path(self, _mock_has_ec_transfer, mock_get_ec_transfer):
+        mock_get_ec_transfer.return_value = SimpleNamespace(is_producer=True, is_consumer=True)
+
+        self.assertFalse(_is_ec_producer_only())
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    def test_disabled_ec_does_not_read_connector(self, _mock_has_ec_transfer, mock_get_ec_transfer):
+        self.assertFalse(_is_ec_producer_only())
+        mock_get_ec_transfer.assert_not_called()
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):

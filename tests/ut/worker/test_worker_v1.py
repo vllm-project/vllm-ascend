@@ -2008,12 +2008,15 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    @patch("vllm.distributed.kv_transfer.ensure_kv_transfer_shutdown", create=True)
-    def test_shutdown_releases_engine(self, _mock_kv_shutdown):
+    @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    def test_shutdown_releases_engine(self, mock_kv_shutdown, mock_ec_shutdown):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         worker.profiler = None
 
         worker.shutdown()
 
+        mock_kv_shutdown.assert_called_once_with()
+        mock_ec_shutdown.assert_called_once_with()
         engine.shutdown.assert_called_once()

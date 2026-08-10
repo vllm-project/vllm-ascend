@@ -152,6 +152,27 @@ else()
   endif()
 endif()
 
+# ECCPUConnector stores encoder-cache data in a shared mmap. Newer CANN releases
+# expose aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED), which turns those mmap
+# pages into real page-locked host memory. Keep the custom op available on older
+# CANN releases as well, but make it fail with an actionable error at runtime
+# instead of silently claiming that pageable memory is pinned.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    void* ptr = nullptr;
+    (void)aclrtHostRegisterV2(ptr, 0, ACL_HOST_REG_PINNED);
+    (void)aclrtHostUnregister;
+    return 0;
+  }
+" HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+if(HAVE_ACLRT_HOST_REGISTER_V2_PINNED)
+  message(STATUS "aclrtHostRegisterV2: pinned host registration available")
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_HOST_REGISTER_V2_PINNED)
+else()
+  message(STATUS "aclrtHostRegisterV2: pinned host registration unavailable; ECCPUConnector will be rejected")
+endif()
+
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()
