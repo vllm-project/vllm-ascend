@@ -120,7 +120,6 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
 
             print(f"Messages API test passed for prompt '{prompt}': {data}")
 
-
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
     """General assertion engine for aisbench outcomes mapped directly from YAML."""
 
