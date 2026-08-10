@@ -869,9 +869,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         group_index=None,
                         dst_type=torch.float8_e4m3fn,
                         quant_mode=2,
-                        clamp_value=fused_moe_evts.swiglu_limit,
-                        glu_alpha=fused_moe_evts.swiglu_alpha,
-                        glu_bias=fused_moe_evts.swiglu_beta,
+                        clamp_value=fused_moe_evts.swiglu_limit
                     )
                 # Execute the down projection concurrently with the combine
                 # communication.
