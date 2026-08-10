@@ -489,12 +489,3 @@ Several options are required or recommended for RL workloads to run correctly on
 | `--enable-return-routed-expert` | Required for MoE models | Both | Records expert routing decisions during inference so the trainer can replay them identically. **Required** for DeepSeek, Qwen-MoE, and any other MoE model in RL training. |
 | `--weight-transfer-config` | `{"backend": "nccl"}` or `{"backend": "ipc"}` | Cross-device | Enables in-place weight synchronization from trainer to rollout engine without restart. |
 | `--enable-auto-tool-choice` | Required for agentic RL | Both | Enables the model to emit structured tool calls that the RL environment can execute. |
-
-## References
-
-- Upstream vLLM RL documentation: [RLHF](https://docs.vllm.ai/en/latest/training/rlhf/), [Async Reinforcement Learning](https://docs.vllm.ai/en/latest/training/async_rl/), [Weight Transfer](https://docs.vllm.ai/en/latest/training/weight_transfer/)
-- Upstream RL-related features: [Batch Invariance](https://docs.vllm.ai/en/latest/features/batch_invariance/), [Tool Calling](https://docs.vllm.ai/en/latest/features/tool_calling/), [Return Routed Experts](https://docs.vllm.ai/en/latest/features/moe/#return-routed-experts), [SamplingParams](https://docs.vllm.ai/en/latest/dev/sampling_params/)
-- Token In / Token Out RFC: [vllm-project/vllm#22817](https://github.com/vllm-project/vllm/issues/22817)
-- vllm-ascend feature guides: [Sleep Mode](./sleep_mode.md), [Batch Invariance](./batch_invariance.md)
-- RL examples: [examples/rl](https://github.com/vllm-project/vllm-ascend/tree/main/examples/rl)
-- SGLang RL reference (for comparison): [SGLang for RL Systems](https://docs.sglang.ai/advanced_features/sglang_for_rl.html)
