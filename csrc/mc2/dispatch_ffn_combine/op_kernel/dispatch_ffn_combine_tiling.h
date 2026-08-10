@@ -32,6 +32,7 @@ struct DispatchFFNCombineInfo {
     uint32_t worldSize;
     uint32_t listLen;
     float swigluLimit;
+    float swigluAlpha;   // SwigluOAI alpha; 0.0=standard swiglu (compatible)
 };
 
 struct CoCTiling {
