@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -624,17 +624,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             tp_size = get_tensor_model_parallel_world_size()
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = (
-                1
-                if self.compressor_ratio <= 1
-                else 4
-                if self.compressor_ratio == 4
-                else 128
-            )
+            cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-                self.seqused_q.device
-            )
+            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -859,9 +851,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self._zero_i32,
                 self.cu_seqlens_ori_kv,
             )
-            cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(
-                self.cu_seqlens_cmp_kv
-            )
+            cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         return self._build_sas_metadata(
             metadata_cache=self.decode_ratio_to_sas_metadata,
             layer_name=layer_name,
