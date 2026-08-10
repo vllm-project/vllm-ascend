@@ -28,16 +28,19 @@ The full MiniMax-M2.7-w8a8-QuaRot checkpoint (62 layers) does not fit on
 surplus ``layers.{16..61}`` weights during loading.
 
 Both scenarios run ModelRunner V1 and V2 on the same machine and assert
-that V2 output throughput is not worse than V1 by more than 3%
-(``V2 >= V1 * 0.97``).
+that V2 mean output throughput is not worse than V1 by more than 3%
+(``V2 >= V1 * 0.97``). Each side runs ``NUM_BENCH_REPEATS`` rounds and
+the first round is discarded; the assertion compares the mean of the
+remaining rounds to reduce single-run throughput noise.
 
 Benchmarks use vLLM's built-in ``vllm bench serve`` CLI with its synthetic
 datasets (``random`` for 16k1k, ``prefix_repetition`` for 128k1k), so no
-external dataset publication is required. Each run is preceded by 5 warm-up
-requests that are excluded from the metrics, mirroring the internal
-methodology of discarding the first complete round. (Nightly single-node
-cases use aisbench instead; this PR E2E case follows the PR E2E toolchain,
-whose only performance precedent is ``tools/vllm_bench.py``.)
+external dataset publication is required. Each round is preceded by 5
+warm-up requests that are excluded from the metrics, and the first round
+itself is discarded, mirroring the internal methodology of discarding the
+first complete round. (Nightly single-node cases use aisbench instead;
+this PR E2E case follows the PR E2E toolchain, whose only performance
+precedent is ``tools/vllm_bench.py``.)
 """
 
 from __future__ import annotations
@@ -72,6 +75,10 @@ HF_OVERRIDES = {
 
 # V2 is considered not slower than V1 when V2 >= V1 * THROUGHPUT_THRESHOLD.
 THROUGHPUT_THRESHOLD = 0.97
+
+# Each side runs this many benchmark rounds on one server. The first round
+# is discarded and the assertion uses the mean of the remaining rounds.
+NUM_BENCH_REPEATS = 5
 
 SERVER_ENV = {
     "HCCL_OP_EXPANSION_MODE": "AIV",
@@ -202,38 +209,65 @@ def _run_bench(port: int, bench_args: list[str]) -> dict[str, Any]:
             return json.load(f)
 
 
-def _run_server_and_bench(use_v2: bool, bench_args: list[str]) -> dict[str, Any]:
+def _run_server_and_bench(use_v2: bool, bench_args: list[str]) -> list[dict[str, Any]]:
+    """Start one server and run the benchmark repeatedly on it.
+
+    Returns one result dict per round (``NUM_BENCH_REPEATS`` rounds).
+    """
     port = get_open_port()
     env_dict = {
         **SERVER_ENV,
         "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
     }
+    runner = "V2" if use_v2 else "V1"
+    results: list[dict[str, Any]] = []
     with RemotePDServer(_server_args(port), env_dict=env_dict, max_wait_seconds=1800) as server:
-        result = _run_bench(server.port, bench_args)
-    return result
+        for round_index in range(1, NUM_BENCH_REPEATS + 1):
+            print(f"[{runner}] bench round {round_index}/{NUM_BENCH_REPEATS}")
+            results.append(_run_bench(server.port, bench_args))
+    return results
 
 
-def _assert_v2_not_slower(v1: dict[str, Any], v2: dict[str, Any], case: str) -> None:
-    assert v1["failed"] == 0, f"[{case}] V1 had {v1['failed']} failed request(s)"
-    assert v2["failed"] == 0, f"[{case}] V2 had {v2['failed']} failed request(s)"
+def _mean_output_throughput(
+    results: list[dict[str, Any]],
+    case: str,
+    label: str,
+) -> float:
+    """Return the mean output throughput over all rounds except the first."""
+    for round_index, result in enumerate(results, 1):
+        assert result["failed"] == 0, f"[{case}] {label} round {round_index} had {result['failed']} failed request(s)"
+    kept = results[1:]
+    values = [float(result["output_throughput"]) for result in kept]
+    mean = sum(values) / len(values)
+    print(f"[{case}] {label} output_throughput per kept round: {[f'{v:.2f}' for v in values]} tok/s")
+    print(f"[{case}] {label} output_throughput mean: {mean:.2f} tok/s")
+    return mean
 
-    v1_throughput = float(v1["output_throughput"])
-    v2_throughput = float(v2["output_throughput"])
-    print(f"[{case}] V1: output_throughput={v1_throughput:.2f} tok/s")
-    print(f"[{case}] V2: output_throughput={v2_throughput:.2f} tok/s")
+
+def _assert_v2_not_slower(
+    v1_results: list[dict[str, Any]],
+    v2_results: list[dict[str, Any]],
+    case: str,
+) -> None:
+    v1_throughput = _mean_output_throughput(v1_results, case, "V1")
+    v2_throughput = _mean_output_throughput(v2_results, case, "V2")
     assert v2_throughput >= v1_throughput * THROUGHPUT_THRESHOLD, (
-        f"[{case}] V2 output throughput {v2_throughput:.2f} tok/s is below "
-        f"V1 * {THROUGHPUT_THRESHOLD} = {v1_throughput * THROUGHPUT_THRESHOLD:.2f} tok/s"
+        f"[{case}] V2 mean output throughput {v2_throughput:.2f} tok/s is below "
+        f"V1 mean * {THROUGHPUT_THRESHOLD} = {v1_throughput * THROUGHPUT_THRESHOLD:.2f} tok/s"
     )
 
 
 def _benchmark_pair(bench_args: list[str], case: str) -> dict[str, Any]:
-    """Run the same scenario on V1 then V2 and assert V2 >= V1 * 0.97."""
-    v1 = _run_server_and_bench(use_v2=False, bench_args=bench_args)
+    """Run the same scenario on V1 then V2 and assert V2 >= V1 * 0.97.
+
+    Each side runs ``NUM_BENCH_REPEATS`` rounds on a single server; the
+    first round is discarded and the assertion compares mean throughput.
+    """
+    v1_results = _run_server_and_bench(use_v2=False, bench_args=bench_args)
     wait_npu_memory_free(max_wait_seconds=120)
-    v2 = _run_server_and_bench(use_v2=True, bench_args=bench_args)
-    _assert_v2_not_slower(v1, v2, case)
-    return v2
+    v2_results = _run_server_and_bench(use_v2=True, bench_args=bench_args)
+    _assert_v2_not_slower(v1_results, v2_results, case)
+    return v2_results[-1]
 
 
 @pytest.mark.e2e_model(MINIMAX_M2_7_MODEL)
