@@ -213,9 +213,11 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/device_allocator
+    - vllm_ascend/patch/platform/patch_camem_allocator.py
   tests:
     - tests/ut/device_allocator
-    - tests/e2e/pull_request/one_card/test_camem.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
 
 # Distributed
 - name: distributed
@@ -599,6 +601,8 @@
     - tests/e2e/pull_request/one_card/test_guided_decoding.py
     - tests/e2e/pull_request/one_card/test_multi_instance.py
     - tests/e2e/pull_request/one_card/model_runner_v2
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py
+    - tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py
     - tests/e2e/pull_request/two_card/test_prefix_caching.py
     - tests/e2e/pull_request/two_card/test_qwen3_performance.py
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
@@ -790,6 +794,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 330
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 410
   tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 200
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 120
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 120
   tests/e2e/pull_request/one_card/test_sampler.py: 300
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 220
   tests/e2e/pull_request/one_card/test_vlm.py: 860
