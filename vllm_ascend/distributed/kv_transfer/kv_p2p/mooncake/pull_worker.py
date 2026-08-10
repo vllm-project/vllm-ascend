@@ -4,6 +4,7 @@
 
 import queue
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
 import msgspec
@@ -114,6 +115,12 @@ class MooncakePullRecvingThread(threading.Thread):
         assert self.pcp_size == 1, f"Mooncake pull worker temporarily requires pcp_size=1, got {self.pcp_size}"
         self.device = device
         self.ready_event = ready_event
+        self.executor = ThreadPoolExecutor(
+            max_workers=32,
+            initializer=torch.npu.set_device,
+            initargs=(self.device,),
+        )
+        self.can_report_invalid_block_ids = len(kv_cache_config.kv_cache_groups) == 1
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
         self.remote_metadata: SizedDict[str, MooncakeTransferMetadataGroups] = SizedDict()
@@ -162,15 +169,18 @@ class MooncakePullRecvingThread(threading.Thread):
             request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
                 remote_host, remote_port = self._get_remote_endpoint(request_endpoints)
-                self._handle_requests(
+                failed_request_ids = self._handle_requests(
                     remote_engine_id,
                     remote_host,
                     remote_port,
                     requests,
                 )
+                for request_id in failed_request_ids:
+                    self._mark_request_failed(requests[request_id])
             except Exception as exc:
-                for request_metadata in requests.values():
-                    self._mark_request_failed(request_metadata)
+                if self.can_report_invalid_block_ids:
+                    for request_metadata in requests.values():
+                        self._mark_request_failed(request_metadata)
                 logger.exception(
                     "Mooncake pull failed for remote engine %s at %s: %s",
                     remote_engine_id,
@@ -183,6 +193,8 @@ class MooncakePullRecvingThread(threading.Thread):
                 self.request_queue.task_done()
 
     def _mark_request_failed(self, request_metadata: ReqMeta) -> None:
+        if not self.can_report_invalid_block_ids:
+            return
         with self.invalid_block_ids_lock:
             for group_block_ids in request_metadata.local_block_ids:
                 self.invalid_block_ids.update(group_block_ids)
@@ -399,29 +411,67 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_host: str,
         remote_port: int,
         requests: dict[str, ReqMeta],
-    ) -> None:
+    ) -> set[str]:
         """Build and execute transfer buckets for one producer engine."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
         transfer_block_ids_by_spec: dict[str, dict[int, list[tuple[int, list[int], list[int]]]]] = {}
-        for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
-            pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
-            transfer_block_buckets = self._build_transfer_block_buckets(
-                pp_metadata,
-                layer_pairs,
-                tp_rank_groups_by_pp_rank[remote_pp_rank],
-                remote_metadata.dcp_size,
-                requests,
-                transfer_block_ids_by_spec,
-            )
-            self._execute_transfer_block_buckets(
-                remote_pp_rank,
-                pp_metadata,
-                remote_metadata.tp_size,
-                remote_metadata.dcp_size,
-                transfer_block_buckets,
-            )
+        future_to_task: dict[Future[None], tuple[int, int, set[str]]] = {}
+        submission_error: Exception | None = None
+        try:
+            for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
+                pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
+                transfer_block_buckets, request_ids_by_remote_tp_rank = self._build_transfer_block_buckets(
+                    pp_metadata,
+                    layer_pairs,
+                    tp_rank_groups_by_pp_rank[remote_pp_rank],
+                    remote_metadata.dcp_size,
+                    requests,
+                    transfer_block_ids_by_spec,
+                )
+                for remote_tp_rank, transfer_entries_by_spec in transfer_block_buckets.items():
+                    future = self.executor.submit(
+                        self._execute_tp_transfer_bucket,
+                        remote_pp_rank,
+                        remote_tp_rank,
+                        remote_metadata.tp_size,
+                        remote_metadata.dcp_size,
+                        pp_metadata,
+                        transfer_entries_by_spec,
+                    )
+                    future_to_task[future] = (
+                        remote_pp_rank,
+                        remote_tp_rank,
+                        request_ids_by_remote_tp_rank[remote_tp_rank],
+                    )
+        except Exception as exc:
+            submission_error = exc
+
+        failed_request_ids: set[str] = set()
+        for future in as_completed(future_to_task):
+            remote_pp_rank, remote_tp_rank, request_ids = future_to_task[future]
+            try:
+                future.result()
+            except Exception:
+                logger.exception(
+                    "Mooncake transfer task failed for remote PP rank %s, TP rank %s, requests=%s",
+                    remote_pp_rank,
+                    remote_tp_rank,
+                    sorted(request_ids),
+                )
+                if self.can_report_invalid_block_ids:
+                    failed_request_ids.update(request_ids)
+                else:
+                    logger.warning(
+                        "Ignoring Mooncake transfer failure for hybrid KV cache requests %s because "
+                        "vLLM invalid block reporting currently supports only one KV cache group",
+                        sorted(request_ids),
+                    )
+
+        if submission_error is not None:
+            raise submission_error
+        return failed_request_ids
 
     def _build_transfer_block_buckets(
         self,
@@ -431,12 +481,9 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_dcp_size: int,
         requests: dict[str, ReqMeta],
         transfer_block_ids_by_spec: dict[str, dict[int, list[tuple[int, list[int], list[int]]]]],
-    ) -> dict[
-        int,
-        dict[
-            int,
-            dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
-        ],
+    ) -> tuple[
+        dict[int, dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]],
+        dict[int, set[str]],
     ]:
         """Bucket one PP rank's requests by remote TP, spec index, and layer pair."""
         # remote_tp_rank -> local_spec_index -> (local_layer_index, remote_layer_index) ->
@@ -448,6 +495,7 @@ class MooncakePullRecvingThread(threading.Thread):
                 dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
             ],
         ] = {}
+        request_ids_by_remote_tp_rank: dict[int, set[str]] = {}
         for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
@@ -493,12 +541,13 @@ class MooncakePullRecvingThread(threading.Thread):
                     request_block_ids_by_spec[spec_index] = transfer_block_ids
 
                 for remote_tp_rank, local_block_ids, remote_block_ids in transfer_block_ids:
+                    request_ids_by_remote_tp_rank.setdefault(remote_tp_rank, set()).add(request_id)
                     transfer_entries_by_spec = transfer_block_buckets.setdefault(remote_tp_rank, {})
                     transfer_entries_by_layer = transfer_entries_by_spec.setdefault(spec_index, {})
                     transfer_entries_by_layer.setdefault(layer_pair, []).append(
                         (request_id, local_block_ids, remote_block_ids)
                     )
-        return transfer_block_buckets
+        return transfer_block_buckets, request_ids_by_remote_tp_rank
 
     @staticmethod
     def _expand_block_ids(block_ids: list[int], scale: int) -> list[int]:
@@ -1026,31 +1075,6 @@ class MooncakePullRecvingThread(threading.Thread):
                         src_list.append(local_base_addr + local_block_id * local_block_stride + local_inner_offset)
                         dst_list.append(remote_base_addr + remote_block_id * remote_block_stride + remote_inner_offset)
                         length_list.append(transfer_len)
-
-    def _execute_transfer_block_buckets(
-        self,
-        remote_pp_rank: int,
-        remote_metadata: MooncakePPTransferMetadata,
-        remote_tp_size: int,
-        remote_dcp_size: int,
-        transfer_block_buckets: dict[
-            int,
-            dict[
-                int,
-                dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
-            ],
-        ],
-    ) -> None:
-        """Calculate addresses and execute one PP rank's TP buckets serially."""
-        for remote_tp_rank, transfer_entries_by_spec in transfer_block_buckets.items():
-            self._execute_tp_transfer_bucket(
-                remote_pp_rank,
-                remote_tp_rank,
-                remote_tp_size,
-                remote_dcp_size,
-                remote_metadata,
-                transfer_entries_by_spec,
-            )
 
     def _execute_tp_transfer_bucket(
         self,
