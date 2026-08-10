@@ -81,9 +81,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
             ),
         )
         return final_hidden_states
