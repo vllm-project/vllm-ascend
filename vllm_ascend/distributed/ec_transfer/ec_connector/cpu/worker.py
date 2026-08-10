@@ -144,12 +144,14 @@ class AscendECCPUWorker(ECCPUWorker):
             f"{total_bytes} bytes but only {allocated_bytes} allocated"
         )
 
-        if self._save_bufs is None:
+        save_bufs = self._save_bufs
+        if save_bufs is None:
             total = sum(len(v) for v in connector_metadata.saves.values())
-            self._save_bufs = self._buf_pool.acquire(total)
+            save_bufs = self._buf_pool.acquire(total)
+            self._save_bufs = save_bufs
 
-        assert self._save_count + len(block_ids) <= self._save_bufs.src_ptrs.numel()
-        src_ptrs, dst_ptrs, sizes = self._save_bufs
+        assert self._save_count + len(block_ids) <= save_bufs.src_ptrs.numel()
+        src_ptrs, dst_ptrs, sizes = save_bufs
         src_base = src.data_ptr()
         dst_base = self._region.blocks.data_ptr()
         idx = self._save_count
