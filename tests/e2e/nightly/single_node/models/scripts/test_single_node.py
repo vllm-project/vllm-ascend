@@ -62,7 +62,8 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
     if isinstance(config.api_keyword_args, list):
         api_args_list = config.api_keyword_args
         if len(api_args_list) != len(prompts):
-            raise ValueError(f"api_keyword_args list length ({len(api_args_list)}) must match prompts length ({len(prompts)})")
+            raise ValueError(f"api_keyword_args list length ({len(api_args_list)}) "
+                             f"must match prompts length ({len(prompts)})")
     else:
         api_args_list = [config.api_keyword_args] * len(prompts)
 
@@ -82,17 +83,18 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
             request_body["stream"] = True
 
         if stream:
-            with requests.post(
+            with (requests.post(
                 f"{url}/v1/messages",
                 headers={"Content-Type": "application/json"},
                 json=request_body,
                 stream=True,
-            ) as response:
+            ) as response):
                 assert response.status_code == 200, f"Streaming request failed for prompt '{prompt}': {response.text}"
                 events = [line.decode("utf-8") for line in response.iter_lines() if line]
                 assert len(events) > 0, f"No SSE events received for prompt '{prompt}'"
                 assert any("message_start" in e for e in events), f"Missing 'message_start' event for prompt '{prompt}'"
-                assert any("content_block_delta" in e for e in events), f"Missing 'content_block_delta' event for prompt '{prompt}'"
+                assert any("content_block_delta" in e for e in events),(f"Missing 'content_block_delta'"
+                                                                        f" event for prompt '{prompt}'")
                 assert any("message_stop" in e for e in events), f"Missing 'message_stop' event for prompt '{prompt}'"
                 print(f"Messages API streaming test passed for prompt '{prompt}' (events={len(events)})")
         else:
