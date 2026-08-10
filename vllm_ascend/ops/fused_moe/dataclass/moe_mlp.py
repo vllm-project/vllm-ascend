@@ -31,6 +31,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 if TYPE_CHECKING:
     from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchOutput, TMoECombineMetadata
 
+
 @dataclass(frozen=True, slots=True)
 class MoEMlpComputeInput:
     """Input to MLP compute."""

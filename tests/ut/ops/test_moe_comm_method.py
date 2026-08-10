@@ -4,11 +4,6 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.fused_moe.moe_comm_method import (
-    AllGatherCommImpl,
-    AlltoAllCommImpl,
-    MC2CommImpl,
-)
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoEFusedExpertsInput,
@@ -16,6 +11,11 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEQuantParams,
     MoERoutingParams,
     MoEWeights,
+)
+from vllm_ascend.ops.fused_moe.moe_comm_method import (
+    AllGatherCommImpl,
+    AlltoAllCommImpl,
+    MC2CommImpl,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.quantization.methods.base import QuantType
