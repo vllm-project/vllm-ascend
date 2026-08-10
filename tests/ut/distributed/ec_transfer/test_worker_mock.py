@@ -194,7 +194,7 @@ def test_save_and_flush_builds_d2h_descriptors(monkeypatch):
 
 def test_save_is_noop_without_allocated_metadata(monkeypatch):
     worker = make_worker(dtype=torch.int8)
-    calls = []
+    calls: list[object] = []
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
 
     worker.save_caches({}, "missing", ECCPUConnectorMetadata())
@@ -208,7 +208,7 @@ def test_save_is_noop_without_allocated_metadata(monkeypatch):
 def test_non_save_rank_does_not_read_encoder_cache(monkeypatch):
     worker = make_worker(dtype=torch.int8)
     worker._is_save_rank = False
-    calls = []
+    calls: list[object] = []
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
     metadata = ECCPUConnectorMetadata(saves={"hash": [0]})
 
@@ -300,7 +300,7 @@ def test_load_is_noop_when_all_hashes_are_already_cached(monkeypatch):
     worker = make_worker(dtype=torch.float32)
     platform = FakePlatform()
     monkeypatch.setattr(worker_mod, "current_platform", platform)
-    calls = []
+    calls: list[object] = []
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
     existing = torch.zeros((1, 4), dtype=torch.float32)
     encoder_cache = {"cached": existing}
@@ -322,7 +322,7 @@ def test_load_releases_descriptors_when_dma_submission_fails(monkeypatch):
         raise RuntimeError("H2D submission failed")
 
     monkeypatch.setattr(worker_mod, "_swap_blocks_batch", fail_copy)
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     metadata = ECCPUConnectorMetadata(loads={"hash": [1]})
 
     with pytest.raises(RuntimeError, match="H2D submission failed"):
@@ -344,7 +344,7 @@ def test_invalid_block_ids_are_rejected(block_ids):
 
 def test_shutdown_unregisters_before_mmap_cleanup(monkeypatch):
     worker = make_worker()
-    order = []
+    order: list[str | tuple[str, int]] = []
     worker._region.cleanup = lambda: order.append("cleanup")
     monkeypatch.setattr(
         worker_mod.torch,
@@ -370,7 +370,7 @@ def test_shutdown_unregisters_before_mmap_cleanup(monkeypatch):
 
 def test_shutdown_preserves_mmap_when_device_synchronize_fails(monkeypatch):
     worker = make_worker()
-    order = []
+    order: list[str | tuple[str, int]] = []
     worker._region.cleanup = lambda: order.append("cleanup")
     monkeypatch.setattr(
         worker_mod,
