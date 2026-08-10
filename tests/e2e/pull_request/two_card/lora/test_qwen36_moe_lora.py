@@ -10,7 +10,7 @@ from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
-MODEL_PATH = "/data1/models/Qwen3.6-35B-A3B"
+MODEL_PATH = "Qwen/Qwen3.6-35B-A3B"
 
 LORA_2D_ID = 1
 LORA_3D_ID = 2
