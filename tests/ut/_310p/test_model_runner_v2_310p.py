@@ -101,6 +101,13 @@ def test_first_release_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_first_release_config(config)
 
 
+def test_first_release_config_accepts_async_scheduling() -> None:
+    config = _make_vllm_config()
+    config.scheduler_config.async_scheduling = True
+
+    NPUModelRunner310V2._validate_first_release_config(config)
+
+
 @pytest.mark.parametrize(
     "setting",
     [

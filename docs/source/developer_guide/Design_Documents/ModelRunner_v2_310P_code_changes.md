@@ -692,3 +692,47 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - `py_compile`、`ruff check` 和 `git diff --check` 已通过。
 - 当前 Windows Python 环境未安装 `pytest`，目标 UT 尚未在本机执行，需在服务器开发环境补跑。
 - 真实 310P TP2 eager、单请求 graph 和 15→16 bucket 多并发仍需在服务器环境验证。
+
+## 20. 异步调度校验放开
+
+问题现象：
+
+- vLLM 上游 MRV2 和当前 Ascend MRV2 公共路径已经支持 async scheduling。
+- 310P MRV2 在 runner 初始化阶段仍将 `scheduler_config.async_scheduling=True` 判定为
+  首版范围外特性，服务尚未进入执行路径就抛出 `NotImplementedError`。
+
+根因：
+
+- 310P 首版开发时使用了保守的特性白名单，异步调度尚未完成验证，因此增加了设备专用拦截。
+- 后续公共 MRV2 已提供异步调度需要的两批 in-flight buffer、异步输出 copy stream/Event、
+  `AsyncModelRunnerOutput` 返回路径和 executor 能力声明，但 310P 的旧校验没有同步移除。
+
+### `vllm_ascend/_310p/worker/v2/model_runner.py`
+
+改动内容：
+
+- 删除 `_validate_first_release_config()` 对 `async_scheduling` 的设备专用拒绝。
+- 继续复用上游 MRV2 的异步输出和调度机制，不在 310P 中复制另一套实现。
+
+安全性说明：
+
+- 310P sampler 产生的 device tensor 在上游 `AsyncOutput` 中由独立 copy stream 异步复制，
+  `torch.cuda.Stream/Event` 已由 Ascend MRV2 兼容层映射到 NPU 实现。
+- 310P 的 sampled-token、`total_len` 和 `num_computed_tokens` 状态仍在主 stream 上于下一步前完成
+  回写；长度 CPU mirror 使用独立 stream/Event，并在下一批 `_update_seq_lens_cpu()` 读取前同步。
+- 当前首版仍不支持 MTP、PP、DP、prefix cache 等既有拦截特性；本次只放开普通生成场景的
+  async scheduling，不扩大其他功能范围。
+- 修改只位于 310P MRV2 专用配置校验，不影响 310P MRV1 和其他机型。
+
+### `tests/ut/_310p/test_model_runner_v2_310p.py`
+
+改动内容：
+
+- 增加 `async_scheduling=True` 能通过 310P 首版配置校验的回归测试。
+- 既有非 TP 并行、MTP、prefix cache 和 EP 拒绝测试保持不变。
+
+验证状态：
+
+- `py_compile`、`ruff check` 和 `git diff --check` 已通过。
+- 当前 Windows Python 环境未安装 `pytest`，目标 UT 尚未在本机执行，需在服务器开发环境补跑。
+- 真实 310P 环境仍需分别验证 TP1/TP2、eager/ACLGraph、单请求/多并发，以及流式输出。

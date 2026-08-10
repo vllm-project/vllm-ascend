@@ -82,8 +82,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Expert parallelism is outside the 310P Model Runner V2 first-release scope.")
         if vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("KV transfer is outside the 310P Model Runner V2 first-release scope.")
-        if getattr(vllm_config.scheduler_config, "async_scheduling", False):
-            raise NotImplementedError("Async scheduling is outside the 310P Model Runner V2 first-release scope.")
         if getattr(vllm_config.model_config, "enable_sleep_mode", False):
             raise NotImplementedError("Sleep mode is outside the 310P Model Runner V2 first-release scope.")
 
