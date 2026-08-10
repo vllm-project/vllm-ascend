@@ -297,17 +297,19 @@ class AscendSFADSACPImpl(AscendSFAImpl):
     ):
         if self.enable_sparse_sfa_c8:
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        kv_a_layernorm = self.kv_a_layernorm
+        assert kv_a_layernorm is not None, "kv_a_layernorm must be initialized for DSA-CP KV preprocessing"
         B = kv_no_split.shape[0]
         kv_no_split = kv_no_split.view(B, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim)
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
-            self.kv_a_layernorm.weight,
+            kv_a_layernorm.weight,
             cos,
             sin,
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
-            epsilon=self.kv_a_layernorm.variance_epsilon,
+            epsilon=kv_a_layernorm.variance_epsilon,
             cache_mode="PA",
             is_output_kv=True,
         )
