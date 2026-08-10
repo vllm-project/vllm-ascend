@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.lora.lora_ops import bmm_expand_slice
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -67,6 +68,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
         self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+
+    def _requires_bmm_expand_slice(self, x: torch.Tensor, y_slice_size: int) -> bool:
+        return x.shape[-1] > y_slice_size
 
     def _shrink_prefill(
         self,
@@ -134,6 +138,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # No LoRA request, so return directly
         if self.no_lora:
             return
+        if self._requires_bmm_expand_slice(x, y_slice_size):
+            self._bmm_expand_slice(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
+            return
         self.sgmv_expand_slice(
             x,
             w_t_all,
@@ -153,7 +160,29 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
+        if self._requires_bmm_expand_slice(x, y_slice_size):
+            self._bmm_expand_slice(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
+            return
         self.bgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            self._get_token_lora_indices(x),
+            y_offset,
+            y_slice_size,
+            add_inputs,
+        )
+
+    def _bmm_expand_slice(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        y_offset: int,
+        y_slice_size: int,
+        add_inputs: bool,
+    ):
+        bmm_expand_slice(
             x,
             w_t_all,
             y,
