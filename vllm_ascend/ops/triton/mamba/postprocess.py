@@ -65,33 +65,39 @@ def postprocess_mamba_fused_kernel(
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
 
+    # Bounds check: num_reqs is the number of active batch rows. With
+    # HAS_IDX_MAPPING, req_idx is a (possibly sparse) request-state slot, so it
+    # must NOT be checked against num_reqs.
+    if batch_idx >= num_reqs:
+        return
+
     if HAS_IDX_MAPPING:
-        req_idx = tl.load(idx_mapping_ptr + batch_idx).to(tl.int32)
+        req_idx = tl.load(idx_mapping_ptr + batch_idx)
+        # -1 is the skip sentinel for inactive batch rows.
+        if req_idx < 0:
+            return
     else:
         req_idx = batch_idx
-
-    # Bounds check
-    if req_idx >= num_reqs:
-        return
 
     # Compute decision logic (mirrors postprocess_mamba Python reference)
     num_accepted = tl.load(num_accepted_tokens_ptr + req_idx)
     src_block_idx = tl.load(mamba_state_idx_ptr + req_idx)
-    num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
+
     if PRECOMPUTED_NEW_COMPUTED:
+        # num_computed_tokens_ptr already holds the post-step new_num_computed
+        # value (V2 supplies the advanced count). num_scheduled/num_draft are
+        # unused on this path and are passed as None, so they must not be
+        # loaded here.
         new_num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_tokens_running_state = new_num_computed - num_accepted + 1
     else:
+        num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
         num_computed = tl.load(num_computed_tokens_ptr + req_idx)
         num_draft = tl.load(num_draft_tokens_ptr + req_idx)
         num_tokens_running_state = num_computed + num_scheduled - num_draft
         new_num_computed = num_tokens_running_state + num_accepted - 1
 
     aligned_new_computed = (new_num_computed // block_size) * block_size
-
-    if not PRECOMPUTED_NEW_COMPUTED:
-        num_tokens_running_state = num_computed + num_scheduled - num_draft
-    else:
-        num_tokens_running_state = (new_num_computed // block_size) * block_size
 
     needs_copy = aligned_new_computed >= num_tokens_running_state
 
@@ -144,11 +150,14 @@ def postprocess_mamba_fused_kernel(
         # Number of elements to copy:
         # (conv_width - accept_token_bias) * inner_size
         if CONV_STATE_DIM_FIRST:
+            # DS conv layout: state[block, dim, state_len]. state_len is the
+            # slide axis, so copy per dim row: dim_row_count rows, each of
+            # (conv_width - accept_token_bias) * elem_size bytes, advancing both
+            # src and dst by dim_row_stride per row.
             dim_row_count = tl.load(state_dim_row_count_ptr + state_idx)
             dim_row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
-            num_rows_to_copy = (conv_width - accept_token_bias).to(tl.int64)
-            copy_size = dim_row_count * dim_row_stride
-            num_loops = num_rows_to_copy
+            copy_size = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
+            num_loops = dim_row_count
         else:
             num_elems_to_copy = (conv_width - accept_token_bias).to(tl.int64) * state_inner_size
             copy_size = num_elems_to_copy * state_elem_size
@@ -171,9 +180,16 @@ def postprocess_mamba_fused_kernel(
     # Mirror postprocess_mamba's trailing
     #     if src_block_idx == dest_block_idx: num_accepted_tokens_cpu[i] = 1
     # This runs whether or not the copy below is skipped (it's per-request, so
-    # only state_idx == 0 writes).
+    # only state_idx == 0 writes). The write target depends on the caller:
+    # main (after vLLM #50432) passes a non-null output buffer and reads from a
+    # snapshot; v0.26.0 passes None for the output and updates the input buffer
+    # in place under HAS_IDX_MAPPING. Distinguish by whether an output buffer
+    # was provided, since both lanes use HAS_IDX_MAPPING=True on the V2 path.
     if src_block_idx == dest_block_idx and state_idx == 0:
-        tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+        if num_accepted_tokens_out_ptr is None:
+            tl.store(num_accepted_tokens_ptr + req_idx, 1)
+        else:
+            tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
 
     # Mirror collect_mamba_copy_meta's early return: src==dst with no token
     # bias means source and destination ranges coincide, so the copy is a
@@ -186,10 +202,23 @@ def postprocess_mamba_fused_kernel(
     # inside the loop (SmallVector assertion `idx < size()`); casting once
     # here and doing plain pointer arithmetic inside the loop is the same fix
     # vllm-ascend applies to batch_memcpy_kernel.
-    src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
-    dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for _ in range(num_loops):
+    if CONV_STATE_DIM_FIRST and is_conv_state:
+        # DS conv layout: state[block, dim, state_len]. state_len is the slide
+        # axis, so copy per dim row: dim_row_count rows, each of
+        # (conv_width - accept_token_bias) * elem_size bytes, advancing both
+        # src and dst by dim_row_stride per row.
+        for row in range(num_loops):
+            row_src = (src_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
+            row_dst = (dst_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
+            for i in range(0, copy_size, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < copy_size
+                data = tl.load(row_src + i + offsets, mask=mask)
+                tl.store(row_dst + i + offsets, data, mask=mask)
+    else:
+        # SD conv / temporal: single contiguous region.
+        src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
         for i in range(0, copy_size, COPY_BLOCK_SIZE):
             mask = (i + offsets) < copy_size
             data = tl.load(src_ptr + i + offsets, mask=mask)
