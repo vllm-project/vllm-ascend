@@ -384,8 +384,15 @@ class MembPullReadThread(threading.Thread):
 
         scale = None
         scale_tensor = state.indexer_scale_tensors[pool_idx] if pool_idx < len(state.indexer_scale_tensors) else None
+        scale_pos = main_tensor_count + 1
+        p_has_scale = len(p_base_addrs) > scale_pos
+        d_has_scale = scale_tensor is not None
+        if p_has_scale != d_has_scale:
+            raise RuntimeError(
+                f"MembPull indexer scale presence mismatch for {layer_name}: P={p_has_scale}, D={d_has_scale}"
+            )
+
         if scale_tensor is not None:
-            scale_pos = main_tensor_count + 1
             if len(p_base_addrs) <= scale_pos:
                 scale = {"error": "p_addr_mismatch", "p_n": len(p_base_addrs)}
             else:

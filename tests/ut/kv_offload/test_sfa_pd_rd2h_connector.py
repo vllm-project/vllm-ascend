@@ -268,6 +268,58 @@ def test_non_tp0_resolves_broadcast_main_gva_without_cpu_tensor():
 
 
 @pytest.mark.parametrize(
+    ("p_has_scale", "d_has_scale"),
+    [(True, False), (False, True)],
+)
+def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scale, d_has_scale):
+    thread = _make_read_thread()
+    layer_name = "model.layers.0.self_attn"
+    thread._state.main_name_to_idx = {layer_name: 0}
+    thread._state.main_gva_bases = [(3000, 4000)]
+    thread._state.main_block_lens = [(10, 20)]
+    thread._state.indexer_tensors = [
+        SimpleNamespace(
+            shape=(16, 1, 1, 5),
+            element_size=lambda: 1,
+            data_ptr=lambda: 8000,
+        )
+    ]
+    thread._state.indexer_scale_tensors = [
+        SimpleNamespace(
+            shape=(16, 1),
+            element_size=lambda: 1,
+            data_ptr=lambda: 9000,
+        )
+        if d_has_scale
+        else None
+    ]
+    base_addrs = [1000, 2000, 7000]
+    block_len = [10, 20, 5]
+    block_size_scale = [1, 1, 1]
+    if p_has_scale:
+        base_addrs.append(9000)
+        block_len.append(1)
+        block_size_scale.append(1)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"indexer scale presence mismatch.*P={p_has_scale}, D={d_has_scale}",
+    ):
+        thread._resolve_read_layer(
+            layer_name,
+            {
+                layer_name: {
+                    "base_addrs": base_addrs,
+                    "block_len": block_len,
+                    "block_size_scale": block_size_scale,
+                    "main_tensor_count": 2,
+                    "has_indexer": True,
+                }
+            },
+        )
+
+
+@pytest.mark.parametrize(
     (
         "k_cpu_ptr",
         "v_cpu_ptr",
