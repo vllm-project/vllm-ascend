@@ -24,15 +24,6 @@ msgstr "# Hunyuan-A13B-Instruct"
 msgid "## Introduction"
 msgstr "## 简介"
 
-msgid ""
-"Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed "
-"by Tencent. This model has a total of 80 billion parameters, 13 billion "
-"activation parameters, supports 256K ultra-long contexts, and possesses "
-"native thought chain (CoT) reasoning capabilities."
-msgstr ""
-"Hunyuan-A13B-Instruct "
-"是腾讯开发的一款细粒度混合专家模型（MoE）。该模型总参数量达800亿，激活参数量为130亿，支持256K超长上下文，并具备原生思维链（CoT）推理能力。"
-
 msgid "## Environment Preparation"
 msgstr "## 环境准备"
 
@@ -155,3 +146,12 @@ msgstr "输出："
 
 msgid "| dataset | version | metric | mode | vllm-api-general-chat |"
 msgstr "| 数据集 | 版本 | 指标 | 模式 | vllm-api-general-chat |"
+
+msgid ""
+"Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed "
+"by Tencent. This model has a total of 80 billion parameters, 13 billion "
+"activation parameters, supports 256k ultra-long contexts, and possesses "
+"native thought chain (CoT) reasoning capabilities."
+msgstr ""
+"Hunyuan-A13B-Instruct "
+"是由腾讯开发的细粒度混合专家模型（MoE）。该模型总参数量为800亿，激活参数量为130亿，支持256k超长上下文，并具备原生思维链（CoT）推理能力。"

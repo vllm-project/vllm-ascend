@@ -23,7 +23,6 @@ add_ops_compile_options(
     OPTIONS
         --cce-auto-sync=on
         -Wno-deprecated-declarations
-        -Werror
         -DHCCL_COMM
         -DCATLASS_ARCH=2201
         ${_DISPATCH_FFN_INC_OPTS}

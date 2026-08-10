@@ -35,7 +35,8 @@ class MiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x_sliced, residual, weight, None, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(x_sliced, residual)
+            result, _, residual = self._add_rms_norm_bias(x_sliced, residual, weight)
 
             return result, residual
 
@@ -43,7 +44,7 @@ class MiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):
             input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, num_tokens
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.ops.vllm.maybe_chunk_residual(input, residual)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight, None, self.eps)
+            result, _, residual = self._add_rms_norm_bias(input, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
@@ -74,7 +75,8 @@ class LastLayerAllgatherRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
-            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(x_sliced, residual, weight, None, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(x_sliced, residual)
+            result, _, _ = self._add_rms_norm_bias(x_sliced, residual, weight)
 
             return result
 
@@ -82,7 +84,7 @@ class LastLayerAllgatherRMSNormPattern(_SequenceParallelPatternHelper):
             input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, num_tokens
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.ops.vllm.maybe_chunk_residual(input, residual)
-            result, _, _ = torch.ops._C_ascend.npu_add_rms_norm_bias(input, residual, weight, None, self.eps)
+            result, _, _ = self._add_rms_norm_bias(input, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather
 
@@ -118,8 +120,9 @@ class Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelpe
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = self._all_gather(input)
             x_sliced = all_gather[:num_tokens]
+            residual = torch.ops.vllm.maybe_chunk_residual(x_sliced, residual)
             add_ = x_sliced + deepstack_input_embeds
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
+            result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
 
             return result, residual
 
@@ -133,7 +136,7 @@ class Qwen3VLMiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelpe
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = input + chunk
             residual = torch.ops.vllm.maybe_chunk_residual(input, residual)
-            result, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(add_, residual, weight, None, self.eps)
+            result, _, residual = self._add_rms_norm_bias(add_, residual, weight)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
@@ -186,9 +189,9 @@ class SequenceParallelismMoePass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        logger.debug("before apply replacement %s", str(graph))
+        logger.debug("SequenceParallelismMoePass before apply replacement\n%s", graph.graph)
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("after apply replacement %s", str(graph))
+        logger.debug("SequenceParallelismMoePass after apply replacement\n%s", graph.graph)
         logger.debug("SequenceParallelismMoePass replaced %s patterns", self.matched_count)
         pattern_idx = 0
         for pattern_entry in self.patterns.patterns.values():

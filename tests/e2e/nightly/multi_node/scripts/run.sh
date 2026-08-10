@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+BISECT_SOC="${1:-}"
+MAX_GOOD_AGE_DAYS="${2:-3}"
+BISECT_SCENE="${3:-multi_node}"
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
@@ -24,10 +28,25 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # cann and atb environment setup
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/cann-9.0.1/share/info/ascendnpu-ir/bin/set_env.sh
+
+# The CANN install directory varies between release (cann-9.0.1) and daily
+# (e.g. cann-2026.08.03) images, so discover it dynamically instead of
+# hardcoding a version-specific path. The ascendnpu-ir component is optional;
+# a missing component must not abort the script.
+CANN_DIR=$(ls -d /usr/local/Ascend/cann-* 2>/dev/null | head -1 || true)
+CANN_IR_SET_ENV="${CANN_DIR}/share/info/ascendnpu-ir/bin/set_env.sh"
+if [ -n "${CANN_DIR}" ] && [ -f "${CANN_IR_SET_ENV}" ]; then
+    source "${CANN_IR_SET_ENV}"
+else
+    echo "WARNING: ascendnpu-ir set_env.sh not found (CANN_DIR=${CANN_DIR:-none}), skipping" >&2
+fi
 
 set +eu
-source /usr/local/Ascend/nnal/atb/set_env.sh
+if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+else
+    echo "WARNING: /usr/local/Ascend/nnal/atb/set_env.sh not found, skipping" >&2
+fi
 set -eu
 
 # Home path for aisbench
@@ -252,6 +271,7 @@ run_tests_with_log() {
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
                 --bad-commit HEAD \
+                --soc "$BISECT_SOC" \
                 --coord-dir "${coord}" \
                 --release-file "${release}"
             while [ ! -f "$release" ]; do sleep 5; done
@@ -268,6 +288,10 @@ run_tests_with_log() {
 aop_pipeline() {
     local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
     local table="${GOOD_TABLE:-}"
+    if [[ -z "$BISECT_SOC" || "$BISECT_SOC" == "unknown" ]]; then
+        echo "ERROR: missing or invalid SOC for AOP lookup"
+        return 1
+    fi
     # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
     local case_name="${BENCHMARK_JOB_NAME#*-}"
     if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then
@@ -347,9 +371,15 @@ aop_pipeline() {
         return 1
     fi
 
-    # Only consider success rows
+    # Match the name and, for new-schema rows, the current SoC and scene.
+    # Legacy seven-column rows have no dimensions and remain eligible during
+    # migration.
     local success_rows
-    success_rows=$(grep "^${case_name}," "$table" | grep -F ',success,' || true)
+    success_rows=$(awk -F',' -v name="$case_name" -v soc="$BISECT_SOC" -v scene="$BISECT_SCENE" '
+        NR > 1 && $1 == name && tolower($4) == "success" &&
+        (soc == "" || NF < 9 || $7 == soc) &&
+        (scene == "" || NF < 9 || $8 == scene) { print }
+    ' "$table")
     if [ -z "$success_rows" ]; then
         echo "  No success row found for '${case_name}'"
         echo "  Decision: no success entry → SKIP"
@@ -386,10 +416,16 @@ aop_pipeline() {
     fi
     now_ts=$(date +%s)
     age_days=$(( (now_ts - last_ts) / 86400 ))
-    echo "  Last success: ${best_date} (${age_days} days ago, threshold: 3 days)"
+    local max_age_days="$MAX_GOOD_AGE_DAYS"
+    if ! [[ "$max_age_days" =~ ^[0-9]+$ ]]; then
+        echo "  Invalid max good age: ${max_age_days}"
+        echo "  Decision: invalid age threshold → SKIP"
+        return 1
+    fi
+    echo "  Last success: ${best_date} (${age_days} days ago, threshold: ${max_age_days} days)"
 
-    if [ "$age_days" -gt 3 ]; then
-        echo "  Decision: old commit (> 3 days) → SKIP"
+    if [ "$age_days" -gt "$max_age_days" ]; then
+        echo "  Decision: old commit (> ${max_age_days} days) → SKIP"
         echo "=== AOP Pipeline (Pod) - END (age skip) ==="
         return 1
     fi
@@ -424,6 +460,7 @@ aop_pipeline() {
         --bad-commit HEAD \
         --good-table "${table}" \
         --name "${case_name}" \
+        --soc "$BISECT_SOC" \
         --coord-dir "${coord}" || bisect_rc=$?
     echo "  bisect completed (exit code: ${bisect_rc})"
     echo "=== AOP Pipeline (Pod) - END ==="

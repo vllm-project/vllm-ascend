@@ -24,8 +24,6 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
-pytestmark = pytest.mark.skip(reason="broken on vLLM v0.24.0 and the verified main commit, fix me.")
-
 
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():

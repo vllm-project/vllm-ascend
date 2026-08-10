@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch_npu
 from vllm.config import CUDAGraphMode
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
@@ -43,7 +42,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
@@ -52,12 +50,16 @@ from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_rc_device, lmhead_tp_enable
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    is_rc_device,
+    lmhead_tp_enable,
+)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -228,7 +230,7 @@ class NPUModelRunner310(NPUModelRunner):
             query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        copy_snapshot_to_gpu(query_start_loc)
+        query_start_loc.copy_to_gpu()
         return num_reqs_padded
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
@@ -344,8 +346,8 @@ class NPUModelRunner310(NPUModelRunner):
             positions_np[:total_num_scheduled_tokens],
         )
 
-        if self.use_cp:
-            self.pcp_manager.init_batch_info(
+        if self.use_dcp:
+            self.dcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
                 self.input_batch.num_computed_tokens_cpu,
@@ -359,8 +361,8 @@ class NPUModelRunner310(NPUModelRunner):
             self.prev_positions.copy_to_gpu(num_reqs)
             prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
 
-        if self.speculative_config and self.use_cp:
-            self.pcp_manager.generate_pcp_mtp_input(
+        if self.speculative_config and self.use_dcp:
+            self.dcp_manager.generate_dcp_mtp_input(
                 total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens,
                 with_prefill,
@@ -375,24 +377,7 @@ class NPUModelRunner310(NPUModelRunner):
                 prev_positions=prev_positions_gpu,
             )
 
-        if self.pcp_size > 1:
-            num_scheduled_tokens[:num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
-                num_scheduled_tokens[:num_reqs], self.arange_np
-            )
-            total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
-            positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
-            np.add(
-                self.input_batch.num_computed_tokens_cpu[req_indices],
-                position_pcp[:total_num_scheduled_tokens],
-                out=positions_np,
-            )
-        if self.pcp_size > 1 and self.pcp_manager.pcp_use_hybrid_attn:
-            assert self.pcp_manager.num_scheduled_tokens_padded is not None
-            self.query_lens = torch.from_numpy(self.pcp_manager.num_scheduled_tokens_padded)
-        else:
-            self.query_lens = torch.from_numpy(num_scheduled_tokens)
+        self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         token_indices = positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
         token_indices_tensor = torch.from_numpy(token_indices)
@@ -422,29 +407,20 @@ class NPUModelRunner310(NPUModelRunner):
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
-                if self.pcp_size > 1:
-                    req_positions_np = positions_np[output_idx : output_idx + num_sched]
-                    dst_slice = self.inputs_embeds.cpu[output_idx : output_idx + num_sched]
-                    self.pcp_manager.fill_prompt_embeds_for_pcp(
-                        req_embeds=req_embeds,
-                        req_positions_np=req_positions_np,
-                        dst_slice=dst_slice,
+                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+
+                if start_pos >= req_embeds.shape[0]:
+                    output_idx += num_sched
+                    continue
+
+                end_pos = start_pos + num_sched
+                actual_end = min(end_pos, req_embeds.shape[0])
+                actual_num_sched = actual_end - start_pos
+
+                if actual_num_sched > 0:
+                    self.inputs_embeds.cpu[output_idx : output_idx + actual_num_sched].copy_(
+                        req_embeds[start_pos:actual_end]
                     )
-                else:
-                    start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
-
-                    if start_pos >= req_embeds.shape[0]:
-                        output_idx += num_sched
-                        continue
-
-                    end_pos = start_pos + num_sched
-                    actual_end = min(end_pos, req_embeds.shape[0])
-                    actual_num_sched = actual_end - start_pos
-
-                    if actual_num_sched > 0:
-                        self.inputs_embeds.cpu[output_idx : output_idx + actual_num_sched].copy_(
-                            req_embeds[start_pos:actual_end]
-                        )
 
                 output_idx += num_sched
 
@@ -452,13 +428,13 @@ class NPUModelRunner310(NPUModelRunner):
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         if is_rc_device():
             self.query_start_loc.np[num_reqs + 1 :].fill(-1)
-        copy_snapshot_to_gpu(self.query_start_loc)
+        self.query_start_loc.copy_to_gpu()
 
         if self._has_gdn:
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            copy_snapshot_to_gpu(self.gdn_query_start_loc)
+            self.gdn_query_start_loc.copy_to_gpu()
 
         torch.add(
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
@@ -488,15 +464,7 @@ class NPUModelRunner310(NPUModelRunner):
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
         num_reqs = base_num_reqs
-        tokens_original = None
-        if self.pcp_size > 1:
-            tokens_original = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
-            original_seq_lens_np = self.input_batch.num_computed_tokens_cpu[:num_reqs] + np.array(
-                tokens_original, dtype=np.int32
-            )
-            discard_requests_mask = original_seq_lens_np < num_tokens_np
-        else:
-            discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
+        discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
@@ -554,11 +522,7 @@ class NPUModelRunner310(NPUModelRunner):
             spec_decode_metadata = None
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-            if self.use_cp:
-                logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens, num_reqs, tokens_original)
-                logits_indices = logits_indices.pin_memory().to(self.device, non_blocking=True)
-            else:
-                logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
+            logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
         else:
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
             new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
@@ -580,7 +544,6 @@ class NPUModelRunner310(NPUModelRunner):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens,
                 cu_num_tokens,
-                num_pcp_pads=self.pcp_manager.num_pcp_pads_cpu[:num_reqs] if self.pcp_size > 1 else None,
             )
             logits_indices = spec_decode_metadata.logits_indices
             num_sampled_tokens = num_draft_tokens + 1
@@ -597,18 +560,6 @@ class NPUModelRunner310(NPUModelRunner):
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
-
-        if (
-            self.pcp_size > 1
-            and self.supports_mm_inputs
-            and get_pp_group().is_first_rank
-            and not self.model_config.is_encoder_decoder
-        ):
-            self.pcp_manager.cache_local_schedule_layout(
-                num_scheduled_tokens=num_scheduled_tokens,
-                num_reqs=base_num_reqs,
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
-            )
 
         return (
             logits_indices,
@@ -700,7 +651,6 @@ class NPUModelRunner310(NPUModelRunner):
             self._update_full_graph_params_if_needed(
                 forward_context,
                 num_tokens_padded,
-                positions,
             )
             if update_before_replay:
                 torch.npu.current_stream().wait_stream(self.update_stream)
@@ -710,7 +660,6 @@ class NPUModelRunner310(NPUModelRunner):
             self._update_full_graph_params_if_needed(
                 forward_context,
                 num_tokens_padded,
-                positions,
             )
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
@@ -999,9 +948,9 @@ class NPUModelRunner310(NPUModelRunner):
 
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        total_cp_world_size = get_total_cp_world_size()
+        dcp_world_size = get_decode_context_model_parallel_world_size()
         for kv_cache_spec in kv_cache_specs:
-            max_num_blocks_per_req = cdiv(max_model_len, kv_cache_spec.block_size * total_cp_world_size)
+            max_num_blocks_per_req = cdiv(max_model_len, kv_cache_spec.block_size * dcp_world_size)
             if isinstance(kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1

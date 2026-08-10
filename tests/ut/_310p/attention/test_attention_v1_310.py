@@ -187,11 +187,12 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
         mock_npu_paged_attention_splitfuse.assert_called_once()
 
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
     @patch("torch_npu._npu_paged_attention", create=True)
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_paged_attention_310(
-        self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_paged_attention
+        self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_paged_attention, mock_using_paged_attention
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(4, 8 * 64)
@@ -206,6 +207,8 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
         metadata.num_decodes = 4
         metadata.num_prefills = 0
+        mock_using_paged_attention.return_value = True
+
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
         output = self.impl.forward_impl(query, key, value, None, metadata, output)

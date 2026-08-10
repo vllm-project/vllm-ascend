@@ -60,7 +60,15 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
+_MINIMAX_M3_PACKED_MODULES = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+}
+
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
+    "minimax_m3": _MINIMAX_M3_PACKED_MODULES,
+    "minimax_m3_vl": _MINIMAX_M3_PACKED_MODULES,
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",
@@ -575,20 +583,40 @@ class AscendModelSlimConfig(QuantizationConfig):
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """Map checkpoint C8 KV scale/offset names to vLLM parameter names."""
-        if self.quant_description.get("kv_cache_type") != "C8":
-            return None
-        _C8_SCALE_MAPPING = {
-            "k_proj.kv_cache_scale": "attn.k_cache_scale",
-            "k_proj.kv_cache_offset": "attn.k_cache_offset",
-            "v_proj.kv_cache_scale": "attn.v_cache_scale",
-            "v_proj.kv_cache_offset": "attn.v_cache_offset",
-        }
-        for src_suffix, dst_suffix in _C8_SCALE_MAPPING.items():
-            if name.endswith(src_suffix):
-                return name[: -len(src_suffix)] + dst_suffix
-        return None
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
+        """Upstream use staticmethod, but we need to use instance attribute"""
+        suffix_map = {}
+        if self.enable_c8_quant:
+            suffix_map.update(
+                {
+                    ".k_proj.kv_cache_scale": ".attn.k_cache_scale",
+                    ".k_proj.kv_cache_offset": ".attn.k_cache_offset",
+                    ".v_proj.kv_cache_scale": ".attn.v_cache_scale",
+                    ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
+                }
+            )
+        if self.enable_fa_quant:
+            suffix_map.update(
+                {
+                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
+                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
+                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
+                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
+                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
+                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                }
+            )
+        if self.enable_indexer_quant:
+            suffix_map.update(
+                {
+                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
+                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
+                }
+            )
+        if not suffix_map:
+            return QuantizationConfig.get_cache_scale_mapper()
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
@@ -688,7 +716,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         elif _is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
-                from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+                from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)

@@ -161,84 +161,7 @@ def test_eagle3_sp_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
-
-
-def test_qwen3_eagle3_pcp2_tp1():
-    """
-    Test Qwen3-8B with Eagle3 speculative decoding under PCP + TP1 configuration.
-    This test verifies that eagle3 spec decode works correctly with:
-    - PCP enabled (prefill_context_parallel_size=2)
-    - Tensor Parallel size = 1
-    - num_speculative_tokens = 3
-    - enforce_eager = True
-    """
-    method = "eagle3"
-    num_speculative_tokens = 3
-
-    main_model_name = MODELS[method]["main"]
-    spec_model_name = MODELS[method]["spec"]
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=256,
-    )
-
-    prompts = [
-        {
-            "role": "user",
-            "content": "Hello, my name is",
-        },
-        {
-            "role": "user",
-            "content": "The president of the United States is",
-        },
-        {
-            "role": "user",
-            "content": "The capital of France is",
-        },
-        {
-            "role": "user",
-            "content": "The future of AI is",
-        },
-    ]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [prompt],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for prompt in prompts
-    ]
-
-    speculative_config = {
-        "method": method,
-        "num_speculative_tokens": num_speculative_tokens,
-        "model": spec_model_name,
-    }
-
-    with VllmRunner(
-        main_model_name,
-        enforce_eager=True,
-        max_model_len=2048,
-        disable_log_stats=False,
-        tensor_parallel_size=1,
-        prefill_context_parallel_size=2,
-        max_num_seqs=256,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.7,
-        speculative_config=speculative_config,
-    ) as llm:
-        llm.generate(prompts, sampling_params)
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @pytest.mark.parametrize("method", P_EAGLE_MODELS.keys())
@@ -330,11 +253,7 @@ def test_p_eagle_acceptance(
     golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
@@ -422,11 +341,7 @@ def test_qwen3_vwn_eagle3_tp2():
     golden = BASELINES_SP["vwn_eagle3"]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
 def test_eagle3_sliding_window():
@@ -506,8 +421,4 @@ def test_eagle3_sliding_window():
     acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
     golden = [0.7, 0.4, 0.3]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

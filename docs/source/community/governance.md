@@ -2,7 +2,7 @@
 
 ## Mission
 
-As a vital component of vLLM, the vLLM Ascend project is dedicated to providing an easy, fast, and cheap LLM Serving for everyone on Ascend NPUs and to actively contributing to the enrichment of vLLM.
+As a vital component of vLLM, the vLLM Ascend project is dedicated to providing an easy, fast, and cheap LLM Serving for everyone on Ascend NPUs and to actively contribute to the enrichment of vLLM.
 
 ## Principles
 
@@ -18,7 +18,7 @@ vLLM Ascend is an open-source project under the vLLM community, where the author
 
     **Requirements:** Complete at least 1 contribution. A contributor is someone who consistently and actively participates in a project, including but not limited to issue/review/commits/community involvement.
 
-    The contributor permissions are granted by the [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend)'s repo `Triage` on GitHub, including repo read and clone, issue and PR management, facilitating efficient collaboration between community developers.
+    Contributors are granted the `Triage` role in the [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) GitHub repository, which allows them to read and clone the repo, manage issues and PRs, and collaborate efficiently with community developers.
 
 - Maintainer:
 

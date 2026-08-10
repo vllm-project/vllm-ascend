@@ -116,6 +116,18 @@ _benchmarks: &benchmarks
         request_rate: 1
         baseline: 33.80
         threshold: 0.97
+_benchmarks_2048: &benchmarks_2048
+      perf_16384_bs4:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 2048
+        batch_size: 32
+        request_rate: 0
+        baseline: 220
+        threshold: 0.97
 
 test_cases:
   - name: "DeepSeek-V3.2-W8A8-weekly"
@@ -125,3 +137,13 @@ test_cases:
     server_cmd: *server_cmd
     benchmarks:
       <<: *benchmarks
+  - name: "DeepSeek-V3.2-W8A8-mix-perf"
+    model: "vllm-ascend/DeepSeek-V3.2-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--async-scheduling"
+    benchmarks:
+      <<: *benchmarks_2048
+

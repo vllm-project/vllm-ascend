@@ -43,6 +43,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_gva_layerwise_config,
+    get_layerwise_kv_cache_specs,
+)
 
 
 class KVPoolScheduler:
@@ -92,6 +98,8 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -107,7 +115,7 @@ class KVPoolScheduler:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.hash_block_size
+        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
@@ -184,6 +192,26 @@ class KVPoolScheduler:
         else:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.layerwise_offload = False
+        if self.use_gva_layerwise:
+            extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
+            if kv_cache_config is not None and extra_config is not None:
+                reuse_layout = build_layerwise_reuse_layout(
+                    get_layerwise_kv_cache_specs(kv_cache_config),
+                    self.num_layers,
+                    extra_config,
+                )
+                if reuse_layout.layer_entries:
+                    self.num_layers = max(
+                        self.num_layers,
+                        max(reuse_layout.layer_entries) + 1,
+                    )
+                self.layerwise_offload = reuse_layout.has_layer_reuse
+            else:
+                self.layerwise_offload = build_layerwise_cache_layout(
+                    self.num_layers,
+                    vllm_config.kv_transfer_config.kv_connector_extra_config,
+                ).has_layer_reuse
         self.model_name = model_config.model.split("/")[-1]
 
         # Keep this in sync with pool_worker.py because it affects GVA allocation size.
@@ -507,14 +535,22 @@ class KVPoolScheduler:
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
+        prompt_token_len = len(request.prompt_token_ids)
+        if (
+            self.retention_interval is not None
+            and not self.use_layerwise
+            and prompt_token_len < 2 * self.retention_interval
+        ):
+            return 0, False
+
         if self.use_gva_layerwise:
-            token_len = len(request.prompt_token_ids)
+            token_len = prompt_token_len
             num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
         else:
             if self._discard_partial_chunks:
-                token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
+                token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             else:
-                token_len = len(request.prompt_token_ids)
+                token_len = prompt_token_len
 
             if token_len < self.cache_transfer_granularity:
                 return 0, False
@@ -524,17 +560,21 @@ class KVPoolScheduler:
                     request, token_len, num_computed_tokens, include_layers=True
                 )
             else:
+                if num_computed_tokens >= token_len:
+                    return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
                     request.block_hashes,
                     self.kv_cache_group_ids,
+                    hbm_hit_tokens=num_computed_tokens,
                 )
 
         if num_external_hit_tokens == 0:
             return 0, False
 
+        store_skip_tokens = num_external_hit_tokens
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
@@ -562,6 +602,7 @@ class KVPoolScheduler:
             vllm_cached_tokens=num_computed_tokens,
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=force_layerwise_load,
+            kvpool_store_skip_tokens=store_skip_tokens,
         )
         logger.info(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
@@ -691,6 +732,8 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
+            save_partial_block=self.layerwise_offload,
+            hash_block_size=self.hash_block_size,
         )
 
     def _process_new_request(
@@ -800,11 +843,11 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        # Chunked-prefill increments (prompt not yet fully computed) are always
-        # saved; only decode increments are gated by save_decode_cache.
+        # Reused buffers must save every step; otherwise only explicit
+        # save_decode_cache keeps Decode increments.
         req_tuple = self._unfinished_requests.get(req_id)
         is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens
-        if is_decoding and not self.save_decode_cache:
+        if is_decoding and not self.save_decode_cache and not self.layerwise_offload:
             return None
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
@@ -840,6 +883,12 @@ class KVPoolScheduler:
         if new_block_ids is not None:
             request_tracker.update(new_block_ids)
         load_spec = None
+        if self.layerwise_offload and num_current_tokens > 0:
+            load_spec = LoadSpec(
+                vllm_cached_tokens=num_current_tokens,
+                kvpool_cached_tokens=num_current_tokens,
+                can_load=True,
+            )
         return self._build_req_meta(
             request_tracker,
             request.block_hashes,
@@ -894,6 +943,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
+            hash_block_size=self.hash_block_size,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
@@ -936,7 +986,7 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids and not self.tp_mismatch:
+                if not new_block_ids and not self.tp_mismatch and not self.layerwise_offload:
                     continue
                 if req_id in self._preempted_req_ids:
                     if not new_block_ids:
@@ -1110,13 +1160,18 @@ class LookupKeyClient:
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
+        hbm_hit_tokens: int = 0,
     ) -> int:
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
-        token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(kv_group_frames) + list(hash_frames)
+        all_frames = [
+            token_len.to_bytes(4, byteorder="big"),
+            *kv_group_frames,
+            hbm_hit_tokens.to_bytes(4, byteorder="big"),
+            *hash_frames,
+        ]
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")

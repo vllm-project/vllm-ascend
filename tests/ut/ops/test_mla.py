@@ -74,9 +74,8 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.mock_quant_config = MagicMock()
 
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
-    @patch("vllm_ascend.ops.mla.get_ascend_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
-    def test_initialization(self, mock_tp_size, mock_ascend_config, mock_get_vllm_config):
+    def test_initialization(self, mock_tp_size, mock_get_vllm_config):
         # Create a proper mock for MLAAttention that has the required attributes
         mock_mla_attn = MagicMock()
         mock_mla_attn.process_weights_after_loading = MagicMock()
@@ -85,7 +84,6 @@ class TestAscendMultiHeadLatentAttention(TestBase):
 
         with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
             mock_tp_size.return_value = 2
-            mock_ascend_config.return_value.enable_shared_expert_dp = True
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
             mock_get_vllm_config.return_value = mock_vllm_config
@@ -107,12 +105,10 @@ class TestAscendMultiHeadLatentAttention(TestBase):
             )
 
             self.assertEqual(attn.tp_size, 2)
-            self.assertTrue(attn.enable_shared_expert_dp)
             self.assertIsNotNone(attn.mla_attn)
 
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
-    @patch("vllm_ascend.ops.mla.get_ascend_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.ops.mla.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -121,12 +117,10 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_get_forward_context_2,
         mock_get_forward_context,
         mock_tp_size,
-        mock_ascend_config,
         mock_get_vllm_config,
         mock_mla_forward,
     ):
         mock_tp_size.return_value = 1
-        mock_ascend_config.return_value.enable_shared_expert_dp = False
         mock_vllm_config = MagicMock(spec=VllmConfig)
         mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=False)
         mock_get_vllm_config.return_value = mock_vllm_config

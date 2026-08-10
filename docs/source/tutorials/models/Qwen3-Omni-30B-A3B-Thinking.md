@@ -198,9 +198,9 @@ Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stre
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
-PS:Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
+Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -229,10 +229,9 @@ vllm serve your_model_path \
     --quantization ascend \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --port 8000 
 ```
 
@@ -343,9 +342,9 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using EvalScope
 
-As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
+As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#2-install-evalscope-using-pip) for `evalscope`installation.
+1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#2-install-evalscope-using-pip) for `evalscope` installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
@@ -377,10 +376,9 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark  
+### Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
-Refer to vllm benchmark for more details.
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
@@ -478,10 +476,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -514,7 +511,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -551,10 +547,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"enable_flashcomm1": false, "weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'

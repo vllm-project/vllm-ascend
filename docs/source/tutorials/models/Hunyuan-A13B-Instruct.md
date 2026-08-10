@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256K ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
+Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256k ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
 
 ## Environment Preparation
 
@@ -80,7 +80,7 @@ vllm serve ${MODEL_PATH} \
     --served-model-name Hunyuan \
     --tensor-parallel-size 4 \
     --max-model-len 32768 \
-    --gpu-memory-utilization 0.90 \
+    --gpu-memory-utilization 0.90
 ```
 
 ### Key Performance Indicators
