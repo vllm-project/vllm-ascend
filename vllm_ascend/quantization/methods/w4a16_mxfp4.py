@@ -139,9 +139,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 mxfp_use_bf16=(x.dtype == torch.bfloat16),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
             )
         )
 

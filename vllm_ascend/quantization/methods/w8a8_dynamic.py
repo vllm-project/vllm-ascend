@@ -286,9 +286,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
-                swiglu_limit=layer.swiglu_limit,
-                swiglu_alpha=layer.swiglu_alpha,
-                swiglu_beta=layer.swiglu_beta,
                 lora_context=lora_context,
             )
         )
