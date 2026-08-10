@@ -442,7 +442,6 @@ jobs:
             "$BISECT_NO_VERIFY_GOOD" \
             "$BISECT_NO_VERIFY_BAD" \
             "$BISECT_FORCE_INITIAL_BUILD" \
-            \
             "$BISECT_CONFIG_BASE_PATH"
 
       - name: On success

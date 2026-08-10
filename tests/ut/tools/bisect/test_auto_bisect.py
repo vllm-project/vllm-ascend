@@ -125,6 +125,8 @@ def test_resolve_good_raises_when_no_matching_success_row(tmp_path: Path):
 
     with pytest.raises(SystemExit, match="No successful good-table row"):
         bisector._resolve_good()
+
+
 def test_resolve_num_nodes_prefers_explicit_value(tmp_path: Path):
     args = argparse.Namespace(
         num_nodes=4,

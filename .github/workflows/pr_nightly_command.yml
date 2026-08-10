@@ -666,7 +666,6 @@ jobs:
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f bisect_args_json="$BISECT_ARGS_JSON"
           sleep 8
