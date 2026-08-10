@@ -461,6 +461,11 @@ class NPUModelRunner(GPUModelRunner):
         self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
         )
+        # Set by _prepare_inputs when optimistic_seq_lens_cpu still needs the
+        # async spec-decode correction; consumed (and cleared) by
+        # _build_attention_metadata just before the first builder that
+        # consumes CPU seq_lens.
+        self._seq_lens_cpu_correction_pending = False
 
         # kv role
         self.is_kv_producer = False
@@ -1071,27 +1076,57 @@ class NPUModelRunner(GPUModelRunner):
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            # Async mode: condense() reordered indices, use prev_positions mapping
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[
-                        np.where(new_mask, 0, prev_idx)
-                    ]
-                )
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                    self.num_accepted_tokens.np[:num_reqs]
-                )
+            if (self.use_async_scheduling and self.need_accepted_tokens
+                    and prev_req_id_to_index
+                    and self.cache_config.mamba_cache_mode == "none"):
+                # Fast path: fix up num_accepted_tokens entirely on the GPU
+                # without blocking the CPU on num_accepted_tokens_event.
+                # _update_states_after_model_execute already computed the
+                # values on the GPU in the previous step's request order;
+                # gather them into the current (possibly condensed) order
+                # and set newly added requests to 1. The event is only used
+                # as a stream-level dependency so the gather observes the
+                # previous step's writes issued on the side stream.
+                # Blocking the CPU here drains the pipeline: everything
+                # after this point (input prep tail, attention metadata
+                # build) would be exposed with the GPU idle.
+                # NOTE: input_batch.num_accepted_tokens_cpu is intentionally
+                # not repaired here; it has no CPU consumer when
+                # mamba_cache_mode is "none" (preprocess_mamba reads it only
+                # in "align" mode).
+                torch.npu.current_stream().wait_event(
+                    self.num_accepted_tokens_event)
+                if prev_positions_gpu is None:
+                    self.prev_positions.copy_to_gpu(num_reqs)
+                    prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+                num_accepted_tokens_gpu = self.num_accepted_tokens.gpu
+                gathered = num_accepted_tokens_gpu.gather(
+                    0, prev_positions_gpu.clamp(min=0))
+                num_accepted_tokens_gpu[:num_reqs].copy_(
+                    torch.where(prev_positions_gpu < 0, 1, gathered))
+                num_accepted_tokens_gpu[num_reqs:].fill_(1)
             else:
-                # Non-async mode: use values directly
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
+                self.num_accepted_tokens_event.synchronize()
+                # Async mode: condense() reordered indices, use prev_positions mapping
+                if self.use_async_scheduling and prev_req_id_to_index:
+                    prev_idx = self.prev_positions.np[:num_reqs]
+                    new_mask = prev_idx < 0
+                    self.num_accepted_tokens.np[:num_reqs] = (
+                        self.input_batch.num_accepted_tokens_cpu[
+                            np.where(new_mask, 0, prev_idx)
+                        ]
+                    )
+                    self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                        self.num_accepted_tokens.np[:num_reqs]
+                    )
+                else:
+                    # Non-async mode: use values directly
+                    self.num_accepted_tokens.np[:num_reqs] = (
+                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    )
+                self.num_accepted_tokens.np[num_reqs:].fill(1)
+                self.num_accepted_tokens.copy_to_gpu()
         else:
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
@@ -1200,18 +1235,21 @@ class NPUModelRunner(GPUModelRunner):
         self.seq_lens[num_reqs:].fill_(0)
 
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
-        # tokens from the previous speculative step were accepted. Correct it
-        # on CPU using the valid-sampled-token counts that are already copied
-        # asynchronously for scheduler bookkeeping. This avoids an extra
-        # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
+        # tokens from the previous speculative step were accepted. It must be
+        # corrected using the valid-sampled-token counts copied
+        # asynchronously for scheduler bookkeeping. The correction (and its
+        # event wait) is deferred to _build_attention_metadata so that the
+        # intervening CPU work overlaps with the previous step's GPU
+        # execution instead of draining the pipeline here.
         # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
         async_spec_decode_active = (
             self.use_async_spec_decode
             and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         )
-        if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
-            self._correct_optimistic_seq_lens_cpu(num_reqs)
+        self._seq_lens_cpu_correction_pending = bool(
+            self._needs_seq_lens_cpu_sync and async_spec_decode_active
+        )
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
@@ -1411,10 +1449,11 @@ class NPUModelRunner(GPUModelRunner):
         attention metadata construction.
 
         Synchronizing on the event before the host read mirrors vLLM's own
-        :meth:`_get_valid_sampled_token_count`. Because the copy was launched a
-        full step earlier, the event is already signalled in steady state and
-        the synchronize is effectively a no-op -- it does not reintroduce the
-        seq_lens device->host copy + synchronize that this optimization removed.
+        :meth:`_get_valid_sampled_token_count`. The call is deferred to
+        :meth:`_build_attention_metadata` (just before the first builder
+        that consumes CPU seq_lens) so the wait overlaps with the previous
+        step's GPU execution instead of draining the pipeline in the middle
+        of :meth:`_prepare_inputs`.
         """
         assert self.valid_sampled_token_count_event is not None
         assert self.valid_sampled_token_count_cpu is not None
@@ -2840,6 +2879,18 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
+    def _kv_cache_group_needs_seq_lens_cpu(self, kv_cache_gid: int) -> bool:
+        """Whether any metadata builder in the KV cache group consumes CPU
+        seq_lens and therefore requires the corrected (exact)
+        ``optimistic_seq_lens_cpu`` in async spec-decode mode. GDN builders
+        operate purely on GPU tensors and can be built before the
+        correction."""
+        for attn_group in self.attn_groups[kv_cache_gid]:
+            builder = attn_group.get_metadata_builder(0)
+            if not isinstance(builder, GDNAttentionMetadataBuilder):
+                return True
+        return False
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -3085,7 +3136,35 @@ class NPUModelRunner(GPUModelRunner):
         decode_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         spec_decode_common_attn_metadata = None
-        for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+
+        # Deferred CPU seq_lens correction (set pending by _prepare_inputs):
+        # builders that consume CPU seq_lens (FIA / MLA / compressed
+        # attention) need the exact values produced by
+        # _correct_optimistic_seq_lens_cpu, which waits on the
+        # valid-sampled-count D2H from the previous step. Groups whose
+        # builders do not consume CPU seq_lens (e.g. GDN) are built first so
+        # their construction overlaps with the previous step's GPU
+        # execution; the correction (and its event wait) runs only just
+        # before the first group that actually needs exact values.
+        defer_seq_lens_correction = (
+            not for_cudagraph_capture and self._seq_lens_cpu_correction_pending
+        )
+        kv_cache_gids = list(range(len(self.kv_cache_config.kv_cache_groups)))
+        if defer_seq_lens_correction:
+            kv_cache_gids.sort(
+                key=lambda gid: self._kv_cache_group_needs_seq_lens_cpu(gid)
+            )
+        for kv_cache_gid in kv_cache_gids:
+            if defer_seq_lens_correction and self._kv_cache_group_needs_seq_lens_cpu(
+                kv_cache_gid
+            ):
+                self._correct_optimistic_seq_lens_cpu(num_reqs)
+                cm_base.max_seq_len = int(
+                    self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max()
+                )
+                defer_seq_lens_correction = False
+                self._seq_lens_cpu_correction_pending = False
+            kv_cache_group = self.kv_cache_config.kv_cache_groups[kv_cache_gid]
             cm = copy(cm_base)  # shallow copy
             # Basically only the encoder seq_lens, block_table and slot_mapping change
             # for each kv_cache_group.
@@ -3121,7 +3200,10 @@ class NPUModelRunner(GPUModelRunner):
                     | AscendDSparkProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
-                else:
+                elif kv_cache_gid == 0:
+                    # Non-eagle drafters use the metadata of KV cache group 0.
+                    # Captured explicitly by gid because the build order may
+                    # be shuffled by the deferred seq_lens correction above.
                     spec_decode_common_attn_metadata = cm
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(
@@ -3132,6 +3214,10 @@ class NPUModelRunner(GPUModelRunner):
                     decode_ratio_to_sas_metadata,
                     common_ratio_to_sas_metadata,
                 )
+        # Defensive clear: if no group required exact CPU seq_lens, the
+        # correction never ran; do not carry the pending state into the next
+        # step (optimistic_seq_lens_cpu is recomputed every step anyway).
+        self._seq_lens_cpu_correction_pending = False
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
