@@ -66,11 +66,6 @@ class AscendPCPManager(PCPManager):
             cp_interleave=cp_interleave,
         )
         self.vllm_config = vllm_config
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is not None and speculative_config.method == "mtp":
-            assert self._block_tables is not None
-            assert self._global_batch_slot_mappings is not None
-            self._block_tables.slot_mappings = self._global_batch_slot_mappings
 
     @staticmethod
     def validate_config(
@@ -290,6 +285,13 @@ class AscendPCPManager(PCPManager):
     def prepare_slot_mappings(self) -> torch.Tensor:
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
+        speculative_config = self.vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.method == "mtp":
+            assert isinstance(self._global_batch, AscendInputBatch)
+            assert self._global_batch_slot_mappings is not None
+            self._global_batch.pcp_global_slot_mappings = (
+                self._global_batch_slot_mappings[:, : self._global_batch.num_tokens]
+            )
         graph_num_tokens = self._global_batch.num_tokens_after_padding
         is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
         if not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
