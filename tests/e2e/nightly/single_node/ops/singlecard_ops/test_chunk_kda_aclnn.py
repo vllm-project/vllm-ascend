@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 import gc
+import math
 from dataclasses import dataclass
 
 import pytest
@@ -126,6 +127,13 @@ def _cleanup_npu():
     torch.npu.reset_peak_memory_stats()
 
 
+def _is_ascend_950() -> bool:
+    try:
+        return "950" in torch.npu.get_device_name(0)
+    except Exception:
+        return False
+
+
 def _assert_close(name, actual, expected, rtol=5e-2, atol=5e-2):
     torch.testing.assert_close(actual.detach().cpu(), expected.detach().cpu(), rtol=rtol, atol=atol, msg=name)
 
@@ -181,38 +189,45 @@ def test_kda_torch_bindings_have_shape_correct_meta_kernels():
     v = torch.empty((1, 64, 2, 256), device="meta", dtype=torch.bfloat16)
     raw_gate = torch.empty((1, 64, 2, 128), device="meta", dtype=torch.bfloat16)
     beta = torch.empty((1, 64, 2), device="meta", dtype=torch.float32)
+    a_log = torch.empty((2,), device="meta", dtype=torch.float32)
+    dt_bias = torch.empty((2 * 128,), device="meta", dtype=torch.float32)
 
     gk = torch.ops._C_ascend.kda_gate_cumsum(raw_gate, 64, layout="BSND")
     outputs = torch.ops._C_ascend.chunk_kda_fwd(
         q,
         k,
         v,
-        gk,
+        raw_gate,
         beta,
         128**-0.5,
         64,
         layout="BSND",
         output_final_state=True,
-        return_intermediate=True,
+        safe_gate=True,
+        use_gate_in_kernel=True,
+        A_log=a_log,
+        dt_bias=dt_bias,
+        disable_recompute=True,
+        return_intermediate_states=True,
     )
     swapped = torch.ops._C_ascend.kda_layout_swap12(raw_gate)
 
     assert gk.shape == raw_gate.shape
     assert gk.dtype == torch.float32
-    assert [tuple(output.shape) for output in outputs] == [
+    assert [tuple(output.shape) for output in outputs[:-1]] == [
         (1, 64, 2, 256),
         (1, 2, 128, 256),
-        (1, 64, 2, 128),
-        (1, 64, 2, 64),
-        (1, 64, 2, 64),
-        (1, 64, 2, 128),
-        (1, 64, 2, 256),
-        (1, 64, 2, 128),
-        (1, 64, 2, 128),
-        (1, 64, 2, 256),
+        (1, 2, 64, 128),
+        (1, 2, 64, 64),
+        (1, 2, 64, 64),
+        (1, 2, 64, 128),
+        (1, 2, 64, 256),
+        (1, 2, 64, 128),
+        (1, 2, 64, 128),
+        (1, 2, 64, 256),
         (1, 1, 2, 128, 256),
-        (0,),
     ]
+    assert outputs[11] is None
     assert outputs[0].dtype == torch.bfloat16
     assert outputs[1].dtype == torch.float32
     assert swapped.shape == (1, 2, 64, 128)
@@ -238,14 +253,15 @@ def test_chunk_kda_fwd_matches_reference_bsnd():
         q,
         k,
         v,
-        gk,
+        g,
         beta,
         scale,
         64,
         layout="BSND",
         initial_state=initial_state,
         output_final_state=True,
-        return_intermediate=True,
+        disable_recompute=True,
+        return_intermediate_states=True,
     )
     ref = chunk_kda_forward_reference(
         q.cpu(),
@@ -316,14 +332,15 @@ def test_chunk_kda_fwd_c128_v256_path(total_t, hq, hv, kdim, vdim, dtype):
             q,
             k,
             v,
-            gk,
+            g,
             beta,
             scale,
             64,
             layout="BSND",
             initial_state=initial_state,
             output_final_state=True,
-            return_intermediate=True,
+            disable_recompute=True,
+            return_intermediate_states=True,
         )
 
     is_a5_determinism_case = (
@@ -396,14 +413,15 @@ def test_chunk_kda_fwd_bnsd_layout_matches_reference():
         q_bnsd,
         k_bnsd,
         v_bnsd,
-        gk_bnsd,
+        g_bnsd,
         beta_bns,
         scale,
         64,
         layout="BNSD",
         initial_state=initial_state,
         output_final_state=True,
-        return_intermediate=True,
+        disable_recompute=True,
+        return_intermediate_states=True,
     )
     gk_bsnd = gk_bnsd.transpose(1, 2).contiguous()
     ref = chunk_kda_forward_reference(
@@ -418,9 +436,198 @@ def test_chunk_kda_fwd_bnsd_layout_matches_reference():
         output_final_state=True,
     )
 
-    out_bsnd = got[0].transpose(1, 2).contiguous()
+    out_bsnd = got[0]
     assert torch.isfinite(out_bsnd).all().item()
     assert torch.isfinite(got[1]).all().item()
     _assert_close("o", out_bsnd, ref.o)
     _assert_close("final_state", got[1], ref.final_state)
     _cleanup_npu()
+
+
+def _canonical_chunk_indices(cu_seqlens, chunk_size):
+    if cu_seqlens is None:
+        return None
+    return [
+        value
+        for seq_id, (start, end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:]))
+        for chunk_id in range((end - start + chunk_size - 1) // chunk_size)
+        for value in (seq_id, chunk_id)
+    ]
+
+
+def _run_chunk_kda_fwd_a5_case(
+    layout,
+    tokens,
+    batch_size,
+    query_heads,
+    value_heads,
+    key_dim,
+    value_dim,
+    chunk_size,
+    dtype,
+    cu_seqlens,
+):
+    torch.npu.set_device(0)
+    device = torch.device("npu:0")
+    if cu_seqlens is not None:
+        assert cu_seqlens[0] == 0
+        assert cu_seqlens[-1] == tokens
+    is_tnd = layout == "TND"
+    q_shape = (tokens, query_heads, key_dim) if is_tnd else (batch_size, tokens, query_heads, key_dim)
+    v_shape = (tokens, value_heads, value_dim) if is_tnd else (batch_size, tokens, value_heads, value_dim)
+    g_shape = (tokens, value_heads, key_dim) if is_tnd else (batch_size, tokens, value_heads, key_dim)
+    beta_shape = (tokens, value_heads) if is_tnd else (batch_size, tokens, value_heads)
+    q = torch.full(
+        q_shape,
+        1.0 / math.sqrt(key_dim),
+        dtype=dtype,
+        device=device,
+    )
+    k = torch.full_like(q, 1.0 / math.sqrt(key_dim))
+    v = torch.zeros(v_shape, dtype=dtype, device=device)
+    raw_gate = torch.full(
+        g_shape,
+        -0.005 * math.log(2.0),
+        dtype=torch.float32,
+        device=device,
+    )
+    beta_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float32
+    beta = torch.full(beta_shape, 0.5, dtype=beta_dtype, device=device)
+    chunk_indices = _canonical_chunk_indices(cu_seqlens, chunk_size)
+
+    torch.npu.synchronize()
+    outputs = torch.ops._C_ascend.chunk_kda_fwd(
+        q,
+        k,
+        v,
+        raw_gate,
+        beta,
+        key_dim**-0.5,
+        chunk_size,
+        layout=layout,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        safe_gate=True,
+        lower_bound=-5.0,
+        use_gate_in_kernel=False,
+        A_log=None,
+        dt_bias=None,
+        disable_recompute=False,
+        return_intermediate_states=False,
+    )
+    torch.npu.synchronize()
+
+    sequence_count = len(cu_seqlens) - 1 if cu_seqlens is not None else batch_size
+    expected_output_shape = (tokens, value_heads, value_dim) if is_tnd else (batch_size, tokens, value_heads, value_dim)
+    expected_gk_shape = (value_heads, tokens, key_dim) if is_tnd else (batch_size, value_heads, tokens, key_dim)
+    assert len(outputs) == len(CHUNK_KDA_OUTPUT_NAMES)
+    assert outputs[0].shape == expected_output_shape
+    assert outputs[1].shape == (sequence_count, value_heads, key_dim, value_dim)
+    assert outputs[2].shape == expected_gk_shape
+    assert torch.count_nonzero(outputs[0]).item() == 0
+    assert torch.count_nonzero(outputs[1]).item() == 0
+    assert torch.isfinite(outputs[2]).all().item()
+
+    _cleanup_npu()
+
+
+@pytest.mark.parametrize(
+    ("layout", "cu_seqlens"),
+    [
+        pytest.param("BSND", None, id="BSND-dense"),
+        pytest.param("TND", [0, 2047, 4096, 8191], id="TND-varlen"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_chunk_kda_fwd_a5_profile_t8191(layout, cu_seqlens):
+    if not _is_ascend_950():
+        pytest.skip("requires an Ascend 950 device")
+
+    _run_chunk_kda_fwd_a5_case(
+        layout=layout,
+        tokens=8191,
+        batch_size=1,
+        query_heads=16,
+        value_heads=32,
+        key_dim=128,
+        value_dim=128,
+        chunk_size=64,
+        dtype=torch.bfloat16,
+        cu_seqlens=cu_seqlens,
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "layout",
+        "tokens",
+        "batch_size",
+        "query_heads",
+        "value_heads",
+        "key_dim",
+        "value_dim",
+        "chunk_size",
+        "dtype",
+        "cu_seqlens",
+    ),
+    [
+        pytest.param(
+            "BSND",
+            600,
+            1,
+            6,
+            12,
+            128,
+            256,
+            128,
+            torch.bfloat16,
+            [0, 127, 383, 600],
+            id="BSND-varlen-bf16",
+        ),
+        pytest.param("TND", 257, 1, 6, 12, 128, 256, 128, torch.bfloat16, None, id="TND-dense-bf16"),
+        pytest.param(
+            "TND",
+            300,
+            1,
+            6,
+            12,
+            128,
+            128,
+            64,
+            torch.bfloat16,
+            [0, 63, 191, 300],
+            id="TND-varlen-bf16",
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_chunk_kda_fwd_a5_generalized_layouts(
+    layout,
+    tokens,
+    batch_size,
+    query_heads,
+    value_heads,
+    key_dim,
+    value_dim,
+    chunk_size,
+    dtype,
+    cu_seqlens,
+):
+    if not _is_ascend_950():
+        pytest.skip("requires an Ascend 950 device")
+
+    _run_chunk_kda_fwd_a5_case(
+        layout=layout,
+        tokens=tokens,
+        batch_size=batch_size,
+        query_heads=query_heads,
+        value_heads=value_heads,
+        key_dim=key_dim,
+        value_dim=value_dim,
+        chunk_size=chunk_size,
+        dtype=dtype,
+        cu_seqlens=cu_seqlens,
+    )
