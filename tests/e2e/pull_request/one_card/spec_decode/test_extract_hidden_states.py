@@ -129,14 +129,8 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
         hidden_states = obj["hidden_states"]
         assert hidden_states.shape == expected_shape
 
-        assert not torch.isnan(hidden_states).any(), (
-            "hidden_states contains NaN — likely regression of PR #13498 "
-            "(KV cache buffer corruption between Mamba ssm_state and "
-            "HiddenStateCacheSpec)."
-        )
-        assert not torch.isinf(hidden_states).any(), (
-            "hidden_states contains Inf — likely regression of PR #13498 (KV cache buffer corruption)."
-        )
+        assert not torch.isnan(hidden_states).any(), "hidden_states contains NaN"
+        assert not torch.isinf(hidden_states).any(), "hidden_states contains Inf"
 
         if verify_token_ids:
             token_ids = obj["token_ids"]
