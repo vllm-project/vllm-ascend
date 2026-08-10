@@ -31,7 +31,7 @@ _benchmarks_gpqa: &benchmarks_gpqa
     top_p: 0.95
     top_k: 20
     ignore_eos: false
-_benchmarks_perf2: &benchmarks_perf2
+_benchmarks_perf1: &benchmarks_perf1
   acc:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
@@ -120,4 +120,4 @@ test_cases:
       - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.1,"original_max_position_embeddings":32768}}'
     benchmarks:
-      <<: *benchmarks_perf2
+      <<: *benchmarks_perf1
