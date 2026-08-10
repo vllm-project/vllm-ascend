@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import torch
 import torch.distributed as dist
