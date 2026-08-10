@@ -12,8 +12,8 @@
  * \file apply_top_k_top_p_custom.h
  * \brief
  */
-#ifndef OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_OP_H_
-#define OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_OP_H_
+#ifndef OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_CUSTOM_OP_H_
+#define OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_CUSTOM_OP_H_
 
 #include "opdev/op_executor.h"
 
@@ -22,4 +22,4 @@ const aclTensor* ApplyTopKTopPCustom(const aclTensor* sortedValue, const aclTens
                                          const aclTensor* p, const aclTensor* k, const aclTensor* logits,
                                          aclOpExecutor* executor);
 }
-#endif // OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_OP_H_
+#endif // OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_CUSTOM_OP_H_

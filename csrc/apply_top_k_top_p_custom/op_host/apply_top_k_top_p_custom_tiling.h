@@ -18,8 +18,8 @@
  *
  *
  */
-#ifndef __APPLY_TOP_K_TOP_P_WITH_SORTED_TILINGDATA_H__
-#define __APPLY_TOP_K_TOP_P_WITH_SORTED_TILINGDATA_H__
+#ifndef __APPLY_TOP_K_TOP_P_CUSTOM_TILINGDATA_H__
+#define __APPLY_TOP_K_TOP_P_CUSTOM_TILINGDATA_H__
 
 #include "register/tilingdata_base.h"
 
@@ -48,4 +48,4 @@ struct TilingForApplyTopKTopPCustomCompileInfo {
 };
 
 } // namespace optiling
-#endif // __APPLY_TOP_K_TOP_P_WITH_SORTED_TILINGDATA_H__
+#endif // __APPLY_TOP_K_TOP_P_CUSTOM_TILINGDATA_H__

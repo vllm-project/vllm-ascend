@@ -57,55 +57,8 @@ public:
             .DynamicShapeSupportFlag(true);
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
-        this->AICore().AddConfig("ascend950");
-
-        OpAICoreConfig config_kirin = GetKirinCoreConfig();
-        this->AICore().AddConfig("kirinx90", config_kirin);
-        this->AICore().AddConfig("kirin9030", config_kirin);
     }
 
-private:
-    OpAICoreConfig GetKirinCoreConfig() const
-    {
-        OpAICoreConfig config_kirin;
-        config_kirin.DynamicCompileStaticFlag(true)
-            .DynamicFormatFlag(true)
-            .DynamicRankSupportFlag(true)
-            .DynamicShapeSupportFlag(true)
-            .NeedCheckSupportFlag(false)
-            .PrecisionReduceFlag(true);
-        config_kirin.Input("sorted_value")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        config_kirin.Input("sorted_indices")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        config_kirin.Input("p")
-            .ParamType(OPTIONAL)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        config_kirin.Input("k")
-            .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        config_kirin.Input("logits")
-            .ParamType(OPTIONAL)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        config_kirin.Output("out")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        return config_kirin;
-    }
 };
 
 OP_ADD(ApplyTopKTopPCustom);

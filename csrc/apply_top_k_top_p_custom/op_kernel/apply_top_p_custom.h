@@ -12,8 +12,8 @@
  * \file apply_top_p_custom.h
  * \brief
  */
-#ifndef APPLY_TOP_P_WITH_SORTED_H_KERNEL
-#define APPLY_TOP_P_WITH_SORTED_H_KERNEL
+#ifndef APPLY_TOP_P_CUSTOM_H_KERNEL
+#define APPLY_TOP_P_CUSTOM_H_KERNEL
 
 #include "kernel_operator.h"
 
@@ -559,4 +559,4 @@ __aicore__ inline void ApplyTopPCustom<inputT, calT, outputT>::GetSoftmaxSum(uin
 }
 } // namespace ApplyTopPCustomOp
 
-#endif // APPLY_TOP_P_WITH_SORTED_H_KERNEL
+#endif // APPLY_TOP_P_CUSTOM_H_KERNEL

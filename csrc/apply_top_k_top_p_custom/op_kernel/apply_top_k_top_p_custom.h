@@ -12,8 +12,8 @@
  * \file apply_top_k_top_p_custom.h
  * \brief
  */
-#ifndef APPLY_TOP_K_TOP_P_WITH_SORTED_H_KERNEL
-#define APPLY_TOP_K_TOP_P_WITH_SORTED_H_KERNEL
+#ifndef APPLY_TOP_K_TOP_P_CUSTOM_H_KERNEL
+#define APPLY_TOP_K_TOP_P_CUSTOM_H_KERNEL
 
 #include "kernel_operator.h"
 
@@ -960,4 +960,4 @@ __aicore__ inline void ApplyTopKTopPCustom<inputT, calT, outputT>::ProcessKLtKMa
 
 } // namespace ApplyTopKTopPCustomOp
 
-#endif // APPLY_TOP_K_TOP_P_WITH_SORTED_H_KERNEL
+#endif // APPLY_TOP_K_TOP_P_CUSTOM_H_KERNEL
