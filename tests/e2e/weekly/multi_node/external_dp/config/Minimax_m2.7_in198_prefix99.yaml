@@ -85,7 +85,7 @@ templates:
       - "minimax"
       - --max-model-len
       - "204800"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "32768"
       - --max-num-seqs
       - "16"
@@ -138,7 +138,7 @@ templates:
       - "minimax"
       - --max-model-len
       - "204800"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "16384"
       - --max-num-seqs
       - "16"
@@ -193,7 +193,7 @@ templates:
       - "minimax"
       - --max-model-len
       - "204800"
-      - -max-num-batched-tokens
+      - --max-num-batched-tokens
       - "16384"
       - --max-num-seqs
       - "16"
