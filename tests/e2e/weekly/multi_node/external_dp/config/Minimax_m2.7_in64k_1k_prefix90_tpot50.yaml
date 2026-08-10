@@ -164,14 +164,25 @@ templates:
         }}'
 
 benchmarks:
-  perf_1:
+  perf_warm_up:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_Minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 72
-    max_out_len: 1024
-    batch_size: 18
+    num_prompts: 2
+    max_out_len: 1
+    batch_size: 2
     request_rate: 0
-    baseline: 284.9
+    baseline: 0
+    threshold: 0.97
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 320
+    max_out_len: 1024
+    batch_size: 80
+    request_rate: 0
+    baseline: 1446.69
     threshold: 0.97

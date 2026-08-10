@@ -1,13 +1,13 @@
 test_name: "Minimax_m2.7_in3_5_tpot50"
 model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
-num_nodes: 2
+num_nodes: 3
 npu_per_node: 16
 
 routing:
   type: "disaggregated_prefill"
   groups:
     prefiller: [ 0 ]
-    decoder: [ 1 ]
+    decoder: [ 1, 2 ]
 
 config:
   - node_index: 0
@@ -22,12 +22,20 @@ config:
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
+    dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
     tp_size: 8
     dp_address: "${NODE_1_IP}"
 
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 2
+    dp_rank_start: 2
+    tp_size: 8
+    dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
@@ -73,15 +81,17 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
+      - --served-model-name
+      - "minimax"
       - --max-model-len
-      - "199608"
-      - --max-num-batched-tokens
-      - "16384"
-      - --max-num-seqs
-      - "24"
+      - "204800"
+      - -max-num-batched-tokens
+      - "32768"
+      - -max-num-seqs
+      - "16"
       - --trust-remote-code
       - --gpu-memory-utilization
-      - "0.8"
+      - "0.7"
       - --quantization
       - "ascend"
       - --speculative-config
@@ -101,7 +111,7 @@ templates:
                             "tp_size": 8
                     },
                     "decode": {
-                            "dp_size": 2,
+                            "dp_size": 4,
                             "tp_size": 8
                   }} }'
 
@@ -124,12 +134,14 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
+      - --served-model-name
+      - "minimax"
       - --max-model-len
-      - "199608"
-      - --max-num-batched-tokens
+      - "204800"
+      - -max-num-batched-tokens
       - "16384"
-      - --max-num-seqs
-      - "24"
+      - -max-num-seqs
+      - "16"
       - --trust-remote-code
       - --gpu-memory-utilization
       - "0.8"
@@ -154,44 +166,84 @@ templates:
             "tp_size": 8
           },
           "decode": {
-            "dp_size": 2,
+            "dp_size": 4,
             "tp_size": 8
           }
         }}'
-
+  - node_index: 2
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --served-model-name
+      - "minimax"
+      - --max-model-len
+      - "204800"
+      - -max-num-batched-tokens
+      - "16384"
+      - -max-num-seqs
+      - "16"
+      - --trust-remote-code
+      - "0.8"
+      - --quantization
+      - "ascend"
+      - --speculative-config
+      - '{"method": "eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
+      - --async-scheduling
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "56900",
+        "engine_id": "2",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true,
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 8
+          },
+          "decode": {
+            "dp_size": 4,
+            "tp_size": 8
+          }
+        }}'
 benchmarks:
-  perf_warm_up:
+  perf_prefix_99:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    dataset_path: vllm-ascend/GSM8K_prefix99_in203738_bs1_mini
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 2
-    max_out_len: 1
-    batch_size: 2
+    num_prompts: 1
+    max_out_len: 1024
+    batch_size: 1
     request_rate: 0
     baseline: 0
     threshold: 0.97
-  perf:
+  perf_1:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    dataset_path: vllm-ascend/GSM8K_prefix99_in203738_bs4_mini
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 160
+    num_prompts: 1
     max_out_len: 1024
-    batch_size: 40
+    batch_size: 1
     request_rate: 0
-    baseline: 720.1
+    baseline: 53.57
     threshold: 0.97
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 65536
-    batch_size: 32
-    baseline: 93.33
-    threshold: 10
-    temperature: 1
-    top_p: 1
-    top_k: 40
-    ignore_eos: false
