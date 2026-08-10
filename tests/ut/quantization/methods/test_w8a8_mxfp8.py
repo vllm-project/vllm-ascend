@@ -69,7 +69,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         # The transformed weight/scale must also stay contiguous, since ACL
         # graph capture expects contiguous weight/scale tensors.
         layer = nn.Module()
-        layer.weight = nn.Parameter(torch.randint(0, 255, (128, 256), dtype=torch.uint8).to(torch.float8_e4m3fn), requires_grad=False)
+        layer.weight = nn.Parameter(
+            torch.randint(0, 255, (128, 256), dtype=torch.uint8).to(torch.float8_e4m3fn), requires_grad=False
+        )
         layer.weight_scale = nn.Parameter(torch.randint(0, 255, (128, 8), dtype=torch.uint8), requires_grad=False)
         self.scheme.process_weights_after_loading(layer)
         transform_weight_ptr = layer._mxfp8_weight_buf.data_ptr()
