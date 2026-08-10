@@ -1,8 +1,8 @@
-# SFA PD RD2H Connector Design
+# SFA Remote D2H Connector Design
 
 ## Purpose and Scope
 
-`SFAPDRD2HConnector` transfers SFA KV cache from a remote Prefill worker into
+`SfaRemoteD2HConnector` transfers SFA KV cache from a remote Prefill worker into
 the Decode-side layout owned by `SparseKVOffloadManager`. It is a KV Connector
 V1 implementation for Prefill-Decode disaggregation with sparse Decode
 offload.
@@ -20,7 +20,7 @@ offload attention backend. AscendStore Layerwise Prefill KV Cache Offload is an
 optional, separately configured feature.
 
 For user-facing configuration and deployment constraints, see
-[SFA PD RD2H KV Transfer](../../user_guide/feature_guide/sfa_pd_rd2h_kv_transfer.md).
+[Layerwise and Sparse KV Cache Offloading](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md).
 
 ## Data Ownership
 

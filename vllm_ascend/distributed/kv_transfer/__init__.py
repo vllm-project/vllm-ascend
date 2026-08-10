@@ -87,7 +87,7 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
-        "SFAPDRD2HConnector",
+        "SfaRemoteD2HConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
-        "SFAPDRD2HConnector",
+        "SfaRemoteD2HConnector",
     )
