@@ -487,6 +487,9 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            ascend_config.ascend_compilation_config.enable_static_kernel = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
             # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
@@ -515,6 +518,9 @@ class NPUPlatform(Platform):
             if get_ascend_device_type() == AscendDeviceType.A5:
                 _prune_capture_sizes_for_950(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            ascend_config.ascend_compilation_config.enable_static_kernel = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
             # because it will compile multiple times, so we set splitting_ops to empty manually.
@@ -526,6 +532,9 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            ascend_config.ascend_compilation_config.enable_static_kernel = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
+            vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -613,6 +622,11 @@ class NPUPlatform(Platform):
                     "(kv_role='kv_consumer')."
                 )
                 scheduler_extension_config.recompute_scheduler_enable = False
+                additional_scheduler_config = vllm_config.additional_config.get("scheduler_config")
+                if additional_scheduler_config is None:
+                    additional_scheduler_config = {}
+                    vllm_config.additional_config["scheduler_config"] = additional_scheduler_config
+                additional_scheduler_config["recompute_scheduler_enable"] = False
             elif kv_transfer_config is None or kv_role != "kv_consumer":
                 raise ValueError(
                     "recompute_scheduler_enable can only be enabled on PD-disaggregated D nodes "

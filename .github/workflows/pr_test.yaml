@@ -130,7 +130,7 @@ jobs:
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1
@@ -138,7 +138,7 @@ jobs:
           pip install uv
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uc-manager
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          uv pip install -r requirements-dev.txt
 
       - name: Install and run Gitleaks Secret Scan
         run: |
