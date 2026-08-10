@@ -76,7 +76,7 @@ def test_build_sas_metadata_parameters_cache_and_output_buffer(
     expected_has_cmp_kv,
 ):
     builder = _make_builder(compressor_ratio)
-    metadata_cache = {}
+    metadata_cache: dict[str, torch.Tensor] = {}
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     cu_seqlens_ori_kv = torch.tensor([0, 8, 14], dtype=torch.int32)
@@ -141,7 +141,7 @@ def test_build_sas_metadata_parameters_cache_and_output_buffer(
 
 def test_build_qli_metadata_parameters_cache_and_output_buffer():
     builder = _make_builder()
-    metadata_cache = {}
+    metadata_cache: dict[str, torch.Tensor] = {}
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
