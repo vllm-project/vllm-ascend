@@ -226,9 +226,7 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             )
         else:
             local_mapping = local_mapping[: dsa_cp_context.num_tokens_pad]
-        dsa_cp_context.slot_mapping_cp = local_mapping[
-            dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad
-        ]
+        dsa_cp_context.slot_mapping_cp = local_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
 
 class AscendSFADSACPImpl(AscendSFAImpl):

@@ -1385,9 +1385,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         need_gather_q_kv: bool,
     ) -> torch.Tensor:
         if self.enable_sp:
-            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                hidden_states.contiguous(), need_gather_q_kv
-            )
+            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
         return hidden_states
 
     def _finalize_o_proj(
