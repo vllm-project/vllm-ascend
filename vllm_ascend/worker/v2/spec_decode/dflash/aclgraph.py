@@ -62,7 +62,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        causal: bool | Mapping[int, bool] = True,
+        causal: bool | Mapping[int, bool] = False,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
