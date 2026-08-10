@@ -17,12 +17,20 @@
 #
 
 import json
+import os
 
 import openai
 import pytest
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
+
+os.environ.update(
+    {
+        "HCCL_DETERMINISTIC": "true",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    }
+)
 
 
 @pytest.mark.asyncio
