@@ -18,6 +18,7 @@
 from collections.abc import Mapping
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -28,7 +29,11 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata,
+    build_attn_metadata_wrapper,
+)
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
