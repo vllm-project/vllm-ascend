@@ -27,6 +27,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
