@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
-import re
+import regex
 from typing import TYPE_CHECKING, Any
 
 import huggingface_hub
@@ -120,15 +120,11 @@ def _assert_response(status_code: int, response_json: dict[str, Any], expected: 
 
     max_length = expected.get("max_length")
     if max_length is not None:
-        assert len(content) <= max_length, (
-            f"response too long: {len(content)} > {max_length}"
-        )
+        assert len(content) <= max_length, f"response too long: {len(content)} > {max_length}"
 
     min_length = expected.get("min_length")
     if min_length is not None:
-        assert len(content) >= min_length, (
-            f"response too short: {len(content)} < {min_length}"
-        )
+        assert len(content) >= min_length, f"response too short: {len(content)} < {min_length}"
 
 
 def send_image_request(config: SingleNodeConfig, server) -> dict[str, Any]:
@@ -159,4 +155,5 @@ def send_image_request(config: SingleNodeConfig, server) -> dict[str, Any]:
     print("Response:", response_json)
 
     _assert_response(response.status_code, response_json, config.expected_response or {})
+    
     return response_json

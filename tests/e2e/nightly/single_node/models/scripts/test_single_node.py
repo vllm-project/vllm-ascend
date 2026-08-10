@@ -62,8 +62,8 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
     if isinstance(config.api_keyword_args, list):
         api_args_list = config.api_keyword_args
         if len(api_args_list) != len(prompts):
-            raise ValueError(f"api_keyword_args list length ({len(api_args_list)}) "
-                             f"must match prompts length ({len(prompts)})")
+            raise ValueError(f"""
+            api_keyword_args list length ({len(api_args_list)})must match prompts length ({len(prompts)})""")
     else:
         api_args_list = [config.api_keyword_args] * len(prompts)
 
@@ -93,8 +93,8 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
                 events = [line.decode("utf-8") for line in response.iter_lines() if line]
                 assert len(events) > 0, f"No SSE events received for prompt '{prompt}'"
                 assert any("message_start" in e for e in events), f"Missing 'message_start' event for prompt '{prompt}'"
-                assert any("content_block_delta" in e for e in events),(f"Missing 'content_block_delta'"
-                                                                        f" event for prompt '{prompt}'")
+                assert any("content_block_delta" in e for e in events),(f"""Missing 'content_block_delta' 
+                event for prompt '{prompt}'""")
                 assert any("message_stop" in e for e in events), f"Missing 'message_stop' event for prompt '{prompt}'"
                 print(f"Messages API streaming test passed for prompt '{prompt}' (events={len(events)})")
         else:
@@ -108,7 +108,7 @@ async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServe
                 assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
                 assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
                 assert "content" in data, "Response missing 'content' field"
-                assert isinstance(data["content"], list), f"Expected content to be a list"
+                assert isinstance(data["content"], list), "Expected content to be a list"
                 assert len(data["content"]) > 0, f"Expected non-empty content for prompt '{prompt}'"
 
             if tools:
