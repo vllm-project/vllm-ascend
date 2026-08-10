@@ -116,7 +116,7 @@ templates:
       - --quantization
       - "ascend"
       - --block-size
-      - "32"
+      - "64"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
@@ -168,7 +168,7 @@ templates:
       - --quantization
       - "ascend"
       - --block-size
-      - "32"
+      - "64"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
@@ -206,7 +206,7 @@ templates:
       - "30"
       - --async-scheduling
       - --block-size
-      - "32"
+      - "64"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
@@ -261,7 +261,7 @@ templates:
       - "30"
       - --async-scheduling
       - --block-size
-      - "32"
+      - "64"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
