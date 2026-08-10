@@ -187,42 +187,51 @@ def test_cpu_and_gpu_corrections_agree():
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)
 
 
+def _finalize_with_reject(seq_lens_list, num_reqs, reject_cpu):
+    """Mirror the inline finalize performed by the Ascend attention backends.
+
+    ``build_parallel_draft_seq_lens_cpu`` now publishes optimistic+query_len;
+    the per-request reject count is subtracted from ``seq_lens_list`` at FIA
+    forward entry. This helper replicates that subtract so tests can verify the
+    two-phase composition matches the old single-phase exact result.
+    """
+    r = reject_cpu[:num_reqs].tolist()
+    for i in range(num_reqs):
+        seq_lens_list[i] -= r[i]
+
+
 def test_build_parallel_draft_seq_lens_cpu_mixed_acceptance():
     optimistic = torch.tensor([100, 200, 300], dtype=torch.int32)
-    actual = build_parallel_draft_seq_lens_cpu(
-        optimistic,
-        num_draft_tokens=[3, 3, 0],
-        valid_sampled_token_count_cpu=torch.tensor([4, 2, 1], dtype=torch.int64),
-        num_reqs=3,
-        query_len=4,
-    )
+    actual = build_parallel_draft_seq_lens_cpu(optimistic, num_reqs=3, query_len=4)
 
-    # req0 accepts all drafts; req1 rejects two; req2 did not speculate.
-    torch.testing.assert_close(actual, torch.tensor([104, 202, 304], dtype=torch.int32))
+    # Build phase: optimistic + query_len only (reject subtraction deferred).
+    torch.testing.assert_close(actual, torch.tensor([104, 204, 304], dtype=torch.int32))
     torch.testing.assert_close(optimistic, torch.tensor([100, 200, 300], dtype=torch.int32))
+
+    # Deferred finalize: req0 accepts all (reject 0); req1 rejects two; req2
+    # did not speculate. reject = num_draft_tokens + 1 - valid_counts (>0 else 0).
+    reject = torch.tensor([0, 2, 0], dtype=torch.int32)
+    seq_lens_list = actual.tolist()
+    _finalize_with_reject(seq_lens_list, num_reqs=3, reject_cpu=reject)
+    assert seq_lens_list == [104, 202, 304]
 
 
 def test_build_parallel_draft_seq_lens_cpu_first_pass():
     optimistic = torch.tensor([64, 128], dtype=torch.int32)
-    actual = build_parallel_draft_seq_lens_cpu(
-        optimistic,
-        num_draft_tokens=None,
-        valid_sampled_token_count_cpu=None,
-        num_reqs=2,
-        query_len=8,
-    )
+    actual = build_parallel_draft_seq_lens_cpu(optimistic, num_reqs=2, query_len=8)
 
+    # First pass: no prior draft -> no reject; optimistic + query_len is exact.
     torch.testing.assert_close(actual, torch.tensor([72, 136], dtype=torch.int32))
 
 
 def test_build_parallel_draft_seq_lens_cpu_preserves_unused_tail():
     optimistic = torch.tensor([10, 20, 999, 999], dtype=torch.int32)
-    actual = build_parallel_draft_seq_lens_cpu(
-        optimistic,
-        num_draft_tokens=[2, 2],
-        valid_sampled_token_count_cpu=torch.tensor([1, 3], dtype=torch.int64),
-        num_reqs=2,
-        query_len=3,
-    )
+    actual = build_parallel_draft_seq_lens_cpu(optimistic, num_reqs=2, query_len=3)
 
-    torch.testing.assert_close(actual, torch.tensor([11, 23, 999, 999], dtype=torch.int32))
+    torch.testing.assert_close(actual, torch.tensor([13, 23, 999, 999], dtype=torch.int32))
+
+    # Deferred finalize touches only [:num_reqs]; the unused tail is untouched.
+    reject = torch.tensor([1, 0], dtype=torch.int32)
+    seq_lens_list = actual.tolist()
+    _finalize_with_reject(seq_lens_list, num_reqs=2, reject_cpu=reject)
+    assert seq_lens_list == [12, 23, 999, 999]

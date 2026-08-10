@@ -232,6 +232,29 @@ class TestQuaRotDraftBoundaries:
         )
         torch.testing.assert_close(target.weight, original_target)
 
+    def test_materialized_layer_reuses_noncopyable_comm_group(self):
+        class NonCopyableCommGroup:
+            def __deepcopy__(self, memo):
+                del memo
+                raise TypeError("cannot pickle ProcessGroup")
+
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        target.comm_group = NonCopyableCommGroup()
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared.comm_group is target.comm_group
+        assert prepared.weight is not target.weight
+        assert prepared.weight.data_ptr() != target.weight.data_ptr()
+        torch.testing.assert_close(prepared.weight, target.weight)
+
     def test_incompatible_quarot_shared_layer_fails_instead_of_aliasing(self):
         proposer = self._make_proposer()
         proposer._quarot_rotation = torch.eye(2)

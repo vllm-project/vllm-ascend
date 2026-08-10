@@ -81,36 +81,23 @@ def correct_optimistic_seq_lens_cpu(
 
 def build_parallel_draft_seq_lens_cpu(
     seq_lens_cpu: torch.Tensor,
-    num_draft_tokens: list[int] | None,
-    valid_sampled_token_count_cpu: torch.Tensor | None,
     num_reqs: int,
     query_len: int,
 ) -> torch.Tensor:
-    """Build exact FIA KV lengths for one parallel-draft pass on the CPU.
+    """Build optimistic FIA KV lengths for one parallel-draft pass on the CPU.
 
-    ``seq_lens_cpu`` contains the target pass's optimistic lengths. For a
-    padded speculative batch, subtract tokens rejected by target verification,
-    then include the parallel draft query block that will be written to cache.
-    The source tensor is never modified.
+    ``seq_lens_cpu`` contains the target pass's optimistic lengths (async mode
+    assumes all prior drafts accepted). Add the parallel draft query block that
+    will be written to cache. The post-rejection correction is deferred to the
+    FIA forward entry (``pending_reject_*`` on the attention metadata), where
+    the asynchronously-copied reject counts are synchronized and subtracted
+    from ``seq_lens_list``; this lets the accepted-token-count D2H overlap with
+    metadata build and the early draft forward instead of synchronizing in the
+    proposer. The source tensor is never modified.
     """
-    exact_seq_lens_cpu = seq_lens_cpu.clone()
-    if num_draft_tokens is not None:
-        assert valid_sampled_token_count_cpu is not None
-        drafts = torch.as_tensor(
-            num_draft_tokens[:num_reqs],
-            dtype=exact_seq_lens_cpu.dtype,
-        )
-        valid_counts = valid_sampled_token_count_cpu[:num_reqs].to(
-            dtype=exact_seq_lens_cpu.dtype,
-        )
-        rejected = torch.where(
-            drafts > 0,
-            drafts + 1 - valid_counts,
-            torch.zeros_like(drafts),
-        )
-        exact_seq_lens_cpu[:num_reqs].sub_(rejected)
-    exact_seq_lens_cpu[:num_reqs].add_(query_len)
-    return exact_seq_lens_cpu
+    out = seq_lens_cpu.clone()
+    out[:num_reqs].add_(query_len)
+    return out
 
 
 class SlidingWindowAdapter:

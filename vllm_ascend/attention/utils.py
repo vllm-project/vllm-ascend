@@ -209,13 +209,25 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
-    # Exact host-side sequence lengths for the current parallel-draft pass.
-    # Async scheduling keeps the regular CPU mirrors optimistic until the
-    # scheduler consumes the accepted-token counts. Ascend FIA needs exact
-    # lengths as a Python list, so the proposer reconstructs them from the
-    # asynchronously copied accepted-token counts without synchronizing the
-    # device ``seq_lens`` tensor.
+    # Optimistic host-side sequence lengths for the current parallel-draft
+    # pass: target optimistic lengths + the draft query block. Async scheduling
+    # keeps the regular CPU mirrors optimistic, and the post-rejection
+    # correction is deferred to the FIA forward entry so the reject-counts D2H
+    # can overlap with build + early draft forward. The exact lengths are
+    # reconstructed by subtracting ``parallel_draft_num_reject_cpu`` from the
+    # per-layer ``seq_lens_list`` at FIA time (see ``pending_reject_*`` on the
+    # backend metadata).
     parallel_draft_seq_lens_cpu: torch.Tensor = None
+
+    # Pending reject-counts for the deferred parallel-draft finalize. The
+    # proposer publishes the host mirror of ``num_rejected_tokens_gpu`` (copied
+    # on a side stream) plus its event and the request count; the backend
+    # metadata builder copies these into per-layer metadata, and the FIA forward
+    # entry synchronizes the event and subtracts the per-request reject count
+    # from ``seq_lens_list`` exactly once.
+    parallel_draft_num_reject_cpu: torch.Tensor = None
+    parallel_draft_num_reject_event: Any = None
+    parallel_draft_num_reject_num_reqs: int = 0
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
