@@ -57,42 +57,17 @@ _benchmarks_acc: &benchmarks_acc
     top_k: 40
     ignore_eos: false
 
-_benchmarks_3500: &benchmarks_3500
-  perf_50:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 760
-    max_out_len: 1500
-    batch_size: 190
-    request_rate: 0
-    baseline: 4573.02
-    threshold: 0.97
-  perf_20:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 192
-    max_out_len: 1500
-    batch_size: 48
-    request_rate: 0
-    baseline: 2229.147
-    threshold: 0.97
-
-
 _benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
   perf_prefix_90:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_Minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 72
+    num_prompts: 160
     max_out_len: 1024
-    batch_size: 18
+    batch_size: 40
     request_rate: 0
-    baseline: 284.9
+    baseline: 808.3
     threshold: 0.97
 
 _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
@@ -101,24 +76,35 @@ _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 24
+    num_prompts: 80
     max_out_len: 1024
-    batch_size: 6
+    batch_size: 20
     request_rate: 0
-    baseline: 95.24
+    baseline: 256.4
     threshold: 0.97
 
 _benchmarks_prefix_max: &benchmarks_prefix_max
-  perf_prefix_90:
+  perf_prefix_99:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    dataset_path: vllm-ascend/GSM8K_prefix99_in203738_bs1_mini
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 1
     max_out_len: 1024
     batch_size: 1
     request_rate: 0
-    baseline: 53.57
+    baseline: 1
+    threshold: 0.1
+  perf_1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix99_in203738_bs4_mini
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 33.6
     threshold: 0.97
 
 # ==========================================
@@ -138,19 +124,6 @@ test_cases:
       - "0.8"
     benchmarks:
       <<: *benchmarks_acc
-  - name: "MiniMax-M2.7-3500"
-    model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
-    envs:
-      <<: *envs
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--max-model-len"
-      - "70000"
-      - "--gpu-memory-utilization"
-      - "0.8"
-      - "--no-enable-prefix-caching"
-    benchmarks:
-      <<: *benchmarks_3500
   - name: "MiniMax-M2.7-prefix_64k_50"
     model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
     envs:

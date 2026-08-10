@@ -182,8 +182,9 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         cached_head_size = (
             (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
         )
+        block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
+            block_size=block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,

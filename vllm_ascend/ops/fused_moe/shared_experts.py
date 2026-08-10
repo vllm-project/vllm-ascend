@@ -22,12 +22,15 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
@@ -41,9 +44,6 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
-    swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.0
-    swiglu_beta: float = 0.0
 
 
 class AscendSharedExperts:
@@ -57,14 +57,18 @@ class AscendSharedExperts:
     def __init__(
         self,
         layer: torch.nn.Module,
-        moe_config,
+        moe_config: FusedMoEConfig,
         quant_type: QuantType,
         quant_method: FusedMoEMethodBase,
     ):
         self.layer = layer
         self.hidden_size = moe_config.hidden_dim
         self.in_dtype = moe_config.in_dtype
+        self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
+        self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
+        self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
         self.quant_type = quant_type
+        self.lora_context = None
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
 
@@ -82,6 +86,9 @@ class AscendSharedExperts:
                 return result
 
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     def validate_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
@@ -135,10 +142,12 @@ class AscendSharedExperts:
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             # Only used for int quantization
-            has_quantized_shared = hasattr(self.layer.gate_up_proj, "weight_scale") and hasattr(
-                self.layer.down_proj, "weight_scale"
+            has_quantized_shared_without_lora = (
+                not has_lora(self.lora_context)
+                and hasattr(self.layer.gate_up_proj, "weight_scale")
+                and hasattr(self.layer.down_proj, "weight_scale")
             )
-            if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -168,9 +177,12 @@ class AscendSharedExperts:
                     activate_left=True,
                     quant_mode=1,
                     swiglu_mode=1,
-                    clamp_limit=fused_moe_evts.swiglu_limit,
-                    glu_alpha=fused_moe_evts.swiglu_alpha,
-                    glu_bias=fused_moe_evts.swiglu_beta,
+                    clamp_limit=self.swiglu_limit,
+                    **(
+                        {}
+                        if get_ascend_device_type() == AscendDeviceType.A5
+                        else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
+                    ),
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
@@ -183,7 +195,7 @@ class AscendSharedExperts:
                     bias=None,
                     output_dtype=original_dtype,
                 )
-            elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
+            elif has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -202,7 +214,7 @@ class AscendSharedExperts:
                     group_index=None,
                     dst_type=torch.float8_e4m3fn,
                     quant_mode=2,
-                    clamp_value=fused_moe_evts.swiglu_limit,
+                    clamp_value=self.swiglu_limit,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
