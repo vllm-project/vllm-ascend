@@ -39,7 +39,7 @@ from vllm_ascend.lora.fused_moe import (
     preprocess_lora_indices,
 )
 from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
     MoEMC2CombineMetadata,
