@@ -89,7 +89,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_gpqa
   - name: "longSeq_pcpdcp_performance_0004"
-    model: "/mnt/share/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
       ASCEND_LAUNCH_BLOCKING: "0"
       OMP_NUM_THREADS: "100"
