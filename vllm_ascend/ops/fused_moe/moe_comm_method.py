@@ -272,6 +272,10 @@ class FusedMC2CommImpl(MoECommMethod):
         else:
             self.expert_token_nums = None
 
+        self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
+        self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
+        self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
+
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
@@ -372,7 +376,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 fused_experts_input,
             )
 
-        activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
+        activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
         if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
             # mc2_mask comes from the reserved bool buffer in
@@ -447,7 +451,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     probs=fused_experts_input.topk_weights.to(torch.float32),
                     group=self.token_dispatcher.moe_all_to_all_group_name,
                     max_output_size=get_ascend_config().mega_moe_max_tokens,
-                    swiglu_limit=fused_experts_input.swiglu_limit,
+                    swiglu_limit=self.swiglu_limit,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,
