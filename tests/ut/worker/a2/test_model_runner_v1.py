@@ -583,6 +583,72 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
 
 
+    def test_reshape_hybrid_c8_mxfp_cache_splits_shared_buffer(self):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.hybrid_with_attn_and_mamba = True
+        runner.model_config.use_mla = False
+        runner.model_config.hf_text_config.head_dim = 64
+        runner.vllm_config.quant_config = SimpleNamespace(enable_mxfp_c8_quant=True)
+
+        kv_cache_spec = FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=66,
+            dtype=torch.float8_e4m3fn,
+        )
+        num_blocks = 2
+        c8_payload_size = kv_cache_spec.page_size_bytes * num_blocks
+        hybrid_padding_size = 128
+        raw_tensor = torch.zeros(hybrid_padding_size + c8_payload_size, dtype=torch.int8)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[KVCacheTensor(size=raw_tensor.numel(), shared_by=["attn"])],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["attn"],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+        backend = MagicMock()
+        backend.get_supported_kernel_block_sizes.return_value = [128]
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            2,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=kv_cache_spec,
+                backend=backend,
+                layer_names=["attn"],
+            )
+        ]
+
+        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, {"attn": raw_tensor})
+
+        k_cache, v_cache, k_scale_cache, v_scale_cache = kv_caches["attn"]
+        self.assertEqual(k_cache.shape, (2, 128, 1, 64))
+        self.assertEqual(v_cache.shape, (2, 128, 1, 64))
+        self.assertEqual(k_scale_cache.shape, (2, 1, 128, 1, 2))
+        self.assertEqual(v_scale_cache.shape, (2, 1, 2, 64, 2))
+        self.assertEqual(k_cache.untyped_storage().data_ptr(), raw_tensor.untyped_storage().data_ptr())
+        self.assertEqual(k_cache.storage_offset(), hybrid_padding_size)
+
+    def test_split_hybrid_c8_mxfp_cache_rejects_small_buffer(self):
+        raw_tensor = torch.zeros(127, dtype=torch.int8)
+
+        with self.assertRaisesRegex(ValueError, "hybrid cache buffer is too small"):
+            NPUModelRunner._split_hybrid_c8_mxfp_cache_buffer(
+                raw_tensor,
+                (1, 64, 1, 64),
+                (1, 64, 1, 64),
+            )
+
+
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)

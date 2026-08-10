@@ -144,7 +144,11 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     update_sparse_kv_offload_metadata,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.device.mxfp_kv_cache import MXFP8_GROUP_SIZE
+from vllm_ascend.device.mxfp_kv_cache import (
+    MXFP8_GROUP_SIZE,
+    mxfp_k_scale_cache_shape,
+    mxfp_v_scale_cache_shape,
+)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -3732,6 +3736,60 @@ class NPUModelRunner(GPUModelRunner):
 
     def _is_c8_mxfp_kv_cache(self, kv_cache_spec: AttentionSpec) -> bool:
         return isinstance(kv_cache_spec, FullAttentionSpec) and is_c8_mxfp_kv_quant(self.vllm_config)
+
+    @staticmethod
+    def _split_hybrid_c8_mxfp_cache_buffer(
+        raw_tensor: torch.Tensor,
+        k_shape: tuple[int, ...],
+        v_shape: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split a hybrid Mamba/attention buffer into C8 MXFP payloads.
+
+        Hybrid cache groups allocate one padded raw buffer that is shared by
+        Mamba and full-attention layers. Mamba state views start at the front
+        of that buffer, while attention payloads are placed at the end. C8
+        MXFP needs four payloads instead of the regular K/V pair.
+        """
+        num_blocks, block_size, num_kv_heads, k_dim = k_shape
+        if len(v_shape) != 4:
+            raise ValueError(f"Expected a four-dimensional V cache shape, got {v_shape}.")
+        if v_shape[:3] != k_shape[:3]:
+            raise ValueError(
+                "C8_MXFP hybrid K/V cache shapes must share block and head dimensions, "
+                f"got k_shape={k_shape}, v_shape={v_shape}."
+            )
+
+        v_dim = v_shape[3]
+        k_scale_shape = mxfp_k_scale_cache_shape(
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            k_dim,
+        )
+        v_scale_shape = mxfp_v_scale_cache_shape(
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            v_dim,
+        )
+        payload_sizes = [
+            math.prod(k_shape),
+            math.prod(v_shape),
+            math.prod(k_scale_shape),
+            math.prod(v_scale_shape),
+        ]
+        payload_size = sum(payload_sizes)
+        if raw_tensor.numel() < payload_size:
+            raise ValueError(
+                "C8_MXFP hybrid cache buffer is too small: "
+                f"raw_numel={raw_tensor.numel()}, payload_numel={payload_size}, "
+                f"k_shape={k_shape}, v_shape={v_shape}."
+            )
+
+        payload = raw_tensor[raw_tensor.numel() - payload_size :]
+        raw_k, raw_v, raw_k_scale, raw_v_scale = torch.split(payload, payload_sizes)
+        return raw_k, raw_v, raw_k_scale, raw_v_scale
+
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
         aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
@@ -4267,16 +4325,6 @@ class NPUModelRunner(GPUModelRunner):
                     if current_kv_cache_spec.scale_dim:
                         raw_k_tensor, raw_scale_tensor = raw_cache
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_scale_tensor.numel()
-                    elif self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                        raw_k_tensor, raw_v_tensor, raw_k_scale_tensor, raw_v_scale_tensor = kv_cache_raw_tensors[
-                            layer_name
-                        ]
-                        sum_page_size_bytes = (
-                            raw_k_tensor.numel()
-                            + raw_v_tensor.numel()
-                            + raw_k_scale_tensor.numel()
-                            + raw_v_scale_tensor.numel()
-                        )
                     else:
                         (raw_k_tensor,) = raw_cache
                         raw_scale_tensor = None
@@ -4309,6 +4357,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
+                    hybrid_c8_raw_tensor = None
                     # cache_only_layers (extract_hidden_states) are allocated
                     # as a single tensor by the branch at the top of
                     # _allocate_kv_cache_tensors; route them to the dedicated
@@ -4348,7 +4397,9 @@ class NPUModelRunner(GPUModelRunner):
                     ):
                         # Currently, we ensure that the same kvcache format is used even if there
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
-                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
+                        raw_k_tensor = raw_v_tensor = kv_cache_raw_tensors[layer_name]
+                        if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
+                            hybrid_c8_raw_tensor = raw_k_tensor
                         sum_page_size_bytes = raw_k_tensor.numel()
                     elif (
                         "cache_only_layers" in layer_name
@@ -4388,14 +4439,30 @@ class NPUModelRunner(GPUModelRunner):
                             k_cache = raw_tensor.view(kv_cache_shape)
                         kv_caches[layer_name] = k_cache
                         continue  # Skip the rest of the AttentionSpec handling
+                    elif self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
+                        raw_k_tensor, raw_v_tensor, raw_k_scale_tensor, raw_v_scale_tensor = kv_cache_raw_tensors[
+                            layer_name
+                        ]
+                        sum_page_size_bytes = (
+                            raw_k_tensor.numel()
+                            + raw_v_tensor.numel()
+                            + raw_k_scale_tensor.numel()
+                            + raw_v_scale_tensor.numel()
+                        )
                     else:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                             layer_name
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+                    if hybrid_c8_raw_tensor is not None:
+                        # The shared raw buffer uses Mamba's padded page size,
+                        # which is intentionally larger than the C8 payload.
+                        # KVCacheManager only addresses the common num_blocks.
+                        num_blocks = kv_cache_config.num_blocks
+                    else:
+                        assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
+                        num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -4417,7 +4484,11 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                            if hybrid_c8_raw_tensor is not None:
+                                # C8 K/V and scale payloads are split after
+                                # their virtual kernel-block shapes are known.
+                                pass
+                            elif not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                                 attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                     current_kv_cache_spec.dtype
                                 )
@@ -4447,6 +4518,17 @@ class NPUModelRunner(GPUModelRunner):
                     if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
                         k_shape = (*kv_cache_shape[1:-1], self.model_config.hf_text_config.head_dim)
                         v_shape = k_shape
+                        if hybrid_c8_raw_tensor is not None:
+                            (
+                                raw_k_tensor,
+                                raw_v_tensor,
+                                raw_k_scale_tensor,
+                                raw_v_scale_tensor,
+                            ) = self._split_hybrid_c8_mxfp_cache_buffer(
+                                hybrid_c8_raw_tensor,
+                                k_shape,
+                                v_shape,
+                            )
                     elif not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
