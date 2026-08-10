@@ -300,9 +300,12 @@ def _task_passed(case_config: dict[str, Any], result: Any) -> bool:
 
 def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -> dict[str, Any]:
     """Build a single task dict in the required format."""
+    dataset_name = case_config.get("dataset_name", "")
     dataset_path = case_config.get("dataset_path", "")
     dataset_conf = case_config.get("dataset_conf", "")
-    if dataset_path:
+    if dataset_name:
+        task_name = dataset_name
+    elif dataset_path:
         task_name = dataset_path.split("/", 1)[-1]
     elif dataset_conf:
         task_name = dataset_conf.split("/")[0]

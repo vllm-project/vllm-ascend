@@ -1,0 +1,63 @@
+# Generated performance datasets
+
+Nightly and weekly AISBench cases can generate deterministic text datasets on
+the CI runner instead of downloading them from ModelScope. This is opt-in: an
+existing case that only defines `dataset_path` or `dataset_path_local` keeps its
+previous behavior.
+
+Generated datasets are supported only for performance cases. Accuracy and
+multimodal cases must continue to use their real datasets.
+
+## Fixed-length dataset
+
+```yaml
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_name: GSM8K-in3500-num2800
+    dataset_generator:
+      type: fixed
+      input_len: 3500
+      num_samples: 2800
+      seed: 42
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 2800
+    max_out_len: 1500
+    batch_size: 700
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+```
+
+## Prefix dataset
+
+```yaml
+benchmarks:
+  perf_prefix75:
+    case_type: performance
+    dataset_name: prefix75-in3500-num210
+    dataset_generator:
+      type: prefix
+      input_len: 3500
+      num_samples: 210
+      prefix_ratio: 0.75
+      prefix_num: 1
+      seed: 42
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 210
+    max_out_len: 1500
+    batch_size: 70
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+```
+
+`dataset_name` is used only in benchmark result reporting. Generated files are
+cached under `/tmp/vllm_ascend_datasets` by default. Set
+`VLLM_ASCEND_DATASET_CACHE` to use another cache directory.
+
+The same benchmark mapping works in the single-node, internal-DP, and
+external-DP YAML formats because dataset resolution is shared by
+`tools/aisbench.py`.
