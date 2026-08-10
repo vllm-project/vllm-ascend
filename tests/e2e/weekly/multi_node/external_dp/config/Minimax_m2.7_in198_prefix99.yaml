@@ -87,7 +87,7 @@ templates:
       - "204800"
       - -max-num-batched-tokens
       - "32768"
-      - -max-num-seqs
+      - --max-num-seqs
       - "16"
       - --trust-remote-code
       - --gpu-memory-utilization
@@ -140,7 +140,7 @@ templates:
       - "204800"
       - -max-num-batched-tokens
       - "16384"
-      - -max-num-seqs
+      - --max-num-seqs
       - "16"
       - --trust-remote-code
       - --gpu-memory-utilization
@@ -195,9 +195,10 @@ templates:
       - "204800"
       - -max-num-batched-tokens
       - "16384"
-      - -max-num-seqs
+      - --max-num-seqs
       - "16"
       - --trust-remote-code
+      - --gpu-memory-utilization
       - "0.8"
       - --quantization
       - "ascend"
