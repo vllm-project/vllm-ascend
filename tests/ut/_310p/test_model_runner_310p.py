@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 from tests.ut.base import TestBase
 from vllm_ascend._310p.model_runner_310p import (
     NPUModelRunner310,
+    _resize_dflash_draft_kv_cache_specs,
     _snapshot_num_computed_tokens_to_device,
 )
 from vllm_ascend.spec_decode.utils import (
@@ -89,6 +90,43 @@ def test_num_computed_tokens_snapshot_isolated_from_deferred_correction() -> Non
         snapshot,
         torch.tensor([119, 88], dtype=torch.int32),
     )
+
+
+def test_dflash_draft_kv_block_reuses_target_mamba_page() -> None:
+    target_spec = AttentionSpec(
+        block_size=1280,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.float16,
+    )
+    draft_spec = AttentionSpec(
+        block_size=1280,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=1280,
+        shapes=((18, 4096), (16, 128, 128)),
+        dtypes=(torch.float16, torch.float32),
+        mamba_cache_mode="align",
+    )
+    specs = {
+        "target.attn": target_spec,
+        "draft.attn": draft_spec,
+        "target.linear_attn": mamba_spec,
+    }
+
+    resized = _resize_dflash_draft_kv_cache_specs(
+        specs,
+        {"draft.attn"},
+        target_spec.page_size_bytes,
+    )
+
+    assert resized["target.attn"] is target_spec
+    assert resized["draft.attn"].block_size == 640
+    assert resized["draft.attn"].page_size_bytes == target_spec.page_size_bytes
+    assert specs["draft.attn"].block_size == 1280
 
 
 def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:

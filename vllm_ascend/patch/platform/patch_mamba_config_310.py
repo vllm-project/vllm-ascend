@@ -106,13 +106,33 @@ def verify_and_update_config(cls, vllm_config) -> None:
             cache_config.block_size * draft_attn_page_size_1_token
         )
         if draft_attn_page_size > attn_page_size:
-            logger.info(
-                "Increasing the unified KV cache page size from %d to %d "
-                "bytes to accommodate speculative draft attention.",
-                attn_page_size,
-                draft_attn_page_size,
+            draft_block_size = (
+                attn_page_size // draft_attn_page_size_1_token
+                if attn_page_size % draft_attn_page_size_1_token == 0
+                else 0
             )
-            attn_page_size = draft_attn_page_size
+            can_resize_dflash_draft = (
+                speculative_config.method == "dflash"
+                and draft_block_size > 0
+                and draft_block_size % kernel_block_alignment_size == 0
+            )
+            if can_resize_dflash_draft:
+                logger.info(
+                    "Keeping the unified KV cache page size at %d bytes; "
+                    "310P DFlash draft attention will use a %d-token "
+                    "logical block instead of %d tokens.",
+                    attn_page_size,
+                    draft_block_size,
+                    cache_config.block_size,
+                )
+            else:
+                logger.info(
+                    "Increasing the unified KV cache page size from %d to %d "
+                    "bytes to accommodate speculative draft attention.",
+                    attn_page_size,
+                    draft_attn_page_size,
+                )
+                attn_page_size = draft_attn_page_size
     assert attn_page_size >= mamba_page_size
     if attn_page_size == mamba_page_size:
         # don't need to pad mamba page size

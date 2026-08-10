@@ -69,6 +69,9 @@ class NPUWorker310(NPUWorker):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
+        if self.cache_config.kv_cache_memory_bytes:
+            return super().determine_available_memory()
+
         GiB = lambda b: b / GiB_bytes
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.

@@ -55,7 +55,24 @@ def _ascend_resolve_kv_cache_block_sizes(
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
 
-    return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    scheduler_block_size, hash_block_size = (
+        _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    )
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if (
+        speculative_config is not None
+        and speculative_config.method == "dflash"
+        and cache_config.enable_prefix_caching
+    ):
+        group_block_sizes = [
+            group.kv_cache_spec.block_size for group in groups
+        ]
+        if any(
+            block_size % hash_block_size != 0
+            for block_size in group_block_sizes
+        ):
+            hash_block_size = math.gcd(*group_block_sizes)
+    return scheduler_block_size, hash_block_size
 
 
 def group_and_unify_kv_cache_specs(

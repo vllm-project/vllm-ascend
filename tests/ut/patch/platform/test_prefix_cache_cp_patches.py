@@ -2,7 +2,7 @@
 
 import math
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -153,6 +153,47 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2 * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+def test_dflash_resolve_uses_common_hash_granularity() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        full_block_size=1280,
+        mamba_block_size=1280,
+    )
+    draft_spec = FullAttentionSpec(
+        block_size=640,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    kv_cache_config.kv_cache_groups.append(
+        KVCacheGroupSpec(
+            layer_names=["draft_attn"],
+            kv_cache_spec=draft_spec,
+        )
+    )
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        pcp=1,
+        block_size=1280,
+    )
+    vllm_config.speculative_config = SimpleNamespace(method="dflash")
+
+    with patch(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils."
+        "_orig_resolve_kv_cache_block_sizes",
+        return_value=(1280, 1280),
+    ):
+        scheduler_block_size, hash_block_size = (
+            _ascend_resolve_kv_cache_block_sizes(
+                kv_cache_config,
+                vllm_config,
+            )
+        )
+
+    assert scheduler_block_size == 1280
+    assert hash_block_size == 640
 
 
 @pytest.mark.parametrize(

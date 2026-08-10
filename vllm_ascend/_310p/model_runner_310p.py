@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
@@ -61,6 +62,47 @@ from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
+_DFLASH_DRAFT_BLOCK_ALIGNMENT = 128
+
+
+def _resize_dflash_draft_kv_cache_specs(
+    kv_cache_specs: dict[str, KVCacheSpec],
+    draft_layer_names: set[str],
+    unified_page_size: int,
+) -> dict[str, KVCacheSpec]:
+    """Fit DFlash draft blocks into the target/Mamba unified cache page."""
+    resized_specs = kv_cache_specs.copy()
+    for layer_name in draft_layer_names:
+        layer_spec = resized_specs.get(layer_name)
+        if not isinstance(layer_spec, AttentionSpec):
+            continue
+        if layer_spec.page_size_bytes <= unified_page_size:
+            continue
+
+        if layer_spec.real_page_size_bytes % layer_spec.block_size != 0:
+            raise ValueError(
+                f"DFlash draft KV page for {layer_name} is not token aligned."
+            )
+        bytes_per_token = layer_spec.real_page_size_bytes // layer_spec.block_size
+        if unified_page_size % bytes_per_token != 0:
+            raise ValueError(
+                f"DFlash draft KV page for {layer_name} cannot fit the "
+                f"{unified_page_size}-byte unified page."
+            )
+        draft_block_size = unified_page_size // bytes_per_token
+        if draft_block_size % _DFLASH_DRAFT_BLOCK_ALIGNMENT != 0:
+            raise ValueError(
+                f"DFlash draft block size {draft_block_size} for {layer_name} "
+                f"is not aligned to {_DFLASH_DRAFT_BLOCK_ALIGNMENT} tokens."
+            )
+        resized_spec = replace(
+            layer_spec,
+            block_size=draft_block_size,
+            page_size_padded=None,
+        )
+        assert resized_spec.page_size_bytes == unified_page_size
+        resized_specs[layer_name] = resized_spec
+    return resized_specs
 
 
 def _snapshot_num_computed_tokens_to_device(
@@ -131,6 +173,40 @@ class NPUModelRunner310(NPUModelRunner):
             # layout-change steps only.
             torch.npu.current_stream().synchronize()
         return deferred
+
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        kv_cache_specs = super().get_kv_cache_spec()
+        if (
+            self.speculative_config is None
+            or self.speculative_config.method != "dflash"
+            or self.drafter is None
+        ):
+            return kv_cache_specs
+
+        draft_layer_names = getattr(
+            self.drafter,
+            "_draft_attn_layer_names",
+            set(),
+        )
+        mamba_page_sizes = {
+            spec.page_size_bytes
+            for spec in kv_cache_specs.values()
+            if isinstance(spec, MambaSpec)
+        }
+        if not draft_layer_names or not mamba_page_sizes:
+            return kv_cache_specs
+        if len(mamba_page_sizes) != 1:
+            raise ValueError(
+                "310P DFlash requires one unified Mamba KV page size, but got "
+                f"{sorted(mamba_page_sizes)}."
+            )
+
+        unified_page_size = next(iter(mamba_page_sizes))
+        return _resize_dflash_draft_kv_cache_specs(
+            kv_cache_specs,
+            set(draft_layer_names),
+            unified_page_size,
+        )
 
     @contextmanager
     def temporary_modify_uniform_decode_query_len(self):
