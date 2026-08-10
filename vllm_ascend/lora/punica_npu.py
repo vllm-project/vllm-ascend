@@ -3,6 +3,10 @@
 from collections.abc import Callable
 
 import torch
+from vllm.distributed import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -385,7 +389,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         needed.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
-        del shrink_config, expand_config, fully_sharded
+        del shrink_config, expand_config
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
         if token_lora_mapping is None:
             token_lora_mapping = self.token_lora_indices
@@ -403,11 +407,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             torch.full_like(token_lora_mapping, -1),
         ).contiguous()
 
-        # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its X_T),
-        # so the shrink buffer is fp32.
-        rank = lora_a_stacked[0].shape[-2]
-        shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
-
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):
             # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
@@ -415,11 +414,34 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             # into "the plain per-row gather" to reuse bgmv_shrink/bgmv_expand.
             a = lora_a_stacked[slice_idx]
             b = lora_b_stacked[slice_idx]
+            local_rank = a.shape[-2]
+            full_rank = b.shape[-1]
             out_size = b.shape[-2]
-            a_flat = a.view(-1, rank, a.shape[-1])
-            b_flat = b.view(-1, out_size, rank)
+            a_flat = a.view(-1, local_rank, a.shape[-1])
+
+            # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
+            # (its X_T), so the shrink buffer is fp32.
+            shrink_out = torch.zeros(
+                (x2d.shape[0], local_rank),
+                dtype=torch.float32,
+                device=x2d.device,
+            )
 
             self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+
+            if fully_sharded:
+                if local_rank == full_rank:
+                    shrink_out = tensor_model_parallel_all_reduce(shrink_out)
+                else:
+                    shrink_out = tensor_model_parallel_all_gather(shrink_out)
+
+            if shrink_out.shape[-1] != full_rank:
+                raise ValueError(
+                    "MoE LoRA rank mismatch after TP communication: "
+                    f"A projection has rank {shrink_out.shape[-1]}, "
+                    f"but LoRA B expects rank {full_rank}."
+                )
+            b_flat = b.view(-1, out_size, full_rank)
 
             delta = shrink_out
             if mul_routed_weight and topk_weights is not None:

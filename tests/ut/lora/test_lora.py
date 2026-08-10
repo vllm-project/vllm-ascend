@@ -113,6 +113,8 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
         split_lora_indices=torch.tensor([0]),
         permuted_lora_indices=torch.tensor([0]),
         exchanged_lora_indices=torch.tensor([0]),
+        fully_sharded=False,
+        tp_rank=0,
     )
     routing = (torch.tensor([0]), torch.tensor([0]))
 
@@ -135,6 +137,9 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
     assert not hasattr(context, "split_lora_indices")
     assert not hasattr(context, "permuted_lora_indices")
     assert not hasattr(context, "exchanged_lora_indices")
+    assert calls[0].kwargs["fully_sharded"] is False
+    assert calls[1].kwargs["fully_sharded"] is False
+    assert calls[1].kwargs["offset"] == 0
 
 
 def test_moe_lora_apply_skips_empty_ep_rank() -> None:
@@ -146,6 +151,120 @@ def test_moe_lora_apply_skips_empty_ep_rank() -> None:
     moe_lora_apply_w2(context, down_out="d", silu_out="s", lora_routing=empty)
 
     punica_wrapper.add_lora_fused_moe.assert_not_called()
+
+
+def test_moe_lora_apply_propagates_fully_sharded_metadata() -> None:
+    punica_wrapper = Mock()
+    context = SimpleNamespace(
+        punica_wrapper=punica_wrapper,
+        w13_lora_a_stacked="w13_a",
+        w13_lora_b_stacked="w13_b",
+        w2_lora_a_stacked="w2_a",
+        w2_lora_b_stacked=(torch.empty(1, 1, 16, 8),),
+        adapter_enabled="all_enabled",
+        fully_sharded=True,
+        tp_rank=3,
+    )
+    routing = (torch.tensor([0]), torch.tensor([0]))
+
+    moe_lora_apply_w13(
+        context,
+        gate_up_out="gate_up_out",
+        hidden_states="hidden_states",
+        lora_routing=routing,
+    )
+    moe_lora_apply_w2(
+        context,
+        down_out="down_out",
+        silu_out="silu_out",
+        lora_routing=routing,
+    )
+
+    calls = punica_wrapper.add_lora_fused_moe.call_args_list
+    assert calls[0].kwargs["fully_sharded"] is True
+    assert calls[1].kwargs["fully_sharded"] is True
+    assert calls[1].kwargs["offset"] == 48
+
+
+def test_punica_fully_sharded_moe_gathers_rank_shards() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+
+    def shrink(_, __, output, ___, ____):
+        output.copy_(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+
+    wrapper.bgmv_shrink = Mock(side_effect=shrink)
+    wrapper.bgmv_expand_slice = Mock()
+    lora_a = (torch.zeros(2, 2, 2, 3),)
+    lora_b = (torch.zeros(2, 2, 5, 4),)
+
+    with (
+        patch(
+            "vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather",
+            side_effect=lambda value: torch.cat((value, value + 10), dim=-1),
+        ) as all_gather,
+        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_reduce") as all_reduce,
+    ):
+        wrapper.add_lora_fused_moe(
+            y=torch.zeros(2, 5),
+            x=torch.zeros(2, 3),
+            lora_a_stacked=lora_a,
+            lora_b_stacked=lora_b,
+            expert_ids=torch.tensor([0, 1]),
+            adapter_enabled=torch.tensor([1, 1]),
+            fully_sharded=True,
+            token_lora_mapping=torch.tensor([0, 1]),
+        )
+
+    all_gather.assert_called_once()
+    all_reduce.assert_not_called()
+    expand_args = wrapper.bgmv_expand_slice.call_args.args
+    assert torch.equal(
+        expand_args[0],
+        torch.tensor([[1.0, 2.0, 11.0, 12.0], [3.0, 4.0, 13.0, 14.0]]),
+    )
+    assert expand_args[1].shape == (4, 5, 4)
+    assert torch.equal(expand_args[3], torch.tensor([0, 3]))
+
+
+def test_punica_fully_sharded_moe_reduces_partial_rank() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+
+    def shrink(_, __, output, ___, ____):
+        output.copy_(torch.arange(8, dtype=torch.float32).view(2, 4))
+
+    wrapper.bgmv_shrink = Mock(side_effect=shrink)
+    wrapper.bgmv_expand_slice = Mock()
+    lora_a = (torch.zeros(2, 2, 4, 3),)
+    lora_b = (torch.zeros(2, 2, 5, 4),)
+
+    with (
+        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather") as all_gather,
+        patch(
+            "vllm_ascend.lora.punica_npu.tensor_model_parallel_all_reduce",
+            side_effect=lambda value: value + 10,
+        ) as all_reduce,
+    ):
+        wrapper.add_lora_fused_moe(
+            y=torch.zeros(2, 10),
+            x=torch.zeros(2, 3),
+            lora_a_stacked=lora_a,
+            lora_b_stacked=lora_b,
+            expert_ids=torch.tensor([0, 1]),
+            adapter_enabled=torch.tensor([1, 1]),
+            fully_sharded=True,
+            offset=5,
+            token_lora_mapping=torch.tensor([0, 1]),
+        )
+
+    all_gather.assert_not_called()
+    all_reduce.assert_called_once()
+    expand_args = wrapper.bgmv_expand_slice.call_args.args
+    assert torch.equal(
+        expand_args[0],
+        torch.arange(8, dtype=torch.float32).view(2, 4) + 10,
+    )
+    assert expand_args[1].shape == (4, 5, 4)
+    assert expand_args[4] == 5
 
 
 def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:
