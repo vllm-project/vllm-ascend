@@ -38,4 +38,8 @@ rejection_sampler.rejection_sample = npu_rejection_sample
 dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
 metrics_logits.libdevice = triton.language.extra.cann.libdevice
 # triton ops that filed in ops/triton
+# Both the main sampling path (Sampler.sample) and the spec-decode draft
+# verification path (SamplingState.apply_top_k_top_p, called by
+# RejectionSampler._verify) must route top-k/top-p to the Ascend kernel.
 sampler.apply_top_k_top_p = apply_top_k_top_p_triton
+states.apply_top_k_top_p = apply_top_k_top_p_triton
