@@ -210,6 +210,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             and get_ascend_config().enable_fused_mc2 == 1
             and _MEGA_MOE_SUPPORTED
         )
+        w1_scale_bias: list[torch.Tensor] | None
+        w2_scale_bias: list[torch.Tensor] | None
 
         if self.use_expert_weight_list:
             if use_mega_moe:
@@ -220,12 +222,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale = [t.reshape(-1) for t in layer.w13_weight_scale_list]
                 w2 = layer.w2_weight_list
                 w2_scale = [t.reshape(-1) for t in layer.w2_weight_scale_list]
-                w1_scale_bias = [
-                    t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias_list
-                ]
-                w2_scale_bias = [
-                    t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias_list
-                ]
+                w1_scale_bias = [t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias_list]
+                w2_scale_bias = [t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias_list]
             else:
                 w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
                 w1_scale = layer.w13_weight_scale_list
