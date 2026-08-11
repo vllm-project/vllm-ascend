@@ -58,4 +58,3 @@ class WorkerSentinel(GPUWorkerSentinel):
         # state, re-initialize the DP group).
         self.reset_device()
         super().retry(ft_request)
-
