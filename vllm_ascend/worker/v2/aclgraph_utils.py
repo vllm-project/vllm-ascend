@@ -51,7 +51,7 @@ def _prepare_pcp_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    skip_attn: bool,
+    full_cudagraph: bool,
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
     """Build graph inputs with the same PCP-local layout used on replay."""
@@ -77,17 +77,15 @@ def _prepare_pcp_inputs_to_capture(
             :input_batch.num_reqs
         ]
 
-    attn_metadata = None
-    if not skip_attn:
-        attn_metadata = model_state.prepare_attn(
-            input_batch,
-            CUDAGraphMode.NONE,
-            input_block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=True,
-        )
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
     return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
@@ -256,11 +254,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 block_tables: BlockTables,
                 attn_groups: list[list[AttentionGroup]],
                 kv_cache_config: KVCacheConfig,
-                skip_attn: bool = False,
+                full_cudagraph: bool,
             ) -> cudagraph_utils.AttentionState:
                 return _prepare_pcp_inputs_to_capture(
                     num_reqs, num_tokens, model_state, input_buffers,
-                    block_tables, attn_groups, kv_cache_config, skip_attn,
+                    block_tables, attn_groups, kv_cache_config, full_cudagraph,
                     pcp_manager,
                 )
 
