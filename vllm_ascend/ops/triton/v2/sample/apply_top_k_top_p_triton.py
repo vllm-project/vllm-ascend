@@ -799,8 +799,6 @@ def apply_top_k_top_p_triton(
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
     """
-    assert logits.ndim == 2
-    assert logits.dtype == torch.float32
     batch_size, vocab_size = logits.shape
     topk_enabled = k is not None
     topp_enabled = p is not None
