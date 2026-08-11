@@ -15,6 +15,8 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
+    AscendMLAPCPImpl,
+    AscendMLAPCPMetadataBuilder,
     AscendMLAPrefillMetadata,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
@@ -30,15 +32,22 @@ class TestAscendMLABackend(TestBase):
         mock_parallel_config = MagicMock()
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1
+        self.mock_parallel_config = mock_parallel_config
 
         self.mock_config.parallel_config = mock_parallel_config
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
+        self.mla_config_patcher = patch(
+            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+            return_value=self.mock_config,
+        )
+        self.mla_config_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_dcp
+        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
 
         enable_dcp.cache_clear()
+        enable_pcp.cache_clear()
 
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
@@ -53,6 +62,11 @@ class TestAscendMLABackend(TestBase):
     def test_get_impl_cls(self):
         result = AscendMLABackend.get_impl_cls()
         self.assertEqual(result, AscendMLAImpl)
+
+    def test_get_builder_and_impl_cls_with_pcp(self):
+        self.mock_parallel_config.prefill_context_parallel_size = 2
+        self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
+        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAPCPImpl)
 
     def test_get_supported_kernel_block_sizes(self):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
@@ -69,6 +83,16 @@ class TestAscendMLABackend(TestBase):
         mock_enable_dcp.return_value = True
         impl_cls = AscendMLABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
+
+    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
+    def test_pcp_and_dcp_are_rejected(self, mock_enable_dcp):
+        mock_enable_dcp.return_value = True
+        self.mock_parallel_config.prefill_context_parallel_size = 2
+
+        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
+            AscendMLABackend.get_builder_cls()
+        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
+            AscendMLABackend.get_impl_cls()
 
 
 class TestDecodeMLAPreprocessResult(TestBase):
