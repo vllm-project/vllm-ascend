@@ -53,8 +53,6 @@ deployment:
                   }
             }
         }'
-        --additional-config
-        '{"eplb_config": {"load_collection_phase": "prefill"}}'
 
   -
     envs:
@@ -93,6 +91,4 @@ deployment:
                   }
             }
         }'
-        --additional-config
-        '{"eplb_config": {"load_collection_phase": "decode"}}'
 benchmarks:
