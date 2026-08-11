@@ -90,6 +90,32 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.find_all_discontinuous_hit_positions(arr, [16, 32, 48, 64, 80, 96], 6, 128, 16)
         self.assertEqual(result, [48])
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate")
+    def test_start_load_kv_drains_stale_save_events(self, _mock_reset_gate):
+        # A step that fires fewer than num_layers hooks (MTP with
+        # num_speculative_tokens < num draft layers) never reaches the
+        # end-of-step clear in save_kv_layer, leaving set events behind.
+        # start_load_kv must drain them so the next step's save waits are safe.
+        import threading
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.use_layerwise = True
+        worker.layer_save_finished_events = [threading.Event() for _ in range(3)]
+        worker.layer_save_finished_events[1].set()  # stale leftover
+        worker.layer_save_finished_events[2].set()  # stale leftover
+        worker.layerwise_retrievers = []
+        # Empty metadata -> start_load_kv returns right after the drain.
+        metadata = MagicMock()
+        metadata.requests = []
+
+        worker.start_load_kv(metadata)
+
+        self.assertFalse(any(e.is_set() for e in worker.layer_save_finished_events))
+        self.assertEqual(worker.current_layer, 0)
+        self.assertEqual(worker.next_layer_to_submit, 0)
+
+
     def test_partial_prefill_block_index_boundaries(self):
         cls = self._make_worker_class()
 
@@ -1585,6 +1611,33 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
         worker._process_load_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_load_tasks[0]), 0)
+
+    def test_process_load_excludes_eagle_trailing_block(self):
+        # Eagle/MTP trims kvpool_cached_tokens by one block (dirty draft
+        # trailing block) while kvpool_store_skip_tokens keeps the raw hit.
+        # The load extent must follow the trimmed kvpool_cached_tokens so the
+        # trailing block is recomputed locally instead of loaded as stale
+        # draft KV.
+        worker = self._make_worker()
+        worker.layerwise_offload = False
+        worker.independent_layers = []
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=48,  # trimmed: blocks 0,1,2
+                kvpool_store_skip_tokens=64,  # raw hit: also block 3 (trailing)
+                can_load=True,
+                token_len=64,
+            ),
+        )
+        worker._process_load_for_layer_batch([req], 0)
+        self.assertEqual(len(worker.layer_load_tasks[0]), 1)
+        br = worker.layer_load_tasks[0][0].block_ranges[0]
+        self.assertEqual((br.start_block, br.end_block), (0, 3))
 
     def test_reused_layer_loads_full_cached_prefix(self):
         worker = self._make_worker()
