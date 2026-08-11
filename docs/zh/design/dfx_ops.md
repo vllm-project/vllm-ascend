@@ -69,6 +69,7 @@ vllm serve <model> --additional-config '{
 - `max_times: 0`：不 auto-arm dump；detect / `manual_trigger` 仍可。
 - token 检测开启后 worker 会强制 top-k logprobs，请求侧可不设 `logprobs`。
 - **输出关键词**（`detector.output_substring.enabled`）：`patterns` 可混用字符串与 token id 列表，例如 `["ERR", [1,2,3]]`。热更后日志打印每条 pattern 的 text↔token_ids；默认**子序列**匹配（输出任意位置），设 `match_prefix: true` 改为**前缀**匹配（从输出开头）；命中后该 req 不再检；report 含 `matched_text` / `matched_token_ids` / `match_mode`（`prefix` / `subsequence`）。
+- **局部重读**（`detector.token_repeat.enabled`）：**不**要 logprobs / msprobe。对累计 output 做滑窗：每新 token 的 score = 它在先前 `window` 个 content token 里出现的次数，`repeat_sum` = 最近 `window` 个 score 之和；`repeat_sum > repeat_sum_threshold`（且过 `min_tokens` warmup、满足 `consecutive_hits`）则告警。与 `output_substring` 同读 `RequestIoSnapshotManager`（含 speculative accepted）。默认 `window=32` / `threshold=64` / `min_tokens=32`；`ignore_token_ids` 可跳过标点等 filler。日志：`[Anomaly token_repeat]`；report 含 `repeat_sum` / `window` / `recent_token_ids`。详见 [anomaly_detection_design.md](./anomaly_detection_design.md) §5。
 
 ### 2.2 手动 `manual_trigger`
 
@@ -108,7 +109,7 @@ vllm serve <model> --additional-config '{
 }
 ```
 
-语义：全部 `include` 命中 **且** 无一 `exclude` 命中 → 才跑 Spec / TokenLogprob / OutputSubstring。  
+语义：全部 `include` 命中 **且** 无一 `exclude` 命中 → 才跑 Spec / TokenLogprob / OutputSubstring / TokenRepeat。  
 前缀匹配用 `type: input_token_id_prefix`（无单独 `input_token_id_prefixes` 字段）。  
 实现：`InputFilterManager`（`vllm_ascend/dfx/input_filters.py`），由 `DfxProcessor` 刷新。见 [dfx_design.md](./dfx_design.md) §2.6。
 
@@ -136,7 +137,7 @@ vllm serve <model> --additional-config '{
 | `[DFX filter]` | InputFilterManager 拒绝 detect |
 | `[DFX print_input]` | `print_input_token_ids_once` 打印 length + prompt token ids |
 | `[DFX manual_trigger]` / `manual_trigger` | `manual_trigger` |
-| `[Anomaly spec short]` / `[Anomaly token_logprob` / `[Anomaly output_substring]` | 检测 short |
+| `[Anomaly spec short]` / `[Anomaly token_logprob` / `[Anomaly output_substring]` / `[Anomaly token_repeat]` | 检测 short |
 | `[Anomaly msprobe]` | dump arm / activate / 配额 |
 
 ## 5. 相关文档
@@ -145,6 +146,6 @@ vllm serve <model> --additional-config '{
 |------|------|
 | [dfx_design.md](./dfx_design.md) | 架构总览、JSON、多 DP sync、InputFilterManager |
 | [dumper_design.md](./dumper_design.md) | dump 生命周期、PP/TP |
-| [anomaly_detection_design.md](./anomaly_detection_design.md) | 异常检测：SpecAcceptance / TokenLogprob / OutputSubstring |
+| [anomaly_detection_design.md](./anomaly_detection_design.md) | 异常检测：SpecAcceptance / TokenLogprob / OutputSubstring / TokenRepeat |
 | [async_scheduling_design.md](./async_scheduling_design.md) | async 时序 |
 | `additional_config.md` | 启动项与字段表 |

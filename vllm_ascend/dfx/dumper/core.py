@@ -96,6 +96,7 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             "DFX ready config=%s report_dir=%s dump.enabled=%s dump.max_times=%d "
             "ascend_log.level=%s ascend_log.debug=%s "
             "spec_check=%s token_logprob_check=%s output_substring_check=%s "
+            "token_repeat_check=%s "
             "report.save_sensitive_info=%s",
             str(self.dfx_config.config_path),
             str(self.dfx_config.report_dir),
@@ -107,6 +108,7 @@ class Dumper(PendingDumpMixin, MsprobeBridgeMixin):
             bool(self.dfx_config.detector_get("spec_acceptance", "enabled", False)),
             bool(self.dfx_config.detector_get("token_logprob", "enabled", False)),
             bool(self.dfx_config.detector_get("output_substring", "enabled", False)),
+            bool(self.dfx_config.detector_get("token_repeat", "enabled", False)),
             self.dfx_config.report_save_sensitive_info(),
         )
 

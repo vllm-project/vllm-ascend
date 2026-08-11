@@ -9,7 +9,7 @@
 ```text
 runner.dfx = DfxProcessor(runner)
   ├─ check_after_spec(...)     # DetectorManager → SpecAcceptance（先过 InputFilterManager）
-  └─ check_after_sample(...)   # DetectorManager → TokenLogprob / OutputSubstring（先过 InputFilterManager）
+  └─ check_after_sample(...)   # DetectorManager → TokenLogprob / OutputSubstring / TokenRepeat（先过 InputFilterManager）
         │
         ▼
 detector.check_all(...) → list[AnomalyAlert]
@@ -24,9 +24,10 @@ detector.check_all(...) → list[AnomalyAlert]
 - **只产 `AnomalyAlert`**：detector 不碰 Dumper；arm 由 processor 调 `Dumper.handle_anomaly_alert`。
 - **配置**：`detector.<name>.enabled`（默认 `false`）+ 各自阈值，JSON 热更新（广播 / file poll）。
 - **与 dump 正交**：detect 不依赖 `dump.enabled` / `max_times`；dump arm 失败仍写 report。
-- **完整 I/O**：由 `RequestIoSnapshotManager` 在写 report 时挂一次；detector 只写检测指标 / window 证据。
+- **完整 I/O**：由 `RequestIoSnapshotManager` 在写 report 时挂一次；detector 只写检测指标 / pattern 证据。
+- **累计 output 流**：`check_after_spec` / `check_after_sample` 各写一次 `append_batch`；`OutputSubstring` / `TokenRepeat` 在 sample 阶段以 `sampled_token_ids=None` 读同一条累计流（含 speculative accepted tokens）。
 
-当前检测器：SpecAcceptance / TokenLogprob / OutputSubstring，以下分节。
+当前检测器：SpecAcceptance / TokenLogprob / OutputSubstring / TokenRepeat，以下分节。
 
 ## 2. SpecAcceptance（投机接受率）
 
@@ -195,11 +196,11 @@ DfxProcessor.check_after_sample
   └─ DetectorManager.check_after_sample
        ├─ append_batch: 本步采样 token 写入 RequestIoSnapshotManager 累计 output
        ├─ TokenLogprobDetector.check_all
-       └─ OutputSubstringDetector.check_all(sampled_token_ids=None)
-            ├─ 用累计 output（避免二次 append）
-            ├─ 对每个 req：按 match_prefix 做前缀或子序列匹配
-            └─ 命中 → AnomalyAlert(anomaly_type="output_substring")
-                 → _handle_alert → Dumper.handle_anomaly_alert + report
+       ├─ OutputSubstringDetector.check_all(sampled_token_ids=None)
+       │    └─ 累计 output 上做前缀 / 子序列匹配 → AnomalyAlert(output_substring)
+       └─ TokenRepeatDetector.check_all(sampled_token_ids=None)
+            └─ 累计 output 增量 fold → AnomalyAlert(token_repeat)
+                 → _handle_alert → Dumper + report
 ```
 
 - 匹配用的是**完整累计 output**（`RequestIoSnapshotManager` 自建累计列表，async 安全）。
@@ -217,7 +218,94 @@ DfxProcessor.check_after_sample
 | `match_mode` | `"prefix"` 或 `"subsequence"`（对应 `match_prefix`） |
 | `output_token_count` | 当前累计输出长度 |
 
-## 5. 代码落点
+## 5. TokenRepeat（局部重读 / 滑窗 repeat_sum）
+
+实现类：`vllm_ascend/dfx/detector/token_repeat.py`。
+
+### 5.1 目标
+
+基于**累计输出 token id**（不依赖 logprobs / msprobe）检测局部「回读」：同一 id 在短窗内反复出现时，`repeat_sum` 会快速升高。补 `token_logprob` 对「词词词」类正常 vocab 重复、以及无 top-k 场景的盲区。
+
+设计原则：
+
+- **与 OutputSubstring 同流**：读 `RequestIoSnapshotManager` 累计 output（含 `check_after_spec` 写入的 accepted tokens）；manager 传 `sampled_token_ids=None`，避免二次 `append_batch`。
+- **增量 fold**：每请求维护 `_consumed_len` 游标，只推送自上次 check 以来的新 id；跳过 / 已告警仍推进游标，防止之后重复计入。
+- **O(1) 滑窗**：`freq` + `scores` deque；每步 score = 新 id 在**先前** content 窗内的出现次数；`repeat_sum` = 最近 `window` 个 score 之和。
+- **可忽略 filler**：`ignore_token_ids` 不进 content 窗（score=0），避免标点等拉高假阳性。
+- **每请求一次**：`_alerted` + 共享 `stop_after_alert`；`clear_finished` 清状态 / 游标。
+- **热更改 `window`**：清空在途 per-req 状态（deque 与游标一并失效）。
+
+### 5.2 开关与配置
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `detector.token_repeat.enabled` | `false` | 局部重读检测（**不**依赖 msprobe / logprobs） |
+| `detector.token_repeat.window` | `32` | content / score 滑窗长度（`>= 1`） |
+| `detector.token_repeat.repeat_sum_threshold` | `64` | `repeat_sum >` 此值才计一次 over（严格大于） |
+| `detector.token_repeat.min_tokens` | `32` | 至少累计这么多**非 ignore** content token 后才允许告警（`0`=不 warmup） |
+| `detector.token_repeat.consecutive_hits` | `1` | 连续 over-threshold 步数达到后才告警 |
+| `detector.token_repeat.ignore_token_ids` | `[]` | 不进入 content 窗的 token id（如标点 filler） |
+
+示例（抓「词词词」类短窗密重复；按模型调阈）：
+
+```json
+{
+  "dump": { "enabled": true, "max_times": 3 },
+  "detector": {
+    "token_repeat": {
+      "enabled": true,
+      "window": 32,
+      "repeat_sum_threshold": 64,
+      "min_tokens": 32,
+      "consecutive_hits": 1,
+      "ignore_token_ids": []
+    }
+  }
+}
+```
+
+调参直觉：
+
+- 同一 token 连续刷：score 近似 `0,1,2,…`，窗满后 `repeat_sum` 约 `window*(window-1)/2` 量级；默认 `window=32`、`threshold=64` 偏保守，密重复很快超阈。
+- 误报多：增大 `repeat_sum_threshold` / `min_tokens` / `consecutive_hits`，或把高频 filler 放进 `ignore_token_ids`。
+- 漏报：减小 `window` 或 `repeat_sum_threshold`，或把 `min_tokens` 降到接近 `window`。
+
+### 5.3 架构与调用链
+
+```text
+check_after_spec
+  └─ append accepted → RequestIoSnapshotManager（累计流）
+
+check_after_sample
+  └─ DetectorManager
+       ├─ append_batch（本步 sample，一次）
+       ├─ TokenLogprob …
+       ├─ OutputSubstring(sampled_token_ids=None)
+       └─ TokenRepeat(sampled_token_ids=None)
+            ├─ new_ids = cumulative[consumed:]；consumed = len(cumulative)
+            ├─ 逐 id push_token_repeat → 更新 repeat_sum / consecutive_hits
+            └─ 命中 → AnomalyAlert(anomaly_type="token_repeat", ill_type=REPEAT)
+```
+
+- **为何不吃本步 `sampled_token_ids`  alone**：MTP / 投机下本步 sample 行与「实际 accepted + 累计 output」可能不一致；与 substring 同流才能覆盖 spec 已写入的 id。
+- `append_output` 对**连续相同 chunk** 去重（spec + sample 同一步误写两次时不双计）；检测侧游标按累计长度推进。
+
+### 5.4 Report 字段
+
+| 字段 | 说明 |
+|------|------|
+| `repeat_sum` | 告警时最近 `window` 个 score 之和 |
+| `repeat_sum_threshold` | 配置阈值 |
+| `window` | 滑窗长度 |
+| `content_tokens_seen` | 累计进入 content 窗的非 ignore token 数 |
+| `last_score` | 本 chunk 最后一枚 token 的 score |
+| `consecutive_hits` | 连续 over-threshold 步数 |
+| `chunk_len` | 本步 fold 的新 id 个数 |
+| `recent_token_ids` | 本 chunk 末尾最多 32 个 id（证据截断） |
+
+`ill_type` 固定为 `ILL_TYPE_REPEAT`（与 msprobe repetition 类别码一致，便于 report 汇总）。
+
+## 6. 代码落点
 
 | 模块 | 说明 |
 |------|------|
@@ -227,6 +315,7 @@ DfxProcessor.check_after_sample
 | `vllm_ascend/dfx/detector/spec_acceptance.py` | 投机接受率 |
 | `vllm_ascend/dfx/detector/token_logprob.py` | token/logprob（ILLDetector） |
 | `vllm_ascend/dfx/detector/output_substring.py` | 输出子串命中 |
+| `vllm_ascend/dfx/detector/token_repeat.py` | 局部重读（滑窗 repeat_sum） |
 | `vllm_ascend/dfx/input_filters.py` | detect 输入过滤（`InputFilterManager`） |
 | `vllm_ascend/dfx/io_snapshot.py` | `RequestIoSnapshotManager` 累计 output / report 挂 I/O |
 | `vllm_ascend/dfx/dumper/` | dump 生命周期、pending-OR（无检测转发） |
@@ -234,7 +323,7 @@ DfxProcessor.check_after_sample
 | `vllm_ascend/worker/model_runner_v1.py` / `v2` | sync / async 调用点 |
 | `docs/source/user_guide/configuration/additional_config.md` | 用户配置表 |
 
-## 6. 相关文档
+## 7. 相关文档
 
 - 总览与配置：[dfx_design.md](./dfx_design.md)
 - 运维与排障：[dfx_ops.md](./dfx_ops.md)

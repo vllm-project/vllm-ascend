@@ -92,6 +92,8 @@ def test_clear_finished_clears_cumulative():
     mgr.append_output("r1", [1, 2])
     proc = DfxProcessor.__new__(DfxProcessor)
     proc.detectors = MagicMock()
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_print_output_on_finish.return_value = False
     proc.clear_finished(["r1"])
     proc.detectors.clear_finished.assert_called_once_with("r1")
     assert mgr.cumulative_output_ids("r1") == []

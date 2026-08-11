@@ -34,6 +34,7 @@ from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.dfx.manual_trigger import ManualTriggerManager, TriggerEvent
 from vllm_ascend.dfx.report import DfxReportWriter
 from vllm_ascend.dfx.tokenizer import load_model_tokenizer
+from vllm_ascend.dfx.util import decode_token_ids
 from vllm_ascend.logger import init_logger_ascend
 
 # How many leading prompt token ids to suggest as a filter prefix example.
@@ -208,10 +209,49 @@ class DfxProcessor:
             return
         io_mgr = RequestIoSnapshotManager.get()
         filt = InputFilterManager.get()
+        if self.dfx_config.report_print_output_on_finish():
+            self._maybe_print_output_on_finish(finished_req_ids, io_mgr)
         for req_id in finished_req_ids:
             self.detectors.clear_finished(req_id)
             io_mgr.clear_req(req_id)
             filt.clear_req(req_id)
+
+    def _maybe_print_output_on_finish(self, finished_req_ids: Any, io_mgr: RequestIoSnapshotManager) -> None:
+        """Log output_token_ids + text for finished reqs (TP0 only)."""
+        runner = self.runner
+        try:
+            if int(getattr(runner, "tp_rank", 0)) != 0:
+                return
+        except Exception:
+            return
+        tokenizer = self._get_detector_tokenizer()
+        max_ids = self.dfx_config.report_max_output_token_ids()
+        for req_id in finished_req_ids:
+            if not req_id:
+                continue
+            snap = io_mgr.snapshot(runner, req_id, None, include_token_ids=True, use_cache=False)
+            ids = list(snap.output_token_ids or [])
+            truncated = False
+            if max_ids > 0 and len(ids) > max_ids:
+                ids = ids[:max_ids]
+                truncated = True
+            text = ""
+            if tokenizer is not None and ids:
+                try:
+                    text = decode_token_ids(tokenizer, ids)
+                except Exception as exc:
+                    text = f"<decode failed: {exc}>"
+            elif tokenizer is None:
+                text = "<tokenizer unavailable>"
+            logger.info(
+                "[DFX print_output] req_id=%s output_token_count=%d truncated=%s "
+                "output_token_ids=%s output_text=%r",
+                req_id,
+                snap.output_token_count,
+                truncated,
+                ids,
+                text,
+            )
 
     def check_after_spec(
         self,

@@ -54,7 +54,10 @@
     // Cap output / window / current *_token_ids (0 = unlimited). Default 1000.
     // Detection matches the full cumulative output; the report may only store a prefix.
     // If a hit is beyond this cap, ids won't appear in the JSON — set 0 to dump all.
-    "max_output_token_ids": 1000
+    "max_output_token_ids": 1000,
+    // When a request finishes: log output_token_ids + decoded text (TP0 only).
+    // Default false (noisy / may contain sensitive text). Independent of save_sensitive_info.
+    "print_output_on_finish": false
   },
 
   "detector": {
@@ -97,6 +100,18 @@
       // false (default): match anywhere as a contiguous token-id subsequence.
       // true: match only at the start (prefix) of the cumulative output.
       "match_prefix": false
+    },
+
+    // Sliding-window re-read: score = count of new token in prior ``window``
+    // content tokens; alert when sum of last ``window`` scores exceeds threshold.
+    // No logprobs / msprobe. ignore_token_ids skips fillers from the content window.
+    "token_repeat": {
+      "enabled": false,
+      "window": 32,
+      "repeat_sum_threshold": 64,
+      "min_tokens": 32,
+      "consecutive_hits": 1,
+      "ignore_token_ids": []
     }
   },
 

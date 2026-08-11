@@ -157,6 +157,19 @@ def test_detectors_enabled_includes_output_substring():
             "spec_acceptance": {"enabled": False},
             "token_logprob": {"enabled": False},
             "output_substring": {"enabled": True},
+            "token_repeat": {"enabled": False},
+        }
+    }
+    assert DfxRuntimeConfig.detectors_enabled_in(data) is True
+
+
+def test_detectors_enabled_includes_token_repeat():
+    data = {
+        "detector": {
+            "spec_acceptance": {"enabled": False},
+            "token_logprob": {"enabled": False},
+            "output_substring": {"enabled": False},
+            "token_repeat": {"enabled": True},
         }
     }
     assert DfxRuntimeConfig.detectors_enabled_in(data) is True

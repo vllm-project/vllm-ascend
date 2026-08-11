@@ -429,6 +429,65 @@ def test_maybe_print_input_token_ids_once_defers_without_prompts():
     proc.dfx_config.consume_print_input_token_ids_once.assert_not_called()
 
 
+def test_clear_finished_prints_output_when_enabled():
+    from types import SimpleNamespace
+
+    import logging
+
+    from vllm_ascend.dfx.input_filters import InputFilterManager
+    from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
+
+    RequestIoSnapshotManager.reset_for_tests()
+    InputFilterManager.reset_for_tests()
+    io = RequestIoSnapshotManager.get()
+    io.append_output("r1", [10, 11, 12])
+
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = SimpleNamespace(tp_rank=0, requests={}, input_batch=None)
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_print_output_on_finish.return_value = True
+    proc.dfx_config.report_max_output_token_ids.return_value = 1000
+    proc.detectors = MagicMock()
+    proc._get_detector_tokenizer = MagicMock(return_value=None)  # type: ignore[method-assign]
+
+    # DFX loggers disable propagation to root; attach a local handler instead
+    # of relying on ``caplog`` to observe ``[DFX print_output]``.
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record)  # type: ignore[method-assign]
+    logger = logging.getLogger("vllm_ascend.dfx.processor")
+    logger.addHandler(handler)
+    try:
+        proc.clear_finished(["r1"])
+    finally:
+        logger.removeHandler(handler)
+
+    proc.detectors.clear_finished.assert_called_once_with("r1")
+    assert io.cumulative_output_count("r1") == 0  # cleared
+    assert any("print_output" in r.getMessage() and "r1" in r.getMessage() for r in records)
+
+
+def test_clear_finished_skips_print_when_disabled():
+    from types import SimpleNamespace
+
+    from vllm_ascend.dfx.input_filters import InputFilterManager
+    from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
+
+    RequestIoSnapshotManager.reset_for_tests()
+    InputFilterManager.reset_for_tests()
+
+    proc = DfxProcessor.__new__(DfxProcessor)
+    proc.runner = SimpleNamespace(tp_rank=0)
+    proc.dfx_config = MagicMock()
+    proc.dfx_config.report_print_output_on_finish.return_value = False
+    proc.detectors = MagicMock()
+    proc._maybe_print_output_on_finish = MagicMock()  # type: ignore[method-assign]
+
+    proc.clear_finished(["r1"])
+    proc._maybe_print_output_on_finish.assert_not_called()
+    proc.detectors.clear_finished.assert_called_once_with("r1")
+
+
 def test_consume_print_input_token_ids_once_roundtrip(tmp_path):
     import json
     from pathlib import Path

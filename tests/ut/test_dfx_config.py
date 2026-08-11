@@ -219,16 +219,27 @@ def _valid_dfx_data(**dump_overrides):
             "spec_acceptance": {},
             "token_logprob": {},
             "output_substring": {},
+            "token_repeat": {},
         },
         "input_filter": {"filters": [], "print_input_token_ids_once": False},
         "report": {
             "save_sensitive_info": False,
             "print_sampling_meta": False,
+            "print_output_on_finish": False,
             "decode_token_ids": True,
             "max_prompt_token_ids": 1000,
             "max_output_token_ids": 1000,
         },
     }
+
+
+def _merge_deep(base: dict, override: dict) -> None:
+    """Recursively merge ``override`` into ``base`` in place (test helper)."""
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge_deep(base[key], value)
+        else:
+            base[key] = value
 
 
 def test_dump_rejects_unknown_keys_including_dump_once():
@@ -256,6 +267,45 @@ def test_dump_once_in_json_fails_bootstrap(tmp_path: Path):
             sync_mode="file",
             reload_interval_seconds=0,
         )
+
+
+@pytest.mark.parametrize(
+    "override, err_match",
+    [
+        (
+            {"detector": {"token_repeat": {"window": 0}}},
+            "detector.token_repeat.window must be >= 1",
+        ),
+        (
+            {"detector": {"token_repeat": {"repeat_sum_threshold": -1}}},
+            "detector.token_repeat.repeat_sum_threshold must be >= 0",
+        ),
+        (
+            {"detector": {"token_repeat": {"consecutive_hits": 0}}},
+            "detector.token_repeat.consecutive_hits must be >= 1",
+        ),
+    ],
+)
+def test_token_repeat_validation_rejects_invalid_values(override, err_match):
+    """Negative validation: token_repeat knobs must satisfy their ranges."""
+    data = _valid_dfx_data()
+    _merge_deep(data, override)
+    with pytest.raises(ValueError, match=err_match):
+        DfxRuntimeConfig._validate(data)
+
+
+def test_token_repeat_validation_rejects_non_int_ignore_token_ids():
+    data = _valid_dfx_data()
+    data["detector"]["token_repeat"]["ignore_token_ids"] = ["x", 1]
+    with pytest.raises(ValueError, match=r"ignore_token_ids\[0\] must be int"):
+        DfxRuntimeConfig._validate(data)
+
+
+def test_report_print_output_on_finish_rejects_non_bool():
+    data = _valid_dfx_data()
+    data["report"]["print_output_on_finish"] = "yes"
+    with pytest.raises(ValueError, match="report.print_output_on_finish must be bool"):
+        DfxRuntimeConfig._validate(data)
 
 
 def test_input_filters_roundtrip(tmp_path: Path):
