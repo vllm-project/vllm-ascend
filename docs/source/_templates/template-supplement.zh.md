@@ -96,20 +96,23 @@
 
 ### 3.3 语法差异
 
-| 旧版语法 | 新版语法 | 注意事项 |
+| Sphinx语法 | MkDocs语法 | 注意事项 |
 |----------|----------|----------|
-| `:::::{tab-set}` + `:sync-group:` | 不需要声明，同级 `===` 自动同步 | 新版同级标签页默认同步 |
+| `:::::{tab-set}` + `:sync-group:` | 不需要声明，同级 `===` 自动同步 | MkDocs同级标签页默认同步 |
 | `::::{tab-item} 名称` | `=== "名称"` | 名称需完全一致才能跨组联动 |
-| `:sync: 键名` | 不需要 | 新版通过标签名称文本匹配 |
-| `::::` / `:::::` 闭合 | 无闭合标签，靠缩进控制 | 新版需确保正确缩进 |
+| `:sync: 键名` | 不需要 | MkDocs通过标签名称文本匹配 |
+| `::::` / `:::::` 闭合 | 无闭合标签，靠缩进控制 | MkDocs需确保正确缩进 |
 
-> ⚠️ *常见错误**：
-> - 缩进不一致会导致 MkDocs 无法识别标签页内容
+⚠️**常见错误**：
+
+> - 缩进不一致会导致 MkDocs 无法识别标签页内容 
 > - 标签名称中的空格、大小写需完全一致，否则跨组同步失效
 
 ## 4 占位符
 
 ### 4.1 MkDocs + Material
+
+**示例：**
 
 ```markdown
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -117,25 +120,25 @@ export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
 ### 4.2 Sphinx + MyST-Parser
 
+**示例：**
+
 ```markdown
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
 ## 5 Jinja 语法转义
 
-> **适用场景**：文档中需要展示包含 `{{ }}` 双花括号的 Jinja 模板示例代码时，两种框架的处理方式不同。
-
 ### 5.1 问题背景
 
-在 vLLM-Ascend 的文档中，有时需要展示包含 Jinja 模板语法的代码示例（如 prompt 模板、RAG 评测脚本等）。这些示例中本身包含 `{{ variable }}` 语法。
-MkDocs 使用 Jinja2 作为模板引擎（通过 `mkdocs-material` 主题），文档正文中的 `{{ }}` 会被视为模板变量进行渲染，导致原本希望展示的 Jinja 示例代码出现异常。
+在 vLLM-Ascend 的文档中，有时需要展示包含 Jinja 模板语法的代码示例（如 prompt 模板、RAG 评测脚本等），两种框架的处理方式不同。这些示例中本身包含 `{{ variable }}` 语法。
+MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视为模板变量进行渲染，导致原本希望展示的 Jinja 示例代码出现异常。
 
 | 框架 | 对 `{{ }}` 的处理 | 风险 |
 |------|-------------------|------|
 | Sphinx + MyST-Parser | 不解析，原样保留 | 无 |
 | MkDocs + Material |解析为模板变量，尝试替换 | 渲染异常，模板代码被破坏 |
 
-### 5.2 解决方案：使用 `{% raw %}` 块
+### 5.2 解决方案
 
 > **适用分支**：`main`（latest 版本）及 v0.24.0 之后的所有版本
 
@@ -179,7 +182,7 @@ MkDocs 使用 Jinja2 作为模板引擎（通过 `mkdocs-material` 主题），�
 
 Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因此文档正文中的 `{{ }}` 不会被特殊处理，直接原样渲染。
 
-## 5 Note / 提示框（Admonition）
+## 5 Note / 提示框
 
 > **适用场景**：需要突出显示重要说明、警告、注意事项等信息。
 
@@ -202,7 +205,7 @@ Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因
     Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
 ```
 
-关键规则：内容必须与 !!! 声明行保持 4 个空格 缩进，且内容之间用空行分隔即可（无需额外缩进）。
+**关键规则**：内容必须与 !!! 声明行保持 4 个空格 缩进，且内容之间用空行分隔即可（无需额外缩进）。
 
 ### 5.2 Sphinx + MyST-Parser
 
@@ -222,3 +225,4 @@ Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因
 Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P table below for its requirements.
 :::
 ```
+
