@@ -1,169 +1,169 @@
-# SparseAttentionScore 算子设计文档
+# SparseAttentionScore Operator Design
 
-## 1. 算子功能概述
+## 1. Operator Overview
 
-`SparseAttentionScore` 是面向 **Paged KV Cache + TopK Block Selection** 场景的稀疏注意力算子。它在 LLM 推理的 decode 阶段（以及小 batch prefill），根据预先选好的 TopK KV block indices，从 paged KV cache 中读取相关 block，完成 attention 计算。
+`SparseAttentionScore` is a sparse attention operator designed for **Paged KV Cache + Top-K Block Selection**. During the decode stage of LLM inference, as well as small-batch prefill, it reads the relevant blocks from a paged KV cache according to preselected Top-K KV block indices and computes attention.
 
-### 核心计算
+### Core Computation
 
 ```
 O = softmax(Q @ K^T / sqrt(d)) @ V
 ```
 
-其中 Q 只关注 TopK 个 KV block（而非全部 KV），实现 **稀疏注意力**。
+Q attends only to the Top-K KV blocks instead of the complete KV cache, thereby implementing **sparse attention**.
 
-### 与 BlockSparseAttention (BSA) 的对比
+### Comparison with BlockSparseAttention (BSA)
 
-| 维度 | SparseAttentionScore (SASA) | BlockSparseAttention (BSA) |
-|------|---------------------------|---------------------------|
-| **稀疏模式输入** | `select_idx` + `select_num_idx`（预计算的 TopK block 编号列表） | `block_sparse_mask`（二维 0/1 mask 矩阵，kernel 内部转为 idx） |
-| **KV 存储格式** | Paged KV Cache: `[num_physical_blocks, block_size, kv_heads, D]` | 连续 KV: TND / BNSD / BSND |
-| **Q 格式** | TND: `[total_tokens, num_heads, D]` | TND / BNSD / BSND |
-| **地址映射** | `block_table[batch, logical_id] → physical_id` | 直接按 seq offset 连续访问 |
-| **Task 粒度** | 1 token × 1 KV head group（group-head 优化后） | 1 Q tile × 1 Q head |
-| **GQA 处理** | 同 group 共享 selectIdx，一次搬 KV 服务 groupSize 个 head | 每个 Q head 独立 task，不做 group 合并 |
-| **block_size** | 固定 128（paged cache 物理块） | 可配置 blockShapeX / blockShapeY |
-| **适用场景** | vLLM 推理 decode、长上下文稀疏推理 | 训练/推理通用稀疏 attention |
-| **workspace** | 不需要 mask→idx 转换 | 需要 workspace 存 sparse_idx + sparse_count |
+| Dimension | SparseAttentionScore (SASA) | BlockSparseAttention (BSA) |
+|---|---|---|
+| **Sparse-pattern input** | `select_idx` + `select_num_idx` (a precomputed list of Top-K block IDs) | `block_sparse_mask` (a 2D binary mask converted to indices inside the kernel) |
+| **KV storage format** | Paged KV Cache: `[num_physical_blocks, block_size, kv_heads, D]` | Contiguous KV: TND / BNSD / BSND |
+| **Q format** | TND: `[total_tokens, num_heads, D]` | TND / BNSD / BSND |
+| **Address mapping** | `block_table[batch, logical_id]` to `physical_id` | Direct contiguous access by sequence offset |
+| **Task granularity** | 1 token x 1 KV head group after group-head optimization | 1 Q tile x 1 Q head |
+| **GQA handling** | A group shares `select_idx`; one KV transfer serves `group_size` heads | Each Q head is an independent task; groups are not merged |
+| **`block_size`** | Fixed at 128 for physical paged-cache blocks | Configurable through `blockShapeX` / `blockShapeY` |
+| **Use cases** | vLLM decode and long-context sparse inference | General sparse attention for training and inference |
+| **Workspace** | No mask-to-index conversion required | Requires workspace for `sparse_idx` and `sparse_count` |
 
-## 2. 输入输出接口
+## 2. Input and Output Interface
 
-### 输入
+### Inputs
 
-| 参数 | 形状 | 说明 |
-|------|------|------|
-| `query` | `[T, N_q, D]` (TND) | Q tensor，bf16/fp16/fp8 |
-| `key` | `[num_blocks, block_size, N_kv, D]` | Paged KV cache K |
-| `value` | `[num_blocks, block_size, N_kv, D]` | Paged KV cache V |
-| `select_idx` | `[N_kv, max_q_seqlen, top_k]` | 每个 kv_head、每个 q_token 的 TopK logical block IDs |
-| `block_table` | `[batch, max_blocks_per_batch]` | logical → physical block 映射 |
-| `select_num_idx` | `[N_kv, max_q_seqlen]` | 每个 token 实际有效的 block 数 |
-| `actual_seq_lengths` | `[batch]` | 每个 batch 的 Q seqlen |
-| `actual_seq_lengths_kv` | `[batch]` | 每个 batch 的 KV seqlen |
+| Parameter | Shape | Description |
+|---|---|---|
+| `query` | `[T, N_q, D]` (TND) | Q tensor in BF16, FP16, or FP8 |
+| `key` | `[num_blocks, block_size, N_kv, D]` | K tensor in the paged KV cache |
+| `value` | `[num_blocks, block_size, N_kv, D]` | V tensor in the paged KV cache |
+| `select_idx` | `[N_kv, max_q_seqlen, top_k]` | Top-K logical block IDs for every KV head and Q token |
+| `block_table` | `[batch, max_blocks_per_batch]` | Logical-to-physical block mapping |
+| `select_num_idx` | `[N_kv, max_q_seqlen]` | Actual number of valid blocks for each token |
+| `actual_seq_lengths` | `[batch]` | Q sequence length for each batch item |
+| `actual_seq_lengths_kv` | `[batch]` | KV sequence length for each batch item |
 
 ### Attributes
 
-| 属性 | 说明 |
-|------|------|
-| `num_key_value_heads` | KV head 数 |
-| `scale_value` | softmax scale（默认 1/sqrt(D)）|
-| `block_size` | paged KV cache 块大小（128）|
-| `top_k` | 最大选取的 block 数 |
-| `inner_precise` | 精度模式 |
+| Attribute | Description |
+|---|---|
+| `num_key_value_heads` | Number of KV heads |
+| `scale_value` | Softmax scale; defaults to `1 / sqrt(D)` |
+| `block_size` | Paged KV cache block size (128) |
+| `top_k` | Maximum number of selected blocks |
+| `inner_precise` | Precision mode |
 
-### 输出
+### Output
 
-| 参数 | 形状 | 说明 |
-|------|------|------|
-| `output` | `[T, N_q, D]` (TND) | 注意力输出，与 Q 同 shape |
+| Parameter | Shape | Description |
+|---|---|---|
+| `output` | `[T, N_q, D]` (TND) | Attention output with the same shape as Q |
 
-## 3. 适配逻辑（Host Tiling）
+## 3. Adaptation Logic (Host Tiling)
 
-### Task 分解
+### Task Decomposition
 
 ```
-totalTaskNum = totalQTokens × kvHeads
+totalTaskNum = totalQTokens x kvHeads
 blockDim = min(totalTaskNum, aicNum)
 ```
 
-每个 task 处理 1 个 Q token 的 1 个 KV head group（包含 groupSize 个 Q heads）。
+Each task processes one KV head group for one Q token. The group contains `groupSize` Q heads.
 
-### Tiling 数据
+### Tiling Data
 
-Host 侧计算并传递给 kernel 的 tiling 数据包括：
+The host calculates the following tiling data and passes it to the kernel:
 
-- **基础形状**: batch, numHeads, kvHeads, embeddingSize, blockSize, topK
-- **groupSize**: numHeads / kvHeads（GQA group 大小）
-- **task 信息**: totalTaskNum, firstBatchTaskNum
-- **tile 大小**: qBaseTile=128, kvBaseTile=128
-- **L1 matmul tile**: mm1/mm2 的 M/N/K 配置
-- **buffer 数量**: Q/K/V/P 的 L1 buffer 个数
+- **Base shapes**: `batch`, `numHeads`, `kvHeads`, `embeddingSize`, `blockSize`, and `topK`
+- **`groupSize`**: `numHeads / kvHeads`, the GQA group size
+- **Task information**: `totalTaskNum` and `firstBatchTaskNum`
+- **Tile sizes**: `qBaseTile = 128` and `kvBaseTile = 128`
+- **L1 matmul tiles**: M/N/K configurations for MM1 and MM2
+- **Buffer counts**: numbers of L1 buffers for Q, K, V, and P
 
-## 4. Kernel 实现方案
+## 4. Kernel Implementation
 
-### 4.1 总体流水线
+### 4.1 Overall Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Per Task: 1 token × groupSize heads × topK KV blocks      │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐              │
-│  │ Load Q   │    │ QK MMAD  │    │ Softmax  │              │
-│  │ (once)   │───▶│ (Cube)   │───▶│ (Vector) │──┐           │
-│  └──────────┘    └──────────┘    └──────────┘  │           │
-│                                                 ▼           │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐              │
-│  │ Load V   │    │ PV MMAD  │    │RescaleO  │              │
-│  │ (per blk)│───▶│ (Cube)   │───▶│ (Vector) │──▶ Store O   │
-│  └──────────┘    └──────────┘    └──────────┘              │
-│                                                             │
-│  Pipeline: QK[i] → SM[i] → PV[i] → Rescale[i] (PRE=2)    │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|  Per task: 1 token x groupSize heads x Top-K KV blocks    |
++-------------------------------------------------------------+
+|                                                             |
+|  +----------+    +----------+    +----------+              |
+|  | Load Q   |    | QK MMAD  |    | Softmax  |              |
+|  | (once)   |--->| (Cube)   |--->| (Vector) |--+           |
+|  +----------+    +----------+    +----------+  |           |
+|                                                 v           |
+|  +----------+    +----------+    +----------+              |
+|  | Load V   |    | PV MMAD  |    | RescaleO |              |
+|  | (per blk)|--->| (Cube)   |--->| (Vector) |---> Store O  |
+|  +----------+    +----------+    +----------+              |
+|                                                             |
+|  Pipeline: QK[i] -> SM[i] -> PV[i] -> Rescale[i] (PRE=2)   |
++-------------------------------------------------------------+
 ```
 
-### 4.2 Task 分解与 KV 复用
+### 4.2 Task Decomposition and KV Reuse
 
 ```cpp
-// 每个 task 对应一个 (token, kvHead) 对
+// Each task corresponds to one (token, kvHead) pair.
 uint32_t qToken = taskIdx / kvHeads_;
 uint32_t kvHeadIdx = taskIdx % kvHeads_;
-uint32_t qHeadStart = kvHeadIdx * groupSize;  // 组内首个 Q head
+uint32_t qHeadStart = kvHeadIdx * groupSize;  // First Q head in the group.
 
-// Q offset: 连续读取 groupSize 个 heads
+// Q offset: read groupSize contiguous heads.
 int64_t gmOffsetQ = qToken * strideQO + qHeadStart * embed_;
 ```
 
-**Group-Head KV Reuse 优化**：同一 group 内的 groupSize 个 Q heads 共享相同的 selectIdx（因为按 kvHead 索引）。优化后一次加载 KV block 即可服务组内所有 heads，减少 groupSize 倍的 KV 搬运。
+**Group-head KV reuse optimization**: All `groupSize` Q heads in a group share the same `select_idx` because it is indexed by KV head. After optimization, loading a KV block once serves all heads in the group, reducing KV transfers by a factor of `groupSize`.
 
-### 4.3 Matmul 维度
+### 4.3 Matmul Dimensions
 
 ```
-QK: M=groupSize, N=kvBlockSize(≤128), K=headDim(128)
-     Q[groupSize, D] × K[D, blockSize]^T → S[groupSize, blockSize]
+QK: M=groupSize, N=kvBlockSize (<=128), K=headDim (128)
+    Q[groupSize, D] x K[D, blockSize]^T -> S[groupSize, blockSize]
 
-PV: M=groupSize, N=headDim(128), K=kvBlockSize(≤128)
-     P[groupSize, blockSize] × V[blockSize, D] → OTmp[groupSize, D]
+PV: M=groupSize, N=headDim (128), K=kvBlockSize (<=128)
+    P[groupSize, blockSize] x V[blockSize, D] -> OTmp[groupSize, D]
 ```
 
-### 4.4 Paged KV Cache 地址计算
+### 4.4 Paged KV Cache Address Calculation
 
 ```cpp
-// KV 存储: [physical_block_id, block_size, kv_heads, D]
-// 每行的 stride = kv_heads * D
-// 每 block 的 stride = block_size * kv_heads * D
+// KV storage: [physical_block_id, block_size, kv_heads, D]
+// Per-row stride = kv_heads * D
+// Per-block stride = block_size * kv_heads * D
 int64_t gmOffsetK = physicalBlockId * strideKVBlock + kvHeadIdx * embed_;
 ```
 
-通过 `block_table` 将 `logical_id`（selectIdx 中的值）转为 `physical_id`，实现 paged KV cache 的地址翻译。
+`block_table` translates each `logical_id` from `select_idx` into a `physical_id`, providing address translation for the paged KV cache.
 
-### 4.5 Online Softmax（逐 block 迭代更新）
+### 4.5 Online Softmax (Iterative Block Updates)
 
-对于 topK 个 KV block 逐一处理，使用 online softmax：
+The Top-K KV blocks are processed one at a time using online softmax:
 
 ```
 for each KV block:
-    S = Q × K^T (bf16 matmul)
-    S_scaled = S * scale (bf16)
-    nowMax = row_max(S_scaled) (per-head 独立)
+    S = Q x K^T (BF16 matmul)
+    S_scaled = S * scale (BF16)
+    nowMax = row_max(S_scaled) (independent per head)
     if not first: nowMax = max(nowMax, cast_bf16(lastMax))
-    P = exp(S_scaled - nowMax) (bf16)
-    nowSum = reduce_sum(P) (bf16)
-    
-    update lastMax/lastSum (fp32):
+    P = exp(S_scaled - nowMax) (BF16)
+    nowSum = reduce_sum(P) (BF16)
+
+    update lastMax/lastSum (FP32):
         correction = exp(lastMax - nowMax)
         lastSum = correction * lastSum + nowSum
         lastMax = nowMax
-    
-    PV = P × V (bf16→fp32 accumulate)
-    o_acc = correction * o_acc + PV (fp32)
+
+    PV = P x V (BF16 with FP32 accumulation)
+    o_acc = correction * o_acc + PV (FP32)
 
 output = cast_bf16(o_acc / lastSum)
 ```
 
-### 4.6 Partial Last Block 处理
+### 4.6 Handling a Partial Final Block
 
-最后一个 causal block 可能不满 block_size：
+The final causal block may contain fewer than `block_size` valid tokens:
 
 ```cpp
 uint32_t lastLogicalBlockId = (historyLen + qTokenInBatch) / blockSize_;
@@ -171,128 +171,136 @@ uint32_t lastBlockTileSize = (historyLen + qTokenInBatch) % blockSize_ + 1;
 validTileSize[i] = (logicalId == lastLogicalBlockId) ? lastBlockTileSize : blockSize_;
 ```
 
-通过 `kvSTileSizeAct = validTileSize[kvBlockIdx]` 传给 matmul，确保只计算有效 KV 行。
+Passing `kvSTileSizeAct = validTileSize[kvBlockIdx]` to matmul ensures that only valid KV rows are included in the computation.
 
-### 4.7 Cube/Vector 双核协同
+### 4.7 Cube/Vector Core Collaboration
 
-- **Cube Core (AIC)**: 执行 QK 和 PV matmul，通过 FixPipe 将结果从 L0C 写到 UB
-- **Vector Core (AIV)**: 执行 softmax（scale、max、exp、sum）和 rescaleO（correction、div、cast）
-- **Cross-core 同步**: `SetFlag`/`WaitFlag` + `PipeBarrier` 实现 Cube→Vector→Cube 流水
+- **Cube Core (AIC)**: Performs QK and PV matmuls and writes results from L0C to UB through FixPipe.
+- **Vector Core (AIV)**: Performs softmax operations (scale, max, exp, and sum) and `rescaleO` operations (correction, division, and cast).
+- **Cross-core synchronization**: `SetFlag`/`WaitFlag` together with `PipeBarrier` implement the Cube-to-Vector-to-Cube pipeline.
 
-### 4.8 L0 Buffer 流水管理
+### 4.8 L0 Buffer Pipeline Management
 
-QK 和 PV matmul 交替使用 L0A/L0B buffer。通过 `prefixSumL0AStages` 计算确保 buffer ID 不冲突：
+QK and PV matmuls alternate between L0A/L0B buffers. `prefixSumL0AStages` prevents buffer ID conflicts:
 
 ```cpp
-uint32_t mL0Loop = CeilDiv(groupSize, L0_TILE_M);  // = 1 for groupSize≤16
+uint32_t mL0Loop = CeilDiv(groupSize, L0_TILE_M);  // 1 when groupSize <= 16.
 mm1L0ATotalStages = mL0Loop * (embed / L0_TILE_K);
 mm2L0ATotalStages = mL0Loop * (kvBaseTile / L0_TILE_K);
 ```
 
-## 5. 与 BSA 的关键实现差异
+## 5. Key Implementation Differences from BSA
 
-### 5.1 KV 数据加载
+### 5.1 KV Data Loading
 
 | | SASA | BSA |
-|---|------|-----|
-| **K 加载** | 逐 physical block 独立加载（通过 block_table 翻译地址） | gather 连续的 sparse block（workspace 中预排的 idx） |
-| **blockMmadQK 的 sparse 参数** | `gatheredKvSTileIdx=0, yBlockNum=1`（每次只处理 1 个 block） | `gatheredKvSTileIdx, yBlockNumRsvd`（gather 多个 block） |
-| **V 加载** | 同 K，逐 physical block | 同 BSA 的 sparse gather |
+|---|---|---|
+| **K loading** | Loads each physical block independently after translating its address through `block_table` | Gathers contiguous sparse blocks using indices prepared in workspace |
+| **Sparse arguments to `blockMmadQK`** | `gatheredKvSTileIdx=0, yBlockNum=1` (processes one block at a time) | `gatheredKvSTileIdx, yBlockNumRsvd` (gathers multiple blocks) |
+| **V loading** | Same per-physical-block approach as K | Same sparse-gather approach as BSA K loading |
 
-### 5.2 Q/O 内存布局
+### 5.2 Q/O Memory Layout
 
-| | SASA (group-head 优化后) | BSA |
-|---|------|-----|
-| **Q GM stride** | `embed_`（group 内 heads 连续） | `strideQO`（可能 numHeads*D 或 BNSD stride） |
-| **O GM stride** | `embed_`（同 Q） | `strideQO`（同 Q） |
-| **rowNum** | `groupSize`（如 4/8） | `qSTileSizeAct`（如 128） |
+| | SASA (after group-head optimization) | BSA |
+|---|---|---|
+| **Q GM stride** | `embed_` (heads are contiguous within a group) | `strideQO` (possibly `num_heads * D` or a BNSD stride) |
+| **O GM stride** | `embed_` (same as Q) | `strideQO` (same as Q) |
+| **`rowNum`** | `groupSize` (for example, 4 or 8) | `qSTileSizeAct` (for example, 128) |
 
-### 5.3 Sparse 模式表达
+### 5.3 Sparse-Pattern Representation
 
-- **BSA**: 输入是 `block_sparse_mask[B, N_q, X_blocks, Y_blocks]`（uint8 bitmap）。Kernel 先在 Vector core 上做 mask→idx 转换（`EpilogueMask2Idx`），再用 idx 做 gather KV。
-- **SASA**: 输入直接是 idx 列表 `select_idx[N_kv, Q_seqlen, topK]` + count `select_num_idx[N_kv, Q_seqlen]`。无需 workspace 做转换。
+- **BSA**: The input is `block_sparse_mask[B, N_q, X_blocks, Y_blocks]`, a `uint8` bitmap. The kernel first performs mask-to-index conversion with `EpilogueMask2Idx` on the Vector core, then uses the indices to gather KV data.
+- **SASA**: The input directly provides the index list `select_idx[N_kv, Q_seqlen, top_k]` and count `select_num_idx[N_kv, Q_seqlen]`, so no conversion workspace is required.
 
-### 5.4 GQA 处理策略
+### 5.4 GQA Strategy
 
-- **BSA**: 每个 Q head 有独立的 sparse pattern（因为 `block_sparse_mask` 按 `qHeadIdx` 索引），所以即使是 GQA 也不做 group 合并：`rowNum = qSTileSizeAct`，不做 head 聚合。
-- **SASA**: `select_idx` 按 `kvHeadIdx` 索引（同 group 所有 Q heads 共享），天然支持 group 合并。优化后 `rowNum = groupSize`，KV 只搬一次。
+- **BSA**: Each Q head has an independent sparse pattern because `block_sparse_mask` is indexed by `qHeadIdx`. Consequently, GQA groups are not merged: `rowNum = qSTileSizeAct` and no head aggregation is performed.
+- **SASA**: `select_idx` is indexed by `kvHeadIdx`, so all Q heads in a group naturally share it. After optimization, `rowNum = groupSize` and the KV data is transferred only once.
 
-## 6. 性能特征
+## 6. Performance Characteristics
 
-### 搬运量对比（单 token decode, groupSize=4, topK=8, D=128, blockSize=128）
+### Transfer-Volume Comparison
 
-**优化前（per-head task）**：
-- Q 搬运: 4 次 × 128 elements = 512 bf16 = 1KB
-- KV 搬运: 4 × 8 blocks × 128×128 × 2 dtype = 4 × 256KB = **1024KB**
+The following comparison is for single-token decode with `groupSize=4`, `topK=8`, `D=128`, and `blockSize=128`.
 
-**优化后（per-group task）**：
-- Q 搬运: 1 次 × 4×128 elements = 512 bf16 = 1KB
-- KV 搬运: 1 × 8 blocks × 128×128 × 2 dtype = **256KB**
+**Before optimization (per-head tasks)**:
 
-KV 搬运减少 **4×**（= groupSize 倍），这是长 KV cache 场景下的主要性能瓶颈。
+- Q transfers: 4 x 128 elements = 512 BF16 values = 1 KB
+- KV transfers: 4 x 8 blocks x 128 x 128 x 2 (K and V) = 4 x 256 KB = **1,024 KB**
 
-## 7. inner_precise 精度模式
+**After optimization (per-group tasks)**:
 
-### A5 (Ascend 950) 支持的模式
+- Q transfers: 1 x 4 x 128 elements = 512 BF16 values = 1 KB
+- KV transfers: 1 x 8 blocks x 128 x 128 x 2 (K and V) = **256 KB**
 
-SparseAttentionScore 在 A5 (Ascend 950PR/950DT) 上 **仅支持 `inner_precise=4`**（默认值），对应混合精度模式 `LOW_HIGH_MIXED`。
+KV transfer volume is reduced by **4x**, equal to `groupSize`. This is the main performance bottleneck for long KV caches.
 
-| inner_precise | 含义 | A5 支持 | A2/A3 支持 |
-|:---:|------|:---:|:---:|
-| 0 | `ALL_HIGH` — online softmax 和 rescaleO 全部采用 fp32 | 不支持 | 支持 |
-| 1 | `ALL_LOW` — online softmax 和 rescaleO 全部采用 fp16（仅 FP16 输入） | 不支持 | 支持 |
-| 4 | `LOW_HIGH_MIXED` — online softmax 采用低精度（bf16/fp16），rescaleO 采用 fp32 | **支持** | 不支持 |
+## 7. `inner_precise` Precision Modes
 
-### 模式差异
+### Modes Supported on A5 (Ascend 950)
 
-**inner_precise=4 (LOW_HIGH_MIXED)**：A5 的唯一模式，也是性能和精度的折中方案。
+SparseAttentionScore on A5 (Ascend 950PR/950DT) supports **only `inner_precise=4`**, the default value. It selects the `LOW_HIGH_MIXED` mixed-precision mode.
 
-具体计算精度分配如下：
+| `inner_precise` | Meaning | A5 Support | A2/A3 Support |
+|:---:|---|:---:|:---:|
+| 0 | `ALL_HIGH`: online softmax and `rescaleO` both use FP32 | No | Yes |
+| 1 | `ALL_LOW`: online softmax and `rescaleO` both use FP16 (FP16 input only) | No | Yes |
+| 4 | `LOW_HIGH_MIXED`: online softmax uses low precision (BF16/FP16), while `rescaleO` uses FP32 | **Yes** | No |
+
+### Differences Between Modes
+
+**`inner_precise=4` (`LOW_HIGH_MIXED`)** is the only A5 mode and balances performance with accuracy.
+
+Its computation and storage precision are assigned as follows:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│ Stage            │ 计算精度          │ 存储精度               │
-├────────────────────────────────────────────────────────────────┤
-│ QK matmul        │ bf16×bf16→fp32累加 │ FixPipe→UB (bf16)     │
-│ Online Softmax   │ bf16              │ P写入L1 (bf16/zN)      │
-│  - scale/max/exp │ bf16 (低精度)     │                        │
-│  - sum           │ bf16 (低精度)     │                        │
-│ PV matmul        │ bf16×bf16→fp32累加 │ FixPipe→UB (fp32)     │
-│ RescaleO         │ fp32 (高精度)     │ O输出 (bf16)           │
-│  - correction    │ fp32              │                        │
-│  - accumulate    │ fp32              │                        │
-│  - final div     │ fp32→bf16 cast    │                        │
-└────────────────────────────────────────────────────────────────┘
++-------------------+---------------------------+------------------------+
+| Stage             | Computation precision     | Storage precision      |
++-------------------+---------------------------+------------------------+
+| QK matmul         | BF16 x BF16, FP32 accum.  | FixPipe -> UB (BF16)   |
+| Online softmax    | BF16                      | P in L1 (BF16/zN)      |
+|  - scale/max/exp  | BF16 (low precision)      |                        |
+|  - sum            | BF16 (low precision)      |                        |
+| PV matmul         | BF16 x BF16, FP32 accum.  | FixPipe -> UB (FP32)   |
+| RescaleO          | FP32 (high precision)     | O output (BF16)        |
+|  - correction     | FP32                      |                        |
+|  - accumulation   | FP32                      |                        |
+|  - final division | FP32 -> BF16 cast         |                        |
++-------------------+---------------------------+------------------------+
 ```
 
-**与 ALL_HIGH (mode 0) 的差异**：
-- mode=0 时 softmax 阶段的 max/exp/sum 也在 fp32 下计算，精度更高但需要 fp32 中间存储（L1 占用翻倍）和额外的 cast 指令
-- mode=4 时 softmax 在 bf16 下完成，P 以 bf16 格式存入 L1（节省 L1 空间），但 exp 近似精度受限于 bf16 的 7-bit 尾数
+**Difference from `ALL_HIGH` (mode 0)**:
 
-**与 ALL_LOW (mode 1) 的差异**：
-- mode=1 时 rescaleO 也在 fp16 下执行，长序列多次 correction 累乘后精度退化严重
-- mode=4 的 rescaleO 使用 fp32 累积，在 online softmax 迭代次数多（topK 大）时仍能保持最终输出精度
+- In mode 0, max, exp, and sum in the softmax stage are also computed in FP32. This provides higher accuracy but requires FP32 intermediate storage, doubling L1 usage, as well as additional cast instructions.
+- In mode 4, softmax is computed in BF16 and P is stored in L1 as BF16, reducing L1 usage. The approximation accuracy of exp is limited by BF16's 7-bit mantissa.
 
-### A5 选择 mode=4 的原因
+**Difference from `ALL_LOW` (mode 1)**:
 
-1. **硬件适配**：A5 Cube 核的 FixPipe 输出到 UB 时对 fp32 intermediate 有带宽优势，可以高效做 bf16→fp32 的 PV 累积
-2. **L1 效率**：P 以 bf16 存 L1（zN layout），相比 fp32 节省一半 L1 空间，允许更多的 double-buffering stages
-3. **精度平衡**：softmax 的 exp 近似在 bf16 下引入 ~1-2 ULP 误差，但 rescaleO 用 fp32 累积保证最终 O 不会因多次迭代而精度雪崩
+- In mode 1, `rescaleO` also runs in FP16. Precision degrades substantially after repeated correction multiplications over long sequences.
+- Mode 4 accumulates `rescaleO` in FP32, preserving final-output accuracy even when online softmax has many iterations because `top_k` is large.
 
-### 精度影响
+### Why A5 Uses Mode 4
 
-在 `inner_precise=4` 下，典型精度表现：
-- QKV 值域 [-1, 1]，`max_diff` 通常 < 4e-3，`mean_diff` < 5e-4
-- 长序列（topK≥6）时，softmax 的 bf16 exp 累积误差可能使 `max_diff` 达到 ~1e-2
-- 对比双精度 golden（strict bf16 模拟），relative error < 1%
+1. **Hardware adaptation**: The A5 Cube core has a bandwidth advantage when FixPipe writes FP32 intermediates to UB, enabling efficient BF16-to-FP32 PV accumulation.
+2. **L1 efficiency**: Storing P in BF16 with the zN layout uses half as much L1 space as FP32 and permits more double-buffering stages.
+3. **Accuracy balance**: The BF16 exp approximation introduces about 1-2 ULP of error, while FP32 accumulation in `rescaleO` prevents the final O from suffering catastrophic precision degradation over multiple iterations.
 
-## 8. 精度模型
+### Accuracy Impact
 
-BF16 路径 (`inner_precise=4`) 的精度链路：
-1. QK matmul: `bf16 × bf16 → fp32 累加 → FixPipe cast bf16`
-2. Softmax: `bf16 scale → bf16 max/sub → bf16 exp → bf16 sum`（per-row 独立）
-3. PV matmul: `bf16 × bf16 → fp32 累加`（OTmp 保持 fp32）
-4. RescaleO: `fp32 correction × fp32 o_acc + fp32 pv`
-5. 最终: `fp32 / fp32 → cast bf16`
+Typical accuracy under `inner_precise=4` is as follows:
 
-典型精度：relative error < 1%（hardware exp 近似 + bf16 截断累积）。
+- For QKV values in `[-1, 1]`, `max_diff` is usually below `4e-3` and `mean_diff` below `5e-4`.
+- For long sequences with `top_k >= 6`, accumulated BF16 softmax exp error may increase `max_diff` to about `1e-2`.
+- Relative error compared with a double-precision golden result using strict BF16 simulation is below 1%.
+
+## 8. Precision Model
+
+The BF16 path under `inner_precise=4` uses the following precision pipeline:
+
+1. QK matmul: `BF16 x BF16 -> FP32 accumulation -> FixPipe cast to BF16`
+2. Softmax: `BF16 scale -> BF16 max/subtract -> BF16 exp -> BF16 sum`, independently per row
+3. PV matmul: `BF16 x BF16 -> FP32 accumulation`, with OTmp retained in FP32
+4. `rescaleO`: `FP32 correction x FP32 o_acc + FP32 pv`
+5. Final step: `FP32 / FP32 -> cast to BF16`
+
+Typical accuracy is a relative error below 1%, including the hardware exp approximation and accumulated BF16 truncation.

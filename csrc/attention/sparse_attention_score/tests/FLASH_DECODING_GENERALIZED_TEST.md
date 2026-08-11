@@ -1,109 +1,109 @@
-# SparseAttentionScore Arch35 FlashDecoding 泛化测试说明
+# SparseAttentionScore Arch35 FlashDecoding Generalization Tests
 
-## 1. 测试目标
+## 1. Test Objectives
 
-本测试用于验证 Host 自动选择 FlashDecoding 的策略和当前 Arch35 FlashDecoding 实现，覆盖：
+These tests verify both the host policy that automatically selects FlashDecoding (FD) and the current Arch35 FlashDecoding implementation. They cover:
 
-- 满足 Host FD 条件时自动进入 FD，不满足时自动回退普通路径；
-- BF16 tiling key 10002/10006；
-- FP16 tiling key 10001/10005；
-- FD shard 数量和 base task 数量的边界；
-- MQA、GQA、MHA；
-- `select_num_idx` 运行时有效 block 数裁剪；
-- 非顺序 `block_table` 映射和最后一个不满 128 token 的 KV block；
-- 随机、相同 logits、跨 shard 大小 logits、常量 value 等数值模式；
-- 不满足 FD 门槛时的普通路径回退。
+- Automatic FD selection when the host-side eligibility conditions are satisfied, and automatic fallback to the normal path otherwise
+- BF16 tiling keys 10002 and 10006
+- FP16 tiling keys 10001 and 10005
+- Boundary conditions for the number of FD shards and base tasks
+- MQA, GQA, and MHA
+- Runtime clipping of the valid block count through `select_num_idx`
+- Nonsequential `block_table` mappings and a final KV block containing fewer than 128 valid tokens
+- Numerical patterns including random values, equal logits, logits with large differences across shards, and constant values
+- Normal-path fallback when the FD threshold is not met
 
-测试分为两层：
+The tests have two layers:
 
-1. Python/NPU 功能和精度测试：执行 Host 自动选择的 kernel。
-2. Host tiling C++ 单元测试：直接断言自动选择的 tiling key。
+1. Python/NPU functionality and accuracy tests that execute the kernel selected automatically by the host.
+2. Host tiling C++ unit tests that directly assert the automatically selected tiling key.
 
-## 2. 测试文件
+## 2. Test Files
 
-### 2.1 Python 真机测试
+### 2.1 Python Tests on NPU Hardware
 
-文件：`test_flash_decoding_generalized.py`
+File: `test_flash_decoding_generalized.py`
 
-每个精度用例只生成一份固定输入，并执行两份结果：
+Each accuracy case generates one fixed input and computes two results:
 
 ```text
-CPU FP32 mathematical golden
-              ↑
-NPU Host-auto (FD or normal fallback)
+CPU FP32 mathematical golden result
+                  ^
+NPU host-auto path (FD or normal fallback)
 ```
 
-检查项：
+The tests check:
 
-- NPU 和 CPU FP32：相对 L1 误差不超过 `2e-2`；
-- NPU 和 CPU FP32：余弦相似度不低于 `0.999`；
-- 输出 shape、dtype、NaN/Inf；
-- 所有随机输入都使用固定 seed，失败可复现。
+- Relative L1 error between the NPU and CPU FP32 results does not exceed `2e-2`.
+- Cosine similarity between the NPU and CPU FP32 results is at least `0.999`.
+- Output shape, data type, and absence of NaN/Inf values.
+- All random inputs use fixed seeds so failures are reproducible.
 
-### 2.2 Host tiling 测试
+### 2.2 Host Tiling Tests
 
-文件：`ut/op_host/test_sparse_attention_score_fd_tiling.cpp`
+File: `ut/op_host/test_sparse_attention_score_fd_tiling.cpp`
 
-该测试使用 28-AIC Ascend950 fake platform，直接断言：
+These tests use a simulated Ascend 950 platform with 28 AICs and directly assert the following results:
 
-| 用例 | 预期结果 |
+| Case | Expected Result |
 |---|---:|
-| BF16、条件满足 | 10006 |
-| FP16、条件满足 | 10005 |
-| `topK=1`，不能增加 shard | 10002 |
-| `topK=17`，超过 FD 上限 | 10002 |
-| baseTasks=8、AIC=28、topK=16 | 10006 |
-| baseTasks=24、AIC=28、topK=2 | 10002 |
-| baseTasks=28、AIC=28 | 10002 |
+| BF16 with all conditions satisfied | 10006 |
+| FP16 with all conditions satisfied | 10005 |
+| `top_k=1`, so sharding cannot increase parallelism | 10002 |
+| `top_k=17`, exceeding the current FD limit | 10002 |
+| `base_tasks=8`, `aic_num=28`, `top_k=16` | 10006 |
+| `base_tasks=24`, `aic_num=28`, `top_k=2` | 10002 |
+| `base_tasks=28`, `aic_num=28` | 10002 |
 
-## 3. 泛化用例矩阵
+## 3. Generalization Test Matrix
 
-### 3.1 FD 有效用例
+### 3.1 FD-Eligible Cases
 
-Python 测试包含 15 个 FD 有效 shape：
+The Python tests contain 15 FD-eligible shapes:
 
-| 维度 | 覆盖值 |
+| Dimension | Covered Values |
 |---|---|
-| dtype | BF16、FP16 |
-| topK | 2、4、8、16 |
-| baseTasks | 1、2、4、8、24 |
-| groupSize | 1、4、8、16、128 |
-| Attention 类型 | MQA、GQA、MHA |
-| Q token | 1、2、4、12 |
-| valid block 数 | 1、2、topK-1、topK |
-| KV 尾块 | 完整 128、部分有效 token |
-| blockTable | logical ID 与 physical ID 逆序映射 |
-| 数值分布 | random、equal logits、constant value、shard extremes |
+| Data type | BF16, FP16 |
+| `top_k` | 2, 4, 8, 16 |
+| `base_tasks` | 1, 2, 4, 8, 24 |
+| `group_size` | 1, 4, 8, 16, 128 |
+| Attention type | MQA, GQA, MHA |
+| Q tokens | 1, 2, 4, 12 |
+| Valid block count | 1, 2, `top_k - 1`, `top_k` |
+| KV tail block | Full 128 tokens or partially valid |
+| `block_table` | Reverse mapping from logical IDs to physical IDs |
+| Numerical distribution | Random, equal logits, constant values, shard extremes |
 
-重要 shard 边界：
+Important sharding boundaries:
 
 ```text
-baseTasks=1,  topK=2  -> 2 shards
-baseTasks=1,  topK=16 -> 16 shards
-baseTasks=2,  topK=8  -> 16 shards
-baseTasks=8,  topK=8  -> 22 compute cores (3 flattened tasks/core)
-baseTasks=24, topK=2  -> 24 compute cores (2 flattened tasks/core)
+base_tasks=1,  top_k=2  -> 2 shards
+base_tasks=1,  top_k=16 -> 16 shards
+base_tasks=2,  top_k=8  -> 16 shards
+base_tasks=8,  top_k=8  -> 22 compute cores (3 flattened tasks/core)
+base_tasks=24, top_k=2  -> 24 compute cores (2 flattened tasks/core)
 ```
 
-### 3.2 FD 回退用例
+### 3.2 FD Fallback Cases
 
-以下用例验证 Host 自动回退：
+The following cases verify automatic host fallback:
 
-- `topK=1`：最终 shard 数等于 base task 数，没有并行收益；
-- `topK=17`：超过当前 FD 的 `topK<=16` 门槛；
-- baseTasks=28：不满足 `baseTasks<aicNum`，同时超过 base-task 元数据容量；
-- FP16 `topK=1`：同时覆盖 FP16 回退 key。
+- `top_k=1`: The final shard count equals the base-task count, providing no additional parallelism.
+- `top_k=17`: This exceeds the current FD threshold of `top_k <= 16`.
+- `base_tasks=28`: This fails the `base_tasks < aic_num` condition and also exceeds the base-task metadata capacity.
+- FP16 with `top_k=1`: This additionally covers the FP16 fallback key.
 
-`topK=17` 超出当前 FD 支持范围。Host UT 断言其自动回退到 key 10002；不把普通 kernel 在该范围的结果纳入 CPU 精度承诺。
+`top_k=17` is outside the currently supported FD range. The host unit test asserts automatic fallback to key 10002; the normal kernel's result for this range is not included in the CPU accuracy guarantee.
 
-### 3.3 自动策略行为
+### 3.3 Automatic Policy Behavior
 
-- 调用方不提供 FD 开关，Host 根据 SoC、dtype、shape、任务量和 cost model 自动选择路径；
-- 元测试会检查 case 表本身没有丢失 dtype、topK、baseTasks、valid count 和数值模式边界。
+- The caller does not provide an FD switch. The host automatically selects the path according to the SoC, data type, shape, task count, and cost model.
+- Meta-tests verify that the case table retains coverage for data type, `top_k`, `base_tasks`, valid-count, and numerical-pattern boundaries.
 
-## 4. 运行方法
+## 4. Running the Tests
 
-### 4.1 Python/NPU 全量测试
+### 4.1 Complete Python/NPU Test Suite
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh
@@ -113,7 +113,7 @@ ASCEND_RT_VISIBLE_DEVICES=1 python -m pytest \
   -v -s
 ```
 
-只运行 FD 有效 shape：
+Run only FD-eligible shapes:
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=1 python -m pytest \
@@ -121,15 +121,15 @@ ASCEND_RT_VISIBLE_DEVICES=1 python -m pytest \
   -v -s
 ```
 
-### 4.2 Host tiling UT
+### 4.2 Host Tiling Unit Tests
 
-编译：
+Build:
 
 ```bash
 bash build.sh --ophost_test --ops=sparse_attention_score --noexec -j16
 ```
 
-运行：
+Run:
 
 ```bash
 BUILD_PATH="$(pwd)/build" \
@@ -137,40 +137,39 @@ BUILD_PATH="$(pwd)/build" \
   --gtest_filter='SparseAttentionScoreFdTilingTest.*'
 ```
 
-## 5. 2026-07-26 真机结果
+## 5. Hardware Results from July 26, 2026
 
-设备：Ascend950PR，NPU 1。
+Device: Ascend 950PR, NPU 1.
 
-Python/NPU：
+Python/NPU:
 
 ```text
 23 passed, 1 xfailed in 4.86s
 ```
 
-关键精度范围：
+Key accuracy results:
 
-| 项目 | 结果 |
+| Metric | Result |
 |---|---:|
-| BF16 FD 有效用例最大 CPU max diff | 0.00018646 |
-| BF16 FD 有效用例最大 relative L1 | 0.00456663 |
-| BF16 FD 有效用例最小 cosine | 0.99999386 |
-| FP16 FD 有效用例最大 CPU max diff | 0.00001946 |
-| FP16 FD 有效用例最大 relative L1 | 0.00027511 |
-| FP16 FD 有效用例最小 cosine | 0.99999964 |
+| Largest CPU `max_diff` among BF16 FD-eligible cases | 0.00018646 |
+| Largest relative L1 among BF16 FD-eligible cases | 0.00456663 |
+| Smallest cosine similarity among BF16 FD-eligible cases | 0.99999386 |
+| Largest CPU `max_diff` among FP16 FD-eligible cases | 0.00001946 |
+| Largest relative L1 among FP16 FD-eligible cases | 0.00027511 |
+| Smallest cosine similarity among FP16 FD-eligible cases | 0.99999964 |
 
-Host tiling UT：
+Host tiling unit tests:
 
 ```text
 9 tests from SparseAttentionScoreFdTilingTest
 9 passed
 ```
 
-### 5.1 2026-07-28 28-AIC 更新验证
+### 5.1 Verification of the 28-AIC Update on July 28, 2026
 
-Host 与 kernel 的 `SASA_FD_MAX_AIC` 同步更新为 28 后，使用
-BF16、batch=8、qSeqlen=1、kvSeqlen=2048、qHeads=16、kvHeads=1、
-headSize=128、blockSize=128、topK=16 的固定长度 shape 在 Ascend950PR
-真机通过。Profiler 结果：
+After synchronizing the host and kernel values of `SASA_FD_MAX_AIC` to 28, a fixed-length BF16 shape passed on Ascend 950PR hardware with the following configuration: `batch=8`, `q_seqlen=1`, `kv_seqlen=2048`, `q_heads=16`, `kv_heads=1`, `head_size=128`, `block_size=128`, and `top_k=16`.
+
+Profiler results:
 
 ```text
 Op Name: SparseAttentionScore_*_10006_mix_aic
@@ -179,7 +178,7 @@ Mix Block Dim: 56
 All task success
 ```
 
-数值结果：
+Numerical results:
 
 ```text
 passed: true
@@ -188,31 +187,31 @@ relative_l1_math: 0.0024210647674262624
 cosine_similarity_math: 0.999998927116394
 ```
 
-当前 Host tiling UT 为 15/15 通过。
+The current host tiling unit-test result is 15/15 passing.
 
-## 6. 测试发现和已知限制
+## 6. Findings and Known Limitations
 
 ### 6.1 `select_num_idx=0`
 
-当某个 base task 的 `select_num_idx=0` 时，当前普通/FD kernel 没有完整初始化对应输出或 partial result，因此输出不满足数学语义上的全零。测试将该场景保留为：
+When a base task has `select_num_idx=0`, the current normal and FD kernels do not fully initialize the corresponding output or partial result. The output therefore does not satisfy the mathematically expected all-zero semantics. This scenario remains in the test suite as:
 
 ```text
 test_zero_valid_blocks_should_produce_zero_output
 ```
 
-并使用非严格 `xfail` 标记。真实 causal block 生成逻辑至少会包含当前 block，正常有效范围从 1 开始；主精度矩阵覆盖 `1、2、topK-1、topK`。
+It is marked with a non-strict `xfail`. Real causal-block generation includes at least the current block, so the normal valid range starts at 1. The primary accuracy matrix covers `1`, `2`, `top_k - 1`, and `top_k`.
 
-### 6.2 `topK=17`
+### 6.2 `top_k=17`
 
-首次泛化运行发现，`topK=17` 下 Host UT 确认回退到 10002，但普通 kernel 相对 CPU FP32 的 relative L1 为 0.22660052。该 shape 超出当前 FD 的 `topK<=16` 范围，因此仅作为策略回退测试，不作为精度支持用例。
+The first generalization run found that, with `top_k=17`, the host unit test confirmed fallback to key 10002, but the normal kernel had a relative L1 error of 0.22660052 against the CPU FP32 result. This shape is outside the current FD range of `top_k <= 16`, so it is retained only as a policy-fallback test and is not treated as an accuracy-supported case.
 
-## 7. 后续扩展方式
+## 7. Extending the Tests
 
-新增 case 时只需要向 `FD_ELIGIBLE_CASES` 或 `FD_FALLBACK_CASES` 添加一个 `FDCase`。case 名、dtype、shape、valid-count 模式、数值模式和 seed 都会进入 pytest ID；生成器会自动完成 CPU golden 和 NPU Host-auto 两方计算。
+To add a case, add an `FDCase` to either `FD_ELIGIBLE_CASES` or `FD_FALLBACK_CASES`. The case name, data type, shape, valid-count pattern, numerical pattern, and seed are all included in the pytest ID. The generator automatically computes both the CPU golden result and the NPU host-auto result.
 
-如果修改 Host FD 门槛，必须同时更新：
+When changing the host FD threshold, also update all of the following:
 
-1. Python case 表和 `_expected_fd_compute_cores`；
-2. Host tiling key 单元测试；
-3. 本文档的覆盖矩阵；
-4. 重新执行真机全量测试。
+1. The Python case table and `_expected_fd_compute_cores`.
+2. The host tiling-key unit tests.
+3. The coverage matrix in this document.
+4. The complete test suite on NPU hardware.
