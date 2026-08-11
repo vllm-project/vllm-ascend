@@ -4,7 +4,9 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +45,11 @@ class TestRecord:
     passed: bool
     elapsed: float
     estimated: float
+    collected: int
+    passed_cases: int
+    failed_cases: int
+    error_cases: int
+    skipped_cases: int
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +57,11 @@ class TestRecord:
             "passed": self.passed,
             "elapsed": self.elapsed,
             "estimated": self.estimated,
+            "collected": self.collected,
+            "passed_cases": self.passed_cases,
+            "failed_cases": self.failed_cases,
+            "error_cases": self.error_cases,
+            "skipped_cases": self.skipped_cases,
         }
 
 
@@ -70,6 +82,21 @@ def _print_github_actions_group_end() -> None:
 def _print_github_actions_annotation(annotation: str, message: str) -> None:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::{annotation}::{_escape_github_actions_value(message)}", flush=True)
+
+
+def _read_junit_counts(report_path: Path) -> tuple[int, int, int, int, int]:
+    root = ET.parse(report_path).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+
+    def total(attribute: str) -> int:
+        return sum(int(suite.attrib.get(attribute, 0)) for suite in suites)
+
+    collected = total("tests")
+    failed = total("failures")
+    errors = total("errors")
+    skipped = total("skipped")
+    passed = max(collected - failed - errors - skipped, 0)
+    return collected, passed, failed, errors, skipped
 
 
 def run_tests(
@@ -109,11 +136,52 @@ def run_tests(
             )
 
             start = time.perf_counter()
-            result = subprocess.run(["pytest", "-sv", "--durations=0", "--color=yes", test.name])
+            with tempfile.NamedTemporaryFile(
+                prefix="pytest-",
+                suffix=".xml",
+                delete=False,
+            ) as report:
+                report_path = Path(report.name)
+            try:
+                result = subprocess.run(
+                    [
+                        "pytest",
+                        "-sv",
+                        "--durations=0",
+                        "--color=yes",
+                        f"--junitxml={report_path}",
+                        test.name,
+                    ]
+                )
+            except (OSError, KeyboardInterrupt):
+                report_path.unlink(missing_ok=True)
+                raise
             elapsed = time.perf_counter() - start
             passed = result.returncode == 0
+            try:
+                counts = _read_junit_counts(report_path)
+            except (ET.ParseError, OSError, ValueError) as error:
+                counts = (0, 0, 0, 0, 0)
+                _print_github_actions_annotation(
+                    "warning",
+                    f"Could not read pytest case count for {test.name}: {error}",
+                )
+            finally:
+                report_path.unlink(missing_ok=True)
 
-            records.append(TestRecord(name=test.name, passed=passed, elapsed=elapsed, estimated=test.estimated_time))
+            records.append(
+                TestRecord(
+                    name=test.name,
+                    passed=passed,
+                    elapsed=elapsed,
+                    estimated=test.estimated_time,
+                    collected=counts[0],
+                    passed_cases=counts[1],
+                    failed_cases=counts[2],
+                    error_cases=counts[3],
+                    skipped_cases=counts[4],
+                )
+            )
 
             color = _Color.GREEN if passed else _Color.RED
             status = "PASSED" if passed else f"FAILED (exit code {result.returncode})"
@@ -121,6 +189,12 @@ def run_tests(
             # PASSED / FAILED (exit code X) line format for suite end detection.
             print(
                 f"{color}[{i + 1}/{len(files)}] {status}  {test.name}  ({elapsed:.0f}s){_Color.RESET}",
+                flush=True,
+            )
+            print(
+                "Case count: "
+                f"collected={counts[0]}, passed={counts[1]}, failed={counts[2]}, "
+                f"errors={counts[3]}, skipped={counts[4]}",
                 flush=True,
             )
         finally:
@@ -147,6 +221,14 @@ def run_tests(
     for r in records:
         icon = f"{_Color.GREEN}✓{_Color.RESET}" if r.passed else f"{_Color.RED}✗{_Color.RESET}"
         print(f"  {icon} {r.name}  ({r.elapsed:.0f}s)")
+    print(
+        "Pytest cases: "
+        f"collected={sum(r.collected for r in records)}, "
+        f"passed={sum(r.passed_cases for r in records)}, "
+        f"failed={sum(r.failed_cases for r in records)}, "
+        f"errors={sum(r.error_cases for r in records)}, "
+        f"skipped={sum(r.skipped_cases for r in records)}"
+    )
     print(flush=True)
 
     return (0 if all_passed else 1), records
