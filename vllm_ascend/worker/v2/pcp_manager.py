@@ -18,7 +18,7 @@
 #
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -26,6 +26,39 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+
+_UPSTREAM_PCP_VALIDATE_CONFIG = PCPManager.validate_config
+
+
+def validate_ascend_pcp_config(
+    vllm_config: VllmConfig,
+    supports_mm_inputs: bool,
+) -> None:
+    """Validate the Ascend MRV2 PCP subset for MLA and GQA backends."""
+    parallel_config = vllm_config.parallel_config
+    model_config = vllm_config.model_config
+    if parallel_config.prefill_context_parallel_size <= 1:
+        return
+
+    if model_config.use_mla:
+        _UPSTREAM_PCP_VALIDATE_CONFIG(vllm_config, supports_mm_inputs)
+        return
+
+    PCPManager._validate_common_config(vllm_config, supports_mm_inputs)
+    if parallel_config.decode_context_parallel_size > 1:
+        raise NotImplementedError("Ascend MRV2 GQA does not support PCP and DCP simultaneously yet.")
+    if model_config.quantization is not None:
+        raise NotImplementedError("Ascend MRV2 GQA PCP does not support quantized models yet.")
+    if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        raise NotImplementedError("Ascend MRV2 GQA PCP supports eager mode only.")
+    if model_config.dtype != torch.bfloat16:
+        raise NotImplementedError("Ascend MRV2 GQA PCP supports BF16 models only.")
+
+    text_config = model_config.hf_text_config
+    if text_config.num_attention_heads == text_config.num_key_value_heads:
+        raise NotImplementedError(
+            "Ascend MRV2 GQA PCP requires num_attention_heads to be greater than num_key_value_heads."
+        )
 
 
 class AscendPCPManager(PCPManager):
@@ -90,7 +123,7 @@ def maybe_build_ascend_pcp_manager(
     if pcp_size <= 1:
         return None
 
-    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs)
+    validate_ascend_pcp_config(vllm_config, supports_mm_inputs)
     dcp_size = parallel_config.decode_context_parallel_size
     return AscendPCPManager(
         pcp_world_size=pcp_size,

@@ -20,15 +20,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import (
     AscendPCPManager,
     maybe_build_ascend_pcp_manager,
+    validate_ascend_pcp_config,
 )
 
 
@@ -46,7 +48,35 @@ def _mock_async_copy_to_cpu(value, out=None, device=None):
     return value.to(device="cpu")
 
 
-def _make_local_pcp_batch():
+def _make_gqa_pcp_config():
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        model_config=SimpleNamespace(
+            use_mla=False,
+            is_encoder_decoder=False,
+            quantization=None,
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(
+                num_attention_heads=32,
+                num_key_value_heads=8,
+            ),
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=8,
+            max_num_batched_tokens=32,
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        lora_config=None,
+        speculative_config=None,
+    )
+
+
+def _make_local_pcp_batch() -> AscendInputBatch:
     """Build a local batch in the shape returned by the community PCP manager."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -209,22 +239,14 @@ def test_maybe_build_ascend_pcp_manager_returns_none_when_pcp_is_disabled():
 
 
 def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=4,
-        ),
-        scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
-    )
+    vllm_config = _make_gqa_pcp_config()
     pcp_group = SimpleNamespace(rank_in_group=1)
-    dcp_group = SimpleNamespace(rank_in_group=0)
     req_states = MagicMock()
 
-    with (
-        patch.object(PCPManager, "validate_config") as validate_config,
-        patch.object(pcp_manager_module, "get_pcp_group", return_value=pcp_group),
-        patch.object(pcp_manager_module, "get_dcp_group", return_value=dcp_group),
+    with patch.object(
+        pcp_manager_module,
+        "get_pcp_group",
+        return_value=pcp_group,
     ):
         manager = maybe_build_ascend_pcp_manager(
             vllm_config,
@@ -238,7 +260,60 @@ def test_maybe_build_ascend_pcp_manager_uses_ascend_subclass():
     assert manager.vllm_config is vllm_config
     assert manager.pcp_world_size == 2
     assert manager.pcp_rank == 1
-    assert manager.dcp_world_size == 2
+    assert manager.dcp_world_size == 1
     assert manager.dcp_rank == 0
-    assert manager.cp_interleave == 4
-    validate_config.assert_called_once_with(vllm_config, False)
+    assert manager.cp_interleave == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("dcp", "PCP and DCP"),
+        ("pp", "PP"),
+        ("encoder_decoder", "encoder-decoder"),
+        ("mm", "MM inputs"),
+        ("lora", "LoRA"),
+        ("spec_decode", "speculative decoding"),
+        ("quantization", "quantized models"),
+        ("graph", "eager mode only"),
+        ("dtype", "BF16 models only"),
+        ("mha", "num_attention_heads"),
+    ],
+)
+def test_validate_ascend_gqa_pcp_rejects_unsupported_modes(case, match):
+    vllm_config = _make_gqa_pcp_config()
+    supports_mm_inputs = case == "mm"
+    if case == "dcp":
+        vllm_config.parallel_config.decode_context_parallel_size = 2
+    elif case == "pp":
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+    elif case == "encoder_decoder":
+        vllm_config.model_config.is_encoder_decoder = True
+    elif case == "lora":
+        vllm_config.lora_config = object()
+    elif case == "spec_decode":
+        vllm_config.speculative_config = object()
+    elif case == "quantization":
+        vllm_config.model_config.quantization = "ascend"
+    elif case == "graph":
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    elif case == "dtype":
+        vllm_config.model_config.dtype = torch.float16
+    elif case == "mha":
+        vllm_config.model_config.hf_text_config.num_key_value_heads = 32
+
+    with pytest.raises(NotImplementedError, match=match):
+        validate_ascend_pcp_config(vllm_config, supports_mm_inputs=supports_mm_inputs)
+
+
+def test_validate_ascend_pcp_preserves_upstream_mla_validation():
+    vllm_config = _make_gqa_pcp_config()
+    vllm_config.model_config.use_mla = True
+
+    with patch.object(
+        pcp_manager_module,
+        "_UPSTREAM_PCP_VALIDATE_CONFIG",
+    ) as validate_upstream:
+        validate_ascend_pcp_config(vllm_config, supports_mm_inputs=False)
+
+    validate_upstream.assert_called_once_with(vllm_config, False)
