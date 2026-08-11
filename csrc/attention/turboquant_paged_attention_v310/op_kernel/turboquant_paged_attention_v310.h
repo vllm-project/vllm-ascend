@@ -48,6 +48,13 @@ using namespace TurboQuant;
 
 constexpr int32_t kNzC0 = 16;
 constexpr float kNegInf = -3.0e38f;
+/*
+ * Tokens batched into a single set of vector ops. The scalar bound is
+ * instruction ISSUE + PipeBarrier (~20 cycles each, measured), not scalar
+ * arithmetic, so the lever is fewer/larger vector ops rather than fewer
+ * scalar statements. 8 keeps the tile buffers ~36KB of the 256KB UB.
+ */
+constexpr uint32_t kTile = 8;
 
 struct TQReadParams {
     GM_ADDR query;
@@ -81,21 +88,34 @@ public:
         cbGm_.SetGlobalBuffer((__gm__ float *)p.centroids);
         outGm_.SetGlobalBuffer((__gm__ half *)p.attnOut);
 
+        /*
+         * TILED BUFFERS. msprof (b=2 vs b=4, identical element-work, 2x the
+         * instruction count) measured ~20 cycles per vector instruction of pure
+         * issue + PipeBarrier overhead. Each op covered only d=256 fp32 = 4
+         * vector repeats, so ~20 cycles of drain wrapped ~4 cycles of work.
+         * Batching kTile tokens per vector op amortises that over kTile x the
+         * data; element-work is unchanged, so vec_time is the floor.
+         *
+         * Sized for kTile tokens. UnpackCodesVec is len-generic, so the tile
+         * simply passes len = kTile*d. Scratch is `lanes` = kTile*d/kPlanes,
+         * maximal when kPlanes is smallest (2, at BITS==4) -> kTile*d/2.
+         */
         pipe->InitBuffer(qBuf_, d * sizeof(float));
         pipe->InitBuffer(accBuf_, d * sizeof(float));
-        pipe->InitBuffer(kvBuf_, d * sizeof(float));
+        pipe->InitBuffer(kvBuf_, kTile * d * sizeof(float));
         pipe->InitBuffer(tmpBuf_, d * sizeof(float));
-        pipe->InitBuffer(byteBuf_, TQTraits<BITS>::PackedBytes(d));
-        pipe->InitBuffer(codeBuf_, d * sizeof(int32_t));
+        pipe->InitBuffer(byteBuf_, kTile * TQTraits<BITS>::PackedBytes(d));
+        pipe->InitBuffer(codeBuf_, kTile * d * sizeof(int32_t));
+        pipe->InitBuffer(qbBuf_, kTile * d * sizeof(float));   // q permuted to plane-major
         pipe->InitBuffer(signBuf_, d * sizeof(float));
         pipe->InitBuffer(cbBuf_, (2 * (1 << BITS)) * sizeof(float));
         pipe->InitBuffer(outBuf_, d * sizeof(half));
         pipe->InitBuffer(redBuf_, d * sizeof(float));   // ReduceSum dst (must not alias src)
         pipe->InitBuffer(wrkBuf_, d * sizeof(float));
         pipe->InitBuffer(dbgBuf_, d * sizeof(float));
-        pipe->InitBuffer(unpHBuf_, (d / 2) * sizeof(half));      // planar unpack scratch
-        pipe->InitBuffer(unpF0Buf_, (d / 2) * sizeof(float));
-        pipe->InitBuffer(unpF1Buf_, (d / 2) * sizeof(float));
+        pipe->InitBuffer(unpHBuf_, (kTile * d / 2) * sizeof(half));      // planar unpack scratch
+        pipe->InitBuffer(unpF0Buf_, (kTile * d / 2) * sizeof(float));
+        pipe->InitBuffer(unpF1Buf_, (kTile * d / 2) * sizeof(float));
         // norm planes prefetched per BLOCK: replaces two GM scalar reads per
         // token (dependent global loads, pure latency) with one DataCopy.
         pipe->InitBuffer(kNrmBuf_, t_->blockSize * t_->numKvHeads * sizeof(half));
@@ -165,6 +185,7 @@ private:
         LocalTensor<float> sco = scoBuf_.Get<float>();
         LocalTensor<float> wgt = wgtBuf_.Get<float>();
         LocalTensor<float> rdx = rdxBuf_.Get<float>();
+        LocalTensor<float> qb = qbBuf_.Get<float>();
 
         // q -> fp32, then into the rotated basis (once per head, not per key)
         LocalTensor<half> qh16 = outBuf_.Get<half>();
@@ -189,6 +210,26 @@ private:
             WaitFlag<HardEvent::MTE3_V>(EVENT_ID5);
             return;
         }
+        /*
+         * Permute q into the tiled code layout, ONCE per head (not per token).
+         * The tile puts token t's plane-pl lanes at [pl*lanes + t*lpt], so q's
+         * plane-pl slice must be replicated kTile times inside each plane:
+         *     qb[pl*lanes + t*lpt + j] = q[pl*lpt + j]
+         * For a SINGLE token this permutation is the identity, which is why the
+         * per-token path could multiply by q directly.
+         */
+        if constexpr (TQPlanar<BITS>::kSupported) {
+            using P = TQPlanar<BITS>;
+            const uint32_t lanes = kTile * d / P::kPlanes;
+            const uint32_t lpt = d / P::kPlanes;
+            for (uint32_t pl = 0; pl < P::kPlanes; ++pl) {
+                for (uint32_t t = 0; t < kTile; ++t) {
+                    Adds(qb[pl * lanes + t * lpt], q[pl * lpt], 0.0f, lpt);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+        }
+
         Duplicate(acc, 0.0f, d);
         PipeBarrier<PIPE_V>();
         float runMax = kNegInf;
@@ -236,26 +277,67 @@ private:
              */
 
             // ---- pass 1: scores for every token in the block ----------------
-            for (uint32_t tk = 0; tk < tokEnd; ++tk) {
-                GatherNz(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
-                if constexpr (TQPlanar<BITS>::kSupported) {
-                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);
+            if constexpr (TQPlanar<BITS>::kSupported) {
+                /*
+                 * TILED. UnpackCodesVec is plane-major and len-generic, so
+                 * len = kTile*d over token-contiguous bytes gives
+                 *     codes[pl*lanes + t*lpt + j]  <->  token t, dim pl*lpt+j
+                 * with lanes = kTile*d/kPlanes and lpt = lanes/kTile.
+                 * qb_ is q permuted into that same layout ONCE per head, so the
+                 * elementwise Mul below is a plain kTile*d op.
+                 *
+                 * Tiles always read a full kTile even in the sequence tail --
+                 * blockSize is a multiple of kTile so the reads stay inside the
+                 * allocated block, and the surplus tokens get kNegInf scores
+                 * below and are killed by the softmax.
+                 */
+                using P = TQPlanar<BITS>;
+                const uint32_t lanes = kTile * d / P::kPlanes;
+                const uint32_t lpt = d / P::kPlanes;           // lanes per token
+                for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
+                    GatherNzTile(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
                     SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
                     WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
-                } else {
+                    DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
+                                        t_->codebookMode);
+                    Mul(kv, kv, qb, kTile * d);
+                    PipeBarrier<PIPE_V>();
+                    // fold the planes: dot = sum over ALL dims = sum_pl sum_j
+                    for (uint32_t pl = 1; pl < P::kPlanes; ++pl) {
+                        Add(kv, kv, kv[pl * lanes], lanes);
+                        PipeBarrier<PIPE_V>();
+                    }
+                    // each token's lpt partials are now CONTIGUOUS at kv[t*lpt]
+                    for (uint32_t t = 0; t < kTile; ++t) {
+                        ReduceSum(red, kv[t * lpt], wrk, lpt);
+                        PipeBarrier<PIPE_V>();
+                        SetFlag<HardEvent::V_S>(EVENT_ID2);
+                        WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                        const uint32_t tk = t0 + t;
+                        if (tk < tokEnd) {
+                            const float kNorm =
+                                static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
+                            sco.SetValue(tk, red.GetValue(0) * kNorm * t_->scale);
+                        }
+                    }
+                }
+            } else {
+                for (uint32_t tk = 0; tk < tokEnd; ++tk) {
+                    GatherNz(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
                     UnpackCodes<BITS>(bytes, codes, d);
                     SetFlag<HardEvent::S_V>(EVENT_ID1);
                     WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                    DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
+                    Mul(tmp, q, kv, d);
+                    PipeBarrier<PIPE_V>();
+                    ReduceSum(tmp, tmp, tmp, d);
+                    PipeBarrier<PIPE_V>();
+                    SetFlag<HardEvent::V_S>(EVENT_ID2);
+                    WaitFlag<HardEvent::V_S>(EVENT_ID2);
+                    const float kNorm = static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
+                    sco.SetValue(tk, tmp.GetValue(0) * kNorm * t_->scale);
                 }
-                DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
-                Mul(tmp, q, kv, d);
-                PipeBarrier<PIPE_V>();
-                ReduceSum(tmp, tmp, tmp, d);
-                PipeBarrier<PIPE_V>();
-                SetFlag<HardEvent::V_S>(EVENT_ID2);
-                WaitFlag<HardEvent::V_S>(EVENT_ID2);
-                const float kNorm = static_cast<float>(kNrm.GetValue(tk * t_->numKvHeads + kvh));
-                sco.SetValue(tk, tmp.GetValue(0) * kNorm * t_->scale);
             }
             SetFlag<HardEvent::S_V>(EVENT_ID1);       // scalar wrote sco -> vector reads it
             WaitFlag<HardEvent::S_V>(EVENT_ID1);
@@ -297,24 +379,55 @@ private:
             runMax = newMax;
 
             // ---- pass 3: accumulate w * ||v|| * yhat_v ----------------------
-            for (uint32_t tk = 0; tk < tokEnd; ++tk) {
-                GatherNz(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
-                if constexpr (TQPlanar<BITS>::kSupported) {
-                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);
+            if constexpr (TQPlanar<BITS>::kSupported) {
+                /*
+                 * The gather/unpack/dequant batches exactly as in pass 1, but the
+                 * accumulation itself does NOT batch away: acc[dim] += w_t*v[t][dim]
+                 * needs a per-token scalar. In the tiled layout token t's values
+                 * for plane pl sit at kv[pl*lanes + t*lpt], while acc is dim-ordered
+                 * (dim = pl*lpt + j), so one Axpy per plane scatters them home.
+                 * That is kPlanes ops/token -- the same count as the old
+                 * Muls+Add, so nothing regresses while the unpack gets amortised.
+                 */
+                using P = TQPlanar<BITS>;
+                const uint32_t lanes = kTile * d / P::kPlanes;
+                const uint32_t lpt = d / P::kPlanes;
+                for (uint32_t t0 = 0; t0 < tokEnd; t0 += kTile) {
+                    GatherNzTile(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), t0, kTile);
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, kTile * d);
                     SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
                     WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
-                } else {
+                    DequantizeVec<BITS>(codes, kv, cb_, kTile * d, t_->invSqrtHeadDim,
+                                        t_->codebookMode);
+                    for (uint32_t t = 0; t < kTile; ++t) {
+                        const uint32_t tk = t0 + t;
+                        if (tk >= tokEnd) {
+                            break;
+                        }
+                        const float vNorm =
+                            static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
+                        const float w = wgt.GetValue(tk);
+                        const float wv = w * vNorm;
+                        for (uint32_t pl = 0; pl < P::kPlanes; ++pl) {
+                            Axpy(acc[pl * lpt], kv[pl * lanes + t * lpt], wv, lpt);
+                            PipeBarrier<PIPE_V>();
+                        }
+                    }
+                }
+            } else {
+                for (uint32_t tk = 0; tk < tokEnd; ++tk) {
+                    GatherNz(vCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
                     UnpackCodes<BITS>(bytes, codes, d);
                     SetFlag<HardEvent::S_V>(EVENT_ID1);
                     WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                    DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
+                    const float vNorm = static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
+                    const float w = wgt.GetValue(tk);
+                    Muls(kv, kv, w * vNorm, d);
+                    PipeBarrier<PIPE_V>();
+                    Add(acc, acc, kv, d);
+                    PipeBarrier<PIPE_V>();
                 }
-                DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
-                const float vNorm = static_cast<float>(vNrm.GetValue(tk * t_->numKvHeads + kvh));
-                const float w = wgt.GetValue(tk);
-                Muls(kv, kv, w * vNorm, d);
-                PipeBarrier<PIPE_V>();
-                Add(acc, acc, kv, d);
-                PipeBarrier<PIPE_V>();
             }
         }
 
@@ -413,6 +526,53 @@ private:
     }
 
     /*
+     * Gather kTile consecutive tokens in one shot, laid out TOKEN-CONTIGUOUS so
+     * the batched unpack sees exactly the byte order the single-token path saw.
+     *
+     * Within one c1 plane consecutive tokens ARE contiguous in GM (off varies
+     * fastest), so each group is one burst of nTok blocks. Writing with
+     * dstStride = groups-1 interleaves the groups back together:
+     *     dst(g, t) = g*kNzC0 + t*groups*kNzC0
+     * i.e. token t's `groups` chunks land adjacent, giving [t][g][kNzC0].
+     *
+     * This issues `groups` DataCopys per TILE instead of per token.
+     */
+    __aicore__ inline void GatherNzTile(const GlobalTensor<half> &cache, const LocalTensor<uint8_t> &bytes,
+                                        uint32_t h, uint32_t blk, uint32_t off0, uint32_t nTok)
+    {
+        const uint32_t ph = t_->packedHalves;
+        const uint32_t groups = ph / kNzC0;
+        LocalTensor<half> asHalf = bytes.ReinterpretCast<half>();
+        /*
+         * Never read past the block. The caller always asks for a full kTile so
+         * the unpack length (and therefore the qb permutation) stays constant,
+         * but if blockSize is not a multiple of kTile the surplus slots would
+         * run into the next c1 plane -- or off the end of the cache on the last
+         * block. Those slots are discarded by the tk >= tokEnd guard, so leaving
+         * them stale is fine; reading out of bounds is not.
+         */
+        const uint32_t avail = t_->blockSize - off0;
+        if (nTok > avail) {
+            nTok = avail;
+        }
+        const uint32_t c1Base = (h * ph) / kNzC0;
+        const uint64_t base =
+            ((static_cast<uint64_t>(blk) * t_->c1 + c1Base) * t_->blockSize + off0) * kNzC0;
+        const uint64_t planeStride = static_cast<uint64_t>(t_->blockSize) * kNzC0;
+        const DataCopyParams p{static_cast<uint16_t>(nTok), 1, 0, static_cast<uint16_t>(groups - 1)};
+        for (uint32_t g = 0; g < groups; ++g) {
+            DataCopy(asHalf[g * kNzC0], cache[base + g * planeStride], p);
+        }
+        if constexpr (TQPlanar<BITS>::kSupported) {
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+        } else {
+            SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        }
+    }
+
+    /*
      * Scalar exp for the online-softmax weights.
      *
      * Deliberately NOT the vector Exp(): pushing one scalar through a UB tensor
@@ -464,7 +624,7 @@ private:
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
         outBuf_, redBuf_, wrkBuf_, dbgBuf_, unpHBuf_, unpF0Buf_, unpF1Buf_, kNrmBuf_, vNrmBuf_,
-        scoBuf_, wgtBuf_, rdxBuf_;
+        scoBuf_, wgtBuf_, rdxBuf_, qbBuf_;
     LocalTensor<float> signs_, cb_;
 };
 
