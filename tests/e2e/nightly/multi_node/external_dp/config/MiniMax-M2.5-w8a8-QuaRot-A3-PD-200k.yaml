@@ -1,0 +1,152 @@
+# MiniMax-M2.5 w8a8 QuaRot, A3 PD disaggregation, 1 prefill + 1 decode node,
+# total context length 200k (--max-model-len 200000).
+#
+# Topology mirrors the Kimi-K2.6 PD case (prefill DP2/TP8, decode DP4/TP4 on
+# 16-NPU A3 nodes); serving args are inherited from the single-node case
+# tests/e2e/nightly/single_node/models/configs/MiniMax-M2.5-w8a8-QuaRot-A3.yaml.
+#
+# The case validates that the PD cluster boots with 200k context
+# (--max-model-len 200000) and the proxy is healthy. Functional verification
+# uses a normal short chat request via curl.
+
+test_name: "MiniMax-M2.5-w8a8-QuaRot-A3-PD-200k"
+model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+num_nodes: 2
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_NZ: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+  VLLM_SERVER_DEV_MODE: "1"
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "512"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "800"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --safetensors-load-strategy
+      - 'prefetch'
+      - --enable-expert-parallel
+      - --trust-remote-code
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --max-model-len
+      - "200000"
+      - --max-num-seqs
+      - "128"
+      - --max-num-batched-tokens
+      - "16384"
+      - --no-enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.85"
+      - --additional-config
+      - '{"enable_cpu_binding": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_producer","kv_port": "30000","engine_id": "0","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2,"tp_size": 8},"decode": {"dp_size": 4,"tp_size": 4}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --safetensors-load-strategy
+      - 'prefetch'
+      - --enable-expert-parallel
+      - --trust-remote-code
+      - --seed
+      - "1024"
+      - --quantization
+      - "ascend"
+      - --max-model-len
+      - "200000"
+      - --max-num-seqs
+      - "128"
+      - --max-num-batched-tokens
+      - "256"
+      - --no-enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.9"
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"method": "eagle3","model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens": 3}'
+      - --additional-config
+      - '{"enable_cpu_binding": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_consumer","kv_port": "30100","engine_id": "1","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2,"tp_size": 8},"decode": {"dp_size": 4,"tp_size": 4}}}'
+
+benchmarks: {}
