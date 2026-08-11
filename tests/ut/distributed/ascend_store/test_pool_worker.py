@@ -710,6 +710,11 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.token_database.mask_allows_chunk.return_value = True
         worker.token_database.is_c128_group.return_value = True
         worker.token_database.process_transfer_chunks_with_block_ids.return_value = [chunk]
+        worker.token_database.prepare_transfer_value.side_effect = lambda _chunk, _block_ids, **_kwargs: (
+            [target[1].data_ptr()],
+            [target[1].numel() * target[1].element_size()],
+            1,
+        )
         worker.m_store = MagicMock()
 
         def get(*_args):
@@ -730,18 +735,21 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         metadata.add_request(request)
         return worker, target, metadata
 
-    def test_start_load_kv_c128_merges_only_after_successful_get(self):
+    def test_start_load_kv_c128_loads_page_directly(self):
         worker, target, metadata = self._make_c128_load_worker([0])
 
         with self.assertLogs(level="INFO") as logs:
             worker.start_load_kv(metadata)
         self.assertTrue(any("kv Test load" in line for line in logs.output))
 
-        self.assertTrue(torch.equal(target[1, 0:4], torch.arange(8).view(4, 2)))
-        self.assertTrue(torch.all(target[1, 4:] == -1))
-        self.assertTrue(torch.all(target[0] == -1))
+        self.assertEqual(worker.m_store.get.call_count, 1)
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(addrs, [[target[1].data_ptr()]])
+        self.assertEqual(sizes, [[target[1].numel() * target[1].element_size()]])
+        self.assertIn("hash", keys[0])
 
-    def test_start_load_kv_c128_aggregates_two_chunks_into_one_page(self):
+    def test_start_load_kv_c128_aggregates_chunks_into_one_page(self):
         worker, target, metadata = self._make_c128_load_worker([0])
         chunks = [
             TransferChunkWithBlockId(
@@ -758,28 +766,22 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 raw_end=1024,
                 value_start=4,
                 value_end=8,
-                target_block_index=1,
+                target_block_index=0,
                 key=PoolKey(KeyMetadata("hybrid-model", 0, 0, 0, 0), "hash1"),
                 block_id=1,
             ),
         ]
         worker.token_database.process_transfer_chunks_with_block_ids.return_value = chunks
-        staging = worker.c128_staging_tensors[1][0]
-        staging_values = iter((11, 22))
-
-        def get(*_args):
-            staging.fill_(next(staging_values))
-            return [0]
-
-        worker.m_store.get.side_effect = get
 
         worker.start_load_kv(metadata)
 
-        self.assertEqual(worker.m_store.get.call_count, 2)
-        self.assertTrue(torch.all(target[1, 0:4] == 11))
-        self.assertTrue(torch.all(target[1, 4:8] == 22))
-        self.assertTrue(torch.all(target[1, 8:] == -1))
-        self.assertTrue(torch.all(target[0] == -1))
+        self.assertEqual(worker.m_store.get.call_count, 1)
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(len(keys), 1)
+        self.assertIn("hash1", keys[0])
+        self.assertEqual(addrs, [[target[1].data_ptr()]])
+        self.assertEqual(sizes, [[target[1].numel() * target[1].element_size()]])
+        self.assertTrue(torch.all(target == -1))
 
     def test_start_load_kv_c128_does_not_merge_failed_get(self):
         for get_result in ([1], None):
