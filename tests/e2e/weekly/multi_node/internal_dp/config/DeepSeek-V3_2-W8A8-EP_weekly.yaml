@@ -31,7 +31,7 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
           --port $SERVER_PORT
-          --data-parallel-size 2
+          --data-parallel-size 1
           --data-parallel-start-rank 0
           --data-parallel-size-local 1
           --data-parallel-address $LOCAL_IP
@@ -55,12 +55,12 @@ deployment:
           "kv_port": "30000",
           "kv_connector_extra_config": {
                     "prefill": {
-                            "dp_size": 2,
+                            "dp_size": 1,
                             "tp_size": 16
                     },
                     "decode": {
                             "dp_size": 8,
-                            "tp_size": 4
+                            "tp_size": 2
                     }
               }
           }'
@@ -87,18 +87,18 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
           --port $SERVER_PORT
-          --data-parallel-size 2
-          --data-parallel-size-local 1
-          --data-parallel-start-rank 1
+          --data-parallel-size 8
+          --data-parallel-size-local 8
+          --data-parallel-start-rank 0
           --data-parallel-address $LOCAL_IP
           --data-parallel-rpc-port 13389
-          --tensor-parallel-size 16
+          --tensor-parallel-size 2
           --enable-expert-parallel
           --seed 1024
           --max-model-len 133000 
           --max-num-batched-tokens 100
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]"}'
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
           --additional-config '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
           --trust-remote-code
           --max-num-seqs 14
@@ -113,12 +113,12 @@ deployment:
           "kv_port": "30200",
           "kv_connector_extra_config": {
                       "prefill": {
-                              "dp_size": 2,
+                              "dp_size": 1,
                               "tp_size": 16
                       },
                       "decode": {
                               "dp_size": 8,
-                              "tp_size": 4
+                              "tp_size": 2
                       }
               }
           }'

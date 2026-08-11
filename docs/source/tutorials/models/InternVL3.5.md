@@ -14,7 +14,7 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Environment Preparation
+## 3 Prerequisites
 
 ### 3.1 Model Weight
 
@@ -173,8 +173,12 @@ Some configurations for optimization are shown below:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
+- The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
+- For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
-Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
+### 5.2 Multi-Node PD Separation Deployment
+
+Not support yet.
 
 ## 6 Functional Verification
 
@@ -209,7 +213,7 @@ Expected Result:
 
 2. After execution, you can get the result.
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### 8.1 Using AISBench
 
@@ -218,6 +222,29 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 ### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+#### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
+| ---------- | ---------------- | ------------- | ---------------- | ------------------------ |
+| InternVL3_5-241B-A28B-w8a8 High Throughput | Single node deployment | 8 (A3) | InternVL3_5-241B-A28B-w8a8 | For short-sequence high throughput, try tp4dp2 |
+| InternVL3_5-38B-w8a8 High Throughput | Single node deployment | 4 (A3) | InternVL3_5-38B-w8a8 | For short-sequence high throughput, try tp4 |
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|
+|--------|-------------|-----|--|--|------------|----------------------|--------------|
+|Single-Node (A3)|InternVL3_5-38B-w8a8 High Throughput|2|4|1|32|16384|135000|
+|Single-Node (A3)|InternVL3_5-241B-A28B-w8a8 High Throughput|4|4|2|32|4096|40960|
+
+### 9.2 Tuning Guidelines
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 9 FAQ
 

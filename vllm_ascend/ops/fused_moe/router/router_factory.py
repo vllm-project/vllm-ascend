@@ -47,19 +47,10 @@ def create_ascend_fused_moe_router(
     e_score_correction_bias: torch.Tensor | None = None,
     custom_routing_function: Callable | None = None,
     eplb_state: EplbLayerState | None = None,
-    zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
     tid2eid: torch.Tensor | None = None,
 ) -> FusedMoERouter:
-    if zero_expert_type is not None:
-        if num_logical_experts is None:
-            raise ValueError("num_logical_experts is required when zero_expert_type is set")
-        if e_score_correction_bias is None:
-            raise ValueError("e_score_correction_bias is required when zero_expert_type is set")
-        # Ascend zero expert handling is still performed by the quant method
-        # after routing; the router only needs to select from the full logits.
-        global_num_experts = max(global_num_experts, e_score_correction_bias.numel())
     if custom_routing_function is not None:
         return CustomRoutingRouter(
             top_k=top_k,

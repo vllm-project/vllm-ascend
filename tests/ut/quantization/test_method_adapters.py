@@ -195,3 +195,13 @@ class TestAscendFusedMoEMethod(TestBase):
             shared_experts_input=None,
         )
         self.mock_scheme.apply.assert_called_once()
+
+    def test_get_eplb_weight_views_delegates_to_moe_scheme(self):
+        layer = torch.nn.Module()
+        weight_views = [torch.randn(8, 16)]
+        self.mock_scheme.get_eplb_weight_views.return_value = weight_views
+
+        result = self.method.get_eplb_weight_views(layer)
+
+        self.assertIs(result, weight_views)
+        self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)

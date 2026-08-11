@@ -23,7 +23,8 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
@@ -77,7 +78,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -97,8 +98,11 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
                 w2=layer.w2_weight,
                 quant_type=self.quant_type,
                 dynamic_eplb=False,
-                expert_map=getattr(layer, "ascend_expert_map", None),
-                apply_router_weight_on_input=getattr(layer, "apply_router_weight_on_input", False),
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
             ),

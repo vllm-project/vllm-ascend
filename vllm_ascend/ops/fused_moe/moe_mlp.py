@@ -24,7 +24,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
@@ -90,6 +90,33 @@ def _require_single_tensor_for_swiglu_quant(
             raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
         return tensor_or_list[0]
     return tensor_or_list
+
+
+def _prepare_dequant_swiglu_weight_scale(
+    w1_scale: list[torch.Tensor] | torch.Tensor,
+    is_swigluoai_uninterleave: bool,
+) -> torch.Tensor:
+    if not is_swigluoai_uninterleave:
+        weight_scale = w1_scale[0]
+    elif isinstance(w1_scale, list):
+        if len(w1_scale) == 1:
+            weight_scale = w1_scale[0]
+        else:
+            weight_scale = torch.stack([scale.reshape(-1) for scale in w1_scale], dim=0)
+    else:
+        weight_scale = w1_scale
+    if weight_scale.dtype != torch.float32:
+        weight_scale = weight_scale.to(torch.float32)
+    if is_swigluoai_uninterleave and weight_scale.dim() == 1:
+        weight_scale = weight_scale.reshape(1, -1)
+    return weight_scale
+
+
+def _prepare_swigluoai_grouped_matmul_scales(
+    weight_scale: list[torch.Tensor] | torch.Tensor, output_dtype: torch.dtype
+) -> list[torch.Tensor]:
+    scales = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+    return [scale.to(output_dtype) if scale.dtype != output_dtype else scale for scale in scales]
 
 
 def quant_apply_mlp(
@@ -220,8 +247,6 @@ def quant_apply_mlp(
                 hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
             )
         else:
-            if w1_scale[0].dtype != torch.float32:
-                w1_scale[0] = w1_scale[0].to(torch.float32)
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
@@ -237,7 +262,7 @@ def quant_apply_mlp(
             # act_fn: swiglu
             dequant_swiglu_kwargs = {
                 "x": hidden_states,
-                "weight_scale": w1_scale[0],
+                "weight_scale": _prepare_dequant_swiglu_weight_scale(w1_scale, is_swigluoai_uninterleave),
                 "activation_scale": pertoken_scale,
                 "bias": None,
                 "quant_scale": None,
@@ -381,10 +406,13 @@ def quant_apply_mlp(
                 dispose_tensor(quantized_hidden_states)
         else:
             # gmm1: gate_up_proj
+            scale = [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale]
+            if is_swigluoai_uninterleave:
+                scale = _prepare_swigluoai_grouped_matmul_scales(w1_scale, _output_dtype)
             gmm1_kwargs = {
                 "x": [hidden_states],
                 "weight": w1 if isinstance(w1, list) else [w1],
-                "scale": [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale],
+                "scale": scale,
                 "bias": bias1,
                 "per_token_scale": [pertoken_scale],
                 "split_item": 2,
@@ -627,6 +655,13 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
         )
+
+    from vllm_ascend.lora.fused_moe import has_lora
+
+    if has_lora(mlp_compute_input.lora_context):
+        from vllm_ascend.lora.quant_moe import quant_apply_mlp_with_moe_lora
+
+        return quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_compute_input)
 
     assert w1_scale is not None and w2_scale is not None
     act_quant_type = torch.int8 if mlp_compute_input.quant.is_int_quant else torch.float8_e4m3fn

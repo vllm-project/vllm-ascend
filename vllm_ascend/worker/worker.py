@@ -41,7 +41,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -62,6 +61,12 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_cache_layout,
+    build_layerwise_reuse_layout,
+    get_gva_layerwise_config,
+    get_layerwise_physical_layer_index,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_host_device_memory_usage_ratio,
 )
@@ -248,42 +253,9 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
-        model = self.model_runner.model
-        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            weight_models = [model]
-            speculative_config = self.vllm_config.speculative_config
-            if speculative_config is not None and speculative_config.method == "mtp":
-                drafter = getattr(self.model_runner, "drafter", None)
-                draft_model = getattr(drafter, "model", None)
-                if draft_model is not None and draft_model is not model:
-                    weight_models.append(draft_model)
-
-            # Unquantized Ascend MoE stores weights in an execution layout
-            # after loading. Restore the loadable layout for every model that
-            # receives online updates. The MTP drafter is a separate model and
-            # must follow the same wake-up preparation as the target.
-            for weight_model in weight_models:
-                for name, param in weight_model.named_parameters():
-                    if "w2_weight" in name and param.shape[2] == hidden_size:
-                        parts = name.split(".")
-                        param_name = parts[-1]
-                        parent_module = weight_model.get_submodule(".".join(parts[:-1]))
-
-                        # Preserve weight_loader for subsequent online updates.
-                        w2_data = param.transpose(1, 2)
-                        replace_parameter(parent_module, param_name, w2_data)
-                    elif "w13_weight" in name and param.shape[1] == hidden_size:
-                        parts = name.split(".")
-                        param_name = parts[-1]
-                        parent_module = weight_model.get_submodule(".".join(parts[:-1]))
-
-                        # Preserve weight_loader for subsequent online updates.
-                        w13_data = param.transpose(1, 2)
-                        replace_parameter(parent_module, param_name, w13_data)
-
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
+            model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
@@ -569,6 +541,26 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            memory_info = getattr(self, "_gva_layerwise_memory_info", None)
+            if memory_info is None:
+                num_layers = self.model_config.get_num_layers(self.parallel_config)
+                layout = build_layerwise_cache_layout(num_layers, extra_config)
+                num_buffer_assignments = len(layout.storage_indices)
+                factor = num_layers / num_buffer_assignments if layout.has_layer_reuse else 1.0
+            else:
+                num_layers, num_buffer_assignments, factor = memory_info
+            if factor != 1.0:
+                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
+                logger.info(
+                    "Layerwise KV cache reuse maps %d layers onto %d buffer assignments; "
+                    "scale logical KV budget by %.3f.",
+                    num_layers,
+                    num_buffer_assignments,
+                    factor,
+                )
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
@@ -613,10 +605,23 @@ class NPUWorker(WorkerBase):
             )
         return int(available_memory)
 
+    def log_memory_stats(self) -> None:
+        """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        self.torch_reserved = torch.npu.memory_reserved()
+        self.torch_allocated = torch.npu.memory_allocated()
+        logger.debug(
+            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+            self.torch_reserved / GiB_bytes,
+            self.torch_allocated / GiB_bytes,
+        )
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -901,8 +906,42 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
+    def _get_layerwise_kv_cache_memory_info(
+        self,
+        kv_cache_spec: dict[str, KVCacheSpec],
+        extra_config: dict[str, Any],
+    ) -> tuple[int, int, float]:
+        if not kv_cache_spec:
+            return 0, 0, 1.0
+        base_layers = self.model_config.get_num_layers(self.parallel_config)
+        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+        num_layers = len(physical_layers)
+        if num_layers < base_layers:
+            return num_layers, num_layers, 1.0
+        reuse_layout = build_layerwise_reuse_layout(
+            kv_cache_spec,
+            base_layers,
+            extra_config,
+        )
+        if not reuse_layout.has_layer_reuse:
+            return num_layers, num_layers, 1.0
+        num_buffer_assignments = len(reuse_layout.shared_buffer_layers)
+
+        logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
+        physical_page_bytes = sum(
+            sum(entry.spec.page_size_bytes for entry in reuse_layout.layer_entries[layers_sharing_buffer[0]])
+            for layers_sharing_buffer in reuse_layout.shared_buffer_layers
+        )
+        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        if extra_config is not None:
+            self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
+                kv_cache_spec,
+                extra_config,
+            )
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
             self.kv_cache_spec = kv_cache_spec
@@ -1000,6 +1039,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
