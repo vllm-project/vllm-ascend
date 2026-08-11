@@ -492,7 +492,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
         dst_type = token_dispatch_input.quant.get_dst_type
-        scale_type = token_dispatch_input.quant.get_scale_type
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -541,7 +540,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 global_input_tokens_local_experts_indices,
                 with_quant,
                 dst_type,
-                scale_type,
             )
         )
 
@@ -670,7 +668,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         global_input_tokens_local_experts_indices,
         with_quant,
         dst_type,
-        scale_type,
     ):
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
@@ -689,6 +686,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                     expert_num=self.num_experts,
                     expert_tokens_num_flag=True,
                     active_expert_range=[0, self.num_local_experts],
+                    x_dtype=dst_type,
                 )
             )
         else:
