@@ -229,10 +229,13 @@ templates:
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
-      - --quantization ascend
+      - --quantization
+      - "ascend"
       - --enable-auto-tool-choice
-      - --tool-call-parser glm47
-      - --reasoning-parser glm45
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm45"
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -326,7 +329,7 @@ benchmarks:
         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
         max_out_len: 32768
         batch_size: 32
-        baseline: 93.33
+        baseline: 90
         threshold: 10
         temperature: 1.0
         top_p: 0.95

@@ -30,9 +30,7 @@ on:
         description: 'Branch to test (main or releases/v0.18.0)'
         required: true
         default: 'main'
-        type: choice
-        options:
-          - main
+        type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
         required: false
@@ -222,7 +220,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       request_id: ${{ inputs.request_id || '' }}
@@ -264,7 +262,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       request_id: ${{ inputs.request_id || '' }}

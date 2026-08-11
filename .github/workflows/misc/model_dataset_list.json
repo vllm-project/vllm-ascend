@@ -224,11 +224,11 @@
       "vllm-ascend/Qwen3-30B-A3B",
       "vllm-ascend/Qwen3-a3B_eagle3",
       "vllm-ascend/Qwen3-30B-A3B-Puring",
+      "vllm-ascend/Qwen3-30B-A3B-quantized.w4a8",
       "vllm-ascend/Qwen3-30B-A3B-W8A8",
       "vllm-ascend/Qwen3-30B-A3B-W8A8-Pruning",
       "vllm-ascend/Qwen3-30B-A3B-W8A8-QuaRot",
       "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8",
-      "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w4a8",
       "vllm-ascend/Qwen3-32B-W4A4",
       "vllm-ascend/Qwen3-32B-W8A8",
       "vllm-ascend/Qwen3-32B-W8A8-QuaRot",
@@ -277,6 +277,7 @@
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M3-w8a8",
+      "Eco-Tech/MiniMax-M3-w8a8-0626",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
       "vllm-ascend/MiniMax-M2.5-eagle-model-0318",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
@@ -364,6 +365,9 @@
       "vllm-ascend/GSM8K-in3500-bs8000-qwen3",
       "vllm-ascend/GSM8K-in2048-bs4000-ds3.2",
       "vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51",
-      "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51"
+      "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51",
+      "vllm-ascend/GSM8K_prefix99_in203738_bs1_mini",
+      "vllm-ascend/GSM8K_prefix99_in203738_bs4_mini",
+      "vllm-ascend/GSM8K_in3500_bs4000_minimax"
     ]
   }

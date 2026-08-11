@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -198,6 +199,8 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
         layer.w2_weight_scale = torch.ones(self.num_experts, hidden_size, dtype=torch.float32)
         layer.swiglu_limit = 1000000
+        lora_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+        layer._ascend_moe_lora_context = lora_context
 
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
@@ -236,6 +239,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
+        self.assertIs(fused_experts_input.lora_context, lora_context)
 
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")

@@ -99,7 +99,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
             rotation_weight = get_rotataion_matrix(self.rotation_path)
-            for name, loaded_weight in weights:
+            for name, loaded_weight in all_weights:
                 if "fc." in name:
                     loaded_weight = process_weight(loaded_weight, rotation_weight)
                 processed_weights.append((name, loaded_weight))
@@ -120,9 +120,8 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
             return
 
         if not confidence_weights:
-            raise RuntimeError(
-                "The DSpark confidence head is enabled, but no confidence_head tensors were found in the checkpoint."
-            )
+            self.enable_confidence_head = False
+            return
 
         confidence_weights.sort(key=lambda item: item[0])
         loaded_parameters = AutoWeightsLoader(self.model.confidence_head).load_weights(confidence_weights)

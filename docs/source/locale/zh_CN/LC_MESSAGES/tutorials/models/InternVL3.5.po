@@ -59,9 +59,6 @@ msgid ""
 " feature's configuration."
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
 
-msgid "## 3 Environment Preparation"
-msgstr "## 3 环境准备"
-
 msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
@@ -95,9 +92,6 @@ msgid ""
 "[installation](../../installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -116,22 +110,6 @@ msgstr "**注意：**"
 
 msgid "Some configurations for optimization are shown below:"
 msgstr "一些用于优化的配置如下所示："
-
-msgid ""
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator."
-msgstr ""
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用 FlashComm 优化以减少 prefill 节点上的通信和计算开销。启用 FlashComm 后，layer_sharding 列表不能包含 o_proj 作为元素。\n"
-"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用 dispatch_ffn_combine/mega_moe 融合算子。"
-
-msgid ""
-"Please refer to the following python file for further explanation and "
-"restrictions of the environment variables above: "
-"[envs.py](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/vllm_ascend/envs.py)"
-msgstr ""
-"有关上述环境变量的进一步解释和限制，请参考以下 Python 文件：[envs.py](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/vllm_ascend/envs.py)"
 
 msgid "## 6 Functional Verification"
 msgstr "## 6 功能验证"
@@ -158,9 +136,6 @@ msgstr ""
 
 msgid "2. After execution, you can get the result."
 msgstr "2. 执行后，您可以获取结果。"
-
-msgid "## 8 Performance"
-msgstr "## 8 性能"
 
 msgid "### 8.1 Using AISBench"
 msgstr "### 8.1 使用 AISBench"
@@ -209,3 +184,76 @@ msgid ""
 "- Common Issues Tip: If you encounter issues, refer to "
 "[FAQs](../../faqs.md)."
 msgstr "- 常见问题提示：如果遇到问题，请参考 [常见问题](../../faqs.md)。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid ""
+"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.\n"
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.\n"
+"- The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.\n"
+"- For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md)."
+msgstr ""
+"- `VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用FlashComm优化，以减少prefill节点上的通信和计算开销。启用FlashComm后，layer_sharding列表不能包含o_proj作为元素。\n"
+"- `VLLM_ASCEND_ENABLE_FUSED_MC2`：启用dispatch_ffn_combine/mega_moe融合算子。\n"
+"- 上述参数仅在特定测试环境中验证，仅供参考。请根据实际输入/输出长度、并发数和硬件配置调整`--max-model-len`、`--max-num-seqs`、`--max-num-batched-tokens`和`--gpu-memory-utilization`。\n"
+"- 有关通过`--additional-config`传递的Ascend特定选项，请参阅[附加配置](../../user_guide/configuration/additional_config.md)。有关Ascend特定的环境变量，请参阅[环境变量](../../user_guide/configuration/env_vars.md)。"
+
+msgid "### 5.2 Multi-Node PD Separation Deployment"
+msgstr "### 5.2 多节点PD分离部署"
+
+msgid "Not support yet."
+msgstr "暂不支持。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid "#### Table 1: Scenario Overview"
+msgstr "#### 表1：场景概述"
+
+msgid ""
+"| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key "
+"Considerations |"
+msgstr "| 场景 | 部署模式 | *NPU总数 | 权重版本 | 关键注意事项 |"
+
+msgid ""
+"| InternVL3_5-241B-A28B-w8a8 High Throughput | Single node deployment | 8 "
+"(A3) | InternVL3_5-241B-A28B-w8a8 | For short-sequence high throughput, try "
+"tp4dp2 |"
+msgstr ""
+"| InternVL3_5-241B-A28B-w8a8 高吞吐 | 单节点部署 | 8 (A3) | "
+"InternVL3_5-241B-A28B-w8a8 | 对于短序列高吞吐，可尝试tp4dp2 |"
+
+msgid ""
+"| InternVL3_5-38B-w8a8 High Throughput | Single node deployment | 4 (A3) | "
+"InternVL3_5-38B-w8a8 | For short-sequence high throughput, try tp4 |"
+msgstr ""
+"| InternVL3_5-38B-w8a8 高吞吐 | 单节点部署 | 4 (A3) | InternVL3_5-38B-w8a8 | "
+"对于短序列高吞吐，可尝试tp4 |"
+
+msgid "#### Table 2: Detailed Node Configuration"
+msgstr "#### 表2：详细节点配置"
+
+msgid ""
+"|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max "
+"Model Len|"
+msgstr "|场景|配置|NPU|TP|DP|最大序列数|最大批量令牌数|最大模型长度|"
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
+
+msgid ""
+"Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
+"Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
+msgstr ""
+"请参阅[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。\n"
+"请参阅[功能指南](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"

@@ -427,7 +427,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
             local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
             offset = global_end - req_local_end  # request tokens on later ranks
-            local_key_lens = torch.where(num_local_tokens > 0, seq_lens - offset, 0)
+            local_key_lens = torch.where(
+                num_local_tokens > 0,
+                torch.clamp_min(seq_lens - offset, 0),
+                0,
+            )
 
             actual_seq_lengths_query[:num_segs] = local_query_lens
             actual_seq_lengths_key[:num_segs] = local_key_lens

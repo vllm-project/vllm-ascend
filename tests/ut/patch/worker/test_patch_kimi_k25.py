@@ -55,7 +55,11 @@ def test_position_embedding_patch_uses_current_vllm_contract(grid_thws):
 def test_a5_moonvit_to_patch_uses_current_vllm_contract(monkeypatch):
     original_to = MoonViT3dPretrainedModel.to
     original_forward = Learnable2DInterpPosEmbDivided_fixed.forward
-    monkeypatch.setattr(ascend_utils, "_ascend_device_type", ascend_utils.AscendDeviceType.A5)
+    monkeypatch.setattr(
+        ascend_utils,
+        "get_ascend_device_type",
+        lambda: ascend_utils.AscendDeviceType.A5,
+    )
 
     try:
         patch_namespace = runpy.run_path(patch_kimi_k25.__file__)

@@ -24,7 +24,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
@@ -655,6 +655,13 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
         )
+
+    from vllm_ascend.lora.fused_moe import has_lora
+
+    if has_lora(mlp_compute_input.lora_context):
+        from vllm_ascend.lora.quant_moe import quant_apply_mlp_with_moe_lora
+
+        return quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_compute_input)
 
     assert w1_scale is not None and w2_scale is not None
     act_quant_type = torch.int8 if mlp_compute_input.quant.is_int_quant else torch.float8_e4m3fn

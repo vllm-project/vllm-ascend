@@ -181,9 +181,6 @@ msgid ""
 "Guide](../../installation.md)."
 msgstr "更多详情，请参考[安装指南](../../installation.md)。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -611,3 +608,6 @@ msgid ""
 msgstr ""
 "!!! tip\n"
 "    上述挂载是访问NPU驱动所需的最小配置。请根据环境需要添加额外的`-v`挂载（例如模型权重路径、数据集等）。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
