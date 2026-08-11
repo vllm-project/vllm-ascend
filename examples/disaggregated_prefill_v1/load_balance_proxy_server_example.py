@@ -10,7 +10,12 @@
 # multiple backend instances.
 #
 # Features:
-# - Load balances requests to multiple prefiller and decoder servers.
+# - Independently load balances requests across prefill and decode pools.
+# - Prefill policies: round_robin, random, consistent_hash, least_loaded,
+#   and cache_aware (default: consistent_hash).
+# - Decode policies: round_robin, random, and least_loaded
+#   (default: least_loaded).
+# - Tracks in-flight load in shared memory; no backend metrics polling is used.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
 # - Streams responses from backend servers to clients.
 #
@@ -40,7 +45,9 @@
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 \
 #     --decoder-hosts 127.0.0.1 127.0.0.1 \
-#     --decoder-ports 8200 8201
+#     --decoder-ports 8200 8201 \
+#     --prefill-policy consistent_hash \
+#     --decode-policy least_loaded
 #
 # This will start the proxy on port 9000, load balancing between two prefiller
 # and two decoder servers.
@@ -107,7 +114,7 @@
 #
 # Notes:
 # - You can scale the number of prefiller and decoder servers as needed.
-# - The proxy will round-robin requests to balance load.
+# - P and D policies are configured independently at startup.
 # - For production, ensure your backend servers are robust and secure.
 #
 # For more details, see the code and comments in this file.
@@ -115,17 +122,20 @@
 import argparse
 import asyncio
 import base64
+import bisect
 import functools
-import heapq
+import hashlib
 import ipaddress
 import json
 import logging
 import os
+import random
 import sys
 import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -134,7 +144,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -152,19 +162,34 @@ class ServerRole(str, Enum):
     DECODE = "decode"
 
 
+class RoutingPolicy(str, Enum):
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    CONSISTENT_HASH = "consistent_hash"
+    LEAST_LOADED = "least_loaded"
+    CACHE_AWARE = "cache_aware"
+
+
+PREFILL_POLICIES = tuple(policy.value for policy in RoutingPolicy)
+DECODE_POLICIES = (
+    RoutingPolicy.ROUND_ROBIN.value,
+    RoutingPolicy.RANDOM.value,
+    RoutingPolicy.LEAST_LOADED.value,
+)
+CONSISTENT_HASH_VIRTUAL_NODES = 160
+FALLBACK_HASH_PREFIX_BYTES = 20 * 1024
+CACHE_PREFIX_BLOCK_BYTES = 64
+PREFILL_MAX_ATTEMPTS = 2
+
+
 @dataclass
 class InstanceInfo:
     request_id: str
     prefiller_key: str
-    prefiller_score: float
     decoder_key: str
-    decoder_score: float
     decoder_host: str
     decoder_port: int
     prefiller_cached_tokens: int | None = None
-
-
-TAINT_PRIORITY = 1e15
 
 
 def extract_cached_tokens(response_json: dict) -> int | None:
@@ -203,18 +228,17 @@ class BackendServer:
     host: str
     port: int
     ordinal: int
-    active_tokens: float = 0.0
-    active_kv_cache: float = 0.0
-    heap_seq: int = 0
+    inflight_requests: int = 0
 
 
 @dataclass
 class RolePools:
-    """Per-role scheduling state: live servers, priority heap, and drain-isolated keys."""
+    """Per-role scheduling state shared by all proxy worker processes."""
 
     servers: dict[str, BackendServer] = field(default_factory=dict)
-    heap: list[tuple[float, int, int, str]] = field(default_factory=list)
     tainted: set[str] = field(default_factory=set)
+    round_robin_cursor: int = 0
+    hash_ring: list[tuple[int, str]] = field(default_factory=list)
 
 
 def setup_logging(log_level: str) -> None:
@@ -230,13 +254,70 @@ def next_req_id() -> str:
     return str(uuid.uuid4())
 
 
-def calculate_prefill_score(request_length: int) -> float:
-    length_score = request_length / 4.0
-    return length_score * 0.0345 + 120.0745
+def stable_hash(value: str | bytes) -> int:
+    data = value.encode("utf-8") if isinstance(value, str) else value
+    return int.from_bytes(hashlib.blake2b(data, digest_size=8).digest(), "big")
 
 
-def calculate_decode_score(request_length: int) -> float:
-    return request_length
+def extract_request_text(req_data: dict[str, Any]) -> str:
+    """Return a stable text representation for prefix-affinity decisions."""
+    prompt = req_data.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    if prompt is not None:
+        return json.dumps(prompt, ensure_ascii=False, sort_keys=True)
+
+    messages = req_data.get("messages")
+    if isinstance(messages, list):
+        normalized_messages = []
+        for message in messages:
+            if not isinstance(message, dict):
+                normalized_messages.append(message)
+                continue
+            normalized_messages.append(
+                {
+                    "role": message.get("role"),
+                    "content": message.get("content"),
+                }
+            )
+        return json.dumps(normalized_messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    input_data = req_data.get("input")
+    if isinstance(input_data, str):
+        return input_data
+    if input_data is not None:
+        return json.dumps(input_data, ensure_ascii=False, sort_keys=True)
+    return ""
+
+
+def extract_routing_key(req_data: dict[str, Any], headers: Any = None) -> str:
+    """Extract a cross-process-stable key for consistent-hash routing."""
+    if headers is not None:
+        for header_name in (
+            "x-session-id",
+            "x-user-id",
+            "x-tenant-id",
+            "x-correlation-id",
+            "x-request-id",
+            "x-trace-id",
+        ):
+            value = headers.get(header_name)
+            if value:
+                return f"header:{header_name}:{value}"
+
+    session_params = req_data.get("session_params")
+    if isinstance(session_params, dict) and session_params.get("session_id"):
+        return f"session:{session_params['session_id']}"
+    for field_name in ("user", "session_id", "user_id"):
+        value = req_data.get(field_name)
+        if value:
+            return f"{field_name}:{value}"
+
+    request_text = extract_request_text(req_data)
+    if not request_text:
+        request_text = json.dumps(req_data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    prefix = request_text.encode("utf-8")[:FALLBACK_HASH_PREFIX_BYTES]
+    return f"request_hash:{stable_hash(prefix):016x}"
 
 
 def normalize_host(host: str) -> str:
@@ -263,14 +344,20 @@ def build_base_url(host: str, port: int) -> str:
 
 
 class SharedProxyScheduler:
-    """Centralized mutable scheduling state shared by all uvicorn workers.
+    """Centralized in-memory scheduling state shared by all uvicorn workers."""
 
-    Uses lazy-deletion min-heap: on priority change, push a new entry and
-    bump the server's ``heap_seq`` counter; stale entries (whose seq does
-    not match) are skipped on pop.
-    """
-
-    def __init__(self, prefiller_instances, decoder_instances):
+    def __init__(
+        self,
+        prefiller_instances,
+        decoder_instances,
+        *,
+        prefill_policy: str = RoutingPolicy.CONSISTENT_HASH.value,
+        decode_policy: str = RoutingPolicy.LEAST_LOADED.value,
+        cache_threshold: float = 0.3,
+        cache_balance_abs_threshold: int = 2,
+        cache_balance_rel_threshold: float = 1.5,
+        cache_max_entries: int = 100_000,
+    ):
         self._lock = threading.RLock()
         self.request_num = 0
         self.waiting_nodes: dict[str, tuple[str, tuple[str, int], int]] = {}
@@ -279,11 +366,34 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
+        self._policies = {
+            ServerRole.PREFILL: RoutingPolicy(prefill_policy),
+            ServerRole.DECODE: RoutingPolicy(decode_policy),
+        }
+        if self._policies[ServerRole.PREFILL].value not in PREFILL_POLICIES:
+            raise ValueError(f"Unsupported prefill policy: {prefill_policy}")
+        if self._policies[ServerRole.DECODE].value not in DECODE_POLICIES:
+            raise ValueError(f"Unsupported decode policy: {decode_policy}")
+        if not 0.0 <= cache_threshold <= 1.0:
+            raise ValueError("cache_threshold must be between 0.0 and 1.0")
+        if cache_balance_abs_threshold < 0:
+            raise ValueError("cache_balance_abs_threshold must be non-negative")
+        if cache_balance_rel_threshold < 1.0:
+            raise ValueError("cache_balance_rel_threshold must be at least 1.0")
+        if cache_max_entries <= 0:
+            raise ValueError("cache_max_entries must be positive")
+        self.cache_threshold = cache_threshold
+        self.cache_balance_abs_threshold = cache_balance_abs_threshold
+        self.cache_balance_rel_threshold = cache_balance_rel_threshold
+        self.cache_max_entries = cache_max_entries
+        self._cache_affinity: OrderedDict[tuple[str, int, str], str] = OrderedDict()
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
         for host, port in decoder_instances:
             self._add_server_no_lock(ServerRole.DECODE, host, port)
+        for role in ServerRole:
+            self._rebuild_hash_ring(role)
 
     def _pool(self, role: ServerRole) -> RolePools:
         return self._pools[role]
@@ -301,41 +411,125 @@ class SharedProxyScheduler:
         self._ordinal += 1
         return ordinal
 
-    def _priority(self, role: ServerRole, entry: BackendServer, key: str) -> float:
-        if key in self._pool(role).tainted:
-            return TAINT_PRIORITY
-        if role is ServerRole.PREFILL:
-            return entry.active_tokens + entry.active_kv_cache * 0.3
-        return entry.active_tokens
-
-    def _push_heap(self, role: ServerRole, key: str) -> None:
+    def _available_keys(self, role: ServerRole) -> list[str]:
         pool = self._pool(role)
-        entry = pool.servers[key]
-        entry.heap_seq += 1
-        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
-        if len(pool.heap) > 2 * len(pool.servers):
-            self._reset_heap(role)
+        return [
+            key for key, _ in sorted(pool.servers.items(), key=lambda item: item[1].ordinal) if key not in pool.tainted
+        ]
 
-    def _pop_valid(self, role: ServerRole) -> str:
+    def _rebuild_hash_ring(self, role: ServerRole) -> None:
         pool = self._pool(role)
-        while pool.heap:
-            _, _, seq, key = heapq.heappop(pool.heap)
-            if key not in pool.servers:
+        ring = []
+        for key in self._available_keys(role):
+            for virtual_node in range(CONSISTENT_HASH_VIRTUAL_NODES):
+                ring.append((stable_hash(f"{key}#{virtual_node}"), key))
+        ring.sort(key=lambda item: item[0])
+        pool.hash_ring = ring
+
+    def _pick_round_robin(self, role: ServerRole, available: list[str]) -> str:
+        pool = self._pool(role)
+        key = available[pool.round_robin_cursor % len(available)]
+        pool.round_robin_cursor += 1
+        return key
+
+    def _pick_least_loaded(self, role: ServerRole, available: list[str]) -> str:
+        servers = self._pool(role).servers
+        minimum = min(servers[key].inflight_requests for key in available)
+        tied = [key for key in available if servers[key].inflight_requests == minimum]
+        return random.choice(tied)
+
+    def _pick_consistent_hash(self, role: ServerRole, routing_key: str) -> str:
+        ring = self._pool(role).hash_ring
+        if not ring:
+            raise RuntimeError(f"No available {role.value} servers")
+        index = bisect.bisect_left(ring, (stable_hash(routing_key), ""))
+        if index == len(ring):
+            index = 0
+        return ring[index][1]
+
+    @staticmethod
+    def _cache_fingerprints(text: str) -> tuple[int, list[tuple[int, str]]]:
+        data = text.encode("utf-8")[:FALLBACK_HASH_PREFIX_BYTES]
+        if not data:
+            return 0, []
+        hasher = hashlib.blake2b(digest_size=16)
+        fingerprints = []
+        offset = 0
+        while offset < len(data):
+            end = min(offset + CACHE_PREFIX_BLOCK_BYTES, len(data))
+            hasher.update(data[offset:end])
+            if end % CACHE_PREFIX_BLOCK_BYTES == 0 or end == len(data):
+                fingerprints.append((end, hasher.copy().hexdigest()))
+            offset = end
+        return len(data), fingerprints
+
+    def _lookup_cache_affinity(self, model: str, text: str, available: set[str]) -> tuple[str | None, float]:
+        input_size, fingerprints = self._cache_fingerprints(text)
+        for prefix_size, fingerprint in reversed(fingerprints):
+            cache_key = (model, prefix_size, fingerprint)
+            owner = self._cache_affinity.get(cache_key)
+            if owner is None:
                 continue
-            entry = pool.servers[key]
-            if entry.heap_seq == seq:
-                return key
-        raise RuntimeError(f"No available {role.value} servers")
+            if owner not in available:
+                self._cache_affinity.pop(cache_key, None)
+                continue
+            self._cache_affinity.move_to_end(cache_key)
+            return owner, prefix_size / input_size
+        return None, 0.0
 
-    def _reset_heap(self, role: ServerRole, *, bump_seq: bool = False) -> None:
-        pool = self._pool(role)
-        heap = []
-        for key, entry in pool.servers.items():
-            if bump_seq:
-                entry.heap_seq += 1
-            heap.append((self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
-        heapq.heapify(heap)
-        pool.heap = heap
+    def _record_cache_affinity(self, model: str, text: str, key: str) -> None:
+        _, fingerprints = self._cache_fingerprints(text)
+        for prefix_size, fingerprint in fingerprints:
+            cache_key = (model, prefix_size, fingerprint)
+            self._cache_affinity[cache_key] = key
+            self._cache_affinity.move_to_end(cache_key)
+        while len(self._cache_affinity) > self.cache_max_entries:
+            self._cache_affinity.popitem(last=False)
+
+    def _drop_cache_affinity_for_server(self, key: str) -> None:
+        stale_keys = [cache_key for cache_key, owner in self._cache_affinity.items() if owner == key]
+        for cache_key in stale_keys:
+            self._cache_affinity.pop(cache_key, None)
+
+    def clear_cache_affinity(self) -> None:
+        with self._lock:
+            self._cache_affinity.clear()
+
+    def _pick_cache_aware(self, available: list[str], model: str, request_text: str) -> str:
+        servers = self.prefillers
+        loads = [servers[key].inflight_requests for key in available]
+        minimum = min(loads)
+        maximum = max(loads)
+        is_imbalanced = (
+            maximum - minimum > self.cache_balance_abs_threshold
+            and maximum > minimum * self.cache_balance_rel_threshold
+        )
+        selected = None
+        if not is_imbalanced:
+            selected, match_rate = self._lookup_cache_affinity(model, request_text, set(available))
+            if match_rate < self.cache_threshold:
+                selected = None
+        if selected is None:
+            selected = self._pick_least_loaded(ServerRole.PREFILL, available)
+        self._record_cache_affinity(model, request_text, selected)
+        return selected
+
+    def _select_key(self, role: ServerRole, routing_key: str, request_text: str, model: str) -> str:
+        available = self._available_keys(role)
+        if not available:
+            raise RuntimeError(f"No available {role.value} servers")
+        policy = self._policies[role]
+        if policy is RoutingPolicy.ROUND_ROBIN:
+            return self._pick_round_robin(role, available)
+        if policy is RoutingPolicy.RANDOM:
+            return random.choice(available)
+        if policy is RoutingPolicy.CONSISTENT_HASH:
+            return self._pick_consistent_hash(role, routing_key)
+        if policy is RoutingPolicy.LEAST_LOADED:
+            return self._pick_least_loaded(role, available)
+        if policy is RoutingPolicy.CACHE_AWARE and role is ServerRole.PREFILL:
+            return self._pick_cache_aware(available, model, request_text)
+        raise RuntimeError(f"Policy {policy.value} is not supported for {role.value}")
 
     def _add_server_no_lock(self, role: ServerRole, host: str, port: int) -> bool:
         key = server_key(host, port)
@@ -343,18 +537,17 @@ class SharedProxyScheduler:
         if key in pool.servers:
             return False
         pool.servers[key] = BackendServer(host, int(port), self._next_ordinal())
-        self._push_heap(role, key)
         return True
 
     def get_snapshot(self) -> dict[str, list[dict[str, Any]]]:
         with self._lock:
             return {
                 "prefill_instances": [
-                    {"host": e.host, "port": e.port}
+                    {"host": e.host, "port": e.port, "inflight": e.inflight_requests}
                     for _, e in sorted(self.prefillers.items(), key=lambda item: item[1].ordinal)
                 ],
                 "decode_instances": [
-                    {"host": e.host, "port": e.port}
+                    {"host": e.host, "port": e.port, "inflight": e.inflight_requests}
                     for _, e in sorted(self.decoders.items(), key=lambda item: item[1].ordinal)
                 ],
             }
@@ -375,79 +568,74 @@ class SharedProxyScheduler:
                 "prefill_instances": len(self.prefillers),
                 "decode_instances": len(self.decoders),
                 "request_num": self.request_num,
+                "prefill_policy": self._policies[ServerRole.PREFILL].value,
+                "decode_policy": self._policies[ServerRole.DECODE].value,
+                "prefill_loads": {key: entry.inflight_requests for key, entry in self.prefillers.items()},
+                "decode_loads": {key: entry.inflight_requests for key, entry in self.decoders.items()},
             }
 
     def _pick_server(
         self,
         role: ServerRole,
-        load: float,
         *,
-        active_tokens: bool = False,
-        kv_cache: bool = False,
+        routing_key: str = "",
+        request_text: str = "",
+        model: str = "",
     ) -> dict[str, Any]:
-        key = self._pop_valid(role)
+        key = self._select_key(role, routing_key, request_text, model)
         entry = self._pool(role).servers[key]
-        if active_tokens:
-            entry.active_tokens += load
-        if kv_cache:
-            entry.active_kv_cache += load
-        self._push_heap(role, key)
+        entry.inflight_requests += 1
         return {"key": key, "host": entry.host, "port": entry.port}
 
-    def _release_load(
-        self,
-        role: ServerRole,
-        key: str | None,
-        load: float,
-        *,
-        active_tokens: bool = False,
-        kv_cache: bool = False,
-    ) -> None:
+    def _release_load(self, role: ServerRole, key: str | None) -> None:
         if not key or key not in self._pool(role).servers:
             return
         entry = self._pool(role).servers[key]
-        if active_tokens:
-            entry.active_tokens -= load
-        if kv_cache:
-            entry.active_kv_cache = max(0.0, entry.active_kv_cache - load)
-        self._push_heap(role, key)
+        entry.inflight_requests = max(0, entry.inflight_requests - 1)
 
-    def begin_request(self, load: float) -> dict[str, Any]:
-        """Pick a prefiller, reserve KV pressure, and count this as an active request."""
+    def begin_request(self, routing_key: str, request_text: str, model: str) -> dict[str, Any]:
+        """Pick P, increment its in-flight count, and start a client request."""
         with self._lock:
-            picked = self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            picked = self._pick_server(
+                ServerRole.PREFILL,
+                routing_key=routing_key,
+                request_text=request_text,
+                model=model,
+            )
             self.request_num += 1
             return picked
 
-    def reserve_prefill_kv(self, load: float) -> dict[str, Any]:
-        """Pick a prefiller for recompute without bumping the active request count."""
+    def begin_recompute_prefill(self, routing_key: str, request_text: str, model: str) -> dict[str, Any]:
+        """Pick P for recompute without starting another client request."""
         with self._lock:
-            return self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            return self._pick_server(
+                ServerRole.PREFILL,
+                routing_key=routing_key,
+                request_text=request_text,
+                model=model,
+            )
 
-    def pick_decoder(self, load: float) -> dict[str, Any]:
+    def complete_prefill(self, key: str) -> None:
         with self._lock:
-            return self._pick_server(ServerRole.DECODE, load, active_tokens=True)
+            self._release_load(ServerRole.PREFILL, key)
 
-    def release_prefill_kv(self, key: str, load: float) -> None:
+    def abort_prefill(self, key: str, *, finish_request: bool) -> None:
         with self._lock:
-            self._release_load(ServerRole.PREFILL, key, load, kv_cache=True)
+            self._release_load(ServerRole.PREFILL, key)
+            if finish_request:
+                self.request_num = max(0, self.request_num - 1)
 
-    def release_decoder(self, key: str, load: float) -> None:
+    def pick_decoder(self) -> dict[str, Any]:
         with self._lock:
-            self._release_load(ServerRole.DECODE, key, load, active_tokens=True)
+            return self._pick_server(ServerRole.DECODE)
 
-    def finish_request(
-        self,
-        prefiller_key: str | None,
-        prefiller_load: float,
-        decoder_key: str | None,
-        decoder_load: float,
-        release_prefill_kv: bool,
-    ) -> None:
+    def release_decoder(self, key: str) -> None:
         with self._lock:
-            if release_prefill_kv:
-                self._release_load(ServerRole.PREFILL, prefiller_key, prefiller_load, kv_cache=True)
-            self._release_load(ServerRole.DECODE, decoder_key, decoder_load, active_tokens=True)
+            self._release_load(ServerRole.DECODE, key)
+
+    def finish_request(self, decoder_key: str | None) -> None:
+        with self._lock:
+            self._release_load(ServerRole.DECODE, decoder_key)
             self.request_num = max(0, self.request_num - 1)
 
     def get_waiting_nodes(self) -> dict[str, tuple[str, tuple[str, int], int]]:
@@ -480,9 +668,10 @@ class SharedProxyScheduler:
             pool = self._pool(role)
             if key in pool.tainted:
                 pool.tainted.discard(key)
-                self._push_heap(role, key)
+                self._rebuild_hash_ring(role)
                 return
             if self._add_server_no_lock(role, host, port):
+                self._rebuild_hash_ring(role)
                 self.log_status(f"Add {role.value} instance: {host}:{port}.")
 
     def drop_waiting_instance(self, key: str) -> None:
@@ -496,8 +685,8 @@ class SharedProxyScheduler:
         with self._lock:
             pool = self._pool(role)
             if self.request_num > 0:
-                pool.tainted.update(keys)
-                self._reset_heap(role, bump_seq=True)
+                pool.tainted.update(key for key in keys if key in pool.servers)
+                self._rebuild_hash_ring(role)
                 logger.warning("Start to taint %s instances %s.", role.value, sorted(keys))
                 return True
 
@@ -505,9 +694,11 @@ class SharedProxyScheduler:
             for key in keys:
                 removed = pool.servers.pop(key, None) is not None or removed
                 self.waiting_nodes.pop(key, None)
+                if role is ServerRole.PREFILL:
+                    self._drop_cache_affinity_for_server(key)
             pool.tainted.difference_update(keys)
             if removed:
-                self._reset_heap(role, bump_seq=True)
+                self._rebuild_hash_ring(role)
                 self.log_status(f"Remove {role.value} instances: {sorted(keys)}.")
             return False
 
@@ -522,8 +713,10 @@ class SharedProxyScheduler:
                 keys = list(pool.tainted)
                 for key in keys:
                     pool.servers.pop(key, None)
+                    if role is ServerRole.PREFILL:
+                        self._drop_cache_affinity_for_server(key)
                 pool.tainted.clear()
-                self._reset_heap(role, bump_seq=True)
+                self._rebuild_hash_ring(role)
                 self.log_status(f"Remove {role.value} instances after drain: {keys}.")
 
 
@@ -675,7 +868,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefiller-ports", type=int, nargs="+", default=[8001])
     parser.add_argument("--decoder-hosts", type=str, nargs="+", default=["localhost"])
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
+    parser.add_argument(
+        "--prefill-policy",
+        choices=PREFILL_POLICIES,
+        default=RoutingPolicy.CONSISTENT_HASH.value,
+        help="Load-balancing policy for prefill nodes.",
+    )
+    parser.add_argument(
+        "--decode-policy",
+        choices=DECODE_POLICIES,
+        default=RoutingPolicy.LEAST_LOADED.value,
+        help="Load-balancing policy for decode nodes.",
+    )
+    parser.add_argument(
+        "--cache-threshold",
+        type=float,
+        default=0.3,
+        help="Minimum prefix-match ratio for cache-aware prefill routing.",
+    )
+    parser.add_argument(
+        "--cache-balance-abs-threshold",
+        type=int,
+        default=2,
+        help="Absolute in-flight gap that makes cache-aware routing fall back to least-loaded.",
+    )
+    parser.add_argument(
+        "--cache-balance-rel-threshold",
+        type=float,
+        default=1.5,
+        help="Relative in-flight gap that makes cache-aware routing fall back to least-loaded.",
+    )
+    parser.add_argument(
+        "--cache-max-entries",
+        type=int,
+        default=100000,
+        help="Maximum number of in-memory prefix-affinity entries.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum number of retries for decode streaming requests.",
+    )
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
@@ -706,6 +940,14 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError("Number of decoder hosts must match number of decoder ports")
+    if not 0.0 <= args.cache_threshold <= 1.0:
+        raise ValueError("cache-threshold must be between 0.0 and 1.0")
+    if args.cache_balance_abs_threshold < 0:
+        raise ValueError("cache-balance-abs-threshold must be non-negative")
+    if args.cache_balance_rel_threshold < 1.0:
+        raise ValueError("cache-balance-rel-threshold must be at least 1.0")
+    if args.cache_max_entries <= 0:
+        raise ValueError("cache-max-entries must be positive")
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
     return args
@@ -734,7 +976,16 @@ def bootstrap_parent_process(args: argparse.Namespace) -> None:
     if args.workers <= 1:
         return
 
-    shared_scheduler = SharedProxyScheduler(args.prefiller_instances, args.decoder_instances)
+    shared_scheduler = SharedProxyScheduler(
+        args.prefiller_instances,
+        args.decoder_instances,
+        prefill_policy=args.prefill_policy,
+        decode_policy=args.decode_policy,
+        cache_threshold=args.cache_threshold,
+        cache_balance_abs_threshold=args.cache_balance_abs_threshold,
+        cache_balance_rel_threshold=args.cache_balance_rel_threshold,
+        cache_max_entries=args.cache_max_entries,
+    )
     NodeListener(shared_scheduler)
 
     authkey = os.urandom(16)
@@ -750,7 +1001,16 @@ def _ensure_scheduler(args) -> SharedProxyScheduler:
     global shared_scheduler
     if shared_scheduler is not None:
         return shared_scheduler
-    shared_scheduler = SharedProxyScheduler(args.prefiller_instances, args.decoder_instances)
+    shared_scheduler = SharedProxyScheduler(
+        args.prefiller_instances,
+        args.decoder_instances,
+        prefill_policy=args.prefill_policy,
+        decode_policy=args.decode_policy,
+        cache_threshold=args.cache_threshold,
+        cache_balance_abs_threshold=args.cache_balance_abs_threshold,
+        cache_balance_rel_threshold=args.cache_balance_rel_threshold,
+        cache_max_entries=args.cache_max_entries,
+    )
     NodeListener(shared_scheduler)
     return shared_scheduler
 
@@ -834,30 +1094,43 @@ def build_prefill_request(req_data: dict) -> dict:
     return payload
 
 
-async def send_request_to_service(
+class PrefillRequestError(RuntimeError):
+    pass
+
+
+async def send_prefill_request_with_retry(
     client: httpx.AsyncClient,
     endpoint: str,
     req_data: dict,
     request_id: str,
-    max_retries: int = 3,
     base_delay: float = 0.2,
-):
-    req_data = build_prefill_request(req_data)
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = build_prefill_request(req_data)
     headers = auth_headers(request_id)
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
+    last_error = "unknown prefill error"
+    for attempt in range(1, PREFILL_MAX_ATTEMPTS + 1):
         try:
-            response = await client.post(endpoint, json=req_data, headers=headers)
+            response = await client.post(endpoint, json=payload, headers=headers)
             response.raise_for_status()
-            return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
-            last_exc = exc
-            if attempt < max_retries:
+            response_json = response.json()
+            if not isinstance(response_json, dict):
+                raise ValueError("prefill response is not a JSON object")
+            kv_transfer_params = response_json.get("kv_transfer_params")
+            if not isinstance(kv_transfer_params, dict) or not kv_transfer_params:
+                raise ValueError("prefill response has no valid kv_transfer_params")
+            return response_json, kv_transfer_params
+        except (httpx.RequestError, httpx.HTTPStatusError, ValueError, json.JSONDecodeError) as exc:
+            last_error = str(exc)
+            logger.warning(
+                "Prefill attempt %s/%s failed for %s: %s",
+                attempt,
+                PREFILL_MAX_ATTEMPTS,
+                endpoint,
+                exc,
+            )
+            if attempt < PREFILL_MAX_ATTEMPTS:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
-                raise last_exc
+    raise PrefillRequestError(f"Prefill request failed after {PREFILL_MAX_ATTEMPTS} attempts: {last_error}")
 
 
 async def stream_service_response_with_retry(
@@ -900,77 +1173,76 @@ async def stream_service_response_with_retry(
 async def _abort_prefill_selection(
     runtime: WorkerRuntime,
     prefiller_key: str,
-    prefiller_score: float,
     *,
     is_initial_request: bool,
 ) -> None:
-    if is_initial_request:
-        await runtime.schedule("finish_request", prefiller_key, prefiller_score, None, 0.0, release_prefill_kv=True)
-    else:
-        await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+    await runtime.schedule("abort_prefill", prefiller_key, finish_request=is_initial_request)
 
 
-async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, release_prefill_kv: bool) -> None:
-    await runtime.schedule(
-        "finish_request",
-        info.prefiller_key,
-        info.prefiller_score,
-        info.decoder_key,
-        info.decoder_score,
-        release_prefill_kv,
-    )
+async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo) -> None:
+    await runtime.schedule("finish_request", info.decoder_key)
 
 
 async def assign_instances(
     api: str,
     req_data: Any,
-    request_length: int,
+    routing_key: str,
     *,
     is_initial_request: bool,
 ) -> InstanceInfo:
     runtime = get_runtime()
     args = get_global_args()
-    prefiller_score = calculate_prefill_score(request_length)
-    decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
-    pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
-    prefiller = await runtime.schedule(pick_prefill, prefiller_score)
+    request_text = extract_request_text(req_data)
+    model = str(req_data.get("model", ""))
+    pick_prefill = "begin_request" if is_initial_request else "begin_recompute_prefill"
+    prefiller = await runtime.schedule(pick_prefill, routing_key, request_text, model)
     prefiller_key = prefiller["key"]
 
     try:
-        response = await send_request_to_service(
+        response_json, kv_transfer_params = await send_prefill_request_with_retry(
             await runtime.get_client(ServerRole.PREFILL, prefiller_key),
             api,
             req_data,
             request_id,
-            max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        raise
-
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
-    if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens(response_json)
+        prefiller_cached_tokens = extract_cached_tokens(response_json)
+        await runtime.schedule("complete_prefill", prefiller_key)
+    except asyncio.CancelledError:
+        await asyncio.shield(_abort_prefill_selection(runtime, prefiller_key, is_initial_request=is_initial_request))
+        raise
+    except PrefillRequestError as exc:
+        await _abort_prefill_selection(runtime, prefiller_key, is_initial_request=is_initial_request)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": str(exc),
+                "request_id": request_id,
+                "prefill": prefiller_key,
+            },
+        ) from exc
+    except Exception:
+        await _abort_prefill_selection(runtime, prefiller_key, is_initial_request=is_initial_request)
+        raise
 
     try:
-        decoder = await runtime.schedule("pick_decoder", decoder_score)
+        decoder = await runtime.schedule("pick_decoder")
+    except asyncio.CancelledError:
+        if is_initial_request:
+            await asyncio.shield(runtime.schedule("finish_request", None))
+        raise
     except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
+        if is_initial_request:
+            await runtime.schedule("finish_request", None)
         raise
 
-    prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
-    decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
-    logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
+    logger.debug("Using prefill=%s decode=%s", prefiller_key, decoder["key"])
     return InstanceInfo(
         request_id=request_id,
         prefiller_key=prefiller_key,
-        prefiller_score=prefiller_score,
         decoder_key=decoder["key"],
-        decoder_score=decoder_score,
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
         prefiller_cached_tokens=prefiller_cached_tokens,
@@ -980,13 +1252,13 @@ async def assign_instances(
 async def reassign_instances(
     api: str,
     req_data: Any,
-    request_length: int,
+    routing_key: str,
     previous_instance: InstanceInfo,
 ) -> InstanceInfo:
     runtime = get_runtime()
-    await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
-    return await assign_instances(api, req_data, request_length, is_initial_request=False)
+    new_instance = await assign_instances(api, req_data, routing_key, is_initial_request=False)
+    await runtime.schedule("release_decoder", previous_instance.decoder_key)
+    return new_instance
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -995,9 +1267,8 @@ async def handle_completions_impl(api: str, request: Request):
     request_released = False
     try:
         req_data = await request.json()
-        req_body = await request.body()
-        request_length = len(req_body)
-        instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
+        routing_key = extract_routing_key(req_data, request.headers)
+        instance_info = await assign_instances(api, req_data, routing_key, is_initial_request=True)
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -1014,19 +1285,10 @@ async def handle_completions_impl(api: str, request: Request):
             nonlocal instance_info
             nonlocal request_released
             generated_token = ""
-            released_kv = False
             retry_count = 0
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
-
-            async def release_prefill_kv_once() -> None:
-                nonlocal released_kv
-                if not released_kv:
-                    await runtime.schedule(
-                        "release_prefill_kv", instance_info.prefiller_key, instance_info.prefiller_score
-                    )
-                    released_kv = True
 
             try:
                 while retry:
@@ -1040,8 +1302,6 @@ async def handle_completions_impl(api: str, request: Request):
                         max_retries=args.max_retries,
                         base_delay=args.retry_delay,
                     ):
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
@@ -1088,9 +1348,7 @@ async def handle_completions_impl(api: str, request: Request):
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
-                            released_kv = False
+                            instance_info = await reassign_instances(api, req_data, routing_key, instance_info)
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
@@ -1109,19 +1367,23 @@ async def handle_completions_impl(api: str, request: Request):
                 raise
             except Exception as exc:
                 logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
+                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing resources",
                     instance_info.decoder_host,
                     instance_info.decoder_port,
                     exc,
                     instance_info.request_id,
                 )
             finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
+                await _finish_instance(runtime, instance_info)
                 request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except HTTPException:
+        if not request_released and "instance_info" in locals():
+            await _finish_instance(runtime, instance_info)
+            request_released = True
+        raise
     except Exception:
         import traceback
 
@@ -1129,7 +1391,7 @@ async def handle_completions_impl(api: str, request: Request):
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print("".join(traceback.format_exception(*exc_info)))
         if not request_released and "instance_info" in locals():
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            await _finish_instance(runtime, instance_info)
             request_released = True
         raise
 
@@ -1210,6 +1472,7 @@ async def reset_prefix_cache(request: Request):
         except Exception as e:
             logger.error("reset_prefix_cache failed for %s: %s", base_url, e)
             failures.append(base_url)
+    await runtime.schedule("clear_cache_affinity")
     if failures:
         return JSONResponse(status_code=500, content={"failed": failures})
     return Response(status_code=200)
