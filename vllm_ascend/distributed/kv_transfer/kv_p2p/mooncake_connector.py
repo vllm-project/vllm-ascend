@@ -3324,11 +3324,30 @@ class MooncakeConnectorWorker:
         if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
             return tuple(), tuple()
 
-        if len(meta.remote_block_ids) != 1 or len(meta.local_block_ids) != 1:
-            raise AssertionError(
-                "SFA replicate-K currently expects exactly one KV cache group. "
-                f"Got remote groups={len(meta.remote_block_ids)}, local groups={len(meta.local_block_ids)}."
+        # Locate the KV cache group holding the replicated SFA indexer cache
+        # (block_size_scale > 1). The indexer cache can live in its own transfer
+        # group, so a single-group assumption is not valid.
+        replicate_group_id: int | None = None
+        for transfer_group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
+            kv_cache_group_id = group_spec.get("kv_cache_group_id", transfer_group_idx)
+            has_replicated_cache = any(
+                any(scale > 1 for scale in self.block_size_scale[layer_idx]) for layer_idx in layer_indices
             )
+            if has_replicated_cache:
+                replicate_group_id = kv_cache_group_id
+                break
+        if (
+            replicate_group_id is None
+            or replicate_group_id not in meta.local_block_ids
+            or replicate_group_id not in meta.remote_block_ids
+        ):
+            group_ids = list(meta.local_block_ids.keys()) if isinstance(meta.local_block_ids, dict) else []
+            logger.warning(
+                "SFA replicate-K skipped: replicated indexer cache group not found (groups=%s block_size_scale=%s)",
+                group_ids,
+                self.block_size_scale,
+            )
+            return tuple(), tuple()
 
         remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
         local_cp_size = self.pcp_size * self.dcp_size
@@ -3350,8 +3369,8 @@ class MooncakeConnectorWorker:
         if num_prefix_cached_blocks > 0 and not meta.local_full_block_ids:
             raise AssertionError("SFA replicate-K requires full local block ids when prefix cache is used.")
 
-        remote_blocks = list(meta.remote_block_ids[0])
-        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
+        remote_blocks = list(meta.remote_block_ids[replicate_group_id])
+        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[replicate_group_id])
         if not local_full_blocks:
             return tuple(), tuple()
 
