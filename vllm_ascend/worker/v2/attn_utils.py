@@ -204,8 +204,6 @@ def build_attn_metadata(
                 if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
                     attn_metadata_extra_kwargs.update(
                         num_reqs_actual=num_reqs,
-                        prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
-                        decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                         block_size=attn_group.kv_cache_spec.block_size,
                     )
@@ -217,8 +215,6 @@ def build_attn_metadata(
                 if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
-                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
-                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata

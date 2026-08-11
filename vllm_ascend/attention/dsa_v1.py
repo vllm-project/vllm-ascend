@@ -1551,7 +1551,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
             if run_multistream_indexer:
                 assert indexer_q is not None
-                assert indexer_kv_scale_metadata is not None
                 main_stream = torch.npu.current_stream()
                 aux_stream = dsv4_dsa_overlap_stream()
                 e_compressed_kv_done = main_stream.record_event()
@@ -1564,6 +1563,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
             if run_multistream_indexer:
+                assert indexer_kv_scale_metadata is not None
                 main_stream.wait_stream(aux_stream)
                 weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
                 indexer_scale_metadata = _require_req_metadata(indexer_kv_scale_metadata)

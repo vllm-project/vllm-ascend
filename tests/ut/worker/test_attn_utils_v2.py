@@ -166,20 +166,14 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         **kwargs,
     ):
         del common_prefix_len, fast_build
-        self.prefill_ratio_to_sas_metadata = kwargs["prefill_ratio_to_sas_metadata"]
-        self.decode_ratio_to_sas_metadata = kwargs["decode_ratio_to_sas_metadata"]
         self.common_ratio_to_sas_metadata = kwargs["common_ratio_to_sas_metadata"]
         call = {
             "common_attn_metadata": common_attn_metadata,
             "block_size": kwargs["block_size"],
-            "prefill_ratio_to_sas_metadata": self.prefill_ratio_to_sas_metadata,
-            "decode_ratio_to_sas_metadata": self.decode_ratio_to_sas_metadata,
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
         }
         self.calls.append(call)
         for cache_name in (
-            "prefill_ratio_to_sas_metadata",
-            "decode_ratio_to_sas_metadata",
             "common_ratio_to_sas_metadata",
         ):
             call[cache_name].setdefault("first_group", len(self.calls) == 1)
