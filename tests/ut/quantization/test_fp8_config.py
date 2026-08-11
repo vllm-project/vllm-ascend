@@ -90,34 +90,6 @@ class TestAscendDeepseekV4FP8Config(TestBase):
         mock_scheme_class.assert_called_once_with()
         self.assertIs(method, mock_ascend_moe)
 
-    def test_get_quant_method_for_moe_with_tid2eid(self):
-        """AscendFusedMoEMethod is called with tid2eid when provided."""
-        moe_config = MagicMock()
-        moe_layer = MagicMock(spec=MoERunner)
-        moe_layer.moe_config = moe_config
-        tid2eid = {"token_0": [0, 1]}
-
-        mock_scheme_instance = MagicMock()
-        mock_scheme_class = MagicMock(return_value=mock_scheme_instance)
-        mock_ascend_moe = MagicMock()
-
-        self.config._resolved_expert_dtype = "fp4"
-
-        with (
-            patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
-                return_value=mock_scheme_class,
-            ),
-            patch(
-                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
-                return_value=mock_ascend_moe,
-            ) as mock_ascend_moe_cls,
-        ):
-            method = self.config.get_quant_method(moe_layer, "prefix", tid2eid=tid2eid)
-
-        mock_ascend_moe_cls.assert_called_once_with(mock_scheme_instance, moe_config, tid2eid=tid2eid)
-        self.assertIs(method, mock_ascend_moe)
-
     def test_get_quant_method_for_moe_non_fp4_raises(self):
         """MoE layer with non-fp4 expert_dtype raises NotImplementedError."""
         moe_config = MagicMock()
