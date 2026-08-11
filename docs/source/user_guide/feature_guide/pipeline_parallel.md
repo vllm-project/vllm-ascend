@@ -25,7 +25,7 @@ This guide uses the following terms:
     **Pipeline Parallel** column in [Supported Models](../support_matrix/supported_models.md).
 
 For a first deployment, begin with **Quick Start**. Before production, review
-**Plan the Parallel Topology** and **Configure Layer Partitioning**. Use the
+**Configure Layer Partitioning** and the compatibility limitations. Use the
 advanced scenarios and performance analysis when the deployment needs
 additional features or tuning.
 
@@ -122,24 +122,6 @@ Start Ray only after setting the required communication environment variables
 on every node. The complete cluster setup is documented in
 [Ray Distributed](../../tutorials/features/ray.md).
 
-### Verify the Deployment
-
-Before applying production tuning, perform a short smoke test and verify:
-
-- The configured TP size, PP size, and total worker count match the planned
-  topology.
-- The effective hidden-layer ranges match the automatic calculation or
-  `VLLM_PP_LAYER_PARTITION`. For an uneven automatic partition, check the
-  startup log for the complete partition list.
-- In an MP deployment, the worker node joins the head node and does not start
-  a second API server.
-- Ray reports the expected nodes and NPU resources in a multi-node deployment.
-- A short request completes successfully and produces output consistent with a
-  known-good non-PP or smaller-scale configuration.
-
-Start with a small `--max-model-len`, `--max-num-batched-tokens`, and
-`--max-num-seqs`. Increase them only after the basic topology is stable.
-
 ## When to Use PP
 
 PP is useful in the following situations:
@@ -160,54 +142,6 @@ add PP when model capacity or the network topology requires it.
 | The model spans multiple nodes | Use TP within a node and PP across nodes. |
 | Multiple serving replicas are required | Build one TP/PP replica first, then add DP only on a supported model, operator, and network topology. |
 | Long-context Prefill needs PP tuning | Start with PP, then evaluate [Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md). |
-
-## Plan the Parallel Topology
-
-When vLLM manages DP replicas internally, the required NPU count for the basic
-topology in this guide is:
-
-```text
-total_npus = data_parallel_size * pipeline_parallel_size * tensor_parallel_size
-```
-
-Calculate separate Prefill and Decode instances independently.
-
-Each DP replica contains `pipeline_parallel_size` stages, and each stage contains
-`tensor_parallel_size` workers. A common two-node layout is:
-
-| DP replica | Node | PP stage | Workers in the TP group |
-| --- | --- | --- | --- |
-| `0` | `0` | `0` | TP rank `0 ... 7` |
-| `0` | `1` | `1` | TP rank `0 ... 7` |
-
-Intermediate activations move from the TP group on node 0 to the TP group on
-node 1.
-
-| Parallel configuration | NPU count | Typical layout |
-| --- | ---: | --- |
-| `DP1 TP8 PP1` | 8 | One TP-only replica on one 8-NPU node. |
-| `DP1 TP8 PP2` | 16 | One replica across two 8-NPU nodes. |
-| `DP2 TP8 PP2` | 32 | Two replicas, each using `TP8 PP2`. |
-
-!!! warning "Cross-node RoCE limitation for MoE models"
-
-    For cross-node MoE deployments over RoCE, PP and DP cannot currently be
-    enabled at the same time because the `MoeDistributeDispatch` communication
-    path does not support this combined topology. Keep either the PP size or the
-    DP size at `1`. The `DP2 TP8 PP2` row above is therefore only a resource
-    calculation example for this scenario, not a supported deployment.
-
-    This restriction is specific to the combined cross-node RoCE topology. It
-    does not mean that PP with DP or PP with MoE is unsupported in every
-    topology.
-
-When planning the topology:
-
-1. Choose a TP size that fits the node-local interconnect and model architecture.
-2. Increase the PP size until each stage fits in device memory.
-3. Add DP only after one TP/PP replica is stable and balanced, and after
-   confirming that the model, communication operator, and network topology
-   support the combination.
 
 ## Configure Layer Partitioning
 
@@ -398,59 +332,6 @@ layer.
 | Memory | Weights are sharded within each layer; some tensors can remain replicated. | Weights and KV cache are divided by layer, while edge stages also hold input-side or output-side modules. | Both reduce per-rank memory, but equal parallel sizes do not guarantee equal peak memory. |
 | Scaling constraints | The usable TP size can be limited by attention heads, KV heads, hidden dimensions, expert routing, or supported kernels. | The model must support PP and have partitionable layers. | PP is useful when increasing TP is invalid or no longer efficient. |
 | Main bottleneck | A slow collective delays every rank in the TP group. | The slowest stage and its boundary transfer limit the pipeline. | TP depends on collective efficiency; PP depends on stage balance and activation-transfer efficiency. |
-
-### Why PP Can Perform Better Across Nodes
-
-TP can invoke one or more collective operations in many Transformer layers. If
-the TP group spans multiple nodes, the latency of cross-node collectives can
-accumulate across the entire model. PP makes it possible to keep these frequent
-TP collectives on the node-local high-bandwidth interconnect and use the
-cross-node network mainly for transfers at PP stage boundaries.
-
-For example, on two nodes with eight NPUs each:
-
-| Topology | Placement | Cross-node communication |
-| --- | --- | --- |
-| `TP16 PP1` | One TP group spans both nodes. | Layer-internal TP collectives cross the node boundary. |
-| `TP8 PP2` | One node-local TP group executes each PP stage. | Intermediate tensors cross the node boundary between the two stages. |
-
-When the model supports both configurations, `TP8 PP2` can outperform
-`TP16 PP1` if the reduction in cross-node collective overhead is larger than
-the PP boundary-transfer and pipeline-idle overhead. This is especially
-relevant when the intra-node interconnect is substantially faster than the
-inter-node RoCE network.
-
-This comparison assumes a supported single-replica topology with DP set to
-`1`. It does not override the cross-node RoCE limitation for PP combined with
-DP described in [Plan the Parallel Topology](#plan-the-parallel-topology).
-
-The following conceptual comparison describes communication frequency; it is
-not an exact bandwidth formula:
-
-```text
-TP cross-node synchronization frequency
-    ~ Transformer layers * collectives per layer
-
-PP cross-node transfer frequency
-    ~ cross-node stage boundaries
-      * scheduled batches, including Prefill chunks and Decode steps
-```
-
-A rough estimate of the payload at one PP boundary is:
-
-```text
-aggregate_boundary_payload
-    ~ sum(numel(tensor) * bytes_per_element(tensor)
-          for tensor in transferred_intermediate_tensors)
-```
-
-This represents the aggregate logical payload for one boundary and one pipeline
-step before protocol overhead. The executed token dimension can be larger than
-the unpadded scheduled-token count. With TP enabled, the payload can be split
-across TP ranks and reconstructed within the receiving TP group. The exact
-traffic depends on the model implementation, tensor layout, collective
-algorithm, batch shape, sequence length, padding, and communication overlap.
-The cross-node link must therefore be measured under the intended workload.
 
 ### Pipeline Bubbles and Workload Effects
 
