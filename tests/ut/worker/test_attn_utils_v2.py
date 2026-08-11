@@ -292,8 +292,6 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         assert common_metadata.num_actual_tokens == 5
         assert common_metadata.num_input_tokens == expected_input_tokens
     for cache_name in (
-        "prefill_ratio_to_sas_metadata",
-        "decode_ratio_to_sas_metadata",
         "common_ratio_to_sas_metadata",
     ):
         assert calls[0][cache_name] is calls[1][cache_name]

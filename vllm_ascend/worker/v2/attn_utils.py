@@ -149,12 +149,7 @@ def build_attn_metadata(
         num_input_tokens = num_tokens
 
     attn_metadata: dict[str, Any] = {}
-    # DSA metadata is shared by the ratio-specific cache groups for one model
-    # execution. Keep the cache at the batch-builder scope,
-    # so each DSA builder can reuse the split results and SAS metadata produced
-    # by earlier groups in this invocation.
-    prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
-    decode_ratio_to_sas_metadata: dict[Any, Any] = {}
+    # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
