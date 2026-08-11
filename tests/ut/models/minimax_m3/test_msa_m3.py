@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import _scatter_index_cache
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
@@ -29,6 +30,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3SparseMetadataBuilder,
     AscendMiniMaxM3SparsePrefillMetadata,
     _register_m3_sparse_packed_modules,
+    _should_use_tp_sharded_index_decode,
     _sparse_proj_quant_type,
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
@@ -378,6 +380,31 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "get_ascend_device_type() == AscendDeviceType.A5" in source
     assert 'main_qkv.device.type != "npu"' in source
     assert "1.0 + self.q_norm.weight" in source
+
+
+def test_a5_index_decode_uses_a5_triton_without_tp_block_sharding() -> None:
+    module_source = inspect.getsource(msa_m3_module)
+    a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
+    a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
+    import_branches = module_source[a5_branch_start:a5_branch_end]
+
+    assert import_branches.count("minimax_m3_index_decode") == 2
+    assert "msa_m3_triton_a5" in import_branches
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    ):
+        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
+
+
+def test_non_a5_decode_keeps_tp_block_sharding() -> None:
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
+        return_value=AscendDeviceType.A3,
+    ):
+        assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
+        assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
+        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
 
 
 @patch(
