@@ -89,24 +89,12 @@ a3:
       - name: multi-node-deepseek-v3.2-W8A8-EP
         config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
         size: 4
-      - name: multi-node-deepseek-v3.1
-        config_file_path: DeepSeek-V3.1-BF16.yaml
-        size: 2
-      - name: multi-node-GLM-5.2-w8a8-A3
-        config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
-        size: 2
-      - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
-        config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
-        size: 2
-      - name: DeepSeek-V4-flash-w8a8-PD-prefix
-        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
-        size: 2
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
         size: 4
-      - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
-        config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
-        size: 2
+      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        size: 4
   double_node:
     test_config:
       - name: multi-node-qwen3-dp
@@ -129,6 +117,21 @@ a3:
         size: 2
       - name: multi-node-GLM-5.1-W8A8C8-A3_64k_128k_90_50
         config_file_path: GLM-5.1-W8A8C8-A3_64k_128k_90_50.yaml
+        size: 2
+      - name: multi-node-deepseek-v3.1
+        config_file_path: DeepSeek-V3.1-BF16.yaml
+        size: 2
+      - name: multi-node-GLM-5.2-w8a8-A3
+        config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
+        size: 2
+      - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
+        config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
+        size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-prefix
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
+        size: 2
+      - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         size: 2
   single_node:
     test_config:
