@@ -642,6 +642,7 @@ def _allocate_kv_cache(
 
             continue
 
+        # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
             k_size = kv_cache_tensor.size
             k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
