@@ -478,7 +478,7 @@ class MiniMaxM3SwiGLUOAI(nn.Module):
                 group_mode=0,
                 axis=-1,
                 round_mode="rint",
-                scale_alg=0,
+                scale_alg=1,
                 max_dtype_value=0.0,
             )
             scale = DeviceOperator.maybe_normalize_mxfp_scale_layout(scale)
