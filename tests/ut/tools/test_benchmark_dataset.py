@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import tools.benchmark_dataset as benchmark_dataset
 from tools.benchmark_dataset import generate_benchmark_dataset, get_prefix_dataset_path
 
 
@@ -30,10 +31,34 @@ class FakeTokenizer:
         del skip_special_tokens
         return " ".join(self.id_to_token[token_id] for token_id in token_ids)
 
+    def __len__(self) -> int:
+        return len(self.token_to_id)
+
 
 def _read_questions(dataset_dir: str) -> list[str]:
     dataset_file = Path(dataset_dir) / "test.jsonl"
     return [json.loads(line)["question"] for line in dataset_file.read_text(encoding="utf-8").splitlines()]
+
+
+def _write_source_dataset(path: Path) -> None:
+    questions = [
+        "alpha beta gamma delta",
+        "red green blue yellow",
+        "spring summer autumn winter",
+        "one two three four",
+    ]
+    path.write_text(
+        "".join(json.dumps({"question": question, "answer": "none"}) + "\n" for question in questions),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture(autouse=True)
+def gsm8k_source_path(tmpdir, monkeypatch) -> Path:
+    source_path = Path(str(tmpdir)) / "GSM8K.jsonl"
+    _write_source_dataset(source_path)
+    monkeypatch.setattr(benchmark_dataset, "GSM8K_SOURCE_PATH", source_path)
+    return source_path
 
 
 def test_generate_fixed_dataset(tmpdir) -> None:
@@ -55,7 +80,6 @@ def test_generate_fixed_dataset(tmpdir) -> None:
 
     questions = _read_questions(dataset_dir)
     assert len(questions) == 5
-    assert len(set(questions)) == 5
     assert all(len(tokenizer.encode(question)) == 16 for question in questions)
     assert (Path(dataset_dir) / "metadata.json").is_file()
 
@@ -139,6 +163,62 @@ def test_generate_prefix_prewarm_dataset(tmpdir) -> None:
     assert prefix_questions[3] == prefix_questions[4] == prefix_questions[5]
     assert prefix_questions[0] != prefix_questions[3]
     assert all(len(tokenizer.encode(question)) == 10 for question in prefix_questions)
+
+
+def test_generate_fixed_dataset_from_gsm8k_source(tmpdir, gsm8k_source_path: Path) -> None:
+    tmp_path = Path(str(tmpdir))
+    tokenizer = FakeTokenizer()
+    config = {
+        "type": "fixed",
+        "input_len": 8,
+        "num_samples": 5,
+        "seed": 7,
+    }
+
+    dataset_dir = generate_benchmark_dataset(
+        model_path="test-model",
+        config=config,
+        cache_root=tmp_path / "cache",
+        tokenizer=tokenizer,
+    )
+
+    questions = _read_questions(dataset_dir)
+    assert len(questions) == 5
+    assert all(len(tokenizer.encode(question)) == 8 for question in questions)
+    assert all("Request variant" not in question for question in questions)
+    metadata = json.loads((Path(dataset_dir) / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["source_dataset_path"] == str(gsm8k_source_path.resolve())
+    assert metadata["source_dataset_sha256"]
+
+
+def test_generate_prefix_dataset_from_gsm8k_source(tmpdir) -> None:
+    tmp_path = Path(str(tmpdir))
+    tokenizer = FakeTokenizer()
+    config = {
+        "type": "prefix",
+        "input_len": 12,
+        "num_samples": 4,
+        "prefix_ratio": 0.5,
+        "prefix_num": 2,
+        "prewarm": True,
+        "dp": 2,
+        "seed": 3,
+    }
+
+    dataset_dir = generate_benchmark_dataset(
+        model_path="test-model",
+        config=config,
+        cache_root=tmp_path / "cache",
+        tokenizer=tokenizer,
+    )
+
+    full_samples = [tokenizer.encode(question) for question in _read_questions(dataset_dir)]
+    prefix_samples = _read_questions(get_prefix_dataset_path(dataset_dir))
+    assert full_samples[0][:6] == full_samples[2][:6]
+    assert full_samples[1][:6] == full_samples[3][:6]
+    assert prefix_samples[0] == prefix_samples[1]
+    assert prefix_samples[2] == prefix_samples[3]
+    assert all(len(tokenizer.encode(question)) == 6 for question in prefix_samples)
 
 
 def test_reuse_complete_cached_dataset(tmpdir) -> None:

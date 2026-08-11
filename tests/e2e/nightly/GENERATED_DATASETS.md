@@ -69,3 +69,11 @@ prefix-only dataset. AISBench runs that dataset first with `batch_size=dp` and
 `max_out_len=1`, then runs the full dataset against the same server process.
 This mirrors the original prefix tool's behavior, but it does not guarantee
 that a load balancer routes exactly one warmup request to every DP rank.
+
+The generator reads a GSM8K-format JSONL file from `GSM8K_SOURCE_PATH` in
+`tools/benchmark_dataset.py`. Its default value is
+`/mnt/share/c00893695/datasets/GSM8K.jsonl`. Change this single constant when
+running in another local or CI environment; benchmark YAML files do not carry
+the source path. Rows must contain a non-empty `question` field. Fixed datasets
+sample questions with replacement, while prefix datasets select distinct
+questions for prefixes and sample questions with replacement for suffixes.

@@ -30,18 +30,36 @@ DEFAULT_CACHE_ROOT = "/tmp/vllm_ascend_datasets"
 PREFIX_DATASET_SUBDIR = "prefix"
 SEPARATOR_TOKEN_COUNT = 3
 
-# Performance datasets only need stable prompt text. Keeping the small seed
-# corpus in source avoids introducing another network dependency in CI.
-SEED_TEXTS = (
-    "A shop has several boxes of pencils. Explain how to calculate the total number of pencils step by step.",
-    "A train travels between two cities at a constant speed. Determine the travel time and show the calculation.",
-    "A library lends books to students during the week. Work out how many books remain and explain each step.",
-    "A farmer packs fruit into equal sized baskets. Calculate the number of full baskets and the remainder.",
-    "A classroom collects data from an experiment. Summarize the observations and derive the final result carefully.",
-    "A runner completes several laps of a track. Compute the total distance and provide a concise explanation.",
-    "A warehouse receives and ships packages every day. Find the final inventory using clear intermediate steps.",
-    "A recipe is scaled for a larger group. Calculate the required amount of every ingredient in a logical order.",
-)
+# Update this single path when running in another local or CI environment.
+GSM8K_SOURCE_PATH = Path("/mnt/share/c00893695/datasets/GSM8K.jsonl")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_source_texts(source_dataset_path: str) -> list[str]:
+    source_texts = []
+    with Path(source_dataset_path).open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Invalid JSON at {source_dataset_path}:{line_number}") from error
+            question = item.get("question")
+            if not isinstance(question, str) or not question.strip():
+                raise ValueError(f"Missing non-empty question at {source_dataset_path}:{line_number}")
+            source_texts.append(question)
+
+    if not source_texts:
+        raise ValueError(f"No questions found in source dataset: {source_dataset_path}")
+    return source_texts
 
 
 def _encode(tokenizer: Any, text: str) -> list[int]:
@@ -80,37 +98,33 @@ def _decode_to_exact_length(tokenizer: Any, token_ids: list[int], target_length:
     raise RuntimeError(f"Unable to generate exactly {target_length} tokens; got {actual_length}")
 
 
-def _build_separator_ids(tokenizer: Any, rng: random.Random, sample_index: int, length: int) -> list[int]:
-    separator = f"\nRequest variant {sample_index}-{rng.getrandbits(64):016x}:\n"
-    return _fit_token_ids(tokenizer, separator, length)
+def _build_random_token_ids(tokenizer: Any, rng: random.Random, length: int) -> list[int]:
+    if length == 0:
+        return []
+    vocab_size = len(tokenizer)
+    if length > vocab_size:
+        raise ValueError(f"Cannot sample {length} unique tokens from a vocabulary of size {vocab_size}")
+    return rng.sample(range(vocab_size), length)
 
 
-def _build_fixed_sample(
-    tokenizer: Any,
-    seed_text: str,
-    input_length: int,
-    rng: random.Random,
-    sample_index: int,
-) -> str:
-    separator_length = min(SEPARATOR_TOKEN_COUNT, input_length)
-    token_ids = _build_separator_ids(tokenizer, rng, sample_index, separator_length)
-    token_ids += _fit_token_ids(tokenizer, seed_text, input_length - separator_length)
-    return _decode_to_exact_length(tokenizer, token_ids, input_length, seed_text)
+def _build_source_sample(tokenizer: Any, source_text: str, input_length: int) -> str:
+    token_ids = _fit_token_ids(tokenizer, source_text, input_length)
+    return _decode_to_exact_length(tokenizer, token_ids, input_length, source_text)
 
 
 def _build_prefix_token_ids(
     tokenizer: Any,
     *,
     prefix_length: int,
-    prefix_num: int,
+    prefix_texts: list[str],
 ) -> list[list[int]]:
     return [
         _fit_token_ids(
             tokenizer,
-            f"Prefix group {index}: {SEED_TEXTS[index % len(SEED_TEXTS)]}\n",
+            f"{prefix_text}\n",
             prefix_length,
         )
-        for index in range(prefix_num)
+        for prefix_text in prefix_texts
     ]
 
 
@@ -121,6 +135,7 @@ def _build_prefix_samples(
     num_samples: int,
     prefix_ratio: float,
     prefix_token_ids: list[list[int]],
+    source_texts: list[str],
     seed: int,
 ) -> list[str]:
     prefix_length = int(input_length * prefix_ratio)
@@ -131,12 +146,11 @@ def _build_prefix_samples(
     samples = []
     for index in range(num_samples):
         selected_prefix = prefix_token_ids[index % prefix_num]
-        separator_ids = _build_separator_ids(tokenizer, rng, index, separator_length)
-        suffix_seed = SEED_TEXTS[(index + prefix_num) % len(SEED_TEXTS)]
+        separator_ids = _build_random_token_ids(tokenizer, rng, separator_length)
+        suffix_seed = rng.choice(source_texts)
         suffix_ids = _fit_token_ids(tokenizer, suffix_seed, suffix_length)
         sample_ids = selected_prefix + separator_ids + suffix_ids
-        filler_text = SEED_TEXTS[(index % prefix_num) % len(SEED_TEXTS)]
-        samples.append(_decode_to_exact_length(tokenizer, sample_ids, input_length, filler_text))
+        samples.append(_decode_to_exact_length(tokenizer, sample_ids, input_length, suffix_seed))
     return samples
 
 
@@ -149,6 +163,13 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(prewarm, bool):
         raise ValueError("dataset_generator.prewarm must be a boolean")
 
+    expanded_path = os.path.expandvars(os.path.expanduser(str(GSM8K_SOURCE_PATH)))
+    resolved_path = Path(expanded_path).resolve()
+    if not resolved_path.is_file():
+        raise FileNotFoundError(f"GSM8K source dataset not found: {resolved_path}")
+    source_dataset_path = str(resolved_path)
+    source_dataset_sha256 = _file_sha256(resolved_path)
+
     normalized = {
         "type": dataset_type,
         "input_len": int(config["input_len"]),
@@ -158,6 +179,8 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
         "prefix_num": int(config.get("prefix_num", 1)),
         "prewarm": prewarm,
         "dp": int(config.get("dp", 1)),
+        "source_dataset_path": source_dataset_path,
+        "source_dataset_sha256": source_dataset_sha256,
         "trust_remote_code": bool(config.get("trust_remote_code", True)),
     }
     if normalized["input_len"] < 1:
@@ -239,6 +262,7 @@ def generate_benchmark_dataset(
             logger.info("Reusing generated benchmark dataset: %s", dataset_dir)
             return str(dataset_dir)
 
+        source_texts = _load_source_texts(normalized["source_dataset_path"])
         if tokenizer is None:
             from transformers import AutoTokenizer
 
@@ -251,21 +275,21 @@ def generate_benchmark_dataset(
         if normalized["type"] == "fixed":
             rng = random.Random(normalized["seed"])
             samples = [
-                _build_fixed_sample(
-                    tokenizer,
-                    rng.choice(SEED_TEXTS),
-                    normalized["input_len"],
-                    rng,
-                    index,
-                )
-                for index in range(normalized["num_samples"])
+                _build_source_sample(tokenizer, rng.choice(source_texts), normalized["input_len"])
+                for _ in range(normalized["num_samples"])
             ]
         else:
+            if normalized["prefix_num"] > len(source_texts):
+                raise ValueError(
+                    f"prefix_num ({normalized['prefix_num']}) exceeds source question count ({len(source_texts)})"
+                )
             prefix_length = int(normalized["input_len"] * normalized["prefix_ratio"])
+            prefix_rng = random.Random(normalized["seed"])
+            prefix_texts = prefix_rng.sample(source_texts, normalized["prefix_num"])
             prefix_token_ids = _build_prefix_token_ids(
                 tokenizer,
                 prefix_length=prefix_length,
-                prefix_num=normalized["prefix_num"],
+                prefix_texts=prefix_texts,
             )
             samples = _build_prefix_samples(
                 tokenizer,
@@ -273,12 +297,13 @@ def generate_benchmark_dataset(
                 num_samples=normalized["num_samples"],
                 prefix_ratio=normalized["prefix_ratio"],
                 prefix_token_ids=prefix_token_ids,
+                source_texts=source_texts,
                 seed=normalized["seed"],
             )
             if normalized["prewarm"]:
                 prefix_samples = []
                 for index, token_ids in enumerate(prefix_token_ids):
-                    filler_text = SEED_TEXTS[index % len(SEED_TEXTS)]
+                    filler_text = prefix_texts[index]
                     prefix_text = _decode_to_exact_length(tokenizer, token_ids, prefix_length, filler_text)
                     prefix_samples.extend([prefix_text] * normalized["dp"])
                 prefix_dataset_dir.mkdir(parents=True, exist_ok=True)
