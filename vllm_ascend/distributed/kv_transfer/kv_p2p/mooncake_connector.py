@@ -126,6 +126,7 @@ class ReqMeta:
     num_prompt_blocks: int
     remote_block_size: int
     local_full_block_ids: BlockIds = tuple()
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -1503,6 +1504,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
             local_full_block_ids=local_full_block_ids or tuple(),
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
 
@@ -3492,6 +3494,10 @@ class MooncakeConnectorWorker:
                 self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
         for req_id, meta in metadata.requests.items():
+            if meta.do_virtual:
+                if self.kv_recv_thread is not None:
+                    self.kv_recv_thread.task_tracker.add_not_transfer_request(req_id)
+                continue
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "start_load_kv for request %s from remote engine %s. "

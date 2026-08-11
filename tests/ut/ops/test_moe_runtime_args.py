@@ -18,13 +18,11 @@ import unittest
 
 import torch
 
-import vllm_ascend.ops.fused_moe.dataclass.token_dispatcher as runtime_args
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoETokenDispatchOutput,
-    MoEWeights,
-    build_fused_experts_input,
-    build_mlp_compute_input,
     build_token_dispatch_input,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -43,30 +41,6 @@ def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
 
 
 class TestMoERuntimeArgs(unittest.TestCase):
-    def test_runtime_args_facade_exports_public_contracts_and_builders(self):
-        expected_symbols = [
-            "MoEAllGatherCombineMetadata",
-            "MoEAllToAllCombineMetadata",
-            "MoEFusedExpertsInput",
-            "MoEMC2CombineMetadata",
-            "MoEMlpComputeInput",
-            "MoEPrepareOutput",
-            "MoEQuantParams",
-            "MoERoutingParams",
-            "MoETokenDispatchInput",
-            "MoETokenDispatchOutput",
-            "MoEWeights",
-            "TMoECombineMetadata",
-            "build_fused_experts_input",
-            "build_mlp_compute_input",
-            "build_token_dispatch_input",
-        ]
-
-        for symbol in expected_symbols:
-            with self.subTest(symbol=symbol):
-                self.assertTrue(hasattr(runtime_args, symbol))
-        self.assertFalse(hasattr(runtime_args, "MoEMxfpParams"))
-
     def test_build_fused_experts_input_preserves_runtime_semantics(self):
         for quant_type in (
             QuantType.NONE,
