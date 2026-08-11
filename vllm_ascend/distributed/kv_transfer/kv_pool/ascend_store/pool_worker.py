@@ -1090,11 +1090,11 @@ class KVPoolWorker:
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
-            cached_tokens = (
-                request.load_spec.kvpool_store_skip_tokens
-                if request.load_spec.kvpool_store_skip_tokens is not None
-                else request.load_spec.kvpool_cached_tokens
-            )
+            # Use the (eagle-trimmed) kvpool_cached_tokens so the trailing
+            # dirty draft block is excluded from the load extent and recomputed
+            # locally; the save side still uses kvpool_store_skip_tokens to
+            # skip re-saving the full raw hit. Mirrors v0.23.0 semantics.
+            cached_tokens = request.load_spec.kvpool_cached_tokens
             group_block_hashes = get_block_hashes(
                 request.block_hashes,
                 block_size,

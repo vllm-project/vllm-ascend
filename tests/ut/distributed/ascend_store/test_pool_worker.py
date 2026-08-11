@@ -1612,6 +1612,33 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._process_load_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_load_tasks[0]), 0)
 
+    def test_process_load_excludes_eagle_trailing_block(self):
+        # Eagle/MTP trims kvpool_cached_tokens by one block (dirty draft
+        # trailing block) while kvpool_store_skip_tokens keeps the raw hit.
+        # The load extent must follow the trimmed kvpool_cached_tokens so the
+        # trailing block is recomputed locally instead of loaded as stale
+        # draft KV.
+        worker = self._make_worker()
+        worker.layerwise_offload = False
+        worker.independent_layers = []
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=48,  # trimmed: blocks 0,1,2
+                kvpool_store_skip_tokens=64,  # raw hit: also block 3 (trailing)
+                can_load=True,
+                token_len=64,
+            ),
+        )
+        worker._process_load_for_layer_batch([req], 0)
+        self.assertEqual(len(worker.layer_load_tasks[0]), 1)
+        br = worker.layer_load_tasks[0][0].block_ranges[0]
+        self.assertEqual((br.start_block, br.end_block), (0, 3))
+
     def test_reused_layer_loads_full_cached_prefix(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
