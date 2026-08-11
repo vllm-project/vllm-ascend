@@ -37,6 +37,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
     OFFLOAD_KV_CACHE_TUPLE_LEN,
@@ -57,14 +58,12 @@ from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
-    AscendDeviceType,
     _round_up,
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_o_proj_tp,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
-    get_ascend_device_type,
     maybe_trans_nz,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -612,7 +611,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(self.indexer.k_cache.prefix)
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
             else:

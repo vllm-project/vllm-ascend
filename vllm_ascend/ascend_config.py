@@ -614,14 +614,15 @@ class AscendCompilationConfig:
                 Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-        if is_310p():
+        if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if enable_npugraph_ex:
-                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+                logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
             if enable_static_kernel:
                 logger.warning(
-                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                    "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
+                    "Disabling it."
                 )
             enable_npugraph_ex = False
             enable_static_kernel = False

@@ -60,8 +60,9 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.utils import is_950, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -1363,7 +1364,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
                 # FIA call each (A5 only).
                 if (
-                    is_950()
+                    get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
                     and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
                     and attn_metadata.num_decodes > 0
                     and attn_metadata.num_prefills > 0

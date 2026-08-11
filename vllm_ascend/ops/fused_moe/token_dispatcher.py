@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -50,8 +51,6 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
 )
@@ -121,8 +120,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
-        self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
-        self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
+        self.need_extra_args = get_current_hardware_profile().supports(HardwareCapability.MOE_DISPATCH_EXTRA_ARGS)
+        self.need_shared_expert_args = get_current_hardware_profile().supports(
+            HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS
+        )
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
@@ -181,7 +182,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
-            quant_mode = 4 if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp else 2
+            quant_mode = 4 if self.need_shared_expert_args and token_dispatch_input.quant.is_mxfp else 2
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
@@ -215,7 +216,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             )
         # Only dispatch-enabled MXFP paths pass y_dtype through MC2.
         if (
-            self.a5_need_extra_args
+            self.need_shared_expert_args
             and (token_dispatch_input.quant.is_mxfp or token_dispatch_input.quant.is_fp8)
             and token_dispatch_input.quant.dispatch_with_quant
         ):
@@ -226,7 +227,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             ):
                 y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-        if self.need_expert_scale or self.a5_need_extra_args:
+        if self.need_expert_scale or self.need_shared_expert_args:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),

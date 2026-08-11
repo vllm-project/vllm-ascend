@@ -33,8 +33,8 @@ except ImportError:
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p
 
 
 def _ascend_all_gather_hidden_and_residual(
@@ -217,7 +217,7 @@ _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
-if is_310p():
+if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core

@@ -29,6 +29,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -36,8 +37,6 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     get_potential_max_tokens,
     npu_stream_switch,
     olora_tp_enable,
@@ -391,7 +390,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -1572,7 +1571,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -2493,7 +2492,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if (
             _is_w8a8_dynamic(self.inderxer_wq_b)
             and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
+            and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         ):
             q = torch_npu.npu_quant_matmul(
                 qr,

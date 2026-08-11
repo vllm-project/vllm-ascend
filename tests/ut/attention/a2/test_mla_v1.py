@@ -21,6 +21,8 @@ from vllm_ascend.attention.mla_v1 import (
     PrefillMLAPreprocessResult,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
 class TestAscendMLABackend(TestBase):
@@ -1588,7 +1590,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_mlapo_a5(self, mock_format_cast, mock_get_ascend_device_type):
         # test with enable_mlapo=True and device_type=A5
@@ -1612,9 +1614,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
         # set device_type=A5
-        from vllm_ascend.attention.mla_v1 import AscendDeviceType
 
-        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A5)
 
         self.impl._process_weights_for_fused_mlapo_a5 = MagicMock()
 
@@ -1630,7 +1631,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_mlapo_non_a5(self, mock_format_cast, mock_get_ascend_device_type):
         # test with enable_mlapo=True and device_type!=A5
@@ -1654,9 +1655,7 @@ class TestAscendMLAImpl(TestBase):
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
-        from vllm_ascend.attention.mla_v1 import AscendDeviceType
-
-        mock_get_ascend_device_type.return_value = AscendDeviceType.A2
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
 
         self.impl._process_weights_for_fused_mlapo = MagicMock()
 

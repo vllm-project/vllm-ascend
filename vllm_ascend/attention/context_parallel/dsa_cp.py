@@ -26,6 +26,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
@@ -33,9 +34,7 @@ from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin, TPWeightSwitchState
 from vllm_ascend.utils import (
-    AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
-    get_ascend_device_type,
     olora_tp_enable,
 )
 
@@ -230,7 +229,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -1096,7 +1095,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and get_current_hardware_profile().supports(
+            HardwareCapability.DSA_O_PROJ_TP
+        )
         self._o_proj_tp_weight_switch_enabled = False
 
         self.eps = kwargs["eps"]
@@ -1341,7 +1342,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            if get_ascend_device_type() in {AscendDeviceType.A5}:
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
                 if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
@@ -1732,7 +1733,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
             and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
             and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
+            and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         ):
             q = torch_npu.npu_quant_matmul(
                 qr,

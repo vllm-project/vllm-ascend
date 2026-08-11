@@ -14,13 +14,13 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
-from vllm_ascend.utils import is_310p
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return not is_310p()
+    return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):

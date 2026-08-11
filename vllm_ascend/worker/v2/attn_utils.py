@@ -47,8 +47,9 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, get_ascend_device_type
+from vllm_ascend.utils import calc_split_factor
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -348,7 +349,7 @@ def _view_dsv4_cache(
         )
         cache_shapes.append(scale_shape)
         cache_dtypes.append(scale_dtype)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
                 kv_cache_spec.block_size,

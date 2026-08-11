@@ -22,6 +22,8 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
@@ -311,7 +313,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -323,7 +327,10 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -335,7 +342,10 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float32)
             result = utils.maybe_trans_nz(weight)
@@ -347,7 +357,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -359,7 +371,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -371,7 +385,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.bfloat16)
             result = utils.maybe_trans_nz(weight)
@@ -383,7 +399,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.zeros(32, 64, dtype=torch.int8)
             result = utils.maybe_trans_nz(weight)
@@ -416,14 +434,18 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
 
 def test_is_rc_device_returns_false_on_non_310p():
     utils._IS_RC_DEVICE = None
-    with mock.patch("vllm_ascend.utils.is_310p", return_value=False):
+    with mock.patch(
+        "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    ):
         assert utils.is_rc_device() is False
 
 
 def test_is_rc_device_detects_ep_from_lspci():
     utils._IS_RC_DEVICE = None
     with (
-        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
         mock.patch("subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = "00:00.0 accelerators: Huawei Technologies Co., Ltd."
@@ -433,7 +455,9 @@ def test_is_rc_device_detects_ep_from_lspci():
 def test_is_rc_device_detects_rc_from_lspci():
     utils._IS_RC_DEVICE = None
     with (
-        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
         mock.patch("subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = "00:00.0 PCI bridge: Huawei Technologies Co., Ltd."
@@ -443,7 +467,9 @@ def test_is_rc_device_detects_rc_from_lspci():
 def test_is_rc_device_defaults_to_ep_when_lspci_unavailable():
     utils._IS_RC_DEVICE = None
     with (
-        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
         mock.patch("subprocess.run", side_effect=FileNotFoundError),
     ):
         assert utils.is_rc_device() is False

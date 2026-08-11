@@ -45,6 +45,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
@@ -52,8 +53,6 @@ from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
-    AscendDeviceType,
-    get_ascend_device_type,
     maybe_trans_nz,
     weak_ref_tensors,
 )
@@ -743,7 +742,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
-            self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+            self.dtype = (
+                torch.float8_e4m3fn
+                if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+                else torch.int8
+            )
         else:
             self.dtype = self.vllm_config.model_config.dtype
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
@@ -960,7 +963,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "Some layers not W8A8 quantized, mlapo disabled for these layers."
                 )
         if self.enable_mlapo:
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 self._process_weights_for_fused_mlapo_a5(act_dtype)
             else:
                 self._process_weights_for_fused_mlapo(act_dtype)
@@ -971,7 +974,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
     def _process_weights_for_fused_fa_quant(self):
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
             self.fak_descale_float = layer.fak_descale_float
             self.quant_kscale = layer.quant_kscale
@@ -1188,7 +1191,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+            if self.fa_quant_layer and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
                     torch.bfloat16
                 )
@@ -1309,7 +1312,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1341,7 +1344,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
         c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1389,7 +1392,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        if self.fa_quant_layer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
@@ -1442,7 +1445,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask = None
             sparse_mode = 0
             actual_seq_lengths = None
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
@@ -1613,7 +1616,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
-        if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+        if self.fa_quant_layer and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
                 decode_ql_nope, dst_type=torch.float8_e4m3fn
             )

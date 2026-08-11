@@ -80,14 +80,13 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    AscendDeviceType,
     enable_dsa_cp,
     extract_dsv4_layer_index,
-    get_ascend_device_type,
     get_dsv4_compress_ratio,
 )
 
@@ -152,7 +151,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
@@ -168,7 +167,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
+            scale_dtype=torch.float
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.float16,
         )
 
     def forward(self): ...
@@ -192,10 +193,14 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        cached_head_size = (
+            self.head_dim + 128
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else self.head_dim
+        )
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -578,8 +583,11 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
+        k_dtype = (
+            torch.float8_e4m3fn
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.int8
+        )
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
@@ -637,7 +645,9 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
+            quant_config=None
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else quant_config,
             prefix=f"{prefix}.wkv",
             return_bias=False,
         )
@@ -645,13 +655,17 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
+            quant_config=None
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else quant_config,
             prefix=f"{prefix}.wgate",
             return_bias=False,
         )
 
-        # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
+        # current compressor kernel needs float for norm_weight input
+        norm_dtype = (
+            torch.float32 if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE) else None
+        )
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
 
         state_dtype = torch.float32
@@ -864,8 +878,11 @@ class DeepseekV4Attention(nn.Module):
                 if 0 <= indexer_seq_idx < len(pattern):
                     skip_topk = pattern[indexer_seq_idx] == "S"
 
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        k_dtype = (
+            torch.float8_e4m3fn
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.bfloat16
+        )
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,

@@ -18,6 +18,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models import deepseek_v4
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2 import attn_utils
@@ -73,13 +74,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 
     monkeypatch.setattr(
         deepseek_v4,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
         attn_utils,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
         attn_utils,
