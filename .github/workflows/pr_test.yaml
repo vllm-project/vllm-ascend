@@ -448,11 +448,6 @@ jobs:
             .github/workflows/scripts
           sparse-checkout-cone-mode: false
 
-      - name: Force failure (fallback verification)
-        run: |
-          echo "::error::Intentional failure to verify fallback to select-tests (full diff-selected tests)"
-          exit 1
-
       - name: Download test case map
         run: |
           set -euo pipefail
