@@ -21,14 +21,15 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import numpy as np
 import pytest
 import torch
+import torch_npu
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
     MoEMC2CombineMetadata,
     MoEQuantParams,
-    MoERoutingParams,
+    MoeRouterInput,
     MoETokenDispatchInput,
 )
 
@@ -40,7 +41,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
-from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
@@ -68,7 +69,7 @@ def build_token_dispatch_input_fixture(
         hidden_states=hidden_states,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        routing=MoERoutingParams(
+        routing=MoeRouterInput(
             expert_map=expert_map,
             global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=mc2_mask,
@@ -171,7 +172,7 @@ class TestTokenDispatcherWithMC2(TestBase):
     def test_init(self):
         self.assertEqual(self.dispatcher.ep_rank_id, 0)
         self.assertEqual(self.dispatcher.ep_world_size, 8)
-        self.assertTrue(self.dispatcher.enable_dispatch_v2)
+        self.assertEqual(self.dispatcher.enable_dispatch_v2, hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"))
         self.assertTrue(self.dispatcher.need_extra_args)
         self.assertEqual(self.dispatcher.global_bs, 0)
 
@@ -249,9 +250,12 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_weights = torch.randn(10, 1)
         topk_ids = torch.randint(0, 8, (10, 1))
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        self.dispatcher.enable_dispatch_v2 = True
 
         with patch(
-            "torch_npu.npu_moe_distribute_dispatch_v2", return_value=(torch.randn(10, 128),) * 5 + (None, None)
+            "torch_npu.npu_moe_distribute_dispatch_v2",
+            return_value=(torch.randn(10, 128),) * 5 + (None, None),
+            create=True,
         ) as mock_dispatch:
             token_dispatch_input = build_token_dispatch_input_fixture(
                 hidden_states=hidden_states,
@@ -280,7 +284,9 @@ class TestTokenDispatcherWithMC2(TestBase):
             is_per_channel_weight=True,
         )
         with patch(
-            "torch_npu.npu_moe_distribute_dispatch_v2", return_value=(torch.randn(10, 128),) * 5 + (None, None)
+            "torch_npu.npu_moe_distribute_dispatch_v2",
+            return_value=(torch.randn(10, 128),) * 5 + (None, None),
+            create=True,
         ) as mock_dispatch:
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
@@ -382,6 +388,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(kwargs["quant_mode"], 4)
         self.assertIn("y_dtype", kwargs)
         self.assertNotEqual(kwargs["y_dtype"], torch.float8_e4m3fn)
+        self.dispatcher.enable_dispatch_v2 = True
 
         with patch(
             "torch_npu.npu_moe_distribute_dispatch_v2",
@@ -394,6 +401,7 @@ class TestTokenDispatcherWithMC2(TestBase):
                 torch.tensor([10], dtype=torch.int64),
                 torch.randn(10, 1),
             ),
+            create=True,
         ) as mock_dispatch:
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 

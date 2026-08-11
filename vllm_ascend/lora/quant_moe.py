@@ -37,7 +37,7 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w13,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 
 QuantMoELoRAApply = Callable[[MoEMlpComputeInput], tuple[torch.Tensor, torch.npu.Event | None]]
