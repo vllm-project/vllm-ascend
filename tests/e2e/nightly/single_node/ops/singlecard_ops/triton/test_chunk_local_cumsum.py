@@ -66,6 +66,7 @@ def reference_chunk_local_cumsum(
         pytest.param((2, 513, 4), 64, True, 0.25, None, False, id="tail-reverse-scale"),
         pytest.param((2, 4, 513), 64, False, None, None, True, id="head-first-tail"),
         pytest.param((1, 300, 8), 64, True, None, [0, 15, 100, 300], False, id="varlen"),
+        pytest.param((1, 4, 300), 64, False, None, [0, 15, 100, 300], True, id="head-first-varlen"),
     ],
 )
 @torch.inference_mode()

@@ -36,6 +36,7 @@ def chunk_local_cumsum_scalar_kernel(
 ):
     i_block, i_b = tl.program_id(0), tl.program_id(1)
     N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE
+    stride_h = T
 
     if IS_VARLEN:
         i_s, i_block = (
@@ -43,13 +44,20 @@ def chunk_local_cumsum_scalar_kernel(
             tl.load(chunk_indices + i_block * 2 + 1).to(tl.int32),
         )
         bos, eos = tl.load(cu_seqlens + i_s).to(tl.int32), tl.load(cu_seqlens + i_s + 1).to(tl.int32)
-        T = eos - bos
+        seq_len = eos - bos
+        head_offset = bos
     else:
         bos, eos = i_b * T, i_b * T + T
+        seq_len = T
+        head_offset = bos * H
 
     if HEAD_FIRST:
-        ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
-        ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
+        ptr_s = tl.make_block_ptr(
+            s + head_offset, (H, seq_len), (stride_h, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0)
+        )
+        ptr_o = tl.make_block_ptr(
+            o + head_offset, (H, seq_len), (stride_h, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0)
+        )
         b_s = tl.load(ptr_s, boundary_check=(1,)).to(tl.float32)
         b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))
         b_s = tl.trans(b_s, (2, 0, 1))
@@ -59,8 +67,8 @@ def chunk_local_cumsum_scalar_kernel(
         b_o = tl.trans(b_o, (1, 2, 0))
         b_o = tl.reshape(b_o, (H, BLOCK_T))
     else:
-        ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
-        ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
+        ptr_s = tl.make_block_ptr(s + bos * H, (seq_len, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
+        ptr_o = tl.make_block_ptr(o + bos * H, (seq_len, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
         b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
         b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))
         b_s = tl.trans(b_s, (1, 0, 2))
