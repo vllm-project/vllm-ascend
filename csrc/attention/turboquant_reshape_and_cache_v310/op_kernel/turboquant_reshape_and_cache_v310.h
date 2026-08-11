@@ -73,6 +73,12 @@ public:
         pipe->InitBuffer(byteBuf_, TQTraits<BITS>::PackedBytes(d));
         pipe->InitBuffer(signBuf_, d * sizeof(float));
         pipe->InitBuffer(cbBuf_, (2 * (1 << BITS)) * sizeof(float));
+        // planar-pack scratch. These were DECLARED and USED but never
+        // InitBuffer'd, so Get<float>() handed back aliasing tensors: pack then
+        // computed c[128]*32 instead of c[0] + c[128]*16, and c[0] was lost.
+        pipe->InitBuffer(pkHBuf_, (d / 2) * sizeof(half));
+        pipe->InitBuffer(pkF0Buf_, (d / 2) * sizeof(float));
+        pipe->InitBuffer(pkF1Buf_, (d / 2) * sizeof(float));
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
@@ -146,7 +152,26 @@ private:
         QuantizeVec<BITS>(v, codes, cb_[1 << BITS], tmp, d, sqrtLen_, t_->codebookMode);
 
         LocalTensor<uint8_t> bytes = byteBuf_.Get<uint8_t>();
-        PackCodes<BITS>(codes, bytes, d);
+        if constexpr (TQPlanar<BITS>::kSupported) {
+            LocalTensor<half> pkH = pkHBuf_.Get<half>();
+            LocalTensor<float> pkF0 = pkF0Buf_.Get<float>();
+            LocalTensor<float> pkF1 = pkF1Buf_.Get<float>();
+            PackCodesVec<BITS>(codes, bytes, pkH, pkF0, pkF1, d);   // vector path
+            /*
+             * V -> MTE3. The vector pack writes `bytes` with Cast on the V pipe
+             * and ScatterNz then reads it with an MTE3 DataCopy; V->MTE3 is NOT
+             * implicitly drained on 310P. The old scalar PackCodes wrote via
+             * SetValue on the S pipe and S->MTE3 IS drained, so this edge did
+             * not exist before the vectorisation.
+             * Symptom without it: token 0 packs correctly (nothing in flight)
+             * while later tokens land corrupted, and b=2 (4 planes, longer pack)
+             * is hit far harder than b=4 (2 planes).
+             */
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
+        } else {
+            PackCodes<BITS>(codes, bytes, d);                 // scalar fallback (BITS=3)
+        }
         PipeBarrier<PIPE_V>();
 
         ScatterNz(cache, bytes, h, slot);
@@ -181,7 +206,8 @@ private:
     GlobalTensor<int32_t> slotGm_;
     GlobalTensor<float> signGm_, cbGm_;
     TQue<QuePosition::VECIN, kBufferNum> inQue_;
-    TBuf<TPosition::VECCALC> vecBuf_, tmpBuf_, codeBuf_, byteBuf_, signBuf_, cbBuf_;
+    TBuf<TPosition::VECCALC> vecBuf_, tmpBuf_, codeBuf_, byteBuf_, signBuf_, cbBuf_,
+        pkHBuf_, pkF0Buf_, pkF1Buf_;
     LocalTensor<float> signs_, cb_;
     float invSqrtLen_{1.0f};
     float sqrtLen_{1.0f};

@@ -92,7 +92,10 @@ public:
         pipe->InitBuffer(outBuf_, d * sizeof(half));
         pipe->InitBuffer(redBuf_, d * sizeof(float));   // ReduceSum dst (must not alias src)
         pipe->InitBuffer(wrkBuf_, d * sizeof(float));
-        pipe->InitBuffer(dbgBuf_, d * sizeof(float));   // variant==10 dot dump; nothing else touches it   // ReduceSum workLocal (must not alias src/dst)
+        pipe->InitBuffer(dbgBuf_, d * sizeof(float));
+        pipe->InitBuffer(unpHBuf_, (d / 2) * sizeof(half));      // planar unpack scratch
+        pipe->InitBuffer(unpF0Buf_, (d / 2) * sizeof(float));
+        pipe->InitBuffer(unpF1Buf_, (d / 2) * sizeof(float));   // variant==10 dot dump; nothing else touches it   // ReduceSum workLocal (must not alias src/dst)
 
         signs_ = signBuf_.Get<float>();
         DataCopy(signs_, signGm_, d);
@@ -146,6 +149,9 @@ private:
         LocalTensor<float> red = redBuf_.Get<float>();
         LocalTensor<float> wrk = wrkBuf_.Get<float>();
         LocalTensor<float> dbg = dbgBuf_.Get<float>();
+        LocalTensor<half> unpH = unpHBuf_.Get<half>();
+        LocalTensor<float> unpF0 = unpF0Buf_.Get<float>();
+        LocalTensor<float> unpF1 = unpF1Buf_.Get<float>();
 
         // q -> fp32, then into the rotated basis (once per head, not per key)
         LocalTensor<half> qh16 = outBuf_.Get<half>();
@@ -195,9 +201,23 @@ private:
 
                 // ---- score: <Pi q, yhat_k> * ||k|| * scale -------------------
                 GatherNz(kCacheGm_, bytes, kvh, static_cast<uint32_t>(phys), tk);
-                UnpackCodes<BITS>(bytes, codes, d);
-                SetFlag<HardEvent::S_V>(EVENT_ID1);   // scalar wrote `codes` -> vector reads it
-                WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                if constexpr (TQPlanar<BITS>::kSupported) {
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);   // vector path
+                    /*
+                     * V -> MTE2, the SYMMETRIC counterpart to the MTE2 -> V edge
+                     * in GatherNz. The NEXT iteration's gather overwrites `bytes`
+                     * while this unpack may still be reading it on the V pipe.
+                     * With the old scalar unpack this edge was S -> MTE2, which
+                     * IS implicitly drained on 310P, so it never had to exist.
+                     * Moving the read to the vector pipe created it.
+                     */
+                    SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                } else {
+                    UnpackCodes<BITS>(bytes, codes, d);                   // scalar fallback (BITS=3)
+                    SetFlag<HardEvent::S_V>(EVENT_ID1);
+                    WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                }
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
 
                 Mul(tmp, q, kv, d);
@@ -267,6 +287,14 @@ private:
                 } else {
                     score = tmp.GetValue(0) * kNorm * t_->scale;
                 }
+                if (t_->variant == 12u && tk == tokEnd - 1) {
+                    Cast(dbg, codes, RoundMode::CAST_NONE, d);   // dump LAST token's codes
+                    PipeBarrier<PIPE_V>();
+                }
+                if (t_->variant == 11u && tk == 0) {
+                    Cast(dbg, codes, RoundMode::CAST_NONE, d);   // dump unpacked codes
+                    PipeBarrier<PIPE_V>();
+                }
                 if (t_->variant == 10u) {
                     // capture the EXACT value the score uses; must read the same
                     // buffer ReduceSum writes (tmp in the aliased form)
@@ -297,9 +325,23 @@ private:
                 // ---- accumulate w * ||v|| * yhat_v (still rotated) ----------
                 GatherNz((t_->variant == 7u) ? kCacheGm_ : vCacheGm_, bytes, kvh,
                          static_cast<uint32_t>(phys), tk);
-                UnpackCodes<BITS>(bytes, codes, d);
-                SetFlag<HardEvent::S_V>(EVENT_ID1);   // scalar wrote `codes` -> vector reads it
-                WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                if constexpr (TQPlanar<BITS>::kSupported) {
+                    UnpackCodesVec<BITS>(bytes, codes, unpH, unpF0, unpF1, d);   // vector path
+                    /*
+                     * V -> MTE2, the SYMMETRIC counterpart to the MTE2 -> V edge
+                     * in GatherNz. The NEXT iteration's gather overwrites `bytes`
+                     * while this unpack may still be reading it on the V pipe.
+                     * With the old scalar unpack this edge was S -> MTE2, which
+                     * IS implicitly drained on 310P, so it never had to exist.
+                     * Moving the read to the vector pipe created it.
+                     */
+                    SetFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                    WaitFlag<HardEvent::V_MTE2>(EVENT_ID7);
+                } else {
+                    UnpackCodes<BITS>(bytes, codes, d);                   // scalar fallback (BITS=3)
+                    SetFlag<HardEvent::S_V>(EVENT_ID1);
+                    WaitFlag<HardEvent::S_V>(EVENT_ID1);
+                }
                 DequantizeVec<BITS>(codes, kv, cb_, d, t_->invSqrtHeadDim, t_->codebookMode);
                 const float vNorm = static_cast<float>(
                     vNormGm_.GetValue(static_cast<uint64_t>(slot) * t_->numKvHeads + kvh));
@@ -320,7 +362,7 @@ private:
             Muls(acc, acc, 1.0f / runSum, d);
             PipeBarrier<PIPE_V>();
         }
-        if (t_->variant == 10u) {
+        if (t_->variant == 10u || t_->variant == 11u || t_->variant == 12u) {
             LocalTensor<half> dh = outBuf_.Get<half>();
             Cast(dh, dbg, RoundMode::CAST_NONE, d);
             SetFlag<HardEvent::V_MTE3>(EVENT_ID4);
@@ -374,11 +416,23 @@ private:
                 ((static_cast<uint64_t>(blk) * t_->c1 + c1) * t_->blockSize + off) * kNzC0;
             DataCopy(asHalf[g * kNzC0], cache[src], kNzC0);
         }
-        // MTE2 -> S. UnpackCodes reads these bytes with scalar GetValue().
-        // PipeBarrier<PIPE_ALL> was here: not a real barrier on 310P, and the
-        // implicit X->S drain requires PipeBarrier<X> specifically.
-        SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        /*
+         * The consumer of `bytes` depends on the code path:
+         *   scalar UnpackCodes  -> GetValue on the SCALAR pipe  => MTE2 -> S
+         *   UnpackCodesVec      -> Cast on the VECTOR pipe      => MTE2 -> V
+         * MTE2->V is explicitly NOT implicitly drained on 310P, so switching the
+         * unpack to vector ops silently removed the only guarantee that the DMA
+         * had landed. Symptom: codes correct for token 0 (nothing in flight) but
+         * attention degrading over a full context, and worse at b=2 (4 planes,
+         * more vector ops, wider race window) than b=4 (2 planes).
+         */
+        if constexpr (TQPlanar<BITS>::kSupported) {
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+        } else {
+            SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        }
     }
 
     /*
@@ -429,7 +483,7 @@ private:
     GlobalTensor<int32_t> btGm_, seqGm_;
     GlobalTensor<float> signGm_, cbGm_;
     TBuf<TPosition::VECCALC> qBuf_, accBuf_, kvBuf_, tmpBuf_, byteBuf_, codeBuf_, signBuf_, cbBuf_,
-        outBuf_, redBuf_, wrkBuf_, dbgBuf_;
+        outBuf_, redBuf_, wrkBuf_, dbgBuf_, unpHBuf_, unpF0Buf_, unpF1Buf_;
     LocalTensor<float> signs_, cb_;
 };
 

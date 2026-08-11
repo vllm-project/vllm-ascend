@@ -237,6 +237,115 @@ __aicore__ inline void DequantizeVec(const LocalTensor<int32_t> &codes, const Lo
     PipeBarrier<PIPE_V>();
 }
 
+
+/*
+ * PLANAR PACK/UNPACK (vectorised) -- for BITS that divide 8 evenly (2 and 4).
+ *
+ * msprof on the read kernel: scalar pipe 100.2% utilised, vector 12.8%, MTE2
+ * 14.4%. The scalar GetValue/SetValue unpack was the entire bottleneck
+ * (256 codes x2 for K/V x16 query heads ~= 8192 scalar ops per token).
+ *
+ * The fix is a LAYOUT change, not just an instruction change. Interleaved
+ * packing (codes 0..7 -> bytes 0..2) cannot be unpacked without a per-lane
+ * shuffle. Planar packing puts each code's plane in its own contiguous run:
+ *
+ *   BITS=4, len=256:  byte[i] = c[i] | (c[i+128] << 4)          i in [0,128)
+ *     unpack: c[0:128] = byte & 0x0F ;  c[128:256] = byte >> 4
+ *
+ *   BITS=2, len=256:  byte[i] = c[i] | c[i+64]<<2 | c[i+128]<<4 | c[i+192]<<6
+ *     unpack: four (shift, mask) pairs
+ *
+ * Byte count is IDENTICAL to the interleaved form, so the FRACTAL_NZ cache
+ * layout, packedHalves and every tiling check are unaffected -- only the order
+ * of codes within the bytes changes, and pack/unpack agree by construction.
+ * Code i still means coordinate i, so the quantiser and dequantiser are
+ * untouched.
+ */
+template <int BITS>
+struct TQPlanar {
+    static constexpr bool kSupported = (8 % BITS == 0);
+    static constexpr int kPlanes = 8 / BITS;              // codes per byte
+    __aicore__ static constexpr int Lanes(int len) { return len / kPlanes; }
+};
+
+// bytes -> codes, vectorised, using FLOAT ARITHMETIC only.
+//
+// ShiftRight/ShiftLeft on int16 silently returned 0 on this target (plane 0 came
+// back as the raw byte 255 because the mask degenerated to `x - 0`, plane 1 came
+// back as 0). And/Or are int16-only and `Ands` is not visible for this chip, so
+// the bit slicing is done in float, where every op is bread-and-butter.
+//
+// Planes are peeled from the TOP down with a running remainder, so only two
+// scratch buffers are needed and no masking step is required:
+//     for pl = kPlanes-1 .. 0:
+//         plane = floor(rem / 2^(BITS*pl));  rem -= plane * 2^(BITS*pl)
+template <int BITS>
+__aicore__ inline void UnpackCodesVec(const LocalTensor<uint8_t> &bytes,
+                                      const LocalTensor<int32_t> &codes,
+                                      const LocalTensor<half> &tmpH,
+                                      const LocalTensor<float> &rem,
+                                      const LocalTensor<float> &pln, int len)
+{
+    using P = TQPlanar<BITS>;
+    const int lanes = P::Lanes(len);
+    Cast(tmpH, bytes, RoundMode::CAST_NONE, lanes);          // u8 -> half
+    PipeBarrier<PIPE_V>();
+    Cast(rem, tmpH, RoundMode::CAST_NONE, lanes);            // half -> float (0..255)
+    PipeBarrier<PIPE_V>();
+#pragma unroll
+    for (int pl = P::kPlanes - 1; pl >= 0; --pl) {
+        float scale = 1.0f;                                   // 2^(BITS*pl)
+        for (int k = 0; k < pl; ++k) {
+            scale *= static_cast<float>(1 << BITS);
+        }
+        Muls(pln, rem, 1.0f / scale, lanes);
+        PipeBarrier<PIPE_V>();
+        Floor(pln, pln, lanes);
+        PipeBarrier<PIPE_V>();
+        Cast(codes[pl * lanes], pln, RoundMode::CAST_RINT, lanes);
+        PipeBarrier<PIPE_V>();
+        if (pl > 0) {
+            Muls(pln, pln, scale, lanes);
+            PipeBarrier<PIPE_V>();
+            Sub(rem, rem, pln, lanes);                        // peel this plane off
+            PipeBarrier<PIPE_V>();
+        }
+    }
+}
+
+// codes -> bytes, vectorised. Planes do not overlap, so OR is just ADD:
+//     byte = sum_p code[p] * 2^(BITS*p)
+template <int BITS>
+__aicore__ inline void PackCodesVec(const LocalTensor<int32_t> &codes,
+                                    const LocalTensor<uint8_t> &bytes,
+                                    const LocalTensor<half> &tmpH,
+                                    const LocalTensor<float> &f0,
+                                    const LocalTensor<float> &f1, int len)
+{
+    using P = TQPlanar<BITS>;
+    const int lanes = P::Lanes(len);
+    constexpr float kUnit = static_cast<float>(1 << BITS);
+    Cast(f0, codes[0], RoundMode::CAST_NONE, lanes);         // plane 0
+    PipeBarrier<PIPE_V>();
+#pragma unroll
+    for (int pl = 1; pl < P::kPlanes; ++pl) {
+        float mul = 1.0f;
+        for (int k = 0; k < pl; ++k) {
+            mul *= kUnit;
+        }
+        Cast(f1, codes[pl * lanes], RoundMode::CAST_NONE, lanes);
+        PipeBarrier<PIPE_V>();
+        Muls(f1, f1, mul, lanes);
+        PipeBarrier<PIPE_V>();
+        Add(f0, f0, f1, lanes);
+        PipeBarrier<PIPE_V>();
+    }
+    Cast(tmpH, f0, RoundMode::CAST_NONE, lanes);
+    PipeBarrier<PIPE_V>();
+    Cast(bytes, tmpH, RoundMode::CAST_NONE, lanes);
+    PipeBarrier<PIPE_V>();
+}
+
 /*
  * Pack `len` codes into bytes. 8 codes -> BITS bytes, exactly, for BITS in 2/3/4.
  * Emitted bytes are reinterpreted as half by the caller: the 310P paged cache
