@@ -369,10 +369,11 @@ def test_register_m3_sparse_packed_modules_adds_split_indexer_mapping() -> None:
     }
 
 
-def test_sparse_prepare_keeps_npu_fused_qkv_norm_rope_path() -> None:
+def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     source = inspect.getsource(MiniMaxM3SparseAttention._sparse_prepare)
 
     assert "qkv_rmsnorm_rope" in source
+    assert "get_ascend_device_type() == AscendDeviceType.A5" in source
     assert 'main_qkv.device.type != "npu"' in source
     assert "1.0 + self.q_norm.weight" in source
 

@@ -319,7 +319,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
 
         if (
-            main_qkv.device.type != "npu"
+            get_ascend_device_type() == AscendDeviceType.A5
+            or main_qkv.device.type != "npu"
             or main_qkv.dtype != torch.bfloat16
             or positions.ndim != 1
             or not getattr(self.rotary_emb, "is_neox_style", True)
@@ -393,7 +394,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def _index_qk_norm(self, idx_q: torch.Tensor, idx_k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         idx_q_shape = idx_q.shape
         idx_k_shape = idx_k.shape
-        idx_q = idx_q.reshape(-1, self.index_q_size)
+        idx_q = idx_q.reshape(-1, self.idx_head_dim)
         idx_k = idx_k.reshape(-1, self.idx_head_dim)
         idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
         idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
@@ -720,10 +721,10 @@ class MiniMaxM3Attention(nn.Module):
     def _qk_norm(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q_shape = q.shape
         k_shape = k.shape
-        q = q.reshape(-1, self.head_dim).contiguous()
-        k = k.reshape(-1, self.head_dim).contiguous()
-        q = self.q_norm(q).reshape(q_shape)
-        k = self.k_norm(k).reshape(k_shape)
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+        q = self.q_norm(q_by_head).view(q_shape)
+        k = self.k_norm(k_by_head).view(k_shape)
         return q, k
 
     def forward(
