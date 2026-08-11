@@ -61,6 +61,7 @@ from vllm_ascend.distributed.parallel_state import (
 from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_sp,
+    is_310p,
     is_vl_model,
     mlp_tp_enable,
     oproj_tp_enable,
@@ -312,6 +313,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
         self.unique_prefix = None
+        self.use_tensor_mm_reduce_scatter_fusion = False
 
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
@@ -326,6 +328,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
         if self.tp_size == 1 or not self.reduce_results:
             output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        elif self.use_tensor_mm_reduce_scatter_fusion:
+            output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.unique_prefix)
 
@@ -363,6 +368,15 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.input_is_parallel = self.layer.input_is_parallel
         self.reduce_results = self.layer.reduce_results
         self.unique_prefix = self.layer.unique_prefix
+        try:
+            use_tensor_fusion = _supports_tensor_mm_reduce_scatter_fusion(
+                self.layer,
+                self.tp_size,
+                self.reduce_results,
+            )
+        except AssertionError:
+            use_tensor_fusion = False
+        self.use_tensor_mm_reduce_scatter_fusion = use_tensor_fusion
 
 
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):
@@ -394,6 +408,83 @@ _MULTIMODAL_ENCODER_PREFIX_PARTS = (
 
 def _should_skip_sp_for_multimodal_encoder(prefix: str) -> bool:
     return any(part in prefix for part in _MULTIMODAL_ENCODER_PREFIX_PARTS)
+
+
+_SEQUENCE_ROW_PARALLEL_PREFIXES = (
+    "o_proj",  # attn output linear of most LLMs
+    "out_proj",  # attn output linear of Qwen3 Next
+    "down_proj",  # second MLP of most LLMs
+    "attention.dense",  # attn output linear of Bailing
+    "wo_b",  # attn output linear of v4
+)
+
+_TENSOR_MM_REDUCE_SCATTER_RANKS = {2, 4, 8}
+_TENSOR_MM_REDUCE_SCATTER_DTYPES = {torch.float16, torch.bfloat16}
+
+
+def _is_context_parallel_attention_output(prefix: str) -> bool:
+    if enable_dsa_cp() and ("o_proj" in prefix or "wo_b" in prefix):
+        return True
+    return False
+
+
+def _get_weight_dtype(layer) -> torch.dtype | None:
+    weight = getattr(layer, "weight", None)
+    if weight is None:
+        return None
+    return getattr(weight, "dtype", getattr(getattr(weight, "data", None), "dtype", None))
+
+
+def _supports_tensor_mm_reduce_scatter_quant_method(layer) -> bool:
+    """Return True for quant methods covered by matmul-reduce-scatter kernels."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
+
+    quant_method = getattr(layer, "quant_method", None)
+    if isinstance(quant_method, UnquantizedLinearMethod):
+        return _get_weight_dtype(layer) in _TENSOR_MM_REDUCE_SCATTER_DTYPES
+
+    if not isinstance(quant_method, AscendLinearMethod):
+        return False
+
+    inner_quant_method = quant_method.quant_method
+    if isinstance(inner_quant_method, AscendW8A8LinearMethod):
+        return all(
+            hasattr(layer, attr)
+            for attr in (
+                "weight",
+                "deq_scale",
+                "aclnn_input_scale",
+                "aclnn_input_scale_reciprocal",
+                "aclnn_input_offset",
+                "quant_bias",
+            )
+        )
+
+    chunk_size = getattr(layer, "_chunk_size", 0)
+    has_dynamic_weight_chunks = isinstance(chunk_size, int) and chunk_size > 0
+    return (
+        isinstance(inner_quant_method, AscendW8A8DynamicLinearMethod)
+        and hasattr(layer, "weight")
+        and hasattr(layer, "weight_scale")
+        and not has_dynamic_weight_chunks
+    )
+
+
+def _supports_tensor_mm_reduce_scatter_fusion(layer, tp_size: int, reduce_results: bool) -> bool:
+    """Return True only when the MC2 matmul-reduce-scatter op supports the row path."""
+    prefix = getattr(layer, "prefix", "")
+    if not reduce_results or tp_size not in _TENSOR_MM_REDUCE_SCATTER_RANKS:
+        return False
+    if is_310p():
+        return False
+    if not any(row_prefix in prefix for row_prefix in _SEQUENCE_ROW_PARALLEL_PREFIXES):
+        return False
+    if _is_context_parallel_attention_output(prefix):
+        return False
+    return _supports_tensor_mm_reduce_scatter_quant_method(layer)
 
 
 def _get_column_parallel_op(
@@ -438,14 +529,7 @@ def _get_row_parallel_op(
         # "share_expert" added for Step3p5
         if "shared_expert" in prefix or "share_expert" in prefix:
             return None
-        sp_row_prefixes = [
-            "o_proj",  # attn output linear of most LLMs
-            "out_proj",  # attn output linear of Qwen3 Next
-            "down_proj",  # second MLP of most LLMs
-            "attention.dense",  # attn output linear of Bailing
-            "wo_b",  # attn output linear of v4
-        ]
-        for a_prefix in sp_row_prefixes:
+        for a_prefix in _SEQUENCE_ROW_PARALLEL_PREFIXES:
             if a_prefix in prefix:
                 return SequenceRowParallelOp(layer)
 

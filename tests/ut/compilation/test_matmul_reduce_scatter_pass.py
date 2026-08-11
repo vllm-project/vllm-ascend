@@ -7,7 +7,7 @@ from vllm_ascend.compilation.passes.matmul_reduce_scatter_pass import MatmulRedu
 from vllm_ascend.ops import register_custom_ops  # noqa: F401
 
 
-def test_matmul_reduce_scatter_pass_replaces_custom_op():
+def test_matmul_reduce_scatter_pass_keeps_layer_wrapper():
     graph = fx.Graph()
     x = graph.placeholder("x")
     node = graph.call_function(torch.ops.vllm.matmul_and_reduce.default, args=(x, "layer"))
@@ -19,4 +19,4 @@ def test_matmul_reduce_scatter_pass_replaces_custom_op():
     MatmulReduceScatterFusionPass(config)(graph)
 
     targets = [node.target for node in graph.nodes if node.op == "call_function"]
-    assert targets == [torch.ops.vllm.matmul_reduce_scatter.default]
+    assert targets == [torch.ops.vllm.matmul_and_reduce.default]

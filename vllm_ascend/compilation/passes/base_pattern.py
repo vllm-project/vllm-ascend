@@ -9,7 +9,10 @@ from vllm.config import VllmConfig
 try:
     import npugraph_ex as nge
 except ImportError:
-    import torchair as nge
+    try:
+        import torchair as nge
+    except ImportError:
+        nge = None
 
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
@@ -52,12 +55,13 @@ class BasePattern(ABC):
 
         pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
 
-        nge.register_replacement(
-            search_fn=pattern_fn,
-            replace_fn=replacement_fn,
-            example_inputs=example_inputs,
-            extra_check=self.get_extra_stream_scope_check(),
-        )
+        if nge is not None:
+            nge.register_replacement(
+                search_fn=pattern_fn,
+                replace_fn=replacement_fn,
+                example_inputs=example_inputs,
+                extra_check=self.get_extra_stream_scope_check(),
+            )
 
         # Mark this pattern as registered
         _registered_patterns.add(pattern_id)
