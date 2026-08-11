@@ -75,7 +75,7 @@ _COMMON_ENV = {
 }
 
 _V1_ENV = {**_COMMON_ENV, "VLLM_USE_V2_MODEL_RUNNER": "0"}
-_V2_ENV = {**_COMMON_ENV, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_VERSION": "0.27.0"}
+_V2_ENV = {**_COMMON_ENV, "VLLM_USE_V2_MODEL_RUNNER": "1"}
 
 _SERVER_ARGS = [
     "--trust-remote-code",
