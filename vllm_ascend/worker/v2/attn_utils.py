@@ -27,7 +27,7 @@ import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -45,6 +45,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -53,6 +54,8 @@ from vllm_ascend.utils import AscendDeviceType, calc_split_factor, get_ascend_de
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
@@ -80,6 +83,18 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
             )
+        if isinstance(attn_module, DeepseekV32IndexerCache):
+            kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=1,
+                head_size=vllm_config.model_config.hf_text_config.index_head_dim,
+                dtype=get_kv_cache_torch_dtype(
+                    vllm_config.cache_config.cache_dtype,
+                    vllm_config.model_config.dtype,
+                ),
+                cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            )
+            continue
 
         kv_cache_spec[layer_name] = spec
 
@@ -375,6 +390,86 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     return tensor[int(offset) :]
 
 
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _allocate_int8_cache_tensor(
+    numel: int,
+    alignment: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Allocate an int8 raw cache tensor.
+
+    When KV transfer is enabled, the returned tensor's data_ptr is aligned
+    to `alignment`. This keeps the original Mooncake/ADXL alignment behavior.
+    """
+    if numel <= 0:
+        raise ValueError(f"Invalid cache tensor size: {numel}")
+
+    vllm_config = get_current_vllm_config()
+    if vllm_config.kv_transfer_config is None:
+        return torch.zeros(numel, dtype=torch.int8, device=device)
+
+    raw_tensor = torch.zeros(
+        numel + alignment,
+        dtype=torch.int8,
+        device=device,
+    )
+    return _align_memory(raw_tensor, alignment)[:numel]
+
+
+def _allocate_sparse_c8_indexer_tensors(
+    dsa_k_tensor_size: int,
+    dsa_k_scale_tensor_size: int,
+    alignment: int,
+    scale_dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Allocate dsa_k and dsa_k_scale from one aligned int8 raw allocation.
+
+    Both returned tensors are logical views into the same underlying storage:
+
+        sparse_c8_raw
+            ├── dsa_k_tensor        int8 raw bytes
+            └── dsa_k_scale_tensor  scale dtype raw bytes stored as int8 view
+
+    `dsa_k_scale_tensor` is still returned as int8 raw storage. Later reshape
+    code should continue to use:
+
+        raw_dsa_k_scale_tensor.view(scale_dtype).view(scale_shape)
+
+    This reduces HCCL/Mooncake registration count because register_buffer
+    can merge these two views into one registered memory range.
+    """
+    if dsa_k_tensor_size <= 0:
+        raise ValueError(f"Invalid dsa_k_tensor_size: {dsa_k_tensor_size}")
+    if dsa_k_scale_tensor_size <= 0:
+        raise ValueError(f"Invalid dsa_k_scale_tensor_size: {dsa_k_scale_tensor_size}")
+
+    scale_dtype_size = torch.empty((), dtype=scale_dtype).element_size()
+
+    # Ensure the scale view starts at an address aligned for scale_dtype.
+    scale_offset = _align_up(dsa_k_tensor_size, scale_dtype_size)
+    total_raw_size = scale_offset + dsa_k_scale_tensor_size
+
+    sparse_c8_raw_tensor = _allocate_int8_cache_tensor(
+        total_raw_size,
+        alignment,
+        device,
+    )
+
+    dsa_k_tensor = sparse_c8_raw_tensor[:dsa_k_tensor_size]
+    dsa_k_scale_tensor = sparse_c8_raw_tensor[scale_offset : scale_offset + dsa_k_scale_tensor_size]
+
+    assert dsa_k_tensor.is_contiguous()
+    assert dsa_k_scale_tensor.is_contiguous()
+    assert dsa_k_scale_tensor.data_ptr() % scale_dtype_size == 0
+    assert dsa_k_scale_tensor.numel() % scale_dtype_size == 0
+
+    return dsa_k_tensor, dsa_k_scale_tensor
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
@@ -408,6 +503,49 @@ def _allocate_kv_cache(
         example_layer_name = kv_cache_tensor.shared_by[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
         assert isinstance(example_spec, AttentionSpec)
+
+        if isinstance(example_spec, AscendSFAIndexerCacheSpec):
+            raw_cache: tuple[torch.Tensor, ...]
+            num_blocks = kv_cache_tensor.size // example_spec.page_size_bytes
+
+            k_tensor_size = (
+                num_blocks
+                * example_spec.sfa_dcp_replicated_indexer_size
+                * example_spec.block_size
+                * example_spec.num_kv_heads
+                * example_spec.head_size
+                * get_dtype_size(example_spec.dtype)
+            )
+            if example_spec.scale_dim:
+                scale_tensor_size = (
+                    num_blocks
+                    * example_spec.sfa_dcp_replicated_indexer_size
+                    * example_spec.block_size
+                    * example_spec.num_kv_heads
+                    * example_spec.scale_dim
+                    * get_dtype_size(example_spec.scale_dtype)
+                )
+                k_tensor, scale_tensor = _allocate_sparse_c8_indexer_tensors(
+                    dsa_k_tensor_size=k_tensor_size,
+                    dsa_k_scale_tensor_size=scale_tensor_size,
+                    alignment=alignment,
+                    scale_dtype=example_spec.scale_dtype,
+                    device=device,
+                )
+                raw_cache = (k_tensor, scale_tensor)
+            else:
+                k_tensor = _allocate_int8_cache_tensor(
+                    k_tensor_size,
+                    alignment,
+                    device,
+                )
+                raw_cache = (k_tensor,)
+
+            for layer_name_inner in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name_inner] = raw_cache
+
+            continue
+
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
         if enable_fa_quant(vllm_config):
             k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(example_layer_name, [k_dim, v_dim])
@@ -455,6 +593,7 @@ def _reshape_kv_cache_v2(
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
+
         group_spec = group.kv_cache_spec
         kernel_block_size = (
             group_spec.storage_block_size
@@ -465,8 +604,48 @@ def _reshape_kv_cache_v2(
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:
                 continue
+
             kv_cache_spec = layer_kv_cache_spec[layer_name]
             assert isinstance(kv_cache_spec, AttentionSpec)
+
+            if isinstance(group_spec, AscendSFAIndexerCacheSpec):
+                assert kv_cache_config is not None
+                raw_cache = kv_cache_raw_tensors[layer_name]
+                assert isinstance(raw_cache, tuple)
+
+                if group_spec.scale_dim:
+                    raw_k_tensor, raw_scale_tensor = raw_cache
+                    sum_page_size_bytes = raw_k_tensor.numel() + raw_scale_tensor.numel()
+                else:
+                    (raw_k_tensor,) = raw_cache
+                    raw_scale_tensor = None
+                    sum_page_size_bytes = raw_k_tensor.numel()
+
+                assert sum_page_size_bytes % group_spec.page_size_bytes == 0
+                num_blocks = sum_page_size_bytes // group_spec.page_size_bytes
+                assert num_blocks >= kv_cache_config.num_blocks
+
+                kv_cache_shape = group.backend.get_kv_cache_shape(
+                    num_blocks * group_spec.sfa_dcp_replicated_indexer_size,
+                    group_spec.block_size,
+                    group_spec.num_kv_heads,
+                    group_spec.head_size,
+                )
+
+                indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
+                if raw_scale_tensor is None:
+                    kv_caches[layer_name] = (indexer_k_cache,)
+                else:
+                    indexer_scale_cache_shape = group.backend.get_kv_cache_shape(
+                        num_blocks * group_spec.sfa_dcp_replicated_indexer_size,
+                        group_spec.block_size,
+                        group_spec.num_kv_heads,
+                        group_spec.scale_dim,
+                    )
+                    indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
+                    kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
+
+                continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
             if is_dsv4_model and isinstance(
