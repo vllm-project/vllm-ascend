@@ -8,6 +8,7 @@ from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     rejection_random_sample_block_verify_kernel,
     rejection_random_sample_kernel,
+    sample_recovered_tokens_kernel,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.rejection_sampler import rejection_random_sample_block_verify_pytorch
@@ -17,6 +18,64 @@ from vllm_ascend.sample.rejection_sampler import rejection_random_sample_block_v
 def setup_device_properties():
     init_device_properties_triton()
     yield
+
+
+@pytest.mark.parametrize("batch_size", [1, 8])
+@pytest.mark.parametrize("has_draft_probs", [False, True])
+@torch.inference_mode()
+def test_sample_recovered_tokens_all_nan(batch_size, has_draft_probs):
+    max_spec_len = 5
+    vocab_size = 17
+    num_tokens = batch_size * max_spec_len
+    cu_num_draft_tokens = torch.arange(
+        max_spec_len,
+        num_tokens + 1,
+        max_spec_len,
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    draft_token_ids = torch.ones(num_tokens, dtype=torch.int32, device=DEVICE)
+    draft_probs = None
+    if has_draft_probs:
+        draft_probs = torch.rand(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
+    target_probs = torch.full(
+        (num_tokens, vocab_size),
+        float("nan"),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    q = torch.ones(batch_size, vocab_size, dtype=torch.float32, device=DEVICE)
+    output_token_ids = torch.full_like(draft_token_ids, -1)
+
+    reference_probs = target_probs.clone()
+    if draft_probs is None:
+        reference_probs[torch.arange(num_tokens, device=DEVICE), draft_token_ids.long()] = 0
+    else:
+        reference_probs = torch.clamp(reference_probs - draft_probs, min=0)
+    expected = torch.argmax(
+        reference_probs / q.repeat_interleave(max_spec_len, dim=0), dim=1
+    ).to(output_token_ids.dtype)
+
+    sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        None,
+        q,
+        vocab_size,
+        vocab_size,
+        NO_DRAFT_PROBS=draft_probs is None,
+        ENABLE_REDUCE_SAMPLING=False,
+        SUB_BLOCK=16,
+        VOCAB_BLOCK_SIZE=8,
+        multibuffer=False,
+    )
+    torch.npu.synchronize()
+
+    assert torch.equal(output_token_ids, expected)
+    assert torch.all((output_token_ids >= 0) & (output_token_ids < vocab_size))
 
 
 @pytest.mark.skip("Probabilistic failure, need zengtian after fix")

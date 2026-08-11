@@ -346,7 +346,7 @@ def sample_recovered_tokens_kernel(
         n_loop = tl.cdiv(C, VOCAB_BLOCK_SIZE)
 
         global_max_p = tl.full((), -float("inf"), tl.float32)
-        global_recovered_id = tl.full((), -1, tl.int64)
+        global_recovered_id = tl.full((), 0, tl.int64)
         draft_token_id = tl.load(draft_token_ids_ptr + token_idx).to(tl.int64)
 
         for li in range(n_loop):
@@ -383,27 +383,31 @@ def sample_recovered_tokens_kernel(
             global_max_p = tl.where(better, block_best_score, global_max_p)
             global_recovered_id = tl.where(better, block_best_global_id, global_recovered_id)
 
+        global_recovered_id = tl.maximum(0, tl.minimum(global_recovered_id, global_vocab_size - 1))
         tl.store(output_token_ids_ptr + token_idx, global_recovered_id)
     else:
         vocab_size = global_vocab_size
         loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
-        global_recovered_id = -1
-        global_max_p = -1.0
+        global_recovered_id = 0
+        global_max_p = -float("inf")
         if NO_DRAFT_PROBS:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
             for loop_i in range(loop):
                 vocab_start = loop_i * SUB_BLOCK
                 vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                vocab_mask = vocab_offset < vocab_size
                 prob = tl.load(
                     target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
-                    mask=vocab_offset < vocab_size,
+                    mask=vocab_mask,
                     other=0,
                 )
                 prob = tl.where(vocab_offset == draft_token_id, 0.0, prob)
                 q = tl.load(
-                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_mask, other=float("-inf")
                 )
                 new_p = prob / q
+                # Padding must never win the argmax when valid scores are NaN.
+                new_p = tl.where(vocab_mask, new_p, float("-inf"))
                 recovered_id = tl.argmax(new_p, axis=-1)
                 max_p = get_element(new_p, (recovered_id,))
                 if max_p > global_max_p:
@@ -413,14 +417,15 @@ def sample_recovered_tokens_kernel(
             for loop_i in range(loop):
                 vocab_start = loop_i * SUB_BLOCK
                 vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                vocab_mask = vocab_offset < vocab_size
                 draft_prob = tl.load(
                     draft_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
-                    mask=vocab_offset < vocab_size,
+                    mask=vocab_mask,
                     other=0,
                 )
                 target_prob = tl.load(
                     target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
-                    mask=vocab_offset < vocab_size,
+                    mask=vocab_mask,
                     other=0,
                 )
                 prob = tl.maximum(target_prob - draft_prob, 0)
@@ -428,15 +433,17 @@ def sample_recovered_tokens_kernel(
                 # `tl.argmax` will select the maximum value.
 
                 q = tl.load(
-                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_mask, other=float("-inf")
                 )
                 new_p = prob / q
+                new_p = tl.where(vocab_mask, new_p, float("-inf"))
                 recovered_id = tl.argmax(new_p, axis=-1)
                 max_p = get_element(new_p, (recovered_id,))
                 if max_p > global_max_p:
                     global_max_p = max_p
                     global_recovered_id = vocab_start + recovered_id
 
+        global_recovered_id = tl.maximum(0, tl.minimum(global_recovered_id, vocab_size - 1))
         tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
 
 
