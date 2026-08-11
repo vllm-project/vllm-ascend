@@ -236,7 +236,7 @@ class AscendDSAPrefillMetadata:
     """Prefill Specific Metadata for Ascend"""
 
     attn_mask: torch.Tensor
-    query_lens: torch.Tensor
+    query_lens_cpu: torch.Tensor
     seq_lens: torch.Tensor
     context_lens: torch.Tensor
     input_positions: torch.Tensor
@@ -318,7 +318,7 @@ class AscendDSAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
-    query_lens: list[int] | None = None
+    query_lens_cpu: torch.Tensor | None = None
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
@@ -498,7 +498,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
         self.graph_pad_size = 0
-        self.query_lens: torch.Tensor = None
+        self.query_lens_cpu: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
@@ -661,9 +661,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-            self.query_lens = query_seq_lens_cpu[:num_reqs]
-            self.common_ratio_to_sas_metadata["query_lens"] = self.query_lens
+            self.query_lens_cpu = (
+                query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+            )
+            self.common_ratio_to_sas_metadata["query_lens_cpu"] = self.query_lens_cpu
         else:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
                 self.common_ratio_to_sas_metadata["num_decodes"],
@@ -676,7 +677,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
-            self.query_lens = self.common_ratio_to_sas_metadata["query_lens"]
+            self.query_lens_cpu = self.common_ratio_to_sas_metadata["query_lens_cpu"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
@@ -701,7 +702,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=self.num_actual_tokens,
-            query_lens=self.query_lens,
+            query_lens_cpu=self.query_lens_cpu,
             slot_mapping=None,
             head_dim=self.model_config.get_head_size(),
             num_decodes=self.num_decodes,
@@ -736,8 +737,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if self.prefill_ratio_to_sas_metadata.get("prefill_input_positions", None) is None:
             input_positions = common_attn_metadata.positions[: self.num_actual_tokens].long()
-            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[reqs_start:]
-            max_query_len = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
+            max_query_len = self.query_lens_cpu[reqs_start:].max().item()
             # Prefer _seq_lens_cpu (always available, updated during draft
             # iterations) over seq_lens_cpu (None in async spec decode mode).
             if common_attn_metadata._seq_lens_cpu is not None:
@@ -917,7 +917,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         return AscendDSAPrefillMetadata(
             attn_mask=None,
-            query_lens=self.query_lens[reqs_start:].to(torch.int32),
+            query_lens_cpu=self.query_lens_cpu[reqs_start:].to(torch.int32),
             seq_lens=self.seq_lens[reqs_start:],
             context_lens=self.seq_lens[reqs_start:],
             input_positions=prefill_input_positions,
@@ -1224,7 +1224,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
-            query_lens=None,
+            query_lens_cpu=None,
             slot_mapping=None,
             head_dim=self.model_config.get_head_size(),
             num_decodes=num_decodes,
@@ -1297,7 +1297,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         return AscendDSAPrefillMetadata(
             attn_mask=None,
-            query_lens=None,
+            query_lens_cpu=None,
             seq_lens=seq_lens,
             context_lens=None,
             input_positions=None,  # type: ignore[arg-type]
