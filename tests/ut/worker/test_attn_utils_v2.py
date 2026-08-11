@@ -173,9 +173,7 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
         }
         self.calls.append(call)
-        call["common_ratio_to_sas_metadata"].setdefault(
-            "first_group", len(self.calls) == 1
-        )
+        call["common_ratio_to_sas_metadata"].setdefault("first_group", len(self.calls) == 1)
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
 
 
