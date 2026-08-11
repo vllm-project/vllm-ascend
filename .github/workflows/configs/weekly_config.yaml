@@ -3,6 +3,8 @@
 # exercised by schedule_weekly_test_a2.yaml and schedule_weekly_test_a3.yaml.
 # Adding a new weekly test case is just appending a `- name: ...` entry
 # under the matching section.
+# Every A3 multi-node case must set `config_base_path` to its internal_dp/config
+# or external_dp/config directory.
 
 a2:
   accuracy:
@@ -20,158 +22,199 @@ a3:
     test_config:
       - name: MiniMax-PD-in32k-bs4-1
         config_file_path: MiniMax-PD-in32k-bs4-1.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
       - name: Qwen3.5-397B-w8a8-PD
         config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
       - name: GLM_5_1_PD_in32k_bs16-0
         config_file_path: GLM_5_1_PD_in32k_bs16-0.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM_5_1_PD_in32k_bs20-90
         config_file_path: GLM_5_1_PD_in32k_bs20-90.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM_5_1_PD_in64k_bs16-90
         config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: kimi-k2_5-w4a8-ep-16k-1k-TPOT50
         config_file_path: Kimi-K2.5-W4A8-16k-1k-TPOT50.yaml
-        size: 4
-      - name: DeepSeek-V4-flash-w8a8-PD-no-prefix
-        config_file_path: DeepSeek-V4-flash-w8a8-PD-no-prefix.yaml
-        size: 2
-      - name: DeepSeek-V4-flash-w8a8-PD-prefix
-        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-weekly.yaml
-        size: 2
-      - name: DeepSeek-V4-Pro-w4a8-1M-PD
-        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-PD-no-prefix
         config_file_path: DeepSeek-V4-Pro-w4a8-PD-no-prefix.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: kimi-k2_5-w4a8-ep-128k-1k-TPOT50
         config_file_path: Kimi-K2.5-W4A8-128k-1k-TPOT50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.1T_MTP1_128K_1K_PD
         config_file_path: DeepSeek_V3.1T_MTP1_128K_1K_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.1T_MTP1_PD
         config_file_path: DeepSeek_V3.1T_MTP1_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.1T_MTP3_PD
         config_file_path: DeepSeek_V3.1T_MTP3_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.1T_MTP1_3_5K_1_5K_PD
         config_file_path: DeepSeek_V3.1T_MTP1_3_5K_1_5K_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.1T_layerwise_PD
         config_file_path: DeepSeek_V3.1T_layerwise_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.2T_MTP2_PD
         config_file_path: DeepSeek_V3.2T_MTP2_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek_V3.2T_MTP3_PD
         config_file_path: DeepSeek_V3.2T_MTP3_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: QWEN3_235B_PD_3_5K_1_5k
         config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
       - name: QWEN3_235B_PD
         config_file_path: QWEN3_235B_PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
-      - name: Kimi-K2.6-W4A8-3.5k-1.5k-TPOT50-PD
-        config_file_path: Kimi-K2.6-W4A8-3.5k-1.5k-TPOT50-PD.yaml
-        size: 2
-      - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
-        config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
-        size: 2
-      - name: Kimi-K2.6-W4A8-128k-1k-TPOT50-PD
-        config_file_path: Kimi-K2.6-W4A8-128k-1k-TPOT50-PD.yaml
-        size: 2
-      - name: Kimi-K2.6-W4A8-254k-1k-TPOT20-PD
-        config_file_path: Kimi-K2.6-W4A8-254k-1k-TPOT20-PD.yaml
-        size: 2
-      - name: Kimi-K2.7-W4A8-3.5k-1.5k-TPOT50-PD
-        config_file_path: Kimi-K2.7-W4A8-3.5k-1.5k-TPOT50-PD.yaml
-        size: 2
-      - name: Kimi-K2.7-W4A8-64k-1k-TPOT50-PD
-        config_file_path: Kimi-K2.7-W4A8-64k-1k-TPOT50-PD.yaml
-        size: 2
-      - name: Kimi-K2.7-W4A8-128k-1k-TPOT50-PD
-        config_file_path: Kimi-K2.7-W4A8-128k-1k-TPOT50-PD.yaml
-        size: 2
-      - name: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD
-        config_file_path: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD.yaml
-        size: 2
-
       - name: GLM-5.1-W8A8C8-3.5k-1.5k-0-20-PD
         config_file_path: GLM-5.1-W8A8C8-3.5k-1.5k-0-20-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-W8A8C8-3.5k-1.5k-0-50-PD
         config_file_path: GLM-5.1-W8A8C8-3.5k-1.5k-0-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-W8A8C8-64k-1k-90-50-PD
         config_file_path: GLM-5.1-W8A8C8-64k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-W8A8C8-128k-1k-90-50-PD
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.2-W4A8C8-3.5k-1.5k-0-20-PD
         config_file_path: GLM-5.2-W4A8C8-3.5k-1.5k-0-20-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.2-W4A8C8-3.5k-1.5k-0-50-PD
         config_file_path: GLM-5.2-W4A8C8-3.5k-1.5k-0-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.2-W4A8C8-64k-1k-90-50-PD
         config_file_path: GLM-5.2-W4A8C8-64k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.2-W4A8C8-128k-1k-90-50-PD
         config_file_path: GLM-5.2-W4A8C8-128k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
       - name: Minimax_m2.7_in3_5_tpot50
         config_file_path: Minimax_m2.7_in3_5_tpot50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
       - name: Minimax_m2.7_in3_5_tpot20
         config_file_path: Minimax_m2.7_in3_5_tpot20.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
       - name: Minimax_m2.7_in198_prefix99
         config_file_path: Minimax_m2.7_in198_prefix99.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 3
 
   double_node:
     test_config:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
         config_file_path: DeepSeek-V3_2-W8A8-EP_weekly.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: DeepSeek-V3-W8A8_weekly
         config_file_path: DeepSeek-V3.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-glm4.7-w8a8c8-layerwise
         config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.1-W8A8C8-A3_64k_128k_90_50
         config_file_path: GLM-5.1-W8A8C8-A3_64k_128k_90_50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.1-W8A8C8-A3_198k_function
         config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.1-W8A8C8-A3_3.5k_1.5k_0_50
         config_file_path: GLM-5.1-W8A8C8-A3_3.5k_1.5k_0_50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
 
       - name: multi-node-GLM-5.2-W4A8C8-A3_64k_128k_90_50
         config_file_path: GLM-5.2-W4A8C8-A3_64k_128k_90_50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.2-W4A8C8-A3_198k_function
         config_file_path: GLM-5.2-W4A8C8-A3_198k_function.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.2-W4A8C8-A3_3.5k_1.5k_0_50
         config_file_path: GLM-5.2-W4A8C8-A3_3.5k_1.5k_0_50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
       - name: Minimax_m2.7_in64k_1k_prefix90_tpot50
         config_file_path: Minimax_m2.7_in64k_1k_prefix90_tpot50.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-no-prefix
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-no-prefix.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-prefix
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-weekly.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.6-W4A8-3.5k-1.5k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-3.5k-1.5k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.6-W4A8-128k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-128k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.6-W4A8-254k-1k-TPOT20-PD
+        config_file_path: Kimi-K2.6-W4A8-254k-1k-TPOT20-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.7-W4A8-3.5k-1.5k-TPOT50-PD
+        config_file_path: Kimi-K2.7-W4A8-3.5k-1.5k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.7-W4A8-64k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.7-W4A8-64k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.7-W4A8-128k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.7-W4A8-128k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
+      - name: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD
+        config_file_path: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 2
 
   single_node:
