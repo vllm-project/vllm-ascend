@@ -63,8 +63,8 @@ msgstr ""
 "- `v0.7.3rc1`：vLLM Ascend 的首个预发布版本。\n"
 "- `v0.7.3.post1`：针对 `v0.7.3` 版本存在小错误时的补丁版本。"
 
-msgid "## Release compatibility matrix"
-msgstr "## 版本兼容性矩阵"
+msgid "## Release compatibility matrix {: #release-compatibility-matrix }"
+msgstr "## 版本兼容性矩阵 {: #release-compatibility-matrix }"
 
 msgid ""
 "The table below is the release compatibility matrix for vLLM Ascend release."

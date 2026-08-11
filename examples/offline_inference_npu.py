@@ -29,24 +29,24 @@ from vllm import LLM, SamplingParams
 def main():
     prompts = [
         "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
         "The future of AI is",
     ]
 
     # Create a sampling params object.
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     # Create an LLM.
     # NOTE: To access output.metrics (e.g., first_token_time, finished_time),
     # set disable_log_stats=False. By default, vLLM disables log stats and
     # output.metrics will be None. See issue #5027 for details.
-    llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+    llm = LLM(model="Qwen/Qwen3-0.6B")
 
     # Generate texts from the prompts.
     outputs = llm.generate(prompts, sampling_params)
+    assert len(outputs) == len(prompts)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        assert generated_text.strip()
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 

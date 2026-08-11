@@ -78,6 +78,7 @@ plugins:
         - "_build/*"
         - "*.zh.md"
         - "_templates/*"
+        - "**/*.inc.md"
         - "release.template.md"
         - "zh/*"
         # Internal helpers that should never be served as static files.
@@ -147,6 +148,7 @@ extra_css:
 
 extra_javascript:
   - javascripts/mathjax.js
+  - javascripts/tabbed-toc.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
@@ -157,10 +159,16 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.22.1
-  vllm_ascend_version: v0.22.1rc1
-  pip_vllm_ascend_version: 0.22.1rc1
-  pip_vllm_version: 0.22.1
+  vllm_version: v0.23.0
+  vllm_ascend_version: v0.23.0rc1
+  pip_vllm_ascend_version: 0.23.0rc1
+  pip_vllm_version: 0.23.0
+  # Runtime stack paired with the released vLLM Ascend version above.
+  release_python_version: ">= 3.10, < 3.13"
+  release_cann_version: "9.0.1"
+  release_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post2"
+  release_triton_ascend_version: "3.2.1"
+  # Runtime stack used by the current main branch.
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
@@ -178,9 +186,9 @@ extra:
 nav:
   - index.md
   - Getting Started:
-    - getting_started.md
-    - quick_start.md
-    - installation.md
+    - getting_started/overview.md
+    - getting_started/quick_start.md
+    - getting_started/installation.md
     - Model Tutorials:
         - tutorials/models/index.md
         - tutorials/models/Qwen3-Dense.md

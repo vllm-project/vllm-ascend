@@ -6,9 +6,9 @@ Welcome to the vLLM Ascend Plugin! This section will help you get up and running
 
 - **[Quick Start](quick_start.md)** — Get started with a minimal example
 - **[Installation](installation.md)** — Install vLLM and vLLM Ascend
-- **[Model Tutorials](tutorials/models/index.md)** — Step-by-step guides for running specific models
-- **[Feature Tutorials](tutorials/features/index.md)** — Explore advanced features like PD disaggregation, context parallel, and more
-- **[FAQs](faqs.md)** — Frequently asked questions
+- **[Model Tutorials](../tutorials/models/index.md)** — Step-by-step guides for running specific models
+- **[Feature Tutorials](../tutorials/features/index.md)** — Explore advanced features like PD disaggregation, context parallel, and more
+- **[FAQs](../faqs.md)** — Frequently asked questions
 
 ## What is vLLM Ascend?
 

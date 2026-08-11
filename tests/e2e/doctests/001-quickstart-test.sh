@@ -39,15 +39,21 @@ function quickstart_offline_test() {
 
 function quickstart_online_test() {
   install_system_packages
-  vllm serve Qwen/Qwen2.5-0.5B-Instruct &
+  vllm serve Qwen/Qwen3-0.6B \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --served-model-name quickstart-model &
   wait_url_ready "vllm serve" "localhost:8000/v1/models"
   # Do real curl test
-  curl http://localhost:8000/v1/completions \
+  curl --fail --silent --show-error \
+    http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "Qwen/Qwen2.5-0.5B-Instruct",
-        "prompt": "Beijing is a",
-        "max_tokens": 5,
+        "model": "quickstart-model",
+        "messages": [
+            {"role": "user", "content": "Introduce vLLM in one sentence."}
+        ],
+        "max_tokens": 32,
         "temperature": 0
     }' | python3 -m json.tool
   VLLM_PID=$(pgrep -f "vllm serve")

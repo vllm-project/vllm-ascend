@@ -28,7 +28,7 @@ It is recommended to download the model weight to a local directory, such as `/d
 
 You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#pre-built-image).
 
 ```bash
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).

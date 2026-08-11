@@ -1,0 +1,40 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "| Component | Default Version Used in This Guide |"
+msgstr "| 组件 | 本指南默认版本 |"
+
+msgid "| Python | `{{ release_python_version }}` |"
+msgstr "| Python | `{{ release_python_version }}` |"
+
+msgid "| CANN | `{{ release_cann_version }}` |"
+msgstr "| CANN | `{{ release_cann_version }}` |"
+
+msgid "| PyTorch / TorchNPU | `{{ release_pytorch_torch_npu_version }}` |"
+msgstr "| PyTorch / TorchNPU | `{{ release_pytorch_torch_npu_version }}` |"
+
+msgid "| Triton Ascend | `{{ release_triton_ascend_version }}` |"
+msgstr "| Triton Ascend | `{{ release_triton_ascend_version }}` |"
+
+msgid "| vLLM | `{{ vllm_version }}` |"
+msgstr "| vLLM | `{{ vllm_version }}` |"
+
+msgid "| vLLM Ascend | `{{ vllm_ascend_version }}` |"
+msgstr "| vLLM Ascend | `{{ vllm_ascend_version }}` |"

@@ -1,0 +1,37 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "| Hardware | Ubuntu | openEuler |"
+msgstr "| 硬件 | Ubuntu | openEuler |"
+
+msgid "    | Atlas A2 | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler` |"
+msgstr "    | Atlas A2 | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler` |"
+
+msgid "    | Atlas A3 | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler` |"
+msgstr "    | Atlas A3 | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler` |"
+
+msgid "    | Atlas 300I DUO | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` |"
+msgstr "    | Atlas 300I DUO | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` |"
+
+msgid "    | Atlas 200I Pro | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` |"
+msgstr "    | Atlas 200I Pro | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` |"
+
+msgid "    | Atlas 950DT | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler` |"
+msgstr "    | Atlas 950DT | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt` | `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler` |"

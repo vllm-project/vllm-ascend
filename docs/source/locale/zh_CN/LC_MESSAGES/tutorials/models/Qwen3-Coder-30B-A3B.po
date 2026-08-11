@@ -178,8 +178,8 @@ msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
 msgid ""
 "For more details, please refer to the [Installation "
-"Guide](../../installation.md)."
-msgstr "更多详情，请参考[安装指南](../../installation.md)。"
+"Guide](../../getting_started/installation.md)."
+msgstr "更多详情，请参考[安装指南](../../getting_started/installation.md)。"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"

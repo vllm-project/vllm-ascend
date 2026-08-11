@@ -1,0 +1,69 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:21+0000\n"
+"PO-Revision-Date: 2026-08-19 09:21+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "=== \"Atlas 200I Pro\""
+msgstr "=== \"Atlas 200I Pro\""
+
+msgid "**This path uses**"
+msgstr "**本路径使用**"
+
+msgid ""
+"- Model: `Qwen/Qwen3.5-2B`\n"
+"    - Precision: FP16\n"
+"    - Parallelism: Quickstart uses TP=1 with one visible NPU\n"
+"    - Mode: online serving\n"
+"    - Model reference: [Qwen3.5 Dense](../tutorials/models/Qwen3.5-Dense.md)"
+msgstr ""
+"- 模型：`Qwen/Qwen3.5-2B`\n"
+"    - 精度：FP16\n"
+"    - 并行：单可见 NPU 的 Quickstart 使用 TP=1\n"
+"    - 模式：在线服务\n"
+"    - 模型参考：[Qwen3.5 Dense](../tutorials/models/Qwen3.5-Dense.md)"
+
+msgid "!!! important \"Atlas 200I Pro container requirements\""
+msgstr "!!! important \"Atlas 200I Pro 容器要求\""
+
+msgid ""
+"Atlas 200I Pro requires additional device nodes, driver libraries, and host configuration files.\n"
+"        Before starting the container, confirm that the host paths mounted by the commands below exist."
+msgstr ""
+"Atlas 200I Pro 需要额外的 device node、驱动库和 Host 配置文件。\n"
+"        启动容器前，请确认下面命令中挂载的 Host 路径真实存在。"
+
+msgid "### 3.1 Start the Container {: #quickstart-atlas-200i-pro-container }"
+msgstr "### 3.1 启动容器 {: #quickstart-atlas-200i-pro-container }"
+
+msgid "=== \"Ubuntu 24.04\""
+msgstr "=== \"Ubuntu 24.04\""
+
+msgid "=== \"openEuler 24.03\""
+msgstr "=== \"openEuler 24.03\""
+
+msgid "<a id=\"quickstart-atlas-200i-pro-verify\"></a>"
+msgstr "<a id=\"quickstart-atlas-200i-pro-verify\"></a>"
+
+msgid "{% include \"getting_started/quick_start/container_verification.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/container_verification.inc.md\" %}"
+
+msgid "<a id=\"quickstart-atlas-200i-pro-inference\"></a>"
+msgstr "<a id=\"quickstart-atlas-200i-pro-inference\"></a>"
+
+msgid "{% include \"getting_started/quick_start/qwen35_serving.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/qwen35_serving.inc.md\" %}"

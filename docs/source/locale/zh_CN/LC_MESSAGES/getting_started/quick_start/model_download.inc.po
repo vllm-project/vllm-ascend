@@ -1,0 +1,31 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:21+0000\n"
+"PO-Revision-Date: 2026-08-19 09:21+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "!!! tip \"Network environments in the Chinese mainland\""
+msgstr "!!! tip \"中国大陆网络环境\""
+
+msgid "If the current environment cannot access Hugging Face reliably, a failed model download often first appears as a connection timeout, DNS failure, or other network error. The error message might not clearly identify the download source as the cause."
+msgstr "如果当前环境无法稳定访问 Hugging Face，模型下载失败时通常先看到连接超时、DNS 或其他网络错误，不一定能从错误信息中直接判断是下载源问题。"
+
+msgid "Before running the offline inference or online serving examples below, consider switching to ModelScope:"
+msgstr "在运行下面的离线推理或在线服务之前，建议切换到 ModelScope："
+
+msgid "If the model has already been downloaded locally, replace the model ID in the example with the local directory. You do not need to set this environment variable."
+msgstr "如果模型已经下载到本地，请直接把示例中的模型 ID 替换为本地目录，不需要设置该环境变量。"

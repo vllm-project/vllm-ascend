@@ -1,0 +1,66 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "### 5.1 CPU-only Build Verification {: #cpu-only-build-verification }"
+msgstr "### 5.1 CPU-only build verification {: #cpu-only-build-verification }"
+
+msgid ""
+"CPU-only build verification checks only the Python/package build. It does "
+"not verify:"
+msgstr "CPU-only build 只验证 Python/package 构建，不验证："
+
+msgid ""
+"- the NPU runtime;\n"
+"- custom kernels;\n"
+"- NPU inference;\n"
+"- NPU-specific tests."
+msgstr ""
+"- NPU runtime；\n"
+"- custom kernel；\n"
+"- NPU inference；\n"
+"- NPU-specific tests。"
+
+msgid ""
+"Even without an NPU, the build stage generally still requires matching CANN "
+"Toolkit headers and libraries."
+msgstr "即使没有 NPU，构建阶段通常仍需要匹配的 CANN Toolkit headers 和 libraries。"
+
+msgid "Install the build dependencies:"
+msgstr "安装构建依赖："
+
+msgid "After installing the matching dependencies, run:"
+msgstr "安装匹配依赖后："
+
+msgid "Set `SOC_VERSION` for the target hardware."
+msgstr "根据目标硬件设置 `SOC_VERSION`。"
+
+msgid "For example:"
+msgstr "示例："
+
+msgid "Then run:"
+msgstr "然后执行："
+
+msgid ""
+"Passing CPU-only verification does not mean that the runtime environment is ready.\n"
+"    Before release or runtime use, you must still complete the installation verification and Quickstart inference on the corresponding NPU."
+msgstr ""
+"CPU-only verification 通过，不代表运行时环境可用。\n"
+"    真正发布或运行前，仍需要在对应 NPU 上完成 Installation verification 和\n"
+"    Quickstart inference。"

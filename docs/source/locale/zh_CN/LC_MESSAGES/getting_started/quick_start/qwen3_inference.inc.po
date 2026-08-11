@@ -1,0 +1,46 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:21+0000\n"
+"PO-Revision-Date: 2026-08-19 09:21+0000\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "### 3.3 Run vLLM"
+msgstr "### 3.3 运行 vLLM"
+
+msgid "{% include \"getting_started/quick_start/model_download.inc.md\" %}"
+msgstr "{% include \"getting_started/quick_start/model_download.inc.md\" %}"
+
+msgid "=== \"Offline batch inference\""
+msgstr "=== \"离线批量推理\""
+
+msgid "Run the following command in the container terminal:"
+msgstr "在容器终端运行："
+
+msgid "In `vi`, press `i` to enter insert mode and paste the following code. After pasting, press `Esc`, type `:wq`, and then press Enter to save and exit."
+msgstr "在 `vi` 中按 `i` 进入编辑模式，粘贴下面的代码；粘贴完成后按 `Esc`，输入 `:wq`，再按 Enter 保存并退出。"
+
+msgid "If the image includes an editor that you are more familiar with, you can also create the same file by using a command such as `nano example.py`."
+msgstr "如果镜像中安装了你更熟悉的编辑器，也可以使用 `nano example.py` 等方式创建同名文件。"
+
+msgid "Run the example:"
+msgstr "运行："
+
+msgid "=== \"Online serving\""
+msgstr "=== \"在线服务\""
+
+msgid "Verify the service from another terminal on the host:"
+msgstr "在 Host 的另一个终端验证："

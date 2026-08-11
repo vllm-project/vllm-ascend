@@ -1,0 +1,64 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-19 09:22+0000\n"
+"PO-Revision-Date: 2026-08-19 09:22+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid ""
+"The goal of Installation is not to run a specific LLM, but to confirm that "
+"the software stack and NPU backend are ready."
+msgstr "Installation 的目标不是跑一个具体 LLM，而是确认软件栈和 NPU backend 已准备好。"
+
+msgid ""
+"The [Quickstart](quick_start.md) covers the model-level inference smoke "
+"test."
+msgstr "模型级 inference smoke test 由 [Quickstart](quick_start.md) 负责。"
+
+msgid "#### 1. Check the Devices"
+msgstr "#### 1. 检查设备"
+
+msgid ""
+"If Docker `--device` already restricts the visible devices, you generally do"
+" not need to set both visibility variables as well."
+msgstr "如果 Docker `--device` 已经限制了可见设备，一般不需要再同时设置两个 visibility 变量。"
+
+msgid "#### 2. Check the Core Software and NPU Backend"
+msgstr "#### 2. 检查核心软件和 NPU backend"
+
+msgid "Then run:"
+msgstr "然后运行："
+
+msgid "The minimum criteria for installation readiness are:"
+msgstr "安装准备完成的最低标准："
+
+msgid ""
+"- the host / current runtime environment can detect the NPU;\n"
+"    - `torch.npu.is_available()` succeeds;\n"
+"    - the simple NPU tensor operation passes;\n"
+"    - the vLLM Ascend plugin is registered;\n"
+"    - there are no unresolved core software dependency conflicts."
+msgstr ""
+"- Host / 当前运行环境可以看到 NPU；\n"
+"    - `torch.npu.is_available()` 成功；\n"
+"    - 简单 NPU tensor operation 通过；\n"
+"    - vLLM Ascend plugin 已注册；\n"
+"    - 没有未处理的核心软件依赖冲突。"
+
+msgid ""
+"After meeting these criteria, proceed to the [Quickstart](quick_start.md) "
+"and run the first model for your hardware."
+msgstr "达到这些条件后，继续 [Quickstart](quick_start.md) 运行硬件对应的第一个模型。"

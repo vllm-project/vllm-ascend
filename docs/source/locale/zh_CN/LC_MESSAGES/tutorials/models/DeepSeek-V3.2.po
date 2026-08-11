@@ -63,10 +63,9 @@ msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/roo
 msgid ""
 "If you want to deploy multi-node environment, you need to verify multi-node "
 "communication according to [verify multi-node communication "
-"environment](../../installation.md#verify-multi-node-communication)."
+"environment](../../getting_started/installation.md#multi-node-deployment)."
 msgstr ""
-"如需部署多节点环境，需按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
-"communication)中的说明验证多节点通信。"
+"如需部署多节点环境，需按照[验证多节点通信环境](../../getting_started/installation.md#multi-node-deployment)中的说明验证多节点通信。"
 
 msgid "You can use our official docker image to run `DeepSeek-V3.2` directly."
 msgstr "您可以直接使用官方 Docker 镜像运行 `DeepSeek-V3.2`。"
@@ -78,8 +77,8 @@ msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码�
 
 msgid ""
 "- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../getting_started/installation.md)。"
 
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"

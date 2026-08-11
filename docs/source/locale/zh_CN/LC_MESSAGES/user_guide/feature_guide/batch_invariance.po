@@ -156,10 +156,10 @@ msgstr ""
 
 msgid ""
 "To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.\n"
-"    For installation instructions, see [Set Up Using Python](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python)"
+"    For installation instructions, see [Set Up Using Python](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/getting_started/installation.md#existing-cann-environment)"
 msgstr ""
 "要安装批量不变性自定义算子库，请在构建vllm-ascend之前设置`VLLM_BATCH_INVARIANT=1`。\n"
-"    有关安装说明，请参阅[使用Python设置](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python)"
+"    有关安装说明，请参阅[使用Python设置](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/getting_started/installation.md#existing-cann-environment)"
 
 msgid ""
 "The batch invariance attention operators currently do not support\n"

@@ -50,6 +50,12 @@ def define_env(env):
     env.variables["vllm_ascend_version"] = env.variables.get("vllm_ascend_version", "v0.22.1rc1")
     env.variables["pip_vllm_ascend_version"] = env.variables.get("pip_vllm_ascend_version", "0.22.1rc1")
     env.variables["pip_vllm_version"] = env.variables.get("pip_vllm_version", "0.22.1")
+    env.variables["release_python_version"] = env.variables.get("release_python_version", ">= 3.10, < 3.13")
+    env.variables["release_cann_version"] = env.variables.get("release_cann_version", "9.0.0")
+    env.variables["release_pytorch_torch_npu_version"] = env.variables.get(
+        "release_pytorch_torch_npu_version", "2.10.0 / 2.10.0"
+    )
+    env.variables["release_triton_ascend_version"] = env.variables.get("release_triton_ascend_version", "3.2.1")
     env.variables["cann_image_tag"] = env.variables.get("cann_image_tag", "9.1.0-910b-ubuntu22.04-py3.12")
     env.variables["main_python_version"] = env.variables.get("main_python_version", ">= 3.10, < 3.13")
     env.variables["main_cann_version"] = env.variables.get("main_cann_version", "9.1.0")
