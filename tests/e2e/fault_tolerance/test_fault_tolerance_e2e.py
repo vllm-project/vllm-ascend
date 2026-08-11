@@ -179,6 +179,7 @@ class FTServerManager:
                         server_host="localhost",
                         server_port=8000 + r,
                         auto_port=False,
+                        env_dict={"ASCEND_RT_VISIBLE_DEVICES": str(r)}
                     )
                     self.servers.append((server, sargs))
                 except Exception:
