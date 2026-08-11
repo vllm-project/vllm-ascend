@@ -45,11 +45,26 @@ implementation uses `AscendStoreConnector` with the Memcache backend.
 - Configure `mmc-meta.conf` and `mmc-local.conf`, and start MetaService before
   starting Prefill.
 
-Install the dependencies in order:
+Build and install MemFabric Hybrid first:
 
 ```bash
-pip install memfabric-hybrid
-pip install memcache-hybrid
+git clone -b release/1.2 https://gitcode.com/Ascend/memfabric_hybrid.git
+cd memfabric_hybrid
+bash script/build_and_pack_run.sh
+bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
+```
+
+Then build and install Memcache Hybrid. Its MemFabric submodule must use the
+same `release/1.2` branch:
+
+```bash
+git clone https://gitcode.com/Ascend/memcache.git
+cd memcache
+git submodule update --init 3rdparty/
+git -c submodule.3rdparty/memfabric_hybrid.branch=release/1.2 \
+    submodule update --remote 3rdparty/memfabric_hybrid
+bash script/build_and_pack_run.sh --build_mode RELEASE
+bash output/memcache_hybrid-1.1.0_linux_aarch64.run
 ```
 
 Prepare the host before starting Prefill:
@@ -61,13 +76,50 @@ source /usr/local/memfabric_hybrid/set_env.sh
 export PYTHONHASHSEED=0
 ```
 
+Configure `mmc-meta.conf` with the MetaService and Config Store endpoints:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+ock.mmc.meta_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+ock.mmc.meta.lease_ttl_ms = 30000
+ock.mmc.log_level = error
+```
+
+Configure `mmc-local.conf` on each Prefill node:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_HOST>:5000
+ock.mmc.local_service.config_store_url = tcp://<CONFIG_STORE_HOST>:6000
+ock.mmc.log_level = error
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_sdma
+ock.mmc.local_service.dram.size = 10GB
+```
+
+The two files must use the same MetaService endpoint, and the LocalService
+Config Store endpoint must match the MetaService Config Store endpoint. Set
+`world_size` to the maximum number of LocalService instances in the deployment.
+Use `device_sdma` on A3 with HCCS, or `device_rdma` on A2 and other systems with
+device RoCE. Set `dram.size` to the host-memory capacity contributed by each
+LocalService.
+
+Export both configuration paths before starting Prefill, and start MetaService
+in a separate process:
+
+```bash
+export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
+export MMC_LOCAL_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-local.conf
+python -c "from memcache_hybrid import MetaService; MetaService.main()"
+```
+
 ### Configuration
 
-This example keeps layer 0 independent and assigns all other layers to three
-reusable buffers:
+To enable only Layerwise Prefill KV Cache Offload, add the following option to
+the Prefill launch command. This example keeps layer 0 independent and assigns
+all other layers to three reusable buffers:
 
-```json
-{
+```bash
+--kv-transfer-config '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_producer",
     "kv_connector_extra_config": {
@@ -76,16 +128,25 @@ reusable buffers:
         "layerwise_num_shared_buffers": 3,
         "layerwise_independent_layers": [0]
     }
-}
+}'
 ```
 
 | Parameter | Description |
 | :--- | :--- |
+| `backend` | Host KV Pool backend. Shared-buffer layerwise offload requires `"memcache"`. |
+| `use_layerwise` | Enables layer-by-layer KV transfer and reusable NPU buffers. |
 | `layerwise_num_shared_buffers` | Number of reusable NPU buffers. More buffers use more memory but provide more opportunity to overlap transfer and computation. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
 
 The buffer count is workload-dependent. Start with two to four buffers and tune
 it according to NPU memory and transfer bandwidth.
+
+When Sparse KV Cache Offload is also enabled on Decode, replace this
+single-connector configuration with the Prefill `MultiConnector` configuration
+in [chapter 4](#4-use-them-together). `AscendStoreConnector` offloads each layer
+buffer to Memcache,
+while `SfaRemoteD2HConnector` exposes the same buffer for Decode to pull through
+MemFabric. A reusable buffer is released only after both operations complete.
 
 ### Verification and limitations
 
@@ -138,6 +199,23 @@ bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
 export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
 ```
 
+Check whether Clang and OpenMP are available:
+
+```bash
+clang --version
+ls "$(clang --print-resource-dir)/include/omp.h"
+```
+
+If either dependency is missing, install it:
+
+```bash
+apt-get update
+apt-get install -y clang libomp-dev
+```
+
+If the image already provides a specific Clang version but lacks OpenMP,
+install the matching package instead, for example `libomp-17-dev` for Clang 17.
+
 ### Configuration
 
 Add the following options to the Decode launch command:
@@ -185,11 +263,11 @@ flowchart LR
 
 ### Prefill configuration
 
-Use `MultiConnector` so Prefill can save KV to Memcache and expose the same
-layer buffer to Decode:
+Add the following option to the Prefill launch command. `MultiConnector` lets
+Prefill save KV to Memcache and expose the same layer buffer to Decode:
 
-```json
-{
+```bash
+--kv-transfer-config '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
     "kv_connector_extra_config": {
@@ -214,7 +292,7 @@ layer buffer to Decode:
             }
         ]
     }
-}
+}'
 ```
 
 Do not enable `sparse_kv_offload_config` on Prefill. A reusable Prefill buffer
@@ -253,6 +331,3 @@ inference requests to the proxy port (`9000` in this example).
   `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports.
   Prefill does not bind these ports; Decode supplies the target through request
   metadata.
-
-For implementation details, see
-[SFA Remote D2H Connector Design](../../developer_guide/Design_Documents/sfa_remote_d2h_connector.md).
