@@ -218,7 +218,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             An AscendMoEScheme instance, or None if the layer
             should use unquantized method.
         """
-        # Add FusedMoE to target scheme map if needed
+        # Add FusedMoEFactory to target scheme map if needed
         self._add_fused_moe_to_target_scheme_map()
 
         weight_quant, input_quant, format = self._get_quant_args(layer, layer_name)
