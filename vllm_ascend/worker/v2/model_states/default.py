@@ -51,11 +51,16 @@ class AscendModelState(DefaultModelState):
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
-            num_input_tokens = input_batch.num_tokens_after_padding
         else:
-            # For piecewise cudagraphs and eager, use unpadded sizes.
+            # Piecewise cudagraphs and eager use the actual request count.
             num_reqs = input_batch.num_reqs
-            num_input_tokens = input_batch.num_tokens
+
+        # The model always receives the padded token buffer. PCP can pad one
+        # rank to the largest rank-local token count even during eager prefill,
+        # so tensor-shaped metadata (positions, RoPE and slot mappings) must use
+        # the same extent as the model input. num_actual_tokens below preserves
+        # the unpadded count for attention semantics.
+        num_input_tokens = input_batch.num_tokens_after_padding
 
         num_actual_reqs = input_batch.num_reqs
         num_actual_tokens = input_batch.num_tokens
