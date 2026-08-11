@@ -1430,8 +1430,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             dynamic_scale = dynamic_scale.reshape(token_x.shape[0] * token_x.shape[1], -1)
         if use_mla_rope:
             cos_shape = attn_metadata.decode.cos.shape
-            cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-            sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+            rope_shape = (
+                (cos_shape[0], 1, cos_shape[-1])
+                if token_x.dim() == 3
+                else (cos_shape[0], cos_shape[-1])
+            )
+            cos = attn_metadata.decode.cos.view(rope_shape)
+            sin = attn_metadata.decode.sin.view(rope_shape)
             prolog_op = torch_npu.npu_mla_prolog_v3
         else:
             cos = None

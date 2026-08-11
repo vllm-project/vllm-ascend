@@ -78,7 +78,8 @@ def test_a5_mla_preprocess_only_decode_passes_optional_rope(use_mla_rope):
         assert call_kwargs["rope_sin"] is None
 
 
-def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
+@pytest.mark.parametrize("use_mla_rope", [True, False])
+def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights(use_mla_rope):
     num_tokens = 2
     num_heads = 4
     kv_lora_rank = 8
@@ -88,9 +89,11 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
         torch.randn(4, 1, 1, kv_lora_rank, dtype=torch.bfloat16),
         torch.randn(4, 1, 1, rope_dim, dtype=torch.bfloat16),
     )
+    cos = torch.randn(num_tokens, 1, 1, rope_dim, dtype=torch.bfloat16)
+    sin = torch.randn_like(cos)
     attn_metadata = SimpleNamespace(
         num_decode_tokens=num_tokens,
-        decode=SimpleNamespace(cos=None, sin=None),
+        decode=SimpleNamespace(cos=cos, sin=sin),
         slot_mapping=torch.arange(num_tokens, dtype=torch.int32),
     )
     atten_obj = SimpleNamespace(
@@ -114,19 +117,24 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
     with (
         mock.patch("vllm_ascend.device.device_op.torch_npu.npu_dynamic_mx_quant") as mock_quant,
         mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
+            return_value=(query_nope, query_rope, None, None, None),
+        ) as mock_rope_prolog,
+        mock.patch(
             "vllm_ascend.device.device_op._npu_mla_prolog_v3_no_rope",
             return_value=(query_nope, query_rope, None, None, None),
-        ) as mock_prolog,
+        ) as mock_no_rope_prolog,
     ):
         A5DeviceAdaptor.mla_preprocess_only_decode(
             atten_obj,
             hidden_states,
             kv_cache,
             attn_metadata,
-            use_mla_rope=False,
+            use_mla_rope=use_mla_rope,
         )
 
     mock_quant.assert_not_called()
+    mock_prolog = mock_rope_prolog if use_mla_rope else mock_no_rope_prolog
     call_kwargs = mock_prolog.call_args.kwargs
     torch.testing.assert_close(call_kwargs["token_x"], hidden_states)
     assert call_kwargs["token_x"].shape == hidden_states.shape
@@ -135,8 +143,12 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights():
     assert call_kwargs["dequant_scale_w_dq"] is None
     assert call_kwargs["dequant_scale_w_uq_qr"] is None
     assert call_kwargs["dequant_scale_w_dkv_kr"] is None
-    assert call_kwargs["rope_cos"] is None
-    assert call_kwargs["rope_sin"] is None
+    if use_mla_rope:
+        torch.testing.assert_close(call_kwargs["rope_cos"], cos.view(num_tokens, rope_dim))
+        torch.testing.assert_close(call_kwargs["rope_sin"], sin.view(num_tokens, rope_dim))
+    else:
+        assert call_kwargs["rope_cos"] is None
+        assert call_kwargs["rope_sin"] is None
     assert call_kwargs["cache_index"].shape == (num_tokens,)
 
 
