@@ -64,6 +64,8 @@ class TestDetermineAvailableMemory310P(TestBase):
 
     def test_ep_ignores_pre_existing_process_memory(self):
         total_memory = int(43.24 * GiB_bytes)
+        # Pre-existing device occupancy is reflected by init_free_memory and
+        # must not be subtracted from the per-instance KV cache budget.
         init_free_memory = int(23.45 * GiB_bytes)
         requested_memory = total_memory * 0.5
         model_memory_usage = int(1.43 * GiB_bytes)
@@ -87,11 +89,6 @@ class TestDetermineAvailableMemory310P(TestBase):
         with (
             patch("vllm_ascend._310p.worker_310p.is_rc_device", return_value=False),
             patch("vllm_ascend._310p.worker_310p.memory_profiling", mock_memory_profiling),
-            patch(
-                "torch.npu.mem_get_info",
-                return_value=(profile_result.after_profile.free_memory, total_memory),
-            ),
-            patch("torch.npu.memory_reserved", return_value=int(1.50 * GiB_bytes)),
         ):
             result = worker.determine_available_memory()
 
@@ -133,11 +130,6 @@ class TestDetermineAvailableMemory310P(TestBase):
             patch("vllm_ascend._310p.worker_310p.is_rc_device", return_value=True),
             patch("vllm_ascend._310p.worker_310p.memory_profiling", mock_memory_profiling),
             patch("vllm_ascend._310p.worker_310p.psutil.virtual_memory", return_value=host_memory),
-            patch(
-                "torch.npu.mem_get_info",
-                return_value=(profile_result.after_profile.free_memory, host_memory.total),
-            ),
-            patch("torch.npu.memory_reserved", return_value=0),
         ):
             result = worker.determine_available_memory()
 
