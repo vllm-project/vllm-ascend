@@ -3119,6 +3119,10 @@ class MooncakeConnectorWorker:
         num_external_blocks_p = math.ceil(meta.num_external_tokens / remote_block_size)
 
         kv_group_items = list(self.kv_group2layeridx.items())
+        use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
+            self.kv_group2layeridx,
+            self.block_size_scale,
+        )
         sequence_group_idx = next(
             (
                 group_spec.get("kv_cache_group_id", group_idx)
@@ -3211,15 +3215,27 @@ class MooncakeConnectorWorker:
             shard_cp_rank = shard_cp_ranks[remote_kv_id]
             remote_first = (num_prefix_p_blocks - shard_cp_rank + remote_cp_size - 1) // remote_cp_size
 
-            group_remote_block_ids: list[list[int]] = []
-            group_local_block_ids: list[list[int]] = []
+            group_remote_block_ids: list[list[int]]
+            group_local_block_ids: list[list[int]]
+            if use_transfer_group_block_ids:
+                group_remote_block_ids = [[] for _ in self.kv_group2layeridx]
+                group_local_block_ids = [[] for _ in self.kv_group2layeridx]
+            else:
+                group_remote_block_ids = [[] for _ in meta.remote_block_ids]
+                group_local_block_ids = [[] for _ in meta.local_block_ids]
             is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
             for group_idx, (group_spec, _) in kv_group_items:
+                kv_cache_group_id = self._get_kv_cache_group_id(group_idx, group_spec)
+                block_id_idx = group_idx if use_transfer_group_block_ids else kv_cache_group_id
                 if group_spec["kv_cache_spec_type"] == "MambaSpec":
                     # Mamba state is not context-block sharded like attention
                     # KV. Transfer the final state from the final PCP/DCP shard.
-                    group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
-                    group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
+                    group_remote_block_ids[block_id_idx] = (
+                        list(meta.remote_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
+                    group_local_block_ids[block_id_idx] = (
+                        list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
+                    )
                     continue
                 # Attention: expand to kernel blocks here. Remote is sliced from remote_first
                 # (skips this rank's prefix-cached blocks) then expanded; local kernels are
@@ -3228,7 +3244,7 @@ class MooncakeConnectorWorker:
                 # n == 0, so both kernel lists naturally come out empty.
                 _, remote_scale, kernel_size = group_kernel_params[group_idx]
                 remote_logical = list(
-                    meta.remote_block_ids[group_idx][remote_first : remote_first + num_blocks_to_pull]
+                    meta.remote_block_ids[kv_cache_group_id][remote_first : remote_first + num_blocks_to_pull]
                 )
                 kernel_remote = self._expand_block_ids(remote_logical, remote_scale)
                 kernel_local = self._local_kernel_ids_for_shard(
@@ -3242,12 +3258,12 @@ class MooncakeConnectorWorker:
                     remote_cp_size,
                     remote_block_size,
                     kernel_size,
-                    list(meta.local_block_ids[group_idx]),
+                    list(meta.local_block_ids[kv_cache_group_id]),
                 )
                 num_kernel_blocks = min(len(kernel_remote), len(kernel_local))
-                group_remote_block_ids.append(kernel_remote[:num_kernel_blocks])
+                group_remote_block_ids[block_id_idx] = kernel_remote[:num_kernel_blocks]
 
-                group_local_block_ids.append(kernel_local[:num_kernel_blocks])
+                group_local_block_ids[block_id_idx] = kernel_local[:num_kernel_blocks]
             remote_block_ids_list.append(tuple(group_remote_block_ids))
             local_block_ids_list.append(tuple(group_local_block_ids))
 

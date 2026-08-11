@@ -3522,6 +3522,91 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
         self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
 
+    def test_issue_13934_dcp_split_transfer_groups_use_kv_cache_group_id(self):
+        """DCP metadata is cache-group indexed, not transfer-group indexed."""
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._is_hma_required = True
+        worker.use_mla = True
+        worker.use_sparse = False
+        worker.num_key_value_heads = 1
+        worker.tp_size = 8
+        worker.tp_rank = 5
+        worker.pcp_size = 1
+        worker.dcp_size = 8
+        worker.pcp_rank = 0
+        worker.dcp_rank = 5
+        worker._decode_tp_size = 8
+        worker._prefill_tp_size = 8
+        worker._prefill_pp_size = 1
+        worker.block_size = 128
+        worker.side_channel_port = 5000
+        worker.handshake_port = worker.side_channel_port + worker.tp_rank
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size_scale = [[1], [1]]
+        # GLM-5.2 exposes more than one Mooncake transfer group for one KV
+        # cache manager group. Request metadata still contains one block table.
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "MLAAttentionSpec",
+                    "kv_cache_group_id": 0,
+                },
+                [0],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
+                    "kv_cache_group_id": 0,
+                },
+                [1],
+            ),
+        }
+
+        remote_blocks = list(range(1, 27))
+        local_blocks = list(range(101, 127))
+        remote_mapping = {
+            str(offset): {
+                "host": f"host-{offset}",
+                "engine_id": f"engine-{offset}",
+                "handshake_port": 31000 + offset,
+            }
+            for offset in range(8)
+        }
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=8,
+            remote_ptp_size=8,
+            remote_port=31000,
+            remote_block_ids=(remote_blocks,),
+            local_block_ids=(local_blocks,),
+            num_external_tokens=26262,
+            num_prompt_blocks=206,
+            num_computed_tokens=0,
+            remote_engine_id="issue-13934-prefill",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping=remote_mapping,
+            remote_block_size=128,
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("issue-13934", cast(ReqMeta, meta))
+
+        self.assertEqual(ports, [[31005]])
+        self.assertEqual(local_ids, [(local_blocks,)])
+        self.assertEqual(remote_ids, [(remote_blocks,)])
+
+        # If the split transfer groups use different kernel scales, they need
+        # separate output block-id lists while still reading cache group 0.
+        worker.block_size_scale = [[1], [2]]
+        meta.remote_engine_id = "issue-13934-prefill-independent-scales"
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("issue-13934", cast(ReqMeta, meta))
+        expanded_local_blocks = [kernel for block in local_blocks for kernel in (block * 2, block * 2 + 1)]
+        expanded_remote_blocks = [kernel for block in remote_blocks for kernel in (block * 2, block * 2 + 1)]
+
+        self.assertEqual(ports, [[31005]])
+        self.assertEqual(local_ids, [(local_blocks, expanded_local_blocks)])
+        self.assertEqual(remote_ids, [(remote_blocks, expanded_remote_blocks)])
+
     def test_get_tp_num_need_pulls(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker.num_key_value_heads = 8
