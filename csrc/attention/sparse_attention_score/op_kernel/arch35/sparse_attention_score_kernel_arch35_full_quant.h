@@ -80,7 +80,7 @@ public:
         gSelectIdx.SetGlobalBuffer((__gm__ int32_t *)params.selectIdx);
         AscendC::GlobalTensor<int32_t> gSelectNumIdx;
         gSelectNumIdx.SetGlobalBuffer((__gm__ int32_t *)params.selectNumIdx);
-
+        
         AscendC::GlobalTensor<int32_t> gBlockTable;
         gBlockTable.SetGlobalBuffer((__gm__ int32_t *)params.blockTable);
         AscendC::GlobalTensor<ElementO> gO;
