@@ -2047,6 +2047,7 @@ class NPUModelRunner(GPUModelRunner):
                             encoder_cache=self.encoder_cache,
                         ) as ec_connector_output:
                             self._execute_mm_encoder(scheduler_output)
+                            self.dfx.clear_finished(getattr(scheduler_output, "finished_req_ids", None))
                             return make_empty_encoder_model_runner_output(scheduler_output)
                     finally:
                         self.dfx.finalize_dump_data()
@@ -2063,6 +2064,12 @@ class NPUModelRunner(GPUModelRunner):
                         # dummy run to ensure coordinate_batch_across_dp
                         # is called into to avoid out of sync issues.
                         self._dummy_run(1)
+                    # Idle cleanup steps still carry finished_req_ids (between
+                    # previous finish and current schedule). clear_finished
+                    # normally runs in sample_tokens; that path is skipped
+                    # here, so print_output_on_finish / detector state must
+                    # be drained on this early return.
+                    self.dfx.clear_finished(getattr(scheduler_output, "finished_req_ids", None))
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
