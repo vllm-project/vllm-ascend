@@ -231,7 +231,7 @@ jobs:
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
           # Preserve CI availability during the transition by compiling on the
           # NPU only when the new CPU-produced cache is unavailable.
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
