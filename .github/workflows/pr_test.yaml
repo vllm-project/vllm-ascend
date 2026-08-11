@@ -371,6 +371,7 @@ jobs:
       - ensure-csrc-cache
     if: >-
       ${{
+        always() &&
         needs.pre-commit.result == 'success' &&
         needs.ensure-csrc-cache.result == 'success' &&
         (
