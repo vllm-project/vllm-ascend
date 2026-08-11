@@ -36,13 +36,13 @@ from vllm_ascend.ascend_config import (
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
-    ScoreEncoderCacheConfig,
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
     get_ascend_config,
     init_ascend_config,
 )
+from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheConfig
 from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
 

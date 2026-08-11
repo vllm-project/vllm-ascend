@@ -53,4 +53,4 @@ llm = LLM(
 | `promote_percentile` | float | `0.2` | Score percentile threshold used to promote CPU entries to NPU. |
 
 Custom managers are selected by fully qualified class name. Each manager defines
-its own `manager_config` schema and consumes it through `from_vllm_config`.
+its own `manager_config` schema and consumes it through `create_manager`.

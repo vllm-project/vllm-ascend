@@ -27,7 +27,6 @@ import torch
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata, EncoderCacheManagerConfig
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"

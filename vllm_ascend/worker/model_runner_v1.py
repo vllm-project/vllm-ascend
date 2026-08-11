@@ -597,6 +597,13 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
+        # Score encoder cache state.
+        self.tmp_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cpu_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cached: dict[str, set[str]] = {}
+        self._pending_encoder_cache_copies: deque[
+            tuple[torch.Tensor, torch.npu.Event]
+        ] = deque()
 
         self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
         self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
@@ -978,27 +985,6 @@ class NPUModelRunner(GPUModelRunner):
                 cur_hash = mm_feature.identifier
                 self.cached.setdefault(cur_hash, set()).add(new_req_data.req_id)
 
-    def free_tmp_cache(self, req_id, request):
-        if request is None:
-            return
-        if not self.use_score_encoder_cache:
-            self.cached.clear()
-            return
-        free_mm_hashes = set()
-        if request.mm_features is None:
-            return
-        for mm_feature in request.mm_features:
-            free_mm_hashes.add(mm_feature.identifier)
-
-        for mm_hash in free_mm_hashes:
-            if mm_hash not in self.cached:
-                continue
-            self.cached[mm_hash].discard(req_id)
-            if not self.cached.get(mm_hash):
-                del self.cached[mm_hash]
-                if mm_hash in self.tmp_encoder_cache:
-                    del self.tmp_encoder_cache[mm_hash]
-
     def _get_score_encoder_cache_metadata(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1010,7 +996,25 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _on_request_state_removed(self, req_id: str, req_state: Any | None) -> None:
-        self.free_tmp_cache(req_id, req_state)
+        if req_state is None:
+            return
+        if not self.use_score_encoder_cache:
+            self.cached.clear()
+            return
+        free_mm_hashes = set()
+        if req_state.mm_features is None:
+            return
+        for mm_feature in req_state.mm_features:
+            free_mm_hashes.add(mm_feature.identifier)
+
+        for mm_hash in free_mm_hashes:
+            if mm_hash not in self.cached:
+                continue
+            self.cached[mm_hash].discard(req_id)
+            if not self.cached.get(mm_hash):
+                del self.cached[mm_hash]
+                if mm_hash in self.tmp_encoder_cache:
+                    del self.tmp_encoder_cache[mm_hash]
 
     def _process_encoder_cache_scheduler_output(
         self,

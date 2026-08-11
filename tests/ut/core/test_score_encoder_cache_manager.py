@@ -12,10 +12,7 @@ from vllm_ascend.ec_manager.score_ec_manager import (
     ScoreEncoderCacheManager,
 )
 
-
-SCORE_MANAGER_CLS = (
-    "vllm_ascend.ec_manager.score_ec_manager.ScoreEncoderCacheManager"
-)
+SCORE_MANAGER_CLS = "vllm_ascend.ec_manager.score_ec_manager.ScoreEncoderCacheManager"
 
 
 def _build_manager(
@@ -58,9 +55,7 @@ def _build_request(request_id: str, mm_hash: str, num_embeds: int):
 
 
 def test_qualified_class_name_resolves_score_manager():
-    config = EncoderCacheManagerConfig(
-        encoder_cache_manager_cls=SCORE_MANAGER_CLS
-    )
+    config = EncoderCacheManagerConfig(encoder_cache_manager_cls=SCORE_MANAGER_CLS)
 
     assert config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager
     assert is_score_encoder_cache_manager(SimpleNamespace(ec_manager_config=config))
@@ -68,9 +63,7 @@ def test_qualified_class_name_resolves_score_manager():
 
 def test_other_managers_do_not_enable_score_cache():
     vllm_config = SimpleNamespace(
-        ec_manager_config=SimpleNamespace(
-            get_encoder_cache_manager_obj=lambda: EncoderCacheManager
-        )
+        ec_manager_config=SimpleNamespace(get_encoder_cache_manager_obj=lambda: EncoderCacheManager)
     )
 
     assert not is_score_encoder_cache_manager(vllm_config)
@@ -94,12 +87,10 @@ def test_factory_reads_score_parameters_from_vllm_config():
             encoder_cache_manager_cls=SCORE_MANAGER_CLS,
             manager_config=manager_config,
         ),
-        model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(vision_config=vision_config)
-        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(vision_config=vision_config)),
     )
 
-    manager = ScoreEncoderCacheManager.from_vllm_config(
+    manager = ScoreEncoderCacheManager.create_manager(
         cache_size=10,
         vllm_config=vllm_config,
     )
