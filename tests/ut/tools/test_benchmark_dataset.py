@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.benchmark_dataset import generate_benchmark_dataset
+from tools.benchmark_dataset import generate_benchmark_dataset, get_prefix_dataset_path
 
 
 class FakeTokenizer:
@@ -112,6 +112,35 @@ def test_generate_full_prefix_dataset(tmpdir) -> None:
     assert all(len(tokenizer.encode(question)) == 12 for question in questions)
 
 
+def test_generate_prefix_prewarm_dataset(tmpdir) -> None:
+    tmp_path = Path(str(tmpdir))
+    tokenizer = FakeTokenizer()
+    config = {
+        "type": "prefix",
+        "input_len": 20,
+        "num_samples": 6,
+        "prefix_ratio": 0.5,
+        "prefix_num": 2,
+        "prewarm": True,
+        "dp": 3,
+        "seed": 11,
+    }
+
+    dataset_dir = generate_benchmark_dataset(
+        model_path="test-model",
+        config=config,
+        cache_root=tmp_path,
+        tokenizer=tokenizer,
+    )
+
+    prefix_questions = _read_questions(get_prefix_dataset_path(dataset_dir))
+    assert len(prefix_questions) == 6
+    assert prefix_questions[0] == prefix_questions[1] == prefix_questions[2]
+    assert prefix_questions[3] == prefix_questions[4] == prefix_questions[5]
+    assert prefix_questions[0] != prefix_questions[3]
+    assert all(len(tokenizer.encode(question)) == 10 for question in prefix_questions)
+
+
 def test_reuse_complete_cached_dataset(tmpdir) -> None:
     tmp_path = Path(str(tmpdir))
     tokenizer = FakeTokenizer()
@@ -140,6 +169,9 @@ def test_reuse_complete_cached_dataset(tmpdir) -> None:
         ({"type": "fixed", "input_len": 0, "num_samples": 2}, "input_len"),
         ({"type": "fixed", "input_len": 8, "num_samples": 0}, "num_samples"),
         ({"type": "fixed", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5}, "prefix_ratio"),
+        ({"type": "fixed", "input_len": 8, "num_samples": 2, "prewarm": True}, "prewarm"),
+        ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5, "dp": 0}, "dp"),
+        ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0.5, "prewarm": "yes"}, "boolean"),
         ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 0}, "prefix_ratio"),
         ({"type": "prefix", "input_len": 2, "num_samples": 2, "prefix_ratio": 0.1}, "too small"),
         ({"type": "prefix", "input_len": 8, "num_samples": 2, "prefix_ratio": 1.1}, "prefix_ratio"),

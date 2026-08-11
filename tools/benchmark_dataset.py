@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_DATASET_TYPES = {"fixed", "prefix"}
 DEFAULT_CACHE_ROOT = "/tmp/vllm_ascend_datasets"
+PREFIX_DATASET_SUBDIR = "prefix"
 SEPARATOR_TOKEN_COUNT = 3
 
 # Performance datasets only need stable prompt text. Keeping the small seed
@@ -97,21 +98,13 @@ def _build_fixed_sample(
     return _decode_to_exact_length(tokenizer, token_ids, input_length, seed_text)
 
 
-def _build_prefix_samples(
+def _build_prefix_token_ids(
     tokenizer: Any,
     *,
-    input_length: int,
-    num_samples: int,
-    prefix_ratio: float,
+    prefix_length: int,
     prefix_num: int,
-    seed: int,
-) -> list[str]:
-    prefix_length = int(input_length * prefix_ratio)
-    separator_length = min(SEPARATOR_TOKEN_COUNT, input_length - prefix_length)
-    suffix_length = input_length - prefix_length - separator_length
-    rng = random.Random(seed)
-
-    prefix_ids = [
+) -> list[list[int]]:
+    return [
         _fit_token_ids(
             tokenizer,
             f"Prefix group {index}: {SEED_TEXTS[index % len(SEED_TEXTS)]}\n",
@@ -119,9 +112,25 @@ def _build_prefix_samples(
         )
         for index in range(prefix_num)
     ]
+
+
+def _build_prefix_samples(
+    tokenizer: Any,
+    *,
+    input_length: int,
+    num_samples: int,
+    prefix_ratio: float,
+    prefix_token_ids: list[list[int]],
+    seed: int,
+) -> list[str]:
+    prefix_length = int(input_length * prefix_ratio)
+    separator_length = min(SEPARATOR_TOKEN_COUNT, input_length - prefix_length)
+    suffix_length = input_length - prefix_length - separator_length
+    rng = random.Random(seed)
+    prefix_num = len(prefix_token_ids)
     samples = []
     for index in range(num_samples):
-        selected_prefix = prefix_ids[index % prefix_num]
+        selected_prefix = prefix_token_ids[index % prefix_num]
         separator_ids = _build_separator_ids(tokenizer, rng, index, separator_length)
         suffix_seed = SEED_TEXTS[(index + prefix_num) % len(SEED_TEXTS)]
         suffix_ids = _fit_token_ids(tokenizer, suffix_seed, suffix_length)
@@ -136,6 +145,10 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if dataset_type not in SUPPORTED_DATASET_TYPES:
         raise ValueError(f"dataset_generator.type must be one of {sorted(SUPPORTED_DATASET_TYPES)}")
 
+    prewarm = config.get("prewarm", False)
+    if not isinstance(prewarm, bool):
+        raise ValueError("dataset_generator.prewarm must be a boolean")
+
     normalized = {
         "type": dataset_type,
         "input_len": int(config["input_len"]),
@@ -143,6 +156,8 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
         "seed": int(config.get("seed", 1)),
         "prefix_ratio": float(config.get("prefix_ratio", 0.0)),
         "prefix_num": int(config.get("prefix_num", 1)),
+        "prewarm": prewarm,
+        "dp": int(config.get("dp", 1)),
         "trust_remote_code": bool(config.get("trust_remote_code", True)),
     }
     if normalized["input_len"] < 1:
@@ -151,10 +166,14 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("dataset_generator.num_samples must be >= 1")
     if normalized["prefix_num"] < 1:
         raise ValueError("dataset_generator.prefix_num must be >= 1")
+    if normalized["dp"] < 1:
+        raise ValueError("dataset_generator.dp must be >= 1")
     if not 0.0 <= normalized["prefix_ratio"] <= 1.0:
         raise ValueError("dataset_generator.prefix_ratio must be in [0, 1]")
     if dataset_type == "fixed" and normalized["prefix_ratio"] != 0.0:
         raise ValueError("fixed datasets do not accept a non-zero prefix_ratio")
+    if dataset_type == "fixed" and normalized["prewarm"]:
+        raise ValueError("prewarm is only supported for prefix datasets")
     if dataset_type == "prefix" and normalized["prefix_ratio"] <= 0.0:
         raise ValueError("prefix datasets require prefix_ratio > 0")
     if dataset_type == "prefix" and int(normalized["input_len"] * normalized["prefix_ratio"]) == 0:
@@ -205,11 +224,18 @@ def generate_benchmark_dataset(
     normalized = _validate_config(config)
     dataset_dir = _dataset_cache_dir(model_path, normalized, cache_root)
     dataset_file = dataset_dir / "test.jsonl"
+    prefix_dataset_dir = dataset_dir / PREFIX_DATASET_SUBDIR
+    prefix_dataset_file = prefix_dataset_dir / "test.jsonl"
     lock_path = dataset_dir.with_suffix(".lock")
 
     dataset_dir.parent.mkdir(parents=True, exist_ok=True)
     with filelock.FileLock(str(lock_path)):
-        if _is_complete_dataset(dataset_file, normalized["num_samples"]):
+        full_dataset_ready = _is_complete_dataset(dataset_file, normalized["num_samples"])
+        prefix_dataset_ready = not normalized["prewarm"] or _is_complete_dataset(
+            prefix_dataset_file,
+            normalized["prefix_num"] * normalized["dp"],
+        )
+        if full_dataset_ready and prefix_dataset_ready:
             logger.info("Reusing generated benchmark dataset: %s", dataset_dir)
             return str(dataset_dir)
 
@@ -235,17 +261,39 @@ def generate_benchmark_dataset(
                 for index in range(normalized["num_samples"])
             ]
         else:
+            prefix_length = int(normalized["input_len"] * normalized["prefix_ratio"])
+            prefix_token_ids = _build_prefix_token_ids(
+                tokenizer,
+                prefix_length=prefix_length,
+                prefix_num=normalized["prefix_num"],
+            )
             samples = _build_prefix_samples(
                 tokenizer,
                 input_length=normalized["input_len"],
                 num_samples=normalized["num_samples"],
                 prefix_ratio=normalized["prefix_ratio"],
-                prefix_num=normalized["prefix_num"],
+                prefix_token_ids=prefix_token_ids,
                 seed=normalized["seed"],
             )
+            if normalized["prewarm"]:
+                prefix_samples = []
+                for index, token_ids in enumerate(prefix_token_ids):
+                    filler_text = SEED_TEXTS[index % len(SEED_TEXTS)]
+                    prefix_text = _decode_to_exact_length(tokenizer, token_ids, prefix_length, filler_text)
+                    prefix_samples.extend([prefix_text] * normalized["dp"])
+                prefix_dataset_dir.mkdir(parents=True, exist_ok=True)
+                _write_dataset(prefix_dataset_file, prefix_samples)
 
         _write_dataset(dataset_file, samples)
         metadata_file = dataset_dir / "metadata.json"
         metadata_file.write_text(json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8")
         logger.info("Generated benchmark dataset with %d samples: %s", len(samples), dataset_dir)
         return str(dataset_dir)
+
+
+def get_prefix_dataset_path(dataset_path: str | Path) -> str:
+    """Return the prefix-only dataset directory for a generated dataset."""
+    prefix_dataset_path = Path(dataset_path) / PREFIX_DATASET_SUBDIR
+    if not (prefix_dataset_path / "test.jsonl").is_file():
+        raise FileNotFoundError(f"Generated prefix dataset not found: {prefix_dataset_path}")
+    return str(prefix_dataset_path)
