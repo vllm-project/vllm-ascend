@@ -83,6 +83,8 @@ on:
         required: false
       OBS_SECRET_ACCESS_KEY:
         required: false
+      OPENLIBING_SECRET:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -114,6 +116,7 @@ jobs:
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
     steps:
       - name: Check npu and CANN info
         run: |
