@@ -3,7 +3,7 @@
 # exercised by schedule_weekly_test_a2.yaml and schedule_weekly_test_a3.yaml.
 # Adding a new weekly test case is just appending a `- name: ...` entry
 # under the matching section.
-# Every A3 multi-node case must set `config_base_path` to its internal_dp/config
+# Every A2/A3 multi-node case must set `config_base_path` to its internal_dp/config
 # or external_dp/config directory.
 
 a2:
