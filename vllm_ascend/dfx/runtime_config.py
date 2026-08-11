@@ -102,6 +102,9 @@ _DEFAULTS: dict[str, Any] = {
         "save_sensitive_info": False,
         # Log [SamplingMeta] for the anomalous req (TP0 + last PP only).
         "print_sampling_meta": False,
+        # When a request finishes: log output_token_ids + decoded text (TP0 only).
+        # Default false (can be noisy / sensitive). Independent of save_sensitive_info.
+        "print_output_on_finish": False,
         # When save_sensitive_info, decode prompt/output ids to text (lazy tokenizer).
         "decode_token_ids": True,
         # Cap persisted token-id list lengths (0 = unlimited). Counts stay full.
@@ -139,6 +142,20 @@ _DEFAULTS: dict[str, Any] = {
             # true: patterns match only at the start (prefix) of cumulative output;
             # false (default): match anywhere as a contiguous token-id subsequence.
             "match_prefix": False,
+        },
+        # Sliding-window token re-read detector (no logprobs). Per new token:
+        # score = count of that id in the previous ``window`` content tokens;
+        # alert when sum of the last ``window`` scores exceeds threshold.
+        "token_repeat": {
+            "enabled": False,
+            "window": 32,
+            "repeat_sum_threshold": 64,
+            # Require this many content tokens before alerting (0 = no warmup).
+            "min_tokens": 32,
+            # Require this many consecutive over-threshold steps.
+            "consecutive_hits": 1,
+            # Token ids skipped for the content window (e.g. punctuation fillers).
+            "ignore_token_ids": [],
         },
     },
     # Detect-time InputFilterManager (+ one-shot prompt print for authoring).
@@ -668,6 +685,7 @@ class DfxRuntimeConfig:
         "spec_acceptance",
         "token_logprob",
         "output_substring",
+        "token_repeat",
     )
     # Allowed keys under ``dump`` (reject typos such as legacy dump_once).
     DUMP_KEYS: frozenset[str] = frozenset(_DEFAULTS["dump"])
@@ -691,6 +709,8 @@ class DfxRuntimeConfig:
             names.append("token")
         if bool(self.detector_get("output_substring", "enabled", False)):
             names.append("output_substring")
+        if bool(self.detector_get("token_repeat", "enabled", False)):
+            names.append("token_repeat")
         dump_on = self.dump_enabled()
         max_times = self.dump_max_times()
         if names and dump_on and max_times > 0:
@@ -906,6 +926,15 @@ class DfxRuntimeConfig:
         """
         report = self._data.get("report") or {}
         return bool(report.get("print_sampling_meta", False))
+
+    def report_print_output_on_finish(self) -> bool:
+        """Whether to log output token ids + text when a request finishes.
+
+        Default False. When True, TP0 logs on ``clear_finished`` (independent of
+        ``save_sensitive_info``). Can be large / sensitive — leave off in prod.
+        """
+        report = self._data.get("report") or {}
+        return bool(report.get("print_output_on_finish", False))
 
     def report_decode_token_ids(self) -> bool:
         """Whether to decode ``*_token_ids`` into text in reports.
@@ -1349,6 +1378,12 @@ class DfxRuntimeConfig:
                 data["report"]["decode_token_ids"] = bool(decode_ids)
             else:
                 raise ValueError("report.decode_token_ids must be bool")
+        print_out_finish = data["report"].get("print_output_on_finish")
+        if print_out_finish is not None and not isinstance(print_out_finish, bool):
+            if print_out_finish in (0, 1):
+                data["report"]["print_output_on_finish"] = bool(print_out_finish)
+            else:
+                raise ValueError("report.print_output_on_finish must be bool")
         for max_key in ("max_prompt_token_ids", "max_output_token_ids"):
             max_val = data["report"].get(max_key)
             if max_val is None:
@@ -1432,3 +1467,26 @@ class DfxRuntimeConfig:
                 out_sub["match_prefix"] = bool(match_prefix)
             else:
                 raise ValueError("detector.output_substring.match_prefix must be bool")
+
+        from vllm_ascend.dfx.detector.token_repeat import normalize_ignore_token_ids
+
+        token_repeat = detector["token_repeat"]
+        window = int(token_repeat.get("window", 32))
+        if window < 1:
+            raise ValueError("detector.token_repeat.window must be >= 1")
+        token_repeat["window"] = window
+        thresh = int(token_repeat.get("repeat_sum_threshold", 64))
+        if thresh < 0:
+            raise ValueError("detector.token_repeat.repeat_sum_threshold must be >= 0")
+        token_repeat["repeat_sum_threshold"] = thresh
+        min_tokens = int(token_repeat.get("min_tokens", window))
+        if min_tokens < 0:
+            raise ValueError("detector.token_repeat.min_tokens must be >= 0")
+        token_repeat["min_tokens"] = min_tokens
+        consecutive_hits = int(token_repeat.get("consecutive_hits", 1))
+        if consecutive_hits < 1:
+            raise ValueError("detector.token_repeat.consecutive_hits must be >= 1")
+        token_repeat["consecutive_hits"] = consecutive_hits
+        token_repeat["ignore_token_ids"] = normalize_ignore_token_ids(
+            token_repeat.get("ignore_token_ids", [])
+        )

@@ -33,24 +33,28 @@ def test_detector_manager_check_after_sample_aggregates_alerts(tmp_path):
 
     token_alert = AnomalyAlert(anomaly_type="token_logprob", req_id="r1")
     out_alert = AnomalyAlert(anomaly_type="output_substring", req_id="r1")
+    repeat_alert = AnomalyAlert(anomaly_type="token_repeat", req_id="r1")
     token_det = mgr.get("token_logprob")
     out_det = mgr.get("output_substring")
-    assert token_det is not None and out_det is not None
+    repeat_det = mgr.get("token_repeat")
+    assert token_det is not None and out_det is not None and repeat_det is not None
 
     token_det.check_all = MagicMock(return_value=[token_alert])  # type: ignore[method-assign]
     out_det.check_all = MagicMock(return_value=[out_alert])  # type: ignore[method-assign]
+    repeat_det.check_all = MagicMock(return_value=[repeat_alert])  # type: ignore[method-assign]
 
     alerts = mgr.check_after_sample(
         sampled_token_ids=[[1, 2]],
         logprobs_lists=None,
         req_ids=["r1"],
     )
-    assert alerts == [token_alert, out_alert]
+    assert alerts == [token_alert, out_alert, repeat_alert]
     token_det.check_all.assert_called_once()
     out_det.check_all.assert_called_once()
-    # Substring path must not re-append (sampled_token_ids=None).
+    repeat_det.check_all.assert_called_once()
+    # Substring + token_repeat share cumulative IO; must not re-append.
     assert out_det.check_all.call_args.kwargs.get("sampled_token_ids") is None
-
+    assert repeat_det.check_all.call_args.kwargs.get("sampled_token_ids") is None
 
 def test_detector_manager_token_logprob_topk_if_enabled(tmp_path):
     cfg = make_dfx_config(tmp_path)
@@ -108,16 +112,37 @@ def test_detector_manager_gates_detection(tmp_path):
     RequestIoSnapshotManager.reset_for_tests()
     cfg = make_dfx_config(tmp_path)
     cfg._data["detector"]["token_logprob"]["enabled"] = True
+    cfg._data["report"]["print_output_on_finish"] = False
     runner = SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"]), requests={})
     mgr = DetectorManager(dfx_config=cfg, runner=runner, detection_gate=lambda: False)
 
     token_det = mgr.get("token_logprob")
     token_det.check_all = MagicMock(return_value=[AnomalyAlert(anomaly_type="token_logprob", req_id="r1")])
 
-    # Gate off: hooks return [] and never touch detectors / IO buffer.
+    # Gate off: hooks return [] and never touch detectors / IO buffer by default.
     assert mgr.check_after_spec(None, None) == []
     assert mgr.check_after_sample(sampled_token_ids=[[1]], logprobs_lists=None, req_ids=["r1"]) == []
     token_det.check_all.assert_not_called()
+    assert RequestIoSnapshotManager.get().cumulative_output_count("r1") == 0
+
+
+def test_detector_manager_gated_keeps_io_only_for_finish_print_on_tp0(tmp_path):
+    """Gate off: only TP0 with print_output_on_finish appends cumulative IO."""
+    RequestIoSnapshotManager.reset_for_tests()
+    cfg = make_dfx_config(tmp_path)
+    cfg._data["report"]["print_output_on_finish"] = True
+
+    # TP0 keeps IO for finish-print.
+    runner_tp0 = SimpleNamespace(tp_rank=0, input_batch=SimpleNamespace(req_ids=["r1"]), requests={})
+    mgr_tp0 = DetectorManager(dfx_config=cfg, runner=runner_tp0, detection_gate=lambda: False)
+    assert mgr_tp0.check_after_sample(sampled_token_ids=[[1]], logprobs_lists=None, req_ids=["r1"]) == []
+    assert RequestIoSnapshotManager.get().cumulative_output_count("r1") == 1
+
+    # Non-TP0 does not append when gated.
+    runner_tp1 = SimpleNamespace(tp_rank=1, input_batch=SimpleNamespace(req_ids=["r2"]), requests={})
+    mgr_tp1 = DetectorManager(dfx_config=cfg, runner=runner_tp1, detection_gate=lambda: False)
+    assert mgr_tp1.check_after_sample(sampled_token_ids=[[2]], logprobs_lists=None, req_ids=["r2"]) == []
+    assert RequestIoSnapshotManager.get().cumulative_output_count("r2") == 0
 
 
 def test_check_after_sample_stop_after_alert_halts_on_alert(tmp_path):

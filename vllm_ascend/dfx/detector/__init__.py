@@ -21,6 +21,7 @@ from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
 from vllm_ascend.dfx.detector.registry import DetectorRegistry
 from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.dfx.detector.token_logprob import TokenLogprobDetector
+from vllm_ascend.dfx.detector.token_repeat import TokenRepeatDetector
 
 __all__ = [
     "AnomalyAlert",
@@ -31,4 +32,5 @@ __all__ = [
     "OutputSubstringDetector",
     "SpecAcceptanceDetector",
     "TokenLogprobDetector",
+    "TokenRepeatDetector",
 ]

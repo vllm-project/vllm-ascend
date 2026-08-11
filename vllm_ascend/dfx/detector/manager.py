@@ -35,6 +35,7 @@ from vllm_ascend.dfx.detector.output_substring import OutputSubstringDetector
 from vllm_ascend.dfx.detector.registry import DetectorRegistry
 from vllm_ascend.dfx.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.dfx.detector.token_logprob import TokenLogprobDetector
+from vllm_ascend.dfx.detector.token_repeat import TokenRepeatDetector
 from vllm_ascend.dfx.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.logger import init_logger_ascend
 
@@ -84,12 +85,17 @@ class DetectorManager:
             runner=runner,
             tokenizer_provider=tokenizer_provider,
         )
+        self._token_repeat_det = TokenRepeatDetector(
+            dfx_config=dfx_config,
+            runner=runner,
+        )
         # Internal ordered registry: iterate for clear_finished; not public.
         self._registry = DetectorRegistry()
         for det in (
             self._spec_det,
             self._token_det,
             self._output_substring_det,
+            self._token_repeat_det,
         ):
             self._registry.register(det)
         # Requests that already produced an anomaly (stop_after_alert): no longer
@@ -179,29 +185,40 @@ class DetectorManager:
         logprobs_lists: Any,
         req_ids: list[str] | None = None,
     ) -> list[AnomalyAlert]:
-        """Append sample tokens to IO buffer; run token_logprob then output_substring.
+        """Append sample tokens to IO buffer; run post-sample detectors.
 
-        ``sampled_token_ids`` is appended to the cumulative IO buffer once here
-        for **all** batch rows (including already-alerted ones) so later
-        manual-dump / report snapshots stay complete. Detection then skips
+        Order: ``token_logprob`` → ``output_substring`` → ``token_repeat``.
+
+        ``sampled_token_ids`` is appended to cumulative IO on the detect path.
+        When anomaly detection is gated off, only TP0 with
+        ``report.print_output_on_finish=true`` keeps appending so finish-print
+        can still show full output without requiring all ranks to accumulate.
+        Detection then skips
         ``stop_after_alert`` reqs by id — never by row-subsetting — so
         ``req_idx`` stays aligned with ``input_batch`` (filters / dump related).
 
-        ``OutputSubstringDetector.check_all`` is called with ``sampled_token_ids=None``
-        so it reads the buffer instead of re-appending (avoids double count).
+        ``OutputSubstringDetector`` and ``TokenRepeatDetector`` are called with
+        ``sampled_token_ids=None`` so they read the shared cumulative IO buffer
+        instead of re-appending (avoids double count; includes tokens recorded
+        earlier by ``check_after_spec``).
 
         With ``detector.stop_after_alert`` (default true) a request keeps being
         checked on every step until it produces an anomaly; afterwards it is
         skipped entirely so the same anomaly does not write endless reports.
         """
-        if self._gated("after_sample"):
-            return []
         resolved_ids = req_ids
         if resolved_ids is None:
             input_batch = getattr(self._runner, "input_batch", None)
             resolved_ids = list(getattr(input_batch, "req_ids", None) or [])
 
-        # Always accumulate IO first (same as ``check_after_spec``).
+        # Keep a single-rank fallback for finish-print when detect gate is off.
+        # Normal detect path appends below after the gate check.
+        if self._gated("after_sample"):
+            if bool(self._dfx_config.report_print_output_on_finish()) and int(getattr(self._runner, "tp_rank", 0)) == 0:
+                RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
+            return []
+
+        # Detect path: always accumulate once before detectors read cumulative IO.
         RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
 
         skip = self._stopped_req_ids if self._stop_after_alert() else None
@@ -218,10 +235,17 @@ class DetectorManager:
                 skip_req_ids=skip,
             )
         )
-        # Substring match uses cumulative IO (already appended); pass None to avoid
-        # a second append_batch inside OutputSubstringDetector.check_all.
+        # Substring + token_repeat share cumulative IO (already appended); pass
+        # None to avoid a second append_batch inside each detector.check_all.
         alerts.extend(
             self._output_substring_det.check_all(
+                sampled_token_ids=None,
+                req_ids=resolved_ids,
+                skip_req_ids=skip,
+            )
+        )
+        alerts.extend(
+            self._token_repeat_det.check_all(
                 sampled_token_ids=None,
                 req_ids=resolved_ids,
                 skip_req_ids=skip,
