@@ -7,6 +7,7 @@ import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs
 from vllm.distributed import get_tp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -35,6 +36,129 @@ from vllm_ascend.utils import (
 )
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+@dataclass
+class AscendSFACPMetadata(AscendSFAMetadata):
+    pcp_slot_mapping: torch.Tensor | None = None
+
+
+class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls if metadata_cls is not None else AscendSFACPMetadata,
+            supports_dcp_with_varlen,
+        )
+
+    def _build_with_metadata_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        build_metadata: Callable[[], AscendSFAMetadata],
+    ) -> AscendSFAMetadata:
+        pcp_slot_mapping = common_attn_metadata.slot_mapping
+        metadata = super()._build_with_metadata_view(
+            common_attn_metadata,
+            build_metadata,
+        )
+        assert isinstance(metadata, AscendSFACPMetadata)
+        metadata.pcp_slot_mapping = pcp_slot_mapping
+        return metadata
+
+class AscendSFACPImpl(AscendSFAImpl):
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **kwargs,
+        )
+        self.enable_sp = False
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+            (kv_no_split, cos, sin), slots, num_decode_tokens
+        )
+        assert slots.numel() == kv_no_split.shape[0], (
+            "SFA PCP cache write requires one slot per gathered token: "
+            f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
+        )
+
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    def _get_sfa_kv_slot_mapping(self, attn_metadata: M) -> torch.Tensor:
+        assert isinstance(attn_metadata, AscendSFACPMetadata)
+        assert attn_metadata.pcp_slot_mapping is not None
+        return attn_metadata.pcp_slot_mapping
+
+    def _write_indexer_cache(
+        self,
+        k_li: torch.Tensor,
+        k_li_scale: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata: M,
+    ) -> None:
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        slot_mapping = self._get_sfa_kv_slot_mapping(attn_metadata)
+        tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
+        gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(
+            tensors, slot_mapping, num_decode_tokens
+        )
+        k_li = gathered_tensors[0]
+        assert gathered_slot_mapping.numel() == k_li.shape[0], (
+            "SFA PCP indexer cache write requires one slot per gathered token: "
+            f"tokens={k_li.shape[0]}, slots={gathered_slot_mapping.numel()}."
+        )
+        if k_li_scale is not None:
+            k_li_scale = gathered_tensors[1]
+        super()._write_indexer_cache(
+            k_li,
+            k_li_scale,
+            gathered_slot_mapping,
+            kv_cache,
+            attn_metadata,
+        )
 
 
 @dataclass
