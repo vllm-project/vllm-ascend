@@ -95,6 +95,8 @@ templates:
       - "0.95"
       - --reasoning-parser
       - minimax_m3
+      - --speculative-config
+      - '{"model": "Inferact/MiniMax-M3-EAGLE3-GQA", "method": "eagle3", "num_speculative_tokens": 3}'
       - --enable-prefix-caching
       - --enforce-eager
       - --additional-config
@@ -141,6 +143,8 @@ templates:
       - --enable-prefix-caching
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"model": "Inferact/MiniMax-M3-EAGLE3-GQA", "method": "eagle3", "num_speculative_tokens": 3}'
       - --additional-config
       - '{"enable_cpu_binding": true, "ascend_compilation_config": {"fuse_norm_quant": false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2, "enable_shared_expert_dp": true, "enable_flashcomm1": true}'
       - --kv-transfer-config
