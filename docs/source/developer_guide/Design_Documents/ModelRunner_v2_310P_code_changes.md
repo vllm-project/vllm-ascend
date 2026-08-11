@@ -808,3 +808,39 @@ attn_metadata.seq_lens = attn_metadata.seq_lens.to(
 - 当前 Windows 本地 Python 环境未安装 `pytest`，目标 UT 未在本地执行，需在服务器环境补充执行。
 - 真实 310P Qwen3.5-4B 仍需依次验证 profile、eager 请求、ACLGraph 捕获/重放、
   TP1/TP2、chunked prefill、多并发和 async scheduling。
+
+## 22. Qwen3.5 MRoPE cos/sin slice 初始化
+
+问题现象：
+
+- 第 21 节修复后，Qwen3.5-4B 已越过上游 Triton positions kernel，但在首次
+  profile forward 的 `AscendMRotaryEmbedding310.forward_oot()` 中报错：
+  `MRoPE cos/sin slices are not initialized`。
+
+根因：
+
+- 310P 的 MRoPE 算子不直接用 positions 索引 cache，而是读取预先构造且地址稳定的
+  `_mrope_cos_slice` 和 `_mrope_sin_slice`。
+- MRV1 在 `NPUModelRunner310._model_forward()` 调用
+  `prepare_mrope_cos_sin_slices_from_runner()`，保证每次模型 forward 前刷新 slice。
+- MRV2 310P 新增的 CPU RoPE 路径只生成了 positions，没有同步迁移 MRV1 的 slice
+  准备步骤，因此算子在 profile 阶段检测到 slice 为空。
+
+修改内容：
+
+- `vllm_ascend/_310p/worker/v2/model_state.py`
+  - 在 310P `prepare_inputs()` 得到最终 padded positions 后，仅当
+    `model_config.uses_mrope` 时调用 `prepare_mrope_cos_sin_slices_from_runner()`。
+  - slice 在模型 forward 前完成刷新，并继续使用既有的固定容量 storage，满足后续
+    ACLGraph 捕获和重放对地址稳定性的要求。
+  - 修改局限于 310P MRV2 ModelState，不修改公共 MRV2 execute 路径，不影响 MRV1
+    或其他设备。
+- `tests/ut/_310p/test_model_runner_v2_310p.py`
+  - 增加回归测试，验证 MRoPE positions 准备后、模型 forward 前必定构造 cos/sin
+    slice，并将同一 positions tensor 传入模型。
+
+验证状态：
+
+- `py_compile`、`ruff check` 和 `git diff --check` 已通过。
+- 当前 Windows 本地 Python 环境未安装 `pytest`，新增目标 UT 需在服务器执行。
+- 真实 310P 需重新验证 Qwen3.5-4B profile、eager 和 ACLGraph。

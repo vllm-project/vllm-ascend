@@ -137,6 +137,32 @@ def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
     assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
 
 
+def test_310p_mrope_state_prepares_cos_sin_before_model_forward() -> None:
+    model_state = object.__new__(Ascend310PMambaHybridModelState)
+    model_state.model_config = SimpleNamespace(uses_mrope=True)
+    model_state.rope_state = MagicMock()
+    positions = torch.zeros((3, 4), dtype=torch.int64)
+    model_state.rope_state.get_positions.return_value = positions
+    input_batch = SimpleNamespace(
+        idx_mapping_np=np.array([0]),
+        query_start_loc_np=np.array([0, 4]),
+        num_tokens_after_padding=4,
+    )
+    req_states = SimpleNamespace(
+        prefill_len=SimpleNamespace(np=np.array([4])),
+        num_computed_tokens_np=np.array([0]),
+    )
+
+    with patch(
+        "vllm_ascend._310p.worker.v2.model_state.prepare_mrope_cos_sin_slices_from_runner"
+    ) as prepare_slices:
+        model_inputs = model_state.prepare_inputs(input_batch, req_states)
+
+    model_state.rope_state.prepare_positions_cpu.assert_called_once()
+    prepare_slices.assert_called_once_with(model_state, positions)
+    assert model_inputs["positions"] is positions
+
+
 @pytest.mark.parametrize(
     "setting",
     [

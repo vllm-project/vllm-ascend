@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -123,7 +124,10 @@ class _Ascend310PModelStateMixin:
             req_states.num_computed_tokens_np,
             input_batch.num_tokens_after_padding,
         )
-        return {"positions": self.rope_state.get_positions(input_batch.num_tokens_after_padding)}
+        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        if self.model_config.uses_mrope:
+            prepare_mrope_cos_sin_slices_from_runner(self, positions)
+        return {"positions": positions}
 
     def custom_sampler(self, sampler):
         del sampler
