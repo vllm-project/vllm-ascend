@@ -111,7 +111,10 @@ def _get_graph_update_backend(
             backend = group.backend
             if backend.get_impl_cls() is not None:
                 return backend
-    raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
+    raise RuntimeError(
+        "No executable attention backend is available for "
+        "full-graph parameter updates."
+    )
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
