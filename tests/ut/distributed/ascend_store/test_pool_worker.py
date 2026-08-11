@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -77,6 +78,22 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         cls = self._make_worker_class()
         result = cls.find_all_continuous_hit_positions([], [], 0, 48, 16)
         self.assertEqual(result, [])
+
+    def test_wait_for_layer_load_fallback_waits_for_reuse(self):
+        cls = self._make_worker_class()
+        worker = cls.__new__(cls)
+        worker.current_layer = 0
+        worker.num_layers = 1
+        worker.layer_load_tasks = [[]]
+        worker.prefetch_layer_map = {}
+        worker.layer_load_finished_events = [threading.Event()]
+        worker.kv_recv_thread = MagicMock()
+        worker.layerwise_reuse_waiter = MagicMock()
+        worker._submit_ready_layer_loads = MagicMock()
+
+        worker.wait_for_layer_load()
+
+        worker.layerwise_reuse_waiter.assert_called_once_with(0)
 
     def test_find_all_discontinuous_hit_positions_all_tp_hits(self):
         cls = self._make_worker_class()

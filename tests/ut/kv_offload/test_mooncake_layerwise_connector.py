@@ -188,6 +188,18 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             chunk_finish=False,
         )
 
+    def test_handle_request_completes_reuse_gate_on_error(self):
+        callback = MagicMock()
+        self.thread.reuse_completion_callback = callback
+        self.thread._transfer_kv_cache = MagicMock(side_effect=RuntimeError("write failed"))
+        task = SendTask(layer_idx=2)
+        self.thread.send_queue.put(task)
+
+        self.thread._handle_request(task)
+
+        callback.assert_called_once_with(2, "write failed")
+        self.assertEqual(self.thread.send_queue.unfinished_tasks, 0)
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.npu_stream_switch",
         side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
@@ -306,6 +318,21 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         )
         self.thread._transfer_kv_cache(send_task)
         self.engine.batch_transfer_sync_write.assert_not_called()
+
+    def test_transfer_negative_return_is_reuse_error(self):
+        self.engine.batch_transfer_sync_write.return_value = -1
+        send_task = SendTask(
+            send_request={"req2": self.req_meta_base},
+            wait_event=MagicMock(),
+            layer_idx=0,
+            layer_name="layer0",
+            group_rearrange_block_ids=[[5, 8]],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "ret=-1"):
+            self.thread._transfer_kv_cache(send_task)
+
+        self.assertIn("req2", self.thread.failed_reqs)
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
@@ -1046,6 +1073,49 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
         request = MockRequest("req1")
         connector.request_finished(request, [1, 2, 3])
         mock_method.assert_called_once_with(request, [1, 2, 3])
+
+
+def test_layerwise_reuse_state_tracks_shared_physical_slots():
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.index_to_name = {1: ["layer1"], 4: ["layer4"]}
+    worker.layer_metadata = {
+        "layer1": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
+        "layer4": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
+    }
+    worker._storage_send_errors = {}
+    worker._pending_reuse_layers = set()
+    worker._layerwise_reuse_lock = threading.Lock()
+    worker.kv_send_layer_thread = MagicMock()
+    worker.kv_send_layer_thread.is_alive.return_value = True
+
+    worker._init_layerwise_reuse_state()
+    worker._mark_layer_reuse_pending(1)
+
+    assert worker.layer_storage_slots[1] == worker.layer_storage_slots[4]
+    assert all(not event.is_set() for event in worker.storage_send_done_events)
+    worker._complete_layer_reuse(1, None)
+    worker.wait_for_layer_reuse(4)
+
+
+def test_layerwise_reuse_wait_propagates_mooncake_error():
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.index_to_name = {1: ["layer1"], 4: ["layer4"]}
+    worker.layer_metadata = {
+        "layer1": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
+        "layer4": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
+    }
+    worker._storage_send_errors = {}
+    worker._pending_reuse_layers = set()
+    worker._layerwise_reuse_lock = threading.Lock()
+    worker.kv_send_layer_thread = MagicMock()
+    worker.kv_send_layer_thread.is_alive.return_value = True
+
+    worker._init_layerwise_reuse_state()
+    worker._mark_layer_reuse_pending(1)
+    worker._complete_layer_reuse(1, "write failed")
+
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "write failed"):
+        worker.wait_for_layer_reuse(4)
 
 
 class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
