@@ -348,7 +348,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         self._init_hadamard()
-        self.start_pos_prefill: torch.Tensor = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+        self.start_pos_prefill: torch.Tensor = torch.zeros(
+            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
+        )
         self.decode_sas_metadata: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.decode_qli_metadata: torch.Tensor = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
@@ -552,13 +554,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             tp_size = get_tensor_model_parallel_world_size()
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = (
-                1
-                if self.compressor_ratio <= 1
-                else 4
-                if self.compressor_ratio == 4
-                else 128
-            )
+            cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             sas_metadata = metadata_op(
@@ -640,9 +636,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         assert self.num_actual_tokens is not None
         num_reqs = common_attn_metadata.num_reqs
         if self.common_ratio_to_sas_metadata.get("input_positions") is None:
-            input_positions = common_attn_metadata.positions[
-                : common_attn_metadata.num_input_tokens
-            ].long()
+            input_positions = common_attn_metadata.positions[: common_attn_metadata.num_input_tokens].long()
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
@@ -654,9 +648,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos = self.common_ratio_to_sas_metadata["cos"]
             sin = self.common_ratio_to_sas_metadata["sin"]
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[
-            : num_reqs + 1
-        ]
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
@@ -676,20 +668,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
-        if (
-            not has_prefill
-            and self.common_ratio_to_sas_metadata.get(layer_name) is None
-        ):
-            cu_seqlens_ori_kv = (
-                DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
-                    self.common_ratio_to_sas_metadata,
-                    "cu_seqlens_ori_kv",
-                    seq_lens,
-                    num_reqs,
-                    self._zero_i32,
-                    self.cu_seqlens_ori_kv,
-                )
-            )
+        if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
+            cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+                self.common_ratio_to_sas_metadata,
+                "cu_seqlens_ori_kv",
+                seq_lens,
+                num_reqs,
+                self._zero_i32,
+                self.cu_seqlens_ori_kv,
+             )
             cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         elif has_prefill:
             cu_seqlens_ori_kv = query_start_loc
@@ -718,9 +705,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         full_compress_cos, full_compress_sin = None, None
         if self.compressor_ratio > 1:
-            num_compressed_tokens = self._num_compressor_metadata_rows(
-                num_reqs
-            )
+            num_compressed_tokens = self._num_compressor_metadata_rows(num_reqs)
             full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
             slot_mapping = None
         else:
@@ -755,11 +740,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AscendDSAMetadata:
         assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
         self.block_size = kwargs.get("block_size", self.block_size)
-        self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata,
-            decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
-        )
+        self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                treat_short_extends_as_decodes=False,
+            )
+         )
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -773,9 +760,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = (
-            DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
-        )
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+            slot_mapping, self.block_size
+         )
         req_metadata = self.build_req_metadata_for_drafting(
             draft_index=draft_index,
             common_attn_metadata=common_attn_metadata,
@@ -803,9 +790,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AscendDSAReqMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[
-            : num_reqs + 1
-        ]
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
@@ -832,9 +817,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens,
                 self.num_actual_tokens,
             )
-            dspark_swa_indices = dspark_swa_indices[
-                : self.num_actual_tokens
-            ]
+            dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         cu_seqlens_ori_kv = (
@@ -850,9 +833,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
         )
         cu_seqlens_cmp_kv = (
-            None
-            if has_prefill
-            else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+            None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -883,15 +864,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not has_prefill:
             assert self.spec_sas_metadata is not None
-            self.spec_sas_metadata[draft_index - 1][:1024].copy_(
-                sas_metadata[:1024]
-            )
+            self.spec_sas_metadata[draft_index - 1][:1024].copy_(sas_metadata[:1024])
             sas_metadata = self.spec_sas_metadata[draft_index - 1]
 
         assert self.spec_slot_mapping is not None
-        slot_mapping = self.spec_slot_mapping[draft_index - 1][
-            : self.num_actual_tokens
-        ]
+        slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
         return AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
@@ -1425,9 +1402,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         sin = common_metadata.sin[layer_name][:num_tokens]
         actual_seq_lengths_query = common_metadata.query_start_loc
         actual_seq_lengths_key = common_metadata.seq_lens
-        ori_win_left = (
-            self.window_size - 1 if swa_req_metadata.ori_win_left is None else swa_req_metadata.ori_win_left
-        )
+        ori_win_left = self.window_size - 1 if swa_req_metadata.ori_win_left is None else swa_req_metadata.ori_win_left
         ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
 
         if self.multistream_dsv4_dsa_overlap:
@@ -1506,7 +1481,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
 
             # swa exec kv
-            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache,kv,swa_req_metadata.slot_mapping,)
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                swa_req_metadata.slot_mapping,
+            )
 
         compress_topk_idxs = None
         indexer_q = None
@@ -1514,12 +1493,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio > 1:
             assert compressor_attn_metadata is not None
             assert compressor_kv_state_metadata is not None
-            compressor_metadata = _require_req_metadata(
-                compressor_attn_metadata
-            )
-            compressor_state_metadata = _require_req_metadata(
-                compressor_kv_state_metadata
-            )
+            compressor_metadata = _require_req_metadata(compressor_attn_metadata)
+            compressor_state_metadata = _require_req_metadata(compressor_kv_state_metadata)
             if self.compress_ratio == 4:
                 assert indexer_kv_scale_metadata is not None
                 if self.skip_topk:
@@ -1591,9 +1566,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             if run_multistream_indexer:
                 main_stream.wait_stream(aux_stream)
                 weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
-                indexer_scale_metadata = _require_req_metadata(
-                    indexer_kv_scale_metadata
-                )
+                indexer_scale_metadata = _require_req_metadata(indexer_kv_scale_metadata)
                 compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
@@ -1625,7 +1598,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query)
+            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+                extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query
+            )
         if self.compress_ratio > 1:
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 extra_attn_kwargs,
@@ -1634,9 +1609,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         if self.compress_ratio <= 1:
             if swa_req_metadata.dspark_swa_indices is not None:
-                extra_attn_kwargs["ori_sparse_indices"] = (
-                    swa_req_metadata.dspark_swa_indices
-                )
+                extra_attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
             return attn_op(
                 q,
                 ori_kv=swa_kv_cache,
