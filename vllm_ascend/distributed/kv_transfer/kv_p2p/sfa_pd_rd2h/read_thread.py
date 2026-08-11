@@ -393,25 +393,22 @@ class MembPullReadThread(threading.Thread):
             )
 
         if scale_tensor is not None:
-            if len(p_base_addrs) <= scale_pos:
-                scale = {"error": "p_addr_mismatch", "p_n": len(p_base_addrs)}
+            p_scale_len = p_block_len[scale_pos] * p_block_size_scale[scale_pos]
+            d_scale_row_len = scale_tensor.element_size() * math.prod(scale_tensor.shape[1:])
+            d_scale_factor = scale_tensor.shape[0] // state.num_blocks
+            d_scale_len = d_scale_row_len * d_scale_factor
+            if p_scale_len != d_scale_len:
+                scale = {
+                    "error": "layout_mismatch",
+                    "p_scale_len": p_scale_len,
+                    "d_scale_len": d_scale_len,
+                }
             else:
-                p_scale_len = p_block_len[scale_pos] * p_block_size_scale[scale_pos]
-                d_scale_row_len = scale_tensor.element_size() * math.prod(scale_tensor.shape[1:])
-                d_scale_factor = scale_tensor.shape[0] // state.num_blocks
-                d_scale_len = d_scale_row_len * d_scale_factor
-                if p_scale_len != d_scale_len:
-                    scale = {
-                        "error": "layout_mismatch",
-                        "p_scale_len": p_scale_len,
-                        "d_scale_len": d_scale_len,
-                    }
-                else:
-                    scale = {
-                        "p_scale_base": p_base_addrs[scale_pos],
-                        "block_len": p_scale_len,
-                        "d_scale_base": scale_tensor.data_ptr(),
-                    }
+                scale = {
+                    "p_scale_base": p_base_addrs[scale_pos],
+                    "block_len": p_scale_len,
+                    "d_scale_base": scale_tensor.data_ptr(),
+                }
 
         return {
             "layer_name": layer_name,
@@ -568,12 +565,6 @@ class MembPullReadThread(threading.Thread):
         scale = layer.get("scale")
         if scale is not None and d_indexer_ids:
             if "error" in scale:
-                if scale["error"] == "p_addr_mismatch":
-                    raise RuntimeError(
-                        f"MembPull indexer scale {layer_name}: D is LIC8 (has scale "
-                        f"tensor) but P exposed only {scale['p_n']} base addrs "
-                        f"(no scale leg) -- P/D LIC8 config mismatch."
-                    )
                 raise RuntimeError(
                     f"MembPull indexer scale {layer_name}: D scale block_len="
                     f"{scale['d_scale_len']} not a multiple of P={scale['p_scale_len']} -- "

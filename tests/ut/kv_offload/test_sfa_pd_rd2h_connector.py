@@ -319,6 +319,61 @@ def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scal
         )
 
 
+def test_resolve_read_layer_builds_indexer_scale_transfer_descriptor():
+    thread = _make_read_thread()
+    layer_name = "model.layers.0.self_attn"
+    thread._state.main_name_to_idx = {layer_name: 0}
+    thread._state.main_gva_bases = [(3000, 4000)]
+    thread._state.main_block_lens = [(10, 20)]
+    thread._state.indexer_tensors = [
+        SimpleNamespace(
+            shape=(16, 1, 1, 5),
+            element_size=lambda: 1,
+            data_ptr=lambda: 8000,
+        )
+    ]
+    thread._state.indexer_scale_tensors = [
+        SimpleNamespace(
+            shape=(16, 1),
+            element_size=lambda: 1,
+            data_ptr=lambda: 9000,
+        )
+    ]
+    layer = thread._resolve_read_layer(
+        layer_name,
+        {
+            layer_name: {
+                "base_addrs": [1000, 2000, 7000, 9000],
+                "block_len": [10, 20, 5, 1],
+                "block_size_scale": [1, 1, 1, 1],
+                "main_tensor_count": 2,
+                "has_indexer": True,
+            }
+        },
+    )
+
+    assert layer is not None
+    assert layer["scale"] == {
+        "p_scale_base": 9000,
+        "block_len": 1,
+        "d_scale_base": 9000,
+    }
+
+    local, peer, lengths, info = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[1, 2],
+        p_indexer_block_ids=[7],
+        want_info=True,
+    )
+
+    assert local == [3030, 4060, 8040, 9008]
+    assert peer == [1010, 2020, 7035, 9007]
+    assert lengths == [20, 40, 5, 1]
+    assert info is not None
+    assert info["num_transfers"] == 4
+
+
 @pytest.mark.parametrize(
     (
         "k_cpu_ptr",
