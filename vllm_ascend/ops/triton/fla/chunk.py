@@ -130,10 +130,9 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens_kern,
         chunk_indices=chunk_indices_chunk64_host,
         use_exp2=False,
-        transpose_state_layout=False,
     )
     if keep_meta is not None:
-        # Scatter the compacted final_state back to the original [N, H, K, V]
+        # Scatter the compacted final_state back to the original [N, H, V, K]
         # layout the PCP state recursion expects; empty segments keep their
         # initial state.
         _fs_full = initial_state.clone()
@@ -167,9 +166,10 @@ def chunk_gated_delta_rule_fwd(
         updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
         updated_state[0, ...] = all_final_state[0]
         for i in range(1, get_pcp_group().world_size):
-            # correct_i = all_final_state[i] + Phi_i * (correct_{i-1} - s0)
-            updated_final_state = all_final_state[i] + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...] - initial_state
+            # correct_i = all_final_state[i] + Φ_i · (correct_{i-1} - s0) = Φ_i · correct_{i-1} + p_i
+            state_delta = (updated_state[i - 1, ...] - initial_state).transpose(-1, -2)
+            updated_final_state = all_final_state[i] + torch.matmul(all_final_h_update[i, ...], state_delta).transpose(
+                -1, -2
             )
             updated_state[i, ...] = updated_final_state
 
@@ -210,7 +210,6 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens_host,
         chunk_indices=chunk_indices_chunk64_host,
         chunk_size=64,
-        transpose_state_layout=False,
     )
 
     o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
@@ -294,11 +293,12 @@ def chunk_gated_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state in the KV-cache layout `[N, H, V, K]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state in KV-cache layout `[N, H, V, K]`.
+            Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -310,7 +310,8 @@ def chunk_gated_delta_rule(
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state in the KV-cache layout `[N, H, V, K]` if
+            `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch

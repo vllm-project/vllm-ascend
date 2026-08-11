@@ -340,6 +340,48 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolis
     assert captured["chunk_indices"] == prebuilt_meta.chunk_indices_chunk64_host
 
 
+@pytest.mark.parametrize("initial_state_present", [False, True])
+def test_chunk_gated_delta_rule_uses_kv_cache_state_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_state_present: bool,
+):
+    """The AscendC boundary consumes and produces Qwen's [N, H, V, K] state."""
+    n, h, v_dim, k_dim = 2, 3, 5, 7
+    initial_state = torch.randn(n, h, v_dim, k_dim) if initial_state_present else None
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+    monkeypatch.setattr(chunk, "get_pcp_group", lambda: type("Group", (), {"world_size": 1})())
+    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g"))
+    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
+    monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A"))
+    monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
+
+    final_state = torch.randn(n, h, v_dim, k_dim)
+
+    def fwd_h(*args, **kwargs):
+        captured["initial_state"] = kwargs["initial_state"]
+        return _DummyTensor("h"), _DummyTensor("v_new"), final_state
+
+    monkeypatch.setattr(torch.ops._C_ascend, "chunk_gated_delta_rule_fwd_h", fwd_h, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "chunk_fwd_o", lambda *args, **kwargs: _DummyTensor("o"), raising=False)
+
+    result = chunk.chunk_gated_delta_rule_fwd(
+        q=_DummyTensor("q"),
+        k=_DummyTensor("k"),
+        v=_DummyTensor("v"),
+        g=_DummyTensor("g"),
+        beta=_DummyTensor("beta"),
+        scale=1.0,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
+
+    assert captured["initial_state"] is initial_state
+    assert result[3] is final_state
+    assert result[3].shape == (n, h, v_dim, k_dim)
+
+
 def test_chunk_gated_delta_rule_fwd_pcp_chaining_subtracts_initial_state(
     monkeypatch: pytest.MonkeyPatch,
 ):

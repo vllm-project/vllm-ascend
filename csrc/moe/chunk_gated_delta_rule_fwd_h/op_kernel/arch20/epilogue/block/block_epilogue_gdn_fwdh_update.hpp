@@ -64,8 +64,6 @@ public:
         hUbTensor = resource.ubBuf.template GetBufferByByte<HElementInput>(PING_BUF_0_OFFSET);
 
         hOutputUbTensor = resource.ubBuf.template GetBufferByByte<HElementOutput>(PING_BUF_1_OFFSET);
-        finalOutputUbTensor = resource.ubBuf.template GetBufferByByte<FinalStateElement>(PING_BUF_1_OFFSET);
-
         glastUbTensor = resource.ubBuf.template GetBufferByByte<float>(PING_G_BUF_OFFSET);
 
     }
@@ -103,7 +101,6 @@ public:
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
         AscendC::GlobalTensor<HElementInput> hInputThisSubBlock = hInput[offsetH];
         AscendC::GlobalTensor<float> hUpdateInputThisSubBlock = hUpdateInput[offsetH];
-        AscendC::GlobalTensor<FinalStateElement> finalStateThisSubBlock = finalState[offsetH];
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
@@ -145,14 +142,25 @@ public:
         AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, mActualThisSubBlock * nActual);
 
         if (isFinalState) {
-            if constexpr(!std::is_same<FinalStateElement, float>::value) {
-                AscendC::PipeBarrier<PIPE_ALL>();
-                AscendC::Cast(finalOutputUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
-                AscendC::PipeBarrier<PIPE_ALL>();
-                AscendC::DataCopy(finalStateThisSubBlock, finalOutputUbTensor, mActualThisSubBlock * nActual);
-            } else {
-                AscendC::PipeBarrier<PIPE_ALL>();
-                AscendC::DataCopy(finalStateThisSubBlock, hUpdateUbTensor, mActualThisSubBlock * nActual);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            for (uint32_t vIdx = 0; vIdx < vHeadDim; ++vIdx) {
+                for (uint32_t localK = 0; localK < mActualThisSubBlock; ++localK) {
+                    calcUbTensor.SetValue(localK, hUpdateUbTensor.GetValue(localK * vHeadDim + vIdx));
+                }
+                if constexpr(!std::is_same<FinalStateElement, float>::value) {
+                    AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+                    AscendC::Cast(hUbTensor, calcUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock);
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                    AscendC::DataCopy(finalState[vIdx * kHeadDim + mOffset], hUbTensor, mActualThisSubBlock);
+                } else {
+                    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+                    AscendC::DataCopy(finalState[vIdx * kHeadDim + mOffset], calcUbTensor, mActualThisSubBlock);
+                }
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
             }
         } else {
             AscendC::PipeBarrier<PIPE_ALL>();
@@ -169,8 +177,6 @@ private:
     AscendC::LocalTensor<float> hUpdateUbTensor;
 
     AscendC::LocalTensor<HElementOutput> hOutputUbTensor;
-    AscendC::LocalTensor<FinalStateElement> finalOutputUbTensor;
-
     AscendC::LocalTensor<float> glastUbTensor;
 
 };

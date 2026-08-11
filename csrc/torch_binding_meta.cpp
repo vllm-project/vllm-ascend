@@ -1696,7 +1696,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta
     if (output_final_state_) {
         int N = cu_seqlens.has_value() ? cu_seqlens->size() - 1 : B;
         auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options();
-        final_state_out = at::empty({N, HV, K, V}, state_options);
+        final_state_out = at::empty({N, HV, V, K}, state_options);
     } else {
         final_state_out = at::empty({1}, k.options());
     }

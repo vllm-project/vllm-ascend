@@ -547,15 +547,13 @@ def chunk_gated_delta_rule_310(
         )
     else:
         state = initial_state
-    state_kernel = state.transpose(-1, -2).contiguous()
-
     h, v_new, final_state_kernel = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_kernel,
         w_kernel,
         u_kernel,
         g=g_kernel,
         gk=None,
-        initial_state=state_kernel,
+        initial_state=state,
         output_final_state=output_final_state,
         chunk_size=CHUNK_SIZE,
         save_new_value=True,
@@ -582,5 +580,4 @@ def chunk_gated_delta_rule_310(
     out = _unpad_chunk_output(out, seq_ranges, original_tokens, input_was_tnd, cu_seqlens is not None)
     if not output_final_state:
         return out, None
-    final_state = final_state_kernel.transpose(-1, -2).contiguous()
-    return out, final_state
+    return out, final_state_kernel

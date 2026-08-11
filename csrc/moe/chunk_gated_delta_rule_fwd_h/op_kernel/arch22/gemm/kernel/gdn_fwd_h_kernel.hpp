@@ -154,7 +154,6 @@ public:
     uint32_t kHeadDim;
     uint32_t vHeadDim;
     uint32_t chunkSize;
-    uint32_t initalStateStride0;
     bool useInitialState;
     bool storeFinalState;
     uint32_t isVariedLen;
@@ -202,7 +201,6 @@ public:
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
-        initalStateStride0 = gdnFwdHTilingData->initalStateStride0;
         useInitialState = gdnFwdHTilingData->useInitialState;
         storeFinalState = gdnFwdHTilingData->storeFinalState;
         isVariedLen = gdnFwdHTilingData->isVariedLen;
@@ -322,33 +320,32 @@ public:
                 uint32_t pingpongFlag = 1;
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-                AscendC::DataCopyParams repeatParams = {static_cast<uint16_t>(kHeadDim), static_cast<uint16_t>(vHeadDim * sizeof(ElementInitialState) / 32), 
-                    static_cast<uint16_t>((initalStateStride0 - vHeadDim)* sizeof(ElementInitialState) / 32), static_cast<uint16_t>(0)};
                 for (uint32_t shapeBatchIdx = 0; shapeBatchIdx < shapeBatch; shapeBatchIdx++) {
                     for (uint32_t vHeadIdx = 0; vHeadIdx < vNumHead; vHeadIdx++) {
                         for (uint32_t tokenBatchIdx = 0; tokenBatchIdx < vecBlockScheduler.tokenBatch; tokenBatchIdx++) {
                             uint32_t batchIdx = isVariedLen ? tokenBatchIdx : shapeBatchIdx;
                             uint32_t chunkOffset = isVariedLen ? gmNumChunks.GetValue(tokenBatchIdx) : 0;
-                            uint32_t initialStateSrcOffset = (batchIdx * vNumHead + vHeadIdx) * kHeadDim * initalStateStride0;
+                            uint32_t initialStateSrcOffset = (batchIdx * vNumHead + vHeadIdx) * stateBlockSize;
                             uint32_t hOffset = (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset) * stateBlockSize;
                             AscendC::LocalTensor<ElementInitialState> stateUbTensor = pingpongFlag ? stateUbTensorPing : stateUbTensorPong;
                             AscendC::LocalTensor<ElementH> hUbTensor = pingpongFlag ? hUbTensorPing : hUbTensorPong;
                             auto event_id = pingpongFlag ? EVENT_ID1 : EVENT_ID0;
                             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-                            if constexpr(!std::is_same<ElementInitialState, ElementH>::value) {
-                                AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateSrcOffset], repeatParams);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                                AscendC::Cast(hUbTensor, stateUbTensor, AscendC::RoundMode::CAST_RINT, stateBlockSize);
-                                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                                AscendC::DataCopy(gmH[hOffset], hUbTensor, stateBlockSize);
-                            } else {
-                                AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateSrcOffset], repeatParams);
-                                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                                AscendC::DataCopy(gmH[hOffset], stateUbTensor, stateBlockSize);
+                            // The cache is contiguous [V, K], while the chunk
+                            // recurrence consumes [K, V].  Transpose in UB so
+                            // the state crosses HBM only once.
+                            AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateSrcOffset], stateBlockSize);
+                            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(event_id);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(event_id);
+                            for (uint32_t kIdx = 0; kIdx < kHeadDim; ++kIdx) {
+                                for (uint32_t vIdx = 0; vIdx < vHeadDim; ++vIdx) {
+                                    hUbTensor.SetValue(kIdx * vHeadDim + vIdx,
+                                        static_cast<ElementH>(stateUbTensor.GetValue(vIdx * kHeadDim + kIdx)));
+                                }
                             }
+                            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(event_id);
+                            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(event_id);
+                            AscendC::DataCopy(gmH[hOffset], hUbTensor, stateBlockSize);
                             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
                             pingpongFlag = 1 - pingpongFlag;
                         }

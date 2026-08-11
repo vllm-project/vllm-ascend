@@ -32,7 +32,7 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
     B, Hg, T, K = k.shape
     HV, V = u.shape[1], u.shape[3]
     NT = T // chunk_size
-    h = initial_state.float().clone() if initial_state is not None else torch.zeros(B, HV, K, V)
+    h = initial_state.float().transpose(-1, -2).clone() if initial_state is not None else torch.zeros(B, HV, K, V)
     h_chunks = [h.clone()]
     v_new = torch.zeros_like(u)
 
@@ -70,6 +70,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         "B,Hg,HV,T,K,V",
         [
             (1, 1, 1, 128, 128, 128),
+            (1, 1, 1, 128, 128, 64),
             (1, 2, 2, 128, 128, 128),
         ],
     )
@@ -80,7 +81,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         w = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
         u = torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1
         g = (-torch.rand(B, HV, T) * 0.1).float()
-        init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
+        init = torch.randn(B, HV, V, K, dtype=DTYPE) * 0.01
 
         h_ref, _ = cpu_reference(k, w, u, g, init, CHUNK_SIZE)
         h_out, _, _ = npu_chunk_gdr_fwd_h(
@@ -104,6 +105,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         "B,Hg,HV,T,K,V",
         [
             (1, 1, 1, 128, 128, 128),
+            (1, 1, 1, 128, 128, 64),
             (1, 2, 2, 128, 128, 128),
         ],
     )
@@ -114,7 +116,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         w = torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1
         u = torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1
         g = (-torch.rand(B, HV, T) * 0.1).float()
-        init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
+        init = torch.randn(B, HV, V, K, dtype=DTYPE) * 0.01
 
         _, vn_ref = cpu_reference(k, w, u, g, init, CHUNK_SIZE)
         _, vn_out, _ = npu_chunk_gdr_fwd_h(
@@ -143,7 +145,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         w = (torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1).npu()
         u = (torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1).npu()
         g = (-torch.rand(B, HV, T).float() * 0.1).npu()
-        init = (torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01).npu()
+        init = (torch.randn(B, HV, V, K, dtype=DTYPE) * 0.01).npu()
 
         h_out, vn_out, _ = npu_chunk_gdr_fwd_h(
             k,

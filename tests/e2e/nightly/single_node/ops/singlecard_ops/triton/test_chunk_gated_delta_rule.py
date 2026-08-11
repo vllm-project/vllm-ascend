@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import PytestBase
@@ -46,6 +47,53 @@ class TestChunkGatedDeltaRule(PytestBase):
 
         assert core_attn_out_non_spec.shape == (1, 17, 8, 128)
         assert last_recurrent_state.shape == (3, 8, 128, 128)
+
+
+@pytest.mark.parametrize("initial_state_present", [False, True])
+@pytest.mark.parametrize("mixed_batch", [False, True])
+def test_qwen_chunk_gdn_real_state_shape(initial_state_present, mixed_batch):
+    """Compare output and [N, H, V, K] state for pure/mixed Qwen prefills."""
+    torch.manual_seed(7)
+    sequence_lengths = [1, 4] if mixed_batch else [5]
+    cu_seqlens = torch.tensor([0, *torch.tensor(sequence_lengths).cumsum(0).tolist()], dtype=torch.int32).npu()
+    num_sequences = len(sequence_lengths)
+    num_tokens, num_heads, key_dim, value_dim = 5, 2, 32, 64
+    shape = (1, num_tokens, num_heads)
+    q = torch.randn(*shape, key_dim, dtype=torch.bfloat16).npu()
+    k = torch.randn_like(q)
+    v = torch.randn(*shape, value_dim, dtype=torch.bfloat16).npu()
+    g = torch.randn(*shape, dtype=torch.float32).npu()
+    beta = torch.rand(*shape, dtype=torch.bfloat16).npu()
+    initial_state = (
+        torch.randn(num_sequences, num_heads, value_dim, key_dim, dtype=torch.float32).npu()
+        if initial_state_present
+        else None
+    )
+
+    actual_output, actual_state = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    expected_output, expected_state = chunk_gated_delta_rule_pytorch(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+
+    assert actual_state.shape == (num_sequences, num_heads, value_dim, key_dim)
+    torch.testing.assert_close(actual_output, expected_output, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_state, expected_state, rtol=2e-2, atol=2e-2)
 
 
 def test_chunk_gated_delta_rule_310_state_layout_matches_vllm():

@@ -397,7 +397,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+            # The recurrent kernel and KV cache both use [N, H, V, K].  Keep
+            # that layout for chunk prefill as well; the AscendC kernel maps
+            # it to its internal [K, V] tiles while loading and storing.
+            initial_state = ssm_state[prefill_state_indices]
             clear_ssm_states(initial_state, prefill_has_initial_state)
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
@@ -412,7 +415,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
