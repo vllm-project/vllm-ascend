@@ -10,10 +10,12 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import enable_sp_by_pass, is_vl_model
@@ -154,6 +156,241 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor, layer_name: str) 
     return output
 
 
+def _is_tp_mm_reduce_scatter_enabled() -> bool:
+    try:
+        get_forward_context()
+    except AssertionError:
+        return False
+
+    return bool(_EXTRA_CTX.flash_comm_v1_enabled)
+
+
+def _maybe_pad_input_for_mm_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
+    pad_size = _EXTRA_CTX.pad_size
+    if pad_size <= 0:
+        return input_
+    return F.pad(input_, (0, 0, 0, pad_size))
+
+
+def _fallback_dynamic_quant_matmul_reduce_scatter(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(input_, dst_type=torch.int8)
+    need_unsqueeze = False
+    if pertoken_scale.dim() == 2:
+        need_unsqueeze = True
+        quantized_x = quantized_x.squeeze(dim=1)
+        pertoken_scale = pertoken_scale.squeeze(dim=1)
+
+    output = torch_npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        weight_scale,
+        pertoken_scale=pertoken_scale,
+        bias=bias,
+        output_dtype=input_.dtype,
+    )
+    if need_unsqueeze:
+        output = output.unsqueeze(dim=1)
+    return torch.ops.vllm.maybe_pad_and_reduce(output)
+
+
+def _dynamic_quant_matmul_reduce_scatter_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if not _is_tp_mm_reduce_scatter_enabled() or input_.dim() != 2:
+        return _fallback_dynamic_quant_matmul_reduce_scatter(input_, weight, weight_scale, bias)
+
+    tp_group = get_tp_group()
+    world_size = tp_group.world_size
+    if world_size == 1 or world_size > 8:
+        return _fallback_dynamic_quant_matmul_reduce_scatter(input_, weight, weight_scale, bias)
+
+    hcom_name = tp_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(
+        tp_group.rank_in_group,
+    )
+    x = _maybe_pad_input_for_mm_reduce_scatter(input_)
+    quantized_x, pertoken_scale = DeviceOperator.npu_dynamic_quant(x, act_quant_type=torch.int8)
+    need_unsqueeze = False
+    if pertoken_scale.dim() == 2:
+        need_unsqueeze = True
+        quantized_x = quantized_x.squeeze(dim=1)
+        pertoken_scale = pertoken_scale.squeeze(dim=1)
+    x1_scale = pertoken_scale.reshape(-1, 1).contiguous()
+    x2_scale = weight_scale.reshape(1, -1).to(torch.float32).contiguous()
+    output = DeviceOperator.npu_mm_reduce_scatter_base(
+        quantized_x,
+        weight,
+        hcom_name,
+        world_size,
+        reduce_op="sum",
+        bias=bias,
+        comm_turn=0,
+        x1_scale=x1_scale,
+        x2_scale=x2_scale,
+        output_dtype=input_.dtype,
+    )
+    if need_unsqueeze:
+        output = output.unsqueeze(dim=1)
+    return output
+
+
+def _fallback_quant_matmul_reduce_scatter(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    deq_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+    input_scale_reciprocal: torch.Tensor,
+    input_offset: torch.Tensor,
+    quant_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    quantized_x = torch.ops.vllm.quantize(input_, input_scale, input_scale_reciprocal, input_offset)
+    output = torch_npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        deq_scale,
+        bias=quant_bias,
+        output_dtype=input_.dtype,
+    )
+    return torch.ops.vllm.maybe_pad_and_reduce(output)
+
+
+def _quant_matmul_reduce_scatter_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    deq_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+    input_scale_reciprocal: torch.Tensor,
+    input_offset: torch.Tensor,
+    quant_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if not _is_tp_mm_reduce_scatter_enabled() or input_.dim() != 2:
+        return _fallback_quant_matmul_reduce_scatter(
+            input_, weight, deq_scale, input_scale, input_scale_reciprocal, input_offset, quant_bias
+        )
+
+    tp_group = get_tp_group()
+    world_size = tp_group.world_size
+    if world_size == 1 or world_size > 8:
+        return _fallback_quant_matmul_reduce_scatter(
+            input_, weight, deq_scale, input_scale, input_scale_reciprocal, input_offset, quant_bias
+        )
+
+    hcom_name = tp_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(
+        tp_group.rank_in_group,
+    )
+    quantized_x = torch.ops.vllm.quantize(
+        _maybe_pad_input_for_mm_reduce_scatter(input_),
+        input_scale,
+        input_scale_reciprocal,
+        input_offset,
+    )
+    output = DeviceOperator.npu_mm_reduce_scatter_base(
+        quantized_x,
+        weight,
+        hcom_name,
+        world_size,
+        reduce_op="sum",
+        bias=None,
+        comm_turn=0,
+        x2_scale=deq_scale,
+        output_dtype=input_.dtype,
+    )
+    if quant_bias is not None:
+        output = torch.add(output, torch.mul(quant_bias, deq_scale).to(input_.dtype))
+    return output
+
+
+def _unquantized_matmul_reduce_scatter_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if not _is_tp_mm_reduce_scatter_enabled() or input_.dim() != 2:
+        output = torch.ops.vllm.unquantized_gemm(input_, weight, bias)
+        return torch.ops.vllm.maybe_pad_and_reduce(output)
+
+    tp_group = get_tp_group()
+    world_size = tp_group.world_size
+    if world_size == 1 or world_size > 8:
+        output = torch.ops.vllm.unquantized_gemm(input_, weight, bias)
+        return torch.ops.vllm.maybe_pad_and_reduce(output)
+
+    hcom_name = tp_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(
+        tp_group.rank_in_group,
+    )
+    output = DeviceOperator.npu_mm_reduce_scatter_base(
+        _maybe_pad_input_for_mm_reduce_scatter(input_),
+        weight.t(),
+        hcom_name,
+        world_size,
+        reduce_op="sum",
+        bias=None,
+        comm_turn=0,
+    )
+    if bias is not None:
+        output.add_(bias)
+    return output
+
+
+def _matmul_reduce_scatter_tensor_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    *_args,
+) -> torch.Tensor:
+    try:
+        world_size = get_tensor_model_parallel_world_size()
+        pad_size = _EXTRA_CTX.pad_size
+    except Exception:
+        world_size = 1
+        pad_size = 0
+
+    if not _is_tp_mm_reduce_scatter_enabled():
+        world_size = 1
+        pad_size = 0
+
+    output_tokens = input_.shape[0]
+    if world_size > 1:
+        output_tokens = (output_tokens + pad_size) // world_size
+    return torch.empty(
+        (output_tokens, *input_.shape[1:-1], weight.shape[-1]),
+        device=input_.device,
+        dtype=input_.dtype,
+    )
+
+
+def _unquantized_matmul_reduce_scatter_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    *_args,
+) -> torch.Tensor:
+    try:
+        world_size = get_tensor_model_parallel_world_size()
+        pad_size = _EXTRA_CTX.pad_size
+    except Exception:
+        world_size = 1
+        pad_size = 0
+
+    if not _is_tp_mm_reduce_scatter_enabled():
+        world_size = 1
+        pad_size = 0
+
+    output_tokens = input_.shape[0]
+    if world_size > 1:
+        output_tokens = (output_tokens + pad_size) // world_size
+    return torch.empty(
+        (output_tokens, *input_.shape[1:-1], weight.shape[0]),
+        device=input_.device,
+        dtype=input_.dtype,
+    )
+
+
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
 # is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
 # aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
@@ -228,6 +465,30 @@ direct_register_custom_op(
     op_name="matmul_and_reduce",
     op_func=_matmul_and_reduce_impl,
     fake_impl=_matmul_and_reduce_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="dynamic_quant_matmul_reduce_scatter",
+    op_func=_dynamic_quant_matmul_reduce_scatter_impl,
+    fake_impl=_matmul_reduce_scatter_tensor_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="quant_matmul_reduce_scatter",
+    op_func=_quant_matmul_reduce_scatter_impl,
+    fake_impl=_matmul_reduce_scatter_tensor_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="unquantized_matmul_reduce_scatter",
+    op_func=_unquantized_matmul_reduce_scatter_impl,
+    fake_impl=_unquantized_matmul_reduce_scatter_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
